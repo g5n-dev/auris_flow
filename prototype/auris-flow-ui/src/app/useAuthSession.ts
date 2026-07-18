@@ -1,18 +1,19 @@
 import { useEffect, useRef, useState } from "react";
 import {
   clearApiAuthContext,
-  createDevAuthSession,
-  establishApiSession,
-  isDefinitiveAuthFailure,
-  revokeAuthSession,
-  validateAuthSession
+  establishApiSession
 } from "../api/client";
-import type { AuthSession, AuthSessionUser, AuthUser } from "../shared/contracts/auth";
+import {
+  beginOidcLogin,
+  createDevAuthSession,
+  isDefinitiveAuthFailure,
+  restoreBrowserAuthSession,
+  revokeBrowserAuthSession
+} from "../api/authClient";
+import type { AuthSession, AuthUser } from "../shared/contracts/auth";
 import {
   authSessionToUser,
-  clearStoredAuthSession,
-  loadStoredAuthSession,
-  persistAuthSession
+  clearLegacyStoredAuthSession
 } from "./authSession";
 
 export function useAuthSession() {
@@ -23,42 +24,32 @@ export function useAuthSession() {
   const [logoutPending, setLogoutPending] = useState(false);
   const authRestoreRequestRef = useRef<{
     attempt: number;
-    request: Promise<AuthSessionUser>;
+    request: Promise<AuthSession>;
   } | null>(null);
 
   useEffect(() => {
     let mounted = true;
-    const stored = loadStoredAuthSession();
-    if (!stored) {
-      authRestoreRequestRef.current = null;
-      setAuthRestoreError(null);
-      setAuthRestoring(false);
-      return () => {
-        mounted = false;
-      };
-    }
+    clearLegacyStoredAuthSession();
     const activeRestore = authRestoreRequestRef.current;
     const restoreRequest = activeRestore?.attempt === authRestoreAttempt
       ? activeRestore.request
-      : validateAuthSession(stored);
+      : restoreBrowserAuthSession();
     authRestoreRequestRef.current = { attempt: authRestoreAttempt, request: restoreRequest };
     restoreRequest
-      .then((validatedUser) => {
+      .then((session) => {
         if (!mounted) return;
-        const validatedSession = { ...stored, user: validatedUser };
-        establishApiSession(validatedSession);
+        establishApiSession(session);
         setAuthRestoreError(null);
-        setCurrentUser(authSessionToUser(validatedSession));
+        setCurrentUser(authSessionToUser(session));
       })
       .catch((caught) => {
         if (!mounted) return;
         clearApiAuthContext();
         if (isDefinitiveAuthFailure(caught)) {
-          clearStoredAuthSession();
           setAuthRestoreError(null);
           return;
         }
-        setAuthRestoreError("会话服务暂时不可用，已保留登录状态，可重试恢复。");
+        setAuthRestoreError("会话服务暂时不可用，可重试通过安全 Cookie 恢复。");
       })
       .finally(() => {
         if (mounted) setAuthRestoring(false);
@@ -76,8 +67,7 @@ export function useAuthSession() {
 
   const authenticate = async (email: string, password: string) => createDevAuthSession(email, password);
 
-  const acceptSession = (session: AuthSession, remember: boolean) => {
-    persistAuthSession(session, remember);
+  const acceptSession = (session: AuthSession) => {
     establishApiSession(session);
     setAuthRestoreError(null);
     setCurrentUser(authSessionToUser(session));
@@ -86,14 +76,15 @@ export function useAuthSession() {
   const logout = async () => {
     if (logoutPending) return;
     setLogoutPending(true);
+    setAuthRestoreError(null);
     try {
-      if (currentUser?.authToken) {
-        await revokeAuthSession(currentUser.authToken, currentUser.tenantId, currentUser.projectId);
+      if (currentUser) {
+        await revokeBrowserAuthSession(currentUser.tenantId, currentUser.projectId);
       }
     } catch {
-      // Local state must still be cleared when the BFF is unavailable.
+      setAuthRestoreError("服务端未确认会话注销；本地认证上下文已清除，请检查网络后重试登录。");
     } finally {
-      clearStoredAuthSession();
+      clearLegacyStoredAuthSession();
       clearApiAuthContext();
       setCurrentUser(null);
       setLogoutPending(false);
@@ -105,6 +96,7 @@ export function useAuthSession() {
     authRestoreError,
     authRestoring,
     authenticate,
+    beginOidcLogin,
     currentUser,
     logout,
     logoutPending,

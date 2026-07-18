@@ -1,9 +1,20 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
+import ts from "typescript";
 
-import { parseLabelLifecycleSummary } from "./labelLifecycleSummary.ts";
+const sourceUrl = new URL("./labelLifecycleSummary.ts", import.meta.url);
 
-test("reads an authoritative published lifecycle and production generation", () => {
+const loadModel = async () => {
+  const source = await readFile(sourceUrl, "utf8");
+  const compiled = ts.transpileModule(source, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext }
+  }).outputText;
+  return import(`data:text/javascript;base64,${Buffer.from(compiled).toString("base64")}`);
+};
+
+test("reads an authoritative published lifecycle and production generation", async () => {
+  const { parseLabelLifecycleSummary } = await loadModel();
   const summary = parseLabelLifecycleSummary({
     label_version_id: "lv_quote_v19",
     artifact_lifecycle: {
@@ -32,7 +43,8 @@ test("reads an authoritative published lifecycle and production generation", () 
   assert.deepEqual(summary.issues, []);
 });
 
-test("keeps deprecated replacement, mapping and reason bound together", () => {
+test("keeps deprecated replacement, mapping and reason bound together", async () => {
+  const { parseLabelLifecycleSummary } = await loadModel();
   const summary = parseLabelLifecycleSummary({
     id: "lv_quote_v18",
     artifact_lifecycle: {
@@ -60,7 +72,8 @@ test("keeps deprecated replacement, mapping and reason bound together", () => {
   assert.equal(summary.productionActivation.state, "inactive");
 });
 
-test("fails closed for ambiguous heads and partial replacement bindings", () => {
+test("fails closed for ambiguous heads and partial replacement bindings", async () => {
+  const { parseLabelLifecycleSummary } = await loadModel();
   const summary = parseLabelLifecycleSummary({
     label_version_id: "lv_broken",
     artifact_lifecycle: { status: "published" },
@@ -79,7 +92,8 @@ test("fails closed for ambiguous heads and partial replacement bindings", () => 
   assert.ok(summary.issues.includes("替代版本与映射包绑定不完整"));
 });
 
-test("does not invent lifecycle fields when the server omits them", () => {
+test("does not invent lifecycle fields when the server omits them", async () => {
+  const { parseLabelLifecycleSummary } = await loadModel();
   const summary = parseLabelLifecycleSummary({ id: "lv_legacy" });
 
   assert.equal(summary.status, null);

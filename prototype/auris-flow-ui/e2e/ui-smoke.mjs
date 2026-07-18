@@ -206,6 +206,147 @@ async function assertListeningTranscriptLayout(page) {
   await assertLazyBranchesHealthy(page, "调听审音矩阵状态筛选");
 }
 
+async function runManualLabelVersionWorkflowSmoke(page, failedResponses, browserErrors, requestFailures) {
+  const browserErrorCount = browserErrors.length;
+  const requestFailureCount = requestFailures.length;
+  await openModule(page, "调听", "调听工作台");
+  await clickButtonContaining(page.locator(".listening-mode-switch"), "证据审查");
+  await page.locator(".evidence-grid.annotation-shell").waitFor({ state: "visible", timeout: 10000 });
+
+  const initialHeadResponse = page.waitForResponse(
+    (response) => response.url().endsWith("/api/v1/release-bundle-heads/production") && response.request().method() === "GET",
+    { timeout: 10000 }
+  );
+  const initialItemsResponse = page.waitForResponse(
+    (response) => response.url().includes(`/api/v1/label-versions/${manualLabelOldVersionId}/items?status=active`) && response.request().method() === "GET",
+    { timeout: 10000 }
+  );
+  const sourceRegion = page.locator('button[title="质检标签 · 金额冲突"]').first();
+  await sourceRegion.waitFor({ state: "visible", timeout: 10000 });
+  await sourceRegion.click();
+  assert((await initialHeadResponse).status() === 200, "人工打标弹窗未读取 production Release Head");
+  assert((await initialItemsResponse).status() === 200, "人工打标弹窗未读取 active LabelVersionItem");
+
+  const dialog = page.getByRole("dialog", { name: "质检标签 标签轨道编辑" });
+  await dialog.waitFor({ state: "visible", timeout: 10000 });
+  const workflow = dialog.getByTestId("manual-label-version-workflow");
+  await workflow.filter({ hasText: `${manualLabelOldVersionId} · generation 1` }).waitFor({ state: "visible", timeout: 8000 });
+  await workflow.filter({ hasText: `金额冲突 · ${manualLabelOldLabelId} · categorical` }).waitFor({ state: "visible", timeout: 8000 });
+  assert(await workflow.locator("select").inputValue() === manualLabelOldLabelId, "旧版权威标签项未按稳定 label_id 精确匹配");
+  assert(await dialog.getByRole("button", { name: "保存标签草稿", exact: true }).isEnabled(), "权威范围加载完成后仍无法保存草稿");
+
+  const createResponsePromise = page.waitForResponse(
+    (response) => response.url().endsWith(`/api/v1/audio-sessions/${manualLabelAudioSessionId}/annotations`) && response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  await dialog.getByRole("button", { name: "保存标签草稿", exact: true }).click();
+  const createResponse = await createResponsePromise;
+  assert(createResponse.status() === 201, "人工标签冻结草稿创建失败");
+  await workflow.filter({ hasText: `冻结草稿 ${manualLabelOldAnnotationId} · ${manualLabelOldVersionId}` }).waitFor({ state: "visible", timeout: 8000 });
+  await workflow.filter({ hasText: manualLabelOldDraftSha256.slice(0, 12) }).waitFor({ state: "visible", timeout: 8000 });
+  const frozenControls = await dialog.evaluate((element) => {
+    const editor = element.querySelector(".track-region-editor-card");
+    const quickCard = element.querySelector(".track-region-quick-card");
+    const editorInput = editor?.querySelector("input");
+    const quickButton = quickCard?.querySelector("button");
+    editorInput?.focus();
+    const editorFocused = document.activeElement === editorInput;
+    quickButton?.focus();
+    const quickButtonFocused = document.activeElement === quickButton;
+    return {
+      editorFocused,
+      editorInertAttribute: editor?.hasAttribute("inert") ?? false,
+      editorInertProperty: editor instanceof HTMLElement ? editor.inert : false,
+      quickButtonFocused,
+      quickCardInertAttribute: quickCard?.hasAttribute("inert") ?? false,
+      quickCardInertProperty: quickCard instanceof HTMLElement ? quickCard.inert : false
+    };
+  });
+  assert(
+    frozenControls.editorInertAttribute &&
+      frozenControls.editorInertProperty &&
+      frozenControls.quickCardInertAttribute &&
+      frozenControls.quickCardInertProperty &&
+      !frozenControls.editorFocused &&
+      !frozenControls.quickButtonFocused,
+    "草稿冻结后编辑器或快捷操作仍可交互",
+    frozenControls
+  );
+
+  const staleSubmitResponsePromise = page.waitForResponse(
+    (response) => response.url().endsWith(`/api/v1/audio-sessions/${manualLabelAudioSessionId}/annotations/${manualLabelOldAnnotationId}/submissions`) && response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  await dialog.getByRole("button", { name: "提交冻结草稿", exact: true }).click();
+  const staleSubmitResponse = await staleSubmitResponsePromise;
+  assert(staleSubmitResponse.status() === 409, "Release Head 切换后旧草稿未返回 STALE_LABEL_VERSION");
+  const staleBody = await staleSubmitResponse.json().catch(() => ({}));
+  assert(staleBody?.error?.code === "STALE_LABEL_VERSION", "旧草稿提交未返回稳定错误码", staleBody);
+  await workflow.filter({ hasText: "提交已阻断：草稿版本不再属于当前 production Head" }).waitFor({ state: "visible", timeout: 10000 });
+  await workflow.filter({ hasText: `${manualLabelNewVersionId} · generation 2` }).waitFor({ state: "visible", timeout: 8000 });
+  assert((await page.locator("body").innerText()).includes("STALE_LABEL_VERSION") === false, "服务端错误码泄漏到页面正文");
+
+  const expectedFailureIndex = failedResponses.findIndex(
+    (failure) => failure.status === 409 && failure.method === "POST" && failure.url.endsWith(`/annotations/${manualLabelOldAnnotationId}/submissions`)
+  );
+  assert(expectedFailureIndex >= 0, "未观测到预期的 stale 提交失败响应", { failedResponses });
+  failedResponses.splice(expectedFailureIndex, 1);
+  const expectedConsoleIndex = browserErrors.findIndex(
+    (message, index) => index >= browserErrorCount && message.includes("409")
+  );
+  if (expectedConsoleIndex >= 0) browserErrors.splice(expectedConsoleIndex, 1);
+
+  await workflow.locator("select").selectOption(manualLabelNewLabelId);
+  const mappingInput = workflow.locator('input[placeholder*="治理负责人"]');
+  assert(await mappingInput.inputValue() === manualLabelMappingBundleId, "旧版本生命周期未恢复已发布 Mapping Bundle");
+  const previewResponsePromise = page.waitForResponse(
+    (response) => response.url().endsWith(`/api/v1/audio-sessions/${manualLabelAudioSessionId}/annotations/${manualLabelOldAnnotationId}/rebases`) && response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  await workflow.getByRole("button", { name: "预览映射差异", exact: true }).click();
+  const previewResponse = await previewResponsePromise;
+  assert(previewResponse.status() === 200, "人工标签 Rebase 预览失败");
+  const preview = workflow.getByTestId("manual-label-rebase-preview");
+  await preview.waitFor({ state: "visible", timeout: 8000 });
+  await preview.filter({ hasText: `${manualLabelOldVersionId} / ${manualLabelOldLabelId} → ${manualLabelNewVersionId} / ${manualLabelNewLabelId}` }).waitFor({ state: "visible", timeout: 8000 });
+  await preview.filter({ hasText: `structural-break · 需要重算 · ${manualLabelNewLabelId}` }).waitFor({ state: "visible", timeout: 8000 });
+  const confirmButton = workflow.getByRole("button", { name: "显式确认并创建新草稿", exact: true });
+  assert(await confirmButton.isDisabled(), "未勾选映射复核确认时错误开放 Rebase 提交");
+  assert(manualLabelRequests.filter((request) => request.kind === "rebase-confirm").length === 0, "未确认前已经发送 Rebase confirm 请求", { manualLabelRequests });
+
+  await preview.getByRole("checkbox").check();
+  assert(await confirmButton.isEnabled(), "明确勾选复核确认后 Rebase 按钮仍不可用");
+  const confirmResponsePromise = page.waitForResponse(
+    (response) => response.url().endsWith(`/api/v1/audio-sessions/${manualLabelAudioSessionId}/annotations/${manualLabelOldAnnotationId}/rebases`) && response.request().method() === "POST" && response.status() === 201,
+    { timeout: 10000 }
+  );
+  await confirmButton.click();
+  const confirmResponse = await confirmResponsePromise;
+  assert(confirmResponse.status() === 201, "明确确认后未创建当前版本新草稿");
+  await workflow.filter({ hasText: `新草稿 ${manualLabelNewAnnotationId} 已绑定 ${manualLabelNewVersionId}` }).waitFor({ state: "visible", timeout: 8000 });
+  assert(await workflow.getByTestId("manual-label-rebase-preview").count() === 0, "Rebase 完成后仍残留旧预览状态");
+
+  const finalSubmitResponsePromise = page.waitForResponse(
+    (response) => response.url().endsWith(`/api/v1/audio-sessions/${manualLabelAudioSessionId}/annotations/${manualLabelNewAnnotationId}/submissions`) && response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  await dialog.getByRole("button", { name: "提交冻结草稿", exact: true }).click();
+  const finalSubmitResponse = await finalSubmitResponsePromise;
+  assert(finalSubmitResponse.status() === 201, "Rebase 后当前版本草稿提交失败");
+  await workflow.filter({ hasText: `已形成 human-confirmed Label Fact ${manualLabelFactId}` }).waitFor({ state: "visible", timeout: 8000 });
+  assert(await dialog.getByRole("button", { name: "事实已提交", exact: true }).isDisabled(), "事实提交成功后主按钮仍可重复写入");
+
+  const dialogGeometry = await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { height: rect.height, width: rect.width, textLength: element.textContent?.trim().length ?? 0 };
+  });
+  assert(dialogGeometry.width > 560 && dialogGeometry.height > 420 && dialogGeometry.textLength > 300, "人工打标闭环出现空白或异常尺寸", dialogGeometry);
+  assert(browserErrors.length === browserErrorCount, "人工打标闭环产生未捕获浏览器错误", { browserErrors });
+  assert(requestFailures.length === requestFailureCount, "人工打标闭环产生网络传输失败", { requestFailures });
+  assert(!failedResponses.some((failure) => failure.url.includes(`/annotations/${manualLabelOldAnnotationId}`) || failure.url.includes(`/annotations/${manualLabelNewAnnotationId}`)), "人工打标预期失败响应未被状态机收敛", { failedResponses });
+  await dialog.getByRole("button", { name: "关闭标签轨道编辑" }).click();
+}
+
 async function runModuleCommandSmoke(page) {
   await openModule(page, "知识库", "知识库");
 
@@ -664,6 +805,19 @@ async function runLabelGovernanceTruthSmoke(page) {
   assert((await promoteResponse).status() === 200, "稳定窗口后人工晋级未成功");
   await page.locator('[data-label-publish-status="success"][data-label-backend-status="published"]').waitFor({ state: "visible", timeout: 10000 });
   await expectBodyText(page, "只有此终态显示成功");
+  const lifecycleSummary = page.getByTestId("label-lifecycle-summary");
+  await lifecycleSummary.filter({ hasText: "已发布" }).waitFor({ state: "visible", timeout: 10000 });
+  await lifecycleSummary.filter({ hasText: `generation ${labelVersionSequence}` }).waitFor({ state: "visible", timeout: 8000 });
+  await lifecycleSummary.filter({ hasText: labelStrongVersionId }).waitFor({ state: "visible", timeout: 8000 });
+  await lifecycleSummary.filter({ hasText: "未绑定替代版本" }).waitFor({ state: "visible", timeout: 8000 });
+  assert(
+    (await lifecycleSummary.getAttribute("data-label-artifact-status")) === "published",
+    "发布终态后生命周期组件未刷新权威 artifact status"
+  );
+  assert(
+    (await lifecycleSummary.locator("[data-label-release-head-generation]").getAttribute("data-label-release-head-generation")) === String(labelVersionSequence),
+    "发布终态后生命周期组件未刷新 production Head generation"
+  );
 }
 
 async function runModalCloseSmoke(page) {
@@ -688,7 +842,15 @@ async function runHotwordGovernanceSmoke(page) {
   await insightScope.filter({ hasText: "lmb_to_lv_19_20250531" }).waitFor({ state: "visible", timeout: 8000 });
   await insightScope.filter({ hasText: "Generation 42" }).waitFor({ state: "visible", timeout: 8000 });
   await insightScope.filter({ hasText: "MAPPING_RECOMPUTE_REQUIRED" }).waitFor({ state: "visible", timeout: 8000 });
+  await insightScope.getByText("86.2%", { exact: true }).waitFor({ state: "visible", timeout: 8000 });
+  await insightScope.filter({ hasText: "样本 128" }).waitFor({ state: "visible", timeout: 8000 });
   await insightScope.getByText("涨跌已隐藏", { exact: true }).first().waitFor({ state: "visible", timeout: 8000 });
+  const structuralBreak = page.locator('[data-insight-structural-break="business-trend"]');
+  await structuralBreak.waitFor({ state: "visible", timeout: 8000 });
+  assert(
+    await structuralBreak.locator("svg.insight-spec-line path").count() === 0,
+    "structural-break 趋势不应渲染连续 path"
+  );
   await openTab(page, "模型质量");
   const hotwordPanel = page.getByTestId("hotword-statistics-panel");
   await hotwordPanel.waitFor({ state: "visible", timeout: 10000 });
@@ -1195,17 +1357,37 @@ const projectionFixtures = {
         source_run_id: "insight_metric_run_42",
         snapshot_role: "aggregation",
         immutable: true,
+        content_sha256: "1".repeat(64),
+        scope_sha256: "2".repeat(64),
+        source_manifest_sha256: "3".repeat(64),
         label_version_applicability: "required",
         label_scope: {
           taxonomy_mode: "normalized",
           source_label_version_ids: ["lv_18", "lv_19"],
           target_label_version_id: "lv_19",
           mapping_bundle_id: "lmb_to_lv_19_20250531",
+          mapping_bundle_sha256: "4".repeat(64),
+          fact_namespace: "production",
+          fact_set_id: "fact_set_42",
+          fact_set_manifest_sha256: "5".repeat(64),
           fact_set_generation: 42,
-          fact_as_of: "2025-05-31T23:59:59Z"
+          fact_as_of: "2025-05-31T23:59:59Z",
+          metric_definition_versions: { quoteConsistency: "metric-catalog/3" },
+          timezone: "Asia/Shanghai",
+          period_boundary: "calendar-month:[start,end)",
+          denominator_definition: "eligible business events in locked FactSet"
         },
         comparability_status: "structural-break",
-        comparability_reason_codes: ["MAPPING_RECOMPUTE_REQUIRED"]
+        comparability_reason_codes: ["MAPPING_RECOMPUTE_REQUIRED"],
+        comparison: {
+          schema_version: "auris.metric-snapshot-comparison/1",
+          baseline: { metric_result_id: "metric_quote_consistency_41" },
+          current: { metric_result_id: "metric_quote_consistency_42" },
+          comparison_status: "structural-break",
+          reason_codes: ["FACT_SET_GENERATION_CHANGED", "MAPPING_RECOMPUTE_REQUIRED"],
+          comparison_sha256: "7".repeat(64),
+          continuous_trend_allowed: false
+        }
       }]
     }
   },
@@ -1222,6 +1404,7 @@ let authLoginRequests = 0;
 let authLogoutRequests = 0;
 const authEmails = [];
 let activeSmokeEmail = "";
+let browserSessionActive = false;
 let hotwordReadRequests = 0;
 const hotwordWriteRequests = [];
 const hotwordStatisticsRequests = [];
@@ -1319,6 +1502,21 @@ const labelPromptVersionRequests = [];
 const labelOptimizationRequests = [];
 const labelOptimizationRuns = new Map();
 const labelPromptCandidates = new Map();
+const manualLabelAudioSessionId = "S20250526-000128";
+const manualLabelOldVersionId = "label-version-manual-v1";
+const manualLabelNewVersionId = "label-version-manual-v2";
+const manualLabelOldLabelId = "qa.amount_conflict";
+const manualLabelNewLabelId = "qa.amount_mismatch";
+const manualLabelOldAnnotationId = "qa-1";
+const manualLabelNewAnnotationId = "qa-1-rebase-g2";
+const manualLabelMappingBundleId = "mapping-bundle-manual-v1-v2";
+const manualLabelOldDraftSha256 = "1".repeat(64);
+const manualLabelNewDraftSha256 = "2".repeat(64);
+const manualLabelPreviewSha256 = "3".repeat(64);
+const manualLabelFactId = "label-fact-manual-ui-1";
+const manualLabelRequests = [];
+let manualLabelDraftCreated = false;
+let manualLabelRebaseConfirmed = false;
 let labelExtractionRunId = "";
 let labelAggregationRunId = "label-aggregation-ui-1";
 let labelStrongVersionId = "";
@@ -1498,8 +1696,13 @@ const bffStub = createHttpServer((request, response) => {
       authLoginRequests += 1;
       authEmails.push(payload.email);
       activeSmokeEmail = payload.email;
+      browserSessionActive = true;
       const user = smokeUser();
-      response.writeHead(200, { "Content-Type": "application/json" });
+      response.writeHead(200, {
+        "Content-Type": "application/json",
+        "Cache-Control": "no-store",
+        "Set-Cookie": `auris_session=${smokeSessionToken}; HttpOnly; SameSite=Lax; Path=/`
+      });
       response.end(JSON.stringify({
         data: {
           access_token: smokeSessionToken,
@@ -1524,6 +1727,11 @@ const bffStub = createHttpServer((request, response) => {
     return;
   }
   if (path === "/api/v1/auth/session" && request.method === "GET") {
+    if (!browserSessionActive) {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "AUTH_SESSION_INVALID", message: "浏览器会话无效" } }));
+      return;
+    }
     const user = smokeUser();
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
@@ -1545,13 +1753,28 @@ const bffStub = createHttpServer((request, response) => {
     return;
   }
   if (path === "/api/v1/auth/logout" && request.method === "POST") {
-    if (request.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+    const hasSessionCookie = request.headers.cookie
+      ?.split(";")
+      .some((item) => item.trim() === `auris_session=${smokeSessionToken}`);
+    const hasScopedSession =
+      request.headers.authorization === `Bearer ${smokeSessionToken}` || hasSessionCookie;
+    if (
+      !browserSessionActive ||
+      !hasScopedSession ||
+      request.headers["x-tenant-id"] !== "aurora_auto" ||
+      request.headers["x-project-id"] !== "sales_qa"
+    ) {
       response.writeHead(401, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "缺少服务端会话" } }));
       return;
     }
     authLogoutRequests += 1;
-    response.writeHead(200, { "Content-Type": "application/json" });
+    browserSessionActive = false;
+    response.writeHead(200, {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store",
+      "Set-Cookie": "auris_session=; Max-Age=0; HttpOnly; SameSite=Lax; Path=/"
+    });
     response.end(JSON.stringify({
       data: {
         status: "revoked",
@@ -2565,6 +2788,9 @@ const bffStub = createHttpServer((request, response) => {
         stage: status,
         rollout_percentage: status === "completed" ? 100 : 10
       };
+      if (isPromote && current.label_version_id === labelStrongVersionId) {
+        labelVersionStatus = "published";
+      }
       labelReleaseDeployments.set(deploymentId, updated);
       labelPublishRequests.push({ path, method: request.method, payload, runId: deploymentId });
       response.writeHead(200, { "Content-Type": "application/json" });
@@ -2669,6 +2895,262 @@ const bffStub = createHttpServer((request, response) => {
     });
     return;
   }
+  if (path === "/api/v1/release-bundle-heads/production" && request.method === "GET") {
+    const switched = manualLabelDraftCreated;
+    const labelVersionId = switched ? manualLabelNewVersionId : manualLabelOldVersionId;
+    const generation = switched ? 2 : 1;
+    manualLabelRequests.push({
+      kind: "release-head-read",
+      generation,
+      labelVersionId,
+      method: request.method,
+      path
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: {
+        environment: "production",
+        generation,
+        label_version_id: labelVersionId,
+        release_head_id: "release-head-manual-production",
+        status: "active",
+        trace_id: `trace_manual_release_head_g${generation}`
+      },
+      meta: {
+        trace_id: `trace_manual_release_head_g${generation}`,
+        request_id: `ui-smoke-manual-release-head-g${generation}`
+      }
+    }));
+    return;
+  }
+  const manualLabelItemsMatch = path.match(/^\/api\/v1\/label-versions\/([^/]+)\/items$/);
+  if (manualLabelItemsMatch && request.method === "GET") {
+    const labelVersionId = decodeURIComponent(manualLabelItemsMatch[1]);
+    if ([manualLabelOldVersionId, manualLabelNewVersionId].includes(labelVersionId)) {
+      const current = labelVersionId === manualLabelNewVersionId;
+      const labelId = current ? manualLabelNewLabelId : manualLabelOldLabelId;
+      manualLabelRequests.push({
+        kind: "label-items-read",
+        labelVersionId,
+        method: request.method,
+        path,
+        url: request.url
+      });
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: {
+          items: [{
+            aliases: current ? ["金额差异"] : ["金额冲突"],
+            canonical_name: current ? "金额不一致" : "金额冲突",
+            definition_sha256: current ? "b".repeat(64) : "a".repeat(64),
+            label_id: labelId,
+            label_version_id: labelVersionId,
+            label_version_item_id: current ? "label-version-item-manual-v2" : "label-version-item-manual-v1",
+            risk_level: "high",
+            status: "active",
+            trace_id: current ? "trace_manual_item_v2" : "trace_manual_item_v1",
+            value_type: "categorical"
+          }]
+        },
+        meta: {
+          limit: 100,
+          next_cursor: null,
+          request_id: current ? "ui-smoke-manual-items-v2" : "ui-smoke-manual-items-v1",
+          total: 1,
+          trace_id: current ? "trace_manual_item_v2" : "trace_manual_item_v1"
+        }
+      }));
+      return;
+    }
+  }
+  if (path === `/api/v1/label-versions/${manualLabelOldVersionId}` && request.method === "GET") {
+    manualLabelRequests.push({ kind: "lifecycle-read", method: request.method, path });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: {
+        effective_from: "2025-05-01T00:00:00+08:00",
+        effective_to: "2025-06-01T00:00:00+08:00",
+        label_version_id: manualLabelOldVersionId,
+        replacement: {
+          mapping_bundle_id: manualLabelMappingBundleId,
+          replacement_label_version_id: manualLabelNewVersionId,
+          relation: "replacement"
+        },
+        status: "retired",
+        trace_id: "trace_manual_lifecycle_v1"
+      },
+      meta: { trace_id: "trace_manual_lifecycle_v1", request_id: "ui-smoke-manual-lifecycle-v1" }
+    }));
+    return;
+  }
+  if (path === `/api/v1/audio-sessions/${manualLabelAudioSessionId}/annotations` && request.method === "POST") {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const payload = body ? JSON.parse(body) : {};
+      manualLabelDraftCreated = true;
+      manualLabelRequests.push({
+        idempotencyKey: request.headers["idempotency-key"],
+        kind: "draft-create",
+        method: request.method,
+        path,
+        payload,
+        projectId: request.headers["x-project-id"],
+        tenantId: request.headers["x-tenant-id"]
+      });
+      response.writeHead(201, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: {
+          annotation_id: payload.annotation_id,
+          audio_session_id: manualLabelAudioSessionId,
+          draft_sha256: manualLabelOldDraftSha256,
+          event_or_segment_id: payload.event_or_segment_id,
+          evidence_sha256: payload.evidence_ref?.sha256,
+          label_id: payload.label_id,
+          label_version_id: payload.label_version_id,
+          occurred_at: payload.occurred_at,
+          release_head_generation: payload.expected_release_head_generation,
+          status: "draft",
+          trace_id: "trace_manual_draft_v1"
+        },
+        meta: { trace_id: "trace_manual_draft_v1", request_id: "ui-smoke-manual-draft-v1" }
+      }));
+    });
+    return;
+  }
+  const manualLabelSubmitMatch = path.match(/^\/api\/v1\/audio-sessions\/([^/]+)\/annotations\/([^/]+)\/submissions$/);
+  if (manualLabelSubmitMatch && request.method === "POST" && decodeURIComponent(manualLabelSubmitMatch[1]) === manualLabelAudioSessionId) {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const annotationId = decodeURIComponent(manualLabelSubmitMatch[2]);
+      const payload = body ? JSON.parse(body) : {};
+      const currentDraft = annotationId === manualLabelNewAnnotationId;
+      manualLabelRequests.push({
+        annotationId,
+        idempotencyKey: request.headers["idempotency-key"],
+        kind: currentDraft ? "final-submit" : "stale-submit",
+        method: request.method,
+        path,
+        payload
+      });
+      if (!currentDraft) {
+        response.writeHead(409, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          error: {
+            code: "STALE_LABEL_VERSION",
+            details: [{
+              current_label_version_id: manualLabelNewVersionId,
+              draft_label_version_id: manualLabelOldVersionId,
+              rebase_required: true
+            }],
+            message: "draft 标签版本已不属于当前生产 Head；必须显式 rebase"
+          },
+          meta: { trace_id: "trace_manual_submit_stale", request_id: "ui-smoke-manual-submit-stale" }
+        }));
+        return;
+      }
+      response.writeHead(201, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: {
+          annotation_id: manualLabelNewAnnotationId,
+          audio_session_id: manualLabelAudioSessionId,
+          draft_sha256: manualLabelNewDraftSha256,
+          event_or_segment_id: manualLabelOldAnnotationId,
+          evidence_sha256: "4".repeat(64),
+          fact_id: manualLabelFactId,
+          label_id: manualLabelNewLabelId,
+          label_version_id: manualLabelNewVersionId,
+          occurred_at: "2025-05-26T04:27:30.000Z",
+          release_head_generation: 2,
+          status: "submitted",
+          trace_id: "trace_manual_fact_v2"
+        },
+        meta: { trace_id: "trace_manual_fact_v2", request_id: "ui-smoke-manual-fact-v2" }
+      }));
+    });
+    return;
+  }
+  const manualLabelRebaseMatch = path.match(/^\/api\/v1\/audio-sessions\/([^/]+)\/annotations\/([^/]+)\/rebases$/);
+  if (manualLabelRebaseMatch && request.method === "POST" && decodeURIComponent(manualLabelRebaseMatch[1]) === manualLabelAudioSessionId) {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const annotationId = decodeURIComponent(manualLabelRebaseMatch[2]);
+      const payload = body ? JSON.parse(body) : {};
+      const confirm = payload.action === "confirm";
+      manualLabelRequests.push({
+        annotationId,
+        idempotencyKey: request.headers["idempotency-key"],
+        kind: confirm ? "rebase-confirm" : "rebase-preview",
+        method: request.method,
+        path,
+        payload
+      });
+      if (!confirm) {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({
+          data: {
+            can_confirm: true,
+            preview: {
+              bundle_sha256: "5".repeat(64),
+              current_release_head_generation: 2,
+              mapping_bundle_id: manualLabelMappingBundleId,
+              mapping_paths: [{
+                comparability_status: "structural-break",
+                path_sha256: "6".repeat(64),
+                relation_path: [{
+                  relation: "replacement",
+                  source_label_id: manualLabelOldLabelId,
+                  target_label_id: manualLabelNewLabelId
+                }],
+                requires_recompute: true,
+                target_label_id: manualLabelNewLabelId
+              }],
+              new_label_id: manualLabelNewLabelId,
+              new_label_version_id: manualLabelNewVersionId,
+              old_draft_sha256: manualLabelOldDraftSha256,
+              old_label_id: manualLabelOldLabelId,
+              old_label_version_id: manualLabelOldVersionId,
+              requires_manual_selection: false
+            },
+            preview_sha256: manualLabelPreviewSha256,
+            status: "preview",
+            trace_id: "trace_manual_rebase_preview"
+          },
+          meta: { trace_id: "trace_manual_rebase_preview", request_id: "ui-smoke-manual-rebase-preview" }
+        }));
+        return;
+      }
+      manualLabelRebaseConfirmed = true;
+      response.writeHead(201, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: {
+          annotation_id: payload.new_annotation_id,
+          audio_session_id: manualLabelAudioSessionId,
+          draft_sha256: manualLabelNewDraftSha256,
+          event_or_segment_id: manualLabelOldAnnotationId,
+          evidence_sha256: "4".repeat(64),
+          label_id: payload.target_label_id,
+          label_version_id: manualLabelNewVersionId,
+          new_annotation_id: payload.new_annotation_id,
+          occurred_at: "2025-05-26T04:27:30.000Z",
+          preview_sha256: payload.preview_sha256,
+          release_head_generation: 2,
+          status: "draft",
+          trace_id: "trace_manual_draft_v2"
+        },
+        meta: { trace_id: "trace_manual_draft_v2", request_id: "ui-smoke-manual-draft-v2" }
+      }));
+    });
+    return;
+  }
   if (path.startsWith("/api/v1/label-versions/") && request.method === "GET") {
     const labelVersionId = decodeURIComponent(path.split("/").pop() || "");
     const labelVersion = labelVersionRequests.find((item) => item.id === labelVersionId);
@@ -2680,8 +3162,24 @@ const bffStub = createHttpServer((request, response) => {
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({
       data: {
+        artifact_lifecycle: {
+          archived_at: null,
+          deprecated_at: null,
+          deprecation_reason: null,
+          published_at: labelVersionStatus === "published" ? "2026-07-18T12:00:00Z" : null,
+          status: labelVersionStatus
+        },
+        environment_activations: labelVersionStatus === "published"
+          ? [{
+              active_deployment_id: `release-${labelVersion.id}`,
+              environment: "production",
+              generation: labelVersionSequence,
+              status: "active"
+            }]
+          : [],
         id: labelVersion.id,
         label_version_id: labelVersion.id,
+        replacement: null,
         status: labelVersionStatus,
         resource_version: 1,
         trace_id: labelVersion.traceId
@@ -3478,8 +3976,17 @@ const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, dev
 const browserErrors = [];
 const requestFailures = [];
 const failedResponses = [];
+let expectedInitialAuthConsoleErrors = 0;
 page.on("pageerror", (error) => browserErrors.push(error.message));
 page.on("console", (message) => {
+  if (
+    message.type() === "error" &&
+    message.text().includes("status of 401 (Unauthorized)") &&
+    expectedInitialAuthConsoleErrors === 0
+  ) {
+    expectedInitialAuthConsoleErrors += 1;
+    return;
+  }
   if (message.type() === "error") browserErrors.push(message.text());
 });
 page.on("requestfailed", (request) => {
@@ -3490,7 +3997,8 @@ page.on("requestfailed", (request) => {
   });
 });
 page.on("response", (response) => {
-  if (response.status() >= 400) {
+  const pathname = new URL(response.url()).pathname;
+  if (response.status() >= 400 && !(pathname === "/api/v1/auth/session" && response.status() === 401)) {
     failedResponses.push({
       status: response.status(),
       method: response.request().method(),
@@ -3526,6 +4034,7 @@ try {
     }
   }
 
+  await runManualLabelVersionWorkflowSmoke(page, failedResponses, browserErrors, requestFailures);
   await assertProjectionSourceStates(page, failedResponses, browserErrors);
   await runLabelGovernanceTruthSmoke(page);
   await runHotwordGovernanceSmoke(page);
@@ -3545,6 +4054,84 @@ try {
   assert(authLoginRequests === 2, "UI smoke 未完成模型负责人到项目管理员的分权登录", { authLoginRequests });
   assert(authEmails.join(",") === "model@auris.local,demo.operator@auris.local", "UI smoke 登录身份顺序不符合审批 RBAC", { authEmails });
   assert(hotwordReadRequests >= 1, "UI smoke 未读取热词统计投影", { hotwordReadRequests });
+  const manualHeadReads = manualLabelRequests.filter((request) => request.kind === "release-head-read");
+  const manualItemReads = manualLabelRequests.filter((request) => request.kind === "label-items-read");
+  assert(
+    manualHeadReads.length >= 4 &&
+      manualHeadReads[0].labelVersionId === manualLabelOldVersionId &&
+      manualHeadReads[0].generation === 1 &&
+      manualHeadReads.slice(1).every((request) => request.labelVersionId === manualLabelNewVersionId && request.generation === 2),
+    "人工打标未按创建/提交时点复核 production Release Head",
+    { manualLabelRequests }
+  );
+  assert(
+    manualItemReads.some((request) => request.labelVersionId === manualLabelOldVersionId && request.url.includes("status=active")) &&
+      manualItemReads.some((request) => request.labelVersionId === manualLabelNewVersionId && request.url.includes("status=active")) &&
+      manualLabelRequests.some((request) => request.kind === "lifecycle-read"),
+    "人工打标未读取旧/新 active 标签项或旧版替代生命周期",
+    { manualLabelRequests }
+  );
+  const manualDraftCreate = manualLabelRequests.find((request) => request.kind === "draft-create");
+  const manualStaleSubmit = manualLabelRequests.find((request) => request.kind === "stale-submit");
+  const manualRebasePreview = manualLabelRequests.find((request) => request.kind === "rebase-preview");
+  const manualRebaseConfirm = manualLabelRequests.find((request) => request.kind === "rebase-confirm");
+  const manualFinalSubmit = manualLabelRequests.find((request) => request.kind === "final-submit");
+  assert(
+    manualDraftCreate?.payload?.annotation_kind === "label-fact-draft" &&
+      manualDraftCreate.payload.annotation_id === manualLabelOldAnnotationId &&
+      manualDraftCreate.payload.label_version_id === manualLabelOldVersionId &&
+      manualDraftCreate.payload.label_id === manualLabelOldLabelId &&
+      manualDraftCreate.payload.expected_release_head_generation === 1 &&
+      manualDraftCreate.payload.environment === "production" &&
+      manualDraftCreate.payload.value_type === "categorical" &&
+      manualDraftCreate.payload.value === "需要人工复核" &&
+      /^[a-f0-9]{64}$/.test(manualDraftCreate.payload.evidence_ref?.sha256 ?? "") &&
+      Boolean(manualDraftCreate.idempotencyKey) &&
+      manualDraftCreate.tenantId === "aurora_auto" &&
+      manualDraftCreate.projectId === "sales_qa",
+    "人工标签冻结草稿未绑定不可变版本、证据 SHA、production generation 或租户项目范围",
+    manualDraftCreate
+  );
+  assert(
+    manualStaleSubmit?.payload?.expected_draft_sha256 === manualLabelOldDraftSha256 &&
+      manualStaleSubmit.payload.expected_release_head_generation === 2 &&
+      manualStaleSubmit.payload.confirmation === "submit-frozen-manual-label",
+    "旧草稿提交未复核当前 Head 或未携带冻结 SHA",
+    manualStaleSubmit
+  );
+  assert(
+    manualRebasePreview?.payload?.action === "preview" &&
+      manualRebasePreview.payload.mapping_bundle_id === manualLabelMappingBundleId &&
+      manualRebasePreview.payload.target_label_id === manualLabelNewLabelId &&
+      manualRebasePreview.payload.expected_release_head_generation === 2,
+    "Rebase 预览未绑定已发布 Mapping Bundle、目标标签与当前 generation",
+    manualRebasePreview
+  );
+  assert(
+    manualLabelRebaseConfirmed &&
+      manualRebaseConfirm?.payload?.action === "confirm" &&
+      manualRebaseConfirm.payload.new_annotation_id === manualLabelNewAnnotationId &&
+      manualRebaseConfirm.payload.preview_sha256 === manualLabelPreviewSha256 &&
+      manualRebaseConfirm.payload.confirmation === "confirm-reviewed-manual-label-rebase",
+    "Rebase 未经预览 SHA 与明确二次确认创建新草稿",
+    manualRebaseConfirm
+  );
+  assert(
+    manualFinalSubmit?.annotationId === manualLabelNewAnnotationId &&
+      manualFinalSubmit.payload.expected_draft_sha256 === manualLabelNewDraftSha256 &&
+      manualFinalSubmit.payload.expected_release_head_generation === 2 &&
+      manualFinalSubmit.payload.confirmation === "submit-frozen-manual-label",
+    "Rebase 后新草稿未按当前版本/generation 提交",
+    manualFinalSubmit
+  );
+  const manualWriteRequests = manualLabelRequests.filter((request) => ["draft-create", "stale-submit", "rebase-preview", "rebase-confirm", "final-submit"].includes(request.kind));
+  assert(
+    manualWriteRequests.length === 5 &&
+      manualWriteRequests.every((request) => Boolean(request.idempotencyKey)) &&
+      new Set(manualWriteRequests.map((request) => request.idempotencyKey)).size === 5,
+    "人工标签闭环写操作未携带独立稳定幂等键",
+    { manualWriteRequests }
+  );
   const labelTaskCreates = labelReviewRequests.filter((item) => item.path === "/api/v1/human-review-tasks" && item.method === "POST");
   assert(labelTaskCreates.length === 0, "非 demo 模式错误创建了通用 HumanReviewTask", { labelReviewRequests });
   const labelBatchDecisions = labelReviewRequests.filter((item) => item.path === "/api/v1/human-review-decision-batches");

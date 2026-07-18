@@ -11,6 +11,9 @@ const distIndex = fileURLToPath(new URL("../dist/index.html", import.meta.url));
 const distManifest = fileURLToPath(new URL("../dist/.vite/manifest.json", import.meta.url));
 const distBrotliManifest = fileURLToPath(new URL("../dist/.vite/brotli-manifest.json", import.meta.url));
 const smokeSessionToken = "auris.v1.preview-smoke.server-issued";
+const previewOidcCookie = "preview-oidc-cookie-session";
+let oidcLoginRequests = 0;
+let expectedInitialAuthConsoleErrors = 0;
 
 function assert(condition, message, detail = undefined) {
   if (!condition) {
@@ -235,7 +238,9 @@ async function enterApp(page, baseUrl) {
     timeout: 30000
   });
   const demoAccount = page.getByRole("button", { name: "演示账号" });
-  if (await demoAccount.count()) await demoAccount.click();
+  const oidcAccount = page.getByRole("button", { name: "使用组织账号登录" });
+  if (await oidcAccount.count()) await oidcAccount.click();
+  else if (await demoAccount.count()) await demoAccount.click();
   await page.getByText("运营首页", { exact: true }).waitFor({ state: "visible", timeout: 10000 });
 }
 
@@ -280,6 +285,10 @@ await verifyDelayedFailureIsObserved();
 
 const bffStub = createHttpServer(async (request, response) => {
   const path = request.url?.split("?")[0] ?? "";
+  const hasOidcCookie = request.headers.cookie
+    ?.split(";")
+    .map((item) => item.trim())
+    .includes(`auris_session=${previewOidcCookie}`) ?? false;
   if (path === "/healthz") {
     sendJson(response, 200, { status: "ok", service: "preview-smoke-stub" });
     return;
@@ -312,11 +321,26 @@ const bffStub = createHttpServer(async (request, response) => {
     });
     return;
   }
-  if (path.startsWith("/api/v1/") && request.headers.authorization !== `Bearer ${smokeSessionToken}`) {
-    sendJson(response, 401, { error: { code: "UNAUTHORIZED", message: "缺少服务端会话" } });
+  if (path === "/api/v1/auth/oidc/login" && request.method === "GET") {
+    const requestedReturnPath = new URL(request.url ?? "", "http://preview.local")
+      .searchParams.get("return_path");
+    const returnPath = requestedReturnPath?.startsWith("/") && !requestedReturnPath.startsWith("//")
+      ? requestedReturnPath
+      : "/";
+    oidcLoginRequests += 1;
+    response.writeHead(303, {
+      Location: returnPath,
+      "Cache-Control": "no-store",
+      "Set-Cookie": `auris_session=${previewOidcCookie}; Path=/; HttpOnly; SameSite=Lax`
+    });
+    response.end();
     return;
   }
   if (path === "/api/v1/auth/session" && request.method === "GET") {
+    if (!hasOidcCookie && request.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+      sendJson(response, 401, { error: { code: "AUTH_SESSION_INVALID", message: "浏览器会话无效" } });
+      return;
+    }
     sendJson(response, 200, {
       data: {
         user_id: "u_admin_001",
@@ -329,10 +353,19 @@ const bffStub = createHttpServer(async (request, response) => {
         tenant_name: "极光汽车",
         project_id: "sales_qa",
         project_name: "销售话术质检",
-        provider: "preview_smoke"
+        provider: "oidc_session",
+        csrf_token: "preview-smoke-csrf-fixture"
       },
       meta: { trace_id: "trace_preview_session", request_id: "preview-session" }
     });
+    return;
+  }
+  if (
+    path.startsWith("/api/v1/") &&
+    !hasOidcCookie &&
+    request.headers.authorization !== `Bearer ${smokeSessionToken}`
+  ) {
+    sendJson(response, 401, { error: { code: "UNAUTHORIZED", message: "缺少服务端会话" } });
     return;
   }
   if (path === "/api/v1/insights/ops-summary" && request.method === "GET") {
@@ -502,6 +535,14 @@ await normalPage.route(knowledgeRouteMatcher, async (route) => {
 });
 
 normalPage.on("console", (message) => {
+  if (
+    message.type() === "error" &&
+    message.text().includes("status of 401 (Unauthorized)") &&
+    expectedInitialAuthConsoleErrors < 2
+  ) {
+    expectedInitialAuthConsoleErrors += 1;
+    return;
+  }
   if (message.type() === "error") consoleErrors.push(message.text());
 });
 normalPage.on("pageerror", (error) => pageErrors.push(error.message));
@@ -522,7 +563,7 @@ normalPage.on("response", (response) => {
   if (isKnowledgeChunkUrl(response.url())) {
     knowledgeChunkResponses.push({ url: response.url(), status: response.status() });
   }
-  if (response.status() >= 400) {
+  if (response.status() >= 400 && !(pathname === "/api/v1/auth/session" && response.status() === 401)) {
     failedResponses.push({ url: response.url(), status: response.status(), method: response.request().method() });
   }
 });
@@ -537,10 +578,15 @@ try {
   );
   await enterApp(normalPage, baseUrl);
   const catalogRequests = startupAssetSignals.filter((signal) => signal.kind === "catalog-request");
+  const appRequests = startupAssetSignals.filter((signal) => signal.kind === "app-request");
   const appResponseIndex = startupAssetSignals.findIndex((signal) => signal.kind === "app-response");
-  assert(catalogRequests.length === 2, "启动阶段没有并行预热两个 catalog", {
+  assert(
+    appRequests.length >= 1 && catalogRequests.length === appRequests.length * 2,
+    "每次启动（含 OIDC 回跳）都必须并行预热两个 catalog",
+    {
     startupAssetSignals
-  });
+    }
+  );
   assert(
     appResponseIndex > 0 &&
       startupAssetSignals
@@ -569,6 +615,9 @@ try {
   assert(pageErrors.length === 0, "生产 preview 存在 page error", { pageErrors });
   assert(requestFailures.length === 0, "生产 preview 存在 request failure", { requestFailures });
   assert(failedResponses.length === 0, "生产 preview 存在失败响应", { failedResponses });
+  assert(oidcLoginRequests >= 1, "生产 preview 未通过 OIDC 重定向建立 Cookie 会话", {
+    oidcLoginRequests
+  });
 
   const failureContext = await browser.newContext({ baseURL: baseUrl, viewport: { width: 1440, height: 900 } });
   const failurePage = await failureContext.newPage();
@@ -587,10 +636,11 @@ try {
     chunkFailureSignals.push({ kind: "requestfailed", url: request.url(), error: request.failure()?.errorText });
   });
   failurePage.on("response", (response) => {
+    const pathname = new URL(response.url()).pathname;
     if (isKnowledgeChunkUrl(response.url()) && response.status() === 200) {
       recoveredChunkResponses.push({ url: response.url(), status: response.status() });
     }
-    if (response.status() >= 400) {
+    if (response.status() >= 400 && !(pathname === "/api/v1/auth/session" && response.status() === 401)) {
       chunkFailureSignals.push({
         kind: "failed-response",
         url: response.url(),
@@ -601,6 +651,14 @@ try {
   });
   failurePage.on("pageerror", (error) => chunkFailureSignals.push({ kind: "pageerror", error: error.message }));
   failurePage.on("console", (message) => {
+    if (
+      message.type() === "error" &&
+      message.text().includes("status of 401 (Unauthorized)") &&
+      expectedInitialAuthConsoleErrors < 2
+    ) {
+      expectedInitialAuthConsoleErrors += 1;
+      return;
+    }
     if (message.type() === "error") chunkFailureSignals.push({ kind: "console", error: message.text() });
   });
   try {

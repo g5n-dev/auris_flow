@@ -2,18 +2,13 @@ import type { InsightsController } from "../controller/useInsightsController";
 import {
   buildMetricScopePresentation,
   buildMetricScopeSetPresentation,
-  metricSnapshotsFromProjection,
   metricDeltaPresentation
 } from "../model/metricScopePresentation";
 import { PanelHeader } from "../../../shared/ui/PanelHeader";
 import { BarChart3 } from "lucide-react";
 
 export function InsightsScopePanel({ controller }: { controller: InsightsController }) {
-  const { activeReport, applyCustomPreset, comparisonScope, customRangeDraft, customRangeError, customReportScope, dataset, evidenceComplete, evidenceForMetric, formatPercent, insightTimeRanges, labelVersionFilter, labelVersionOptions, metricByKey, metricProjectionItems, northStar, rangeConfig, riskFacts, salesFilter, salesOptions, selectedMetric, setActiveModule, setAgentOutput, setComparisonScope, setLabelVersionFilter, setSalesFilter, setSelectedFactId, setSelectedMetricKey, setStoreFilter, setTimeRange, storeFilter, storeOptions, timeRange, updateCustomRangeDraft, view, visibleMetrics } = controller;
-  const projectionMetricSnapshots = metricSnapshotsFromProjection(metricProjectionItems);
-  const authoritativeMetricSnapshots = projectionMetricSnapshots.length
-    ? projectionMetricSnapshots
-    : activeReport?.metricSnapshots ?? [];
+  const { applyCustomPreset, authoritativeMetricError, authoritativeMetricSnapshots, authoritativeMetricStatus, comparisonScope, customRangeDraft, customRangeError, customReportScope, dataset, evidenceComplete, evidenceForMetric, formatPercent, insightTimeRanges, labelVersionFilter, labelVersionOptions, metricByKey, northStar, rangeConfig, riskFacts, salesFilter, salesOptions, selectedMetric, setActiveModule, setAgentOutput, setComparisonScope, setLabelVersionFilter, setSalesFilter, setSelectedFactId, setSelectedMetricKey, setStoreFilter, setTimeRange, storeFilter, storeOptions, timeRange, updateCustomRangeDraft, view, visibleMetrics } = controller;
   const metricSnapshotByKey = new Map(
     authoritativeMetricSnapshots.map((snapshot) => [snapshot.metric_key, snapshot])
   );
@@ -27,6 +22,11 @@ export function InsightsScopePanel({ controller }: { controller: InsightsControl
     ? selectedScope.comparabilityReasonCodes.join("、")
     : selectedScope.hiddenDeltaReason ?? "服务端未返回额外原因";
   const scopeCards = [
+    [
+      "Current 快照",
+      authoritativeMetricStatus === "ready" ? "BFF 已绑定" : authoritativeMetricStatus === "loading" ? "读取中" : "已阻断",
+      authoritativeMetricError ?? `${authoritativeMetricSnapshots.length} 个唯一物化快照`
+    ],
     [
       "统计口径",
       selectedScope.taxonomyMode ?? "未返回",
@@ -209,7 +209,7 @@ export function InsightsScopePanel({ controller }: { controller: InsightsControl
                     <span>{metric.label}</span>
                     <strong>{metric.value}</strong>
                     <b title={delta.reason ?? undefined}>{delta.text}</b>
-                    <em>{metric.meaning}{delta.reason ? ` · ${delta.reason}` : ""}</em>
+                    <em>{metric.sampleSize ? `样本 ${metric.sampleSize} · ` : ""}{metric.meaning}{delta.reason ? ` · ${delta.reason}` : ""}</em>
                   </button>
                 );
               })}

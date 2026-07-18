@@ -22,6 +22,7 @@ import { buildInsightReportActions } from "./buildInsightReportActions";
 import { buildInsightAgentAction } from "./buildInsightAgentAction";
 import { buildInsightChartRenderer } from "./buildInsightChartRenderer";
 import { buildInsightReportRenderer } from "./buildInsightReportRenderer";
+import { useAuthoritativeInsightMetrics } from "./useAuthoritativeInsightMetrics";
 
 export function useInsightsController(props: InsightsModuleProps) {
   const hotwordInsightsState = useHotwordInsights(props);
@@ -32,8 +33,10 @@ export function useInsightsController(props: InsightsModuleProps) {
   const scope3 = Object.assign(scope2, insightTimeRangeState);
   const insightComparisonState = useInsightComparisonState(scope3);
   const scope4 = Object.assign(scope3, insightComparisonState);
-  const insightMetrics = buildInsightMetrics(scope4);
-  const scope5 = Object.assign(scope4, insightMetrics);
+  const authoritativeInsightMetrics = useAuthoritativeInsightMetrics(scope4);
+  const scope4a = Object.assign(scope4, authoritativeInsightMetrics);
+  const insightMetrics = buildInsightMetrics(scope4a);
+  const scope5 = Object.assign(scope4a, insightMetrics);
   const insightView = buildInsightView(scope5);
   const scope6 = Object.assign(scope5, insightView);
   const insightSelectionState = useInsightSelectionState(scope6);

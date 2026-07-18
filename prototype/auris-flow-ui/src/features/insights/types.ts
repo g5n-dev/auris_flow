@@ -49,7 +49,7 @@ export type InsightMetric = {
     key: string;
     label: string;
     value: string;
-    valueNumber: number;
+    valueNumber: number | null;
     delta: string;
     tone: InsightTone;
     meaning: string;
@@ -65,12 +65,23 @@ export type InsightMetric = {
     action: string;
     route: ModuleKey;
     evidenceIds: string[];
+    snapshotBound?: boolean;
+    sampleSize?: number | null;
+    snapshotUnit?: string | null;
   };
 
 export type InsightMetricSnapshot = {
     metric_result_id: string;
     metric_key: string;
     [key: string]: unknown;
+  };
+
+export type InsightReportDocument = Record<string, unknown> & {
+    schema_version: "auris.insight-report.v2";
+    report_id: string;
+    title: string;
+    metric_results: unknown[];
+    sections: unknown[];
   };
 
 export type InsightNorthStar = {
@@ -160,6 +171,12 @@ export type InsightReportDraft = {
     metricResultIds?: string[];
     metricSnapshots?: InsightMetricSnapshot[];
     evidencePackIds?: string[];
+    authoritativeReportDocument?: InsightReportDocument;
+    reportMetricBinding?: {
+      bindingId: string;
+      contentSha256: string;
+      metricScopeSha256: string;
+    };
   };
 
 export type InsightReportFlowState = {

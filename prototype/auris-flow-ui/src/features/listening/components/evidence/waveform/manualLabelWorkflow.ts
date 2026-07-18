@@ -58,7 +58,7 @@ export function matchLabelVersionItem(
     const names = [item.label_id, item.canonical_name, ...item.aliases].map(normalize);
     return candidates.some((candidate) => names.includes(candidate));
   });
-  return exact.length === 1 ? exact[0] : items.length === 1 ? items[0] : null;
+  return exact.length === 1 ? exact[0] : null;
 }
 
 export function parseManualLabelValue(

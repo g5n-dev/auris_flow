@@ -153,6 +153,8 @@ export function buildInsightReportExecution(scope: InsightsModuleProps & Hotword
               store_id: metricScope.store_ids[0],
               model_version: metricScope.model_version,
               label_version: metricScope.label_version,
+              source_run_id: metricRunId,
+              metric_keys: requestedMetricKeys,
               limit: 50
             });
             const validatedMetricSnapshots = bindMaterializedMetricSnapshots(

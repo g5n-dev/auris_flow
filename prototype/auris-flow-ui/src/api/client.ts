@@ -1,4 +1,10 @@
 import { parseApiRequestError } from "./apiRequestError";
+import {
+  clearBrowserSessionSecurityContext,
+  getBrowserSessionCsrfToken,
+  setBrowserSessionCsrfToken
+} from "./authClient";
+import type { AuthSession } from "../shared/contracts/auth";
 export { ApiRequestError, isApiRequestError } from "./apiRequestError";
 
 export type BackendStatus = "checking" | "online" | "degraded" | "offline";
@@ -94,113 +100,17 @@ export function setApiContext(nextContext: ApiRuntimeContext) {
 
 export function clearApiAuthContext() {
   apiContext = { ...DEFAULT_API_CONTEXT, authToken: "" };
+  clearBrowserSessionSecurityContext();
 }
-
-export type AuthSessionUser = {
-  user_id: string;
-  name: string;
-  email: string;
-  role: string;
-  roles: string[];
-  initials: string;
-  tenant_id: string;
-  tenant_name: string;
-  project_id: string;
-  project_name: string;
-  provider?: string;
-};
-
-export type AuthSession = {
-  access_token: string;
-  token_type: "Bearer";
-  expires_at: string;
-  user: AuthSessionUser;
-};
-
-export type AuthLogoutReceipt = {
-  status: "revoked";
-  session_id: string;
-  revoked_at: string;
-};
 
 export function establishApiSession(session: AuthSession) {
   apiContext = {
     ...DEFAULT_API_CONTEXT,
     tenantId: session.user.tenant_id,
     projectId: session.user.project_id,
-    authToken: session.access_token
+    authToken: session.access_token ?? ""
   };
-}
-
-export class AuthRequestError extends Error {
-  readonly status: number;
-  readonly code?: string;
-
-  constructor(message: string, status: number, code?: string) {
-    super(message);
-    this.name = "AuthRequestError";
-    this.status = status;
-    this.code = code;
-  }
-}
-
-export const isDefinitiveAuthFailure = (error: unknown) =>
-  error instanceof AuthRequestError && (error.status === 401 || error.status === 403);
-
-async function authRequest<T>(path: string, options: RequestInit = {}): Promise<ApiEnvelope<T>> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      ...(options.body ? { "Content-Type": "application/json" } : {}),
-      ...(options.headers ?? {}),
-      "X-Request-Id": requestId()
-    },
-    credentials: "include"
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new AuthRequestError(
-      body?.error?.message ?? `认证服务返回 ${response.status}`,
-      response.status,
-      body?.error?.code
-    );
-  }
-  return body as ApiEnvelope<T>;
-}
-
-export async function createDevAuthSession(email: string, password: string): Promise<AuthSession> {
-  const response = await authRequest<AuthSession>("/v1/auth/dev-login", {
-    method: "POST",
-    body: JSON.stringify({ email, password })
-  });
-  return response.data;
-}
-
-export async function validateAuthSession(session: AuthSession): Promise<AuthSessionUser> {
-  const response = await authRequest<AuthSessionUser>("/v1/auth/session", {
-    headers: {
-      Authorization: `Bearer ${safeHeaderValue(session.access_token)}`,
-      "X-Tenant-Id": safeHeaderValue(session.user.tenant_id),
-      "X-Project-Id": safeHeaderValue(session.user.project_id)
-    }
-  });
-  return response.data;
-}
-
-export async function revokeAuthSession(
-  accessToken: string,
-  tenantId: string,
-  projectId: string
-): Promise<AuthLogoutReceipt> {
-  const response = await authRequest<AuthLogoutReceipt>("/v1/auth/logout", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${safeHeaderValue(accessToken)}`,
-      "X-Tenant-Id": safeHeaderValue(tenantId),
-      "X-Project-Id": safeHeaderValue(projectId)
-    }
-  });
-  return response.data;
+  setBrowserSessionCsrfToken(session.csrf_token ?? session.user.csrf_token);
 }
 
 export type ApiEnvelope<T> = {
@@ -338,15 +248,15 @@ export type InsightMaterializedMetric = {
   trace_id?: string;
   [key: string]: unknown;
 };
-
 export type InsightMetricQuery = {
   time_range: string;
   store_id?: string;
   model_version?: string;
   label_version?: string;
   limit?: number;
+  source_run_id?: string;
+  metric_keys?: string[];
 };
-
 export type InsightReportRunPayload = {
   metric_result_ids: string[];
   [key: string]: unknown;
@@ -683,6 +593,11 @@ export async function apiRequest<T>(
     headers.set("Authorization", `Bearer ${safeHeaderValue(requestContext.authToken)}`);
   } else {
     headers.delete("Authorization");
+  }
+  const requestMethod = (options.method ?? "GET").toUpperCase();
+  const csrfToken = getBrowserSessionCsrfToken();
+  if (!["GET", "HEAD", "OPTIONS"].includes(requestMethod) && csrfToken && !headers.has("X-CSRF-Token")) {
+    headers.set("X-CSRF-Token", safeHeaderValue(csrfToken));
   }
   headers.set("X-Request-Id", requestId());
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -1353,7 +1268,6 @@ export async function getInsightMetricRun(runId: string): Promise<ApiEnvelope<Ba
   const response = await apiRequest<Record<string, unknown>>(`/v1/runs/${encodeURIComponent(runId)}`);
   return { ...response, data: normalizeActionReceipt(response.data, response.meta?.trace_id) };
 }
-
 export async function getMaterializedInsightMetrics(
   query: InsightMetricQuery
 ): Promise<ApiEnvelope<{ items: InsightMaterializedMetric[] }>> {
@@ -1364,9 +1278,10 @@ export async function getMaterializedInsightMetrics(
   if (query.store_id) params.set("store_id", query.store_id);
   if (query.model_version) params.set("model_version", query.model_version);
   if (query.label_version) params.set("label_version", query.label_version);
+  if (query.source_run_id) params.set("source_run_id", query.source_run_id);
+  for (const metricKey of query.metric_keys ?? []) params.append("metric_key", metricKey);
   return apiRequest<{ items: InsightMaterializedMetric[] }>(`/v1/insights/metrics?${params.toString()}`);
 }
-
 export async function createInsightReportRun(
   payload: InsightReportRunPayload,
   options?: WriteRequestOptions

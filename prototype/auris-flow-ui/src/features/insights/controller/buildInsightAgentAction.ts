@@ -80,6 +80,11 @@ export function buildInsightAgentAction(scope: InsightsModuleProps & HotwordInsi
             if (!metricResultId) {
               throw new Error(`指标 ${selectedMetric.label} 缺少不可变快照，禁止创建下游动作。`);
             }
+            if (selectedMetric.valueNumber === null) {
+              throw new Error(
+                `指标 ${selectedMetric.label} 当前为 N/A 或未物化，缺少可验证数值，禁止创建数值目标。`
+              );
+            }
             const riskLevel = ["quoteConsistency", "crosstalkRisk"].includes(selectedMetric.key) ? "high" : "medium";
             const actionReceipt = await createPlatformMutation("insights", {
               report_id: governedReport.id,

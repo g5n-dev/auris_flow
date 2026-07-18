@@ -23,6 +23,15 @@ test("只在标签 ID、名称或别名唯一匹配时自动选择", async () =>
   assert.equal(matchLabelVersionItem(items, "qa.amount_conflict", "任意").label_id, "qa.amount_conflict");
   assert.equal(matchLabelVersionItem(items, "", "报价冲突").label_id, "qa.amount_conflict");
   assert.equal(matchLabelVersionItem(items, "", "未知"), null);
+  assert.equal(
+    matchLabelVersionItem(
+      [{ label_id: "qa.only-active", canonical_name: "唯一但不匹配", aliases: [] }],
+      "qa.requested",
+      "请求标签"
+    ),
+    null,
+    "即使只有一个 active item，也不能绕过精确匹配替用户猜测"
+  );
 });
 
 test("按冻结 value_type 严格转换，不能把任意文本当布尔或数值", async () => {

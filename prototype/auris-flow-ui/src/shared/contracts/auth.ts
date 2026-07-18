@@ -9,8 +9,10 @@ export type AuthUser = {
   roles: string[];
   tenantId: string;
   projectId: string;
+  /** Short-lived development compatibility bearer kept in React memory only. */
   authToken: string;
   expiresAt: string;
+  provider?: string;
 };
 
 export type AuthSessionUser = {
@@ -25,11 +27,20 @@ export type AuthSessionUser = {
   project_id: string;
   project_name: string;
   provider?: string;
+  csrf_token?: string;
 };
 
 export type AuthSession = {
-  access_token: string;
-  token_type: "Bearer";
-  expires_at: string;
+  access_token?: string;
+  token_type?: "Bearer";
+  expires_at?: string;
+  provider?: string;
+  csrf_token?: string;
   user: AuthSessionUser;
+};
+
+export type AuthLogoutReceipt = {
+  status: "revoked";
+  session_id: string;
+  revoked_at: string;
 };

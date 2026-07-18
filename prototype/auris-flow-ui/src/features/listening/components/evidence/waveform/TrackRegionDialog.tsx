@@ -5,6 +5,10 @@ import { AlertTriangle, Check, Headphones, Link2, Pause, Plus, SkipBack, SkipFor
 export function TrackRegionDialog({ controller }: { controller: WaveformPanelController }) {
   const { activeSegment, createAnnotation, manualLabelWorkflow, modalRegion, modalRegionDraft, modalRegionEnd, modalRegionTime, modalSourceSlice, modalTrack, regionEdits, saveModalAnnotationDraft, savingAnnotationId, setTrackRegionModalId, startTrackPreview, submitModalAnnotationDraft, trackPreviewState, updateModalRegion, updateRegionPosition } = controller;
   const manualDraftFrozen = Boolean(manualLabelWorkflow.draft);
+  // React 18 must receive the native boolean attribute as a string; its types expose inert as boolean.
+  const manualDraftInert = manualDraftFrozen
+    ? ({ inert: "" } as unknown as { inert: boolean })
+    : {};
   return (
     modalRegion && modalTrack && (
             <div
@@ -49,7 +53,7 @@ export function TrackRegionDialog({ controller }: { controller: WaveformPanelCon
                   <section
                     className="session-boundary-card track-region-editor-card"
                     aria-disabled={manualDraftFrozen}
-                    inert={manualDraftFrozen}
+                    {...manualDraftInert}
                   >
                     <span>标注内容</span>
                     <div className="track-region-form">
@@ -257,7 +261,7 @@ export function TrackRegionDialog({ controller }: { controller: WaveformPanelCon
                   <section
                     className="session-boundary-card track-region-quick-card"
                     aria-disabled={manualDraftFrozen}
-                    inert={manualDraftFrozen}
+                    {...manualDraftInert}
                   >
                     <span>快捷处理</span>
                     <div className="track-region-quick-actions">

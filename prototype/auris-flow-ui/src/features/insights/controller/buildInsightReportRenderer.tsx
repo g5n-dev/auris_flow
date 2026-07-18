@@ -111,11 +111,11 @@ export function buildInsightReportRenderer(scope: InsightsModuleProps & HotwordI
                 <RotateCcw size={14} />
                 {reportFlowActionLabel("重生成")}
               </button>
-              <button type="button" {...actionFeedbackAttrs("s,e")} onClick={() => exportReport(activeReport, "markdown")}>
+              <button type="button" disabled={!activeReport.authoritativeReportDocument} title={!activeReport.authoritativeReportDocument ? "等待服务端冻结正文与绑定校验" : undefined} {...actionFeedbackAttrs("s,e,d")} onClick={() => exportReport(activeReport, "markdown")}>
                 <Download size={14} />
                 导出 MD
               </button>
-              <button type="button" {...actionFeedbackAttrs("s,e")} onClick={() => exportReport(activeReport, "json")}>
+              <button type="button" disabled={!activeReport.authoritativeReportDocument} title={!activeReport.authoritativeReportDocument ? "等待服务端冻结正文与绑定校验" : undefined} {...actionFeedbackAttrs("s,e,d")} onClick={() => exportReport(activeReport, "json")}>
                 <Download size={14} />
                 导出 JSON
               </button>

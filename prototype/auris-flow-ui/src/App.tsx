@@ -44,6 +44,7 @@ export default function App() {
       <AuthPage
         onLogin={auth.authenticate}
         onAuth={auth.acceptSession}
+        onOidcLogin={auth.beginOidcLogin}
         restoreError={auth.authRestoreError}
         onRetryRestore={auth.retryRestore}
       />

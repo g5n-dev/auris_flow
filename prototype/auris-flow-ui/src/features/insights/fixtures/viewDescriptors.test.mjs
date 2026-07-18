@@ -28,6 +28,10 @@ const loadBuilder = async (sourceUrl, exportName, injectedNames) => {
     /import \{[^\n]+\} from "\.\.\/fixtures\/viewDescriptors";\n/,
     `const { ${injectedNames.join(", ")} } = globalThis.__insightDescriptors;\n`
   );
+  source = source.replace(
+    /import \{ snapshotValuePresentation \} from "\.\.\/model\/authoritativeSnapshots";\n/,
+    "const snapshotValuePresentation = () => { throw new Error('descriptor test has no BFF snapshot'); };\n"
+  );
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
       target: ts.ScriptTarget.ES2022,

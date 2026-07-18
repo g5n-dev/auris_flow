@@ -100,11 +100,12 @@ export function buildMetricScopePresentation(
   }
 
   const labelScope = scopeRecord(record);
+  const comparison = asRecord(record.comparison);
   const status = nonBlankString(
-    record.comparability_status ?? labelScope?.comparability_status
+    comparison?.comparison_status ?? record.comparison_status ?? record.comparability_status ?? labelScope?.comparability_status
   );
   const reasonCodes = stringList(
-    record.comparability_reason_codes ?? labelScope?.comparability_reason_codes
+    comparison?.reason_codes ?? record.comparison_reason_codes ?? record.comparability_reason_codes ?? labelScope?.comparability_reason_codes
   );
   return {
     snapshotBound: true,

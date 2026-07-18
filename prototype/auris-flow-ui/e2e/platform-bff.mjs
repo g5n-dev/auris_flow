@@ -527,7 +527,7 @@ async function verifyAuthSessionRestore(page, session) {
   await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
   const restoredResponse = await restoredResponsePromise;
   const restoredPayload = await restoredResponse.json().catch(() => ({}));
-  assert(restoredResponse.status() === 200, "reload must validate the stored server session", restoredPayload);
+  assert(restoredResponse.status() === 200, "reload must validate the HttpOnly cookie session", restoredPayload);
   assert(
     restoredPayload?.data?.user_id === session.user.user_id,
     "reload must restore the same authenticated user",
@@ -554,12 +554,11 @@ async function verifyAuthSessionRestore(page, session) {
   await page.reload({ waitUntil: "domcontentloaded", timeout: 30000 });
   const retryButton = page.locator('[data-action-key="retry-auth-restore"]');
   await retryButton.waitFor({ state: "visible", timeout: 10000 });
-  const retainedToken = await page.evaluate(() => {
+  const legacyStoredSession = await page.evaluate(() => {
     const key = "auris-flow.auth-session.v1";
-    const raw = window.localStorage.getItem(key) ?? window.sessionStorage.getItem(key);
-    return raw ? JSON.parse(raw).access_token : null;
+    return window.localStorage.getItem(key) ?? window.sessionStorage.getItem(key);
   });
-  assert(retainedToken === session.access_token, "transient 503 must preserve the stored session");
+  assert(legacyStoredSession === null, "browser storage must not retain bearer session material");
 
   const retryResponsePromise = page.waitForResponse(
     (response) =>
@@ -5381,12 +5380,22 @@ async function browserApi(page, path, { method = "GET", body, key, headers: head
   );
   return page.evaluate(
     async ({ path, method, body, key, defaultHeaders, headerOverrides }) => {
-      const rawSession = localStorage.getItem("auris-flow.auth-session.v1") || sessionStorage.getItem("auris-flow.auth-session.v1");
-      const pageSession = rawSession ? JSON.parse(rawSession) : null;
+      const unsafeMethod = !["GET", "HEAD", "OPTIONS"].includes(method.toUpperCase());
+      let csrfToken = "";
+      if (unsafeMethod) {
+        const sessionResponse = await fetch("/api/v1/auth/session", {
+          headers: defaultHeaders,
+          credentials: "include"
+        });
+        if (sessionResponse.ok) {
+          const sessionEnvelope = await sessionResponse.json().catch(() => ({}));
+          csrfToken = sessionEnvelope?.data?.csrf_token ?? "";
+        }
+      }
       const headers = {
         ...defaultHeaders,
         ...headerOverrides,
-        ...(pageSession?.access_token ? { Authorization: `Bearer ${pageSession.access_token}` } : {}),
+        ...(csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
         "X-Request-Id": `browser-e2e-${Date.now().toString(36)}`,
         ...(key ? { "Idempotency-Key": key } : {}),
         ...(body ? { "Content-Type": "application/json" } : {})

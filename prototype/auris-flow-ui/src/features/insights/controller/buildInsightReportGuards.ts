@@ -17,6 +17,7 @@ import { backendRunFailed } from "../../../shared/runtime/backendRunStatus";
 import { isRecordValue } from "../../../shared/runtime/records";
 import { INSIGHT_REPORT_POLL_LIMIT, waitForInsightPoll } from "../reportPolicy";
 import type { InsightReportDraft } from "../types";
+import { parseGeneratedReportResource } from "../model/authoritativeSnapshots";
 
 export function buildInsightReportGuards(scope: InsightsModuleProps & HotwordInsightsState & InsightDatasetState & InsightTimeRangeState & InsightComparisonState & InsightMetrics & InsightView & InsightSelectionState & InsightEvidenceActions & InsightChartSpecs & InsightChartSelection & InsightContext & InsightReportDraftBuilder & InsightReportState) {
   const { activeReport, dataset, insightContextKeyRef, insightTaskActionPending, reportFlowPending, reportFlowState, reportOperationRef, reportReadyForAction, setInsightActionNotice, setReportDrafts, setReportFlowState, unique } = scope;
@@ -77,8 +78,12 @@ export function buildInsightReportGuards(scope: InsightsModuleProps & HotwordIns
         });
         const receipt = await getInsightReportResource(report.id);
         lastState = typeof receipt.data.status === "string" ? receipt.data.status : lastState;
+        const authoritative = lastState === "generated"
+          ? parseGeneratedReportResource(receipt.data, report)
+          : undefined;
         const nextReport: InsightReportDraft = {
           ...report,
+          ...authoritative,
           backendState: lastState,
           status: lastState === "generated" ? "已生成" : report.status
         };

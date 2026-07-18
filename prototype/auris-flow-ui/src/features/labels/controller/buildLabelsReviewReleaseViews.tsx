@@ -225,7 +225,10 @@ export function buildLabelsReviewReleaseViews(activeAutomation: BuildLabelsRevie
         </>,
         <>
           <PanelHeader title="发布草稿" subtitle={`${lockedLabelVersionId || "LabelVersion 未锁定"} / ${dagsterDraftState}`} icon={<Workflow size={16} />} />
-          <LabelLifecycleSummary labelVersionId={LABEL_DEMO_MODE ? "" : lockedLabelVersionId} />
+          <LabelLifecycleSummary
+            labelVersionId={LABEL_DEMO_MODE ? "" : lockedLabelVersionId}
+            refreshToken={`${labelPublishRequest.status}:${labelPublishRequest.backendStatus ?? ""}:${labelPublishRequest.traceId ?? ""}`}
+          />
           <div className="label-v2-editor-grid">
             <label>
               <span>发布说明</span>

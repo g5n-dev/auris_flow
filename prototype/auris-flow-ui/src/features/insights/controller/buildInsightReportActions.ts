@@ -31,6 +31,9 @@ export function buildInsightReportActions(scope: InsightsModuleProps & HotwordIn
     };
 
   const reportToMarkdown = (report: InsightReportDraft) => {
+      if (!report.authoritativeReportDocument) {
+        throw new Error("报告尚未返回服务端冻结正文，禁止导出本地 fixture 草稿。");
+      }
       const metricScopeLines = (report.metricSnapshots ?? []).map((snapshot) => {
         const presentation = buildMetricScopePresentation(snapshot);
         return [
@@ -45,22 +48,27 @@ export function buildInsightReportActions(scope: InsightsModuleProps & HotwordIn
       return [
         `# ${report.title}`,
         "",
-        `范围：${report.scope}`,
-        `状态：${report.status} / ${report.createdAt}`,
-        "",
         ...report.sections.flatMap((section) => [`## ${section.title}`, section.body, ""]),
         "## 冻结统计口径",
         ...(metricScopeLines.length
           ? metricScopeLines
           : ["当前报告未返回不可变 metric snapshot/scope；未用筛选条件猜测口径。"]),
-        "",
-        `引用图表：${report.chartIds.join(", ")}`,
-        `引用证据：${report.evidenceIds.join(", ")}`
+        ""
       ].join("\n");
     };
 
   const exportReport = (report: InsightReportDraft, format: "markdown" | "json") => {
-      const content = format === "json" ? JSON.stringify(report, null, 2) : reportToMarkdown(report);
+      if (!report.authoritativeReportDocument) {
+        setInsightActionNotice({
+          status: "error",
+          title: "报告导出已阻断",
+          detail: "报告尚未返回服务端冻结正文或绑定校验未通过。"
+        });
+        return;
+      }
+      const content = format === "json"
+        ? JSON.stringify(report.authoritativeReportDocument, null, 2)
+        : reportToMarkdown(report);
       const blob = new Blob([content], { type: format === "json" ? "application/json" : "text/markdown" });
       const url = URL.createObjectURL(blob);
       const anchor = document.createElement("a");

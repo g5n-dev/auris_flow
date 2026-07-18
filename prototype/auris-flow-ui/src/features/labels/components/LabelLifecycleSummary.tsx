@@ -125,7 +125,13 @@ function LifecycleFacts({ summary }: { summary: LabelLifecycleSummary }) {
   );
 }
 
-export function LabelLifecycleSummary({ labelVersionId }: { labelVersionId: string }) {
+export function LabelLifecycleSummary({
+  labelVersionId,
+  refreshToken = ""
+}: {
+  labelVersionId: string;
+  refreshToken?: string;
+}) {
   const [retryGeneration, setRetryGeneration] = useState(0);
   const [readState, setReadState] = useState<LifecycleReadState>({ status: "idle", labelVersionId: "" });
 
@@ -160,7 +166,7 @@ export function LabelLifecycleSummary({ labelVersionId }: { labelVersionId: stri
     return () => {
       cancelled = true;
     };
-  }, [labelVersionId, retryGeneration]);
+  }, [labelVersionId, refreshToken, retryGeneration]);
 
   if (!labelVersionId) {
     return (

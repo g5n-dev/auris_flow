@@ -6,6 +6,8 @@ import type { InsightComparisonState } from "./useInsightComparisonState";
 import type { InsightMetric, InsightNorthStar } from "../types";
 import { metricDescriptors, northStarDescriptor } from "../fixtures/viewDescriptors";
 import type { InsightMetricKey, NorthStarComponentKey } from "../fixtures/viewDescriptors";
+import type { AuthoritativeInsightMetrics } from "./useAuthoritativeInsightMetrics";
+import { snapshotValuePresentation } from "../model/authoritativeSnapshots";
 
 type MetricRuntime = Pick<
   InsightMetric,
@@ -17,8 +19,8 @@ type NorthStarComponentRuntime = Pick<
   "value" | "contribution"
 > & Partial<Pick<InsightNorthStar["components"][number], "tone">>;
 
-export function buildInsightMetrics(scope: InsightsModuleProps & HotwordInsightsState & InsightDatasetState & InsightTimeRangeState & InsightComparisonState) {
-  const { buildRangeValues, clampScore, conversionProgress, crosstalkRisk, dataset, driveFacts, effectiveReceptionRate, evidenceComplete, formatPercent, modelScore, northStarScore, objectionResolution, quoteConsistency, quoteFacts, rangeDeltaText, rangeValue, rangedConversionProgress, rangedEffectiveReceptionRate, rangedQuoteConsistency, rangedRiskReverseScore, resolvedFacts, riskFacts, riskReverseScore, tagAssetQuality, testDriveIntent, unique, validReceptionFacts } = scope;
+export function buildInsightMetrics(scope: InsightsModuleProps & HotwordInsightsState & InsightDatasetState & InsightTimeRangeState & InsightComparisonState & AuthoritativeInsightMetrics) {
+  const { authoritativeMetricStatus, buildRangeValues, clampScore, conversionProgress, crosstalkRisk, dataset, driveFacts, effectiveReceptionRate, evidenceComplete, formatPercent, modelScore, northStarScore, objectionResolution, quoteConsistency, quoteFacts, rangeDeltaText, rangeValue, rangedConversionProgress, rangedEffectiveReceptionRate, rangedQuoteConsistency, rangedRiskReverseScore, resolvedFacts, riskFacts, riskReverseScore, snapshotByMetricKey, tagAssetQuality, testDriveIntent, unique, validReceptionFacts } = scope;
   const metricRuntimeByKey: Record<InsightMetricKey, MetricRuntime> = {
     effectiveReceptionRate: {
       value: formatPercent(rangedEffectiveReceptionRate),
@@ -93,11 +95,56 @@ export function buildInsightMetrics(scope: InsightsModuleProps & HotwordInsights
       evidenceIds: riskFacts.map((fact) => fact.id)
     }
   };
-  const insightMetrics = metricDescriptors.map((descriptor) => ({
-    ...descriptor,
-    ...metricRuntimeByKey[descriptor.key],
-    tags: [...descriptor.tags]
-  } as InsightMetric));
+  // The application controller always supplies the authoritative snapshot map.
+  // Keep descriptor-only consumers backwards compatible without weakening the
+  // runtime fail-closed branch used by the actual page.
+  const hasAuthoritativeBinding = snapshotByMetricKey instanceof Map;
+  const insightMetrics = metricDescriptors.map((descriptor) => {
+    const localRuntime = metricRuntimeByKey[descriptor.key];
+    if (!hasAuthoritativeBinding) {
+      return {
+        ...descriptor,
+        ...localRuntime,
+        tags: [...descriptor.tags]
+      } as InsightMetric;
+    }
+    const snapshot = snapshotByMetricKey.get(descriptor.key);
+    if (snapshot) {
+      const materialized = snapshotValuePresentation(snapshot);
+      return {
+        ...descriptor,
+        ...localRuntime,
+        value: materialized.text,
+        valueNumber: materialized.value,
+        sampleSize: materialized.sampleSize,
+        snapshotBound: true,
+        snapshotUnit: materialized.unit,
+        tags: [...descriptor.tags]
+      } as InsightMetric;
+    }
+    if (authoritativeMetricStatus !== "ready") {
+      return {
+        ...descriptor,
+        ...localRuntime,
+        value: authoritativeMetricStatus === "loading" ? "载入中" : "不可用",
+        valueNumber: null,
+        sampleSize: null,
+        snapshotBound: false,
+        snapshotUnit: null,
+        tags: [...descriptor.tags]
+      } as InsightMetric;
+    }
+    return {
+      ...descriptor,
+      ...localRuntime,
+      value: "未物化",
+      valueNumber: null,
+      sampleSize: null,
+      snapshotBound: false,
+      snapshotUnit: null,
+      tags: [...descriptor.tags]
+    } as InsightMetric;
+  });
 
   const componentRuntimeFor = (key: NorthStarComponentKey): NorthStarComponentRuntime => {
     switch (key) {

@@ -16,21 +16,22 @@ import type { InsightReportGuards } from "./buildInsightReportGuards";
 import type { InsightReportExecution } from "./buildInsightReportExecution";
 import type { InsightReportActions } from "./buildInsightReportActions";
 import type { InsightAgentAction } from "./buildInsightAgentAction";
+import type { AuthoritativeInsightMetrics } from "./useAuthoritativeInsightMetrics";
 import type { InsightChartSpec } from "../types";
 import {
   buildMetricScopePresentation,
-  metricSnapshotsFromProjection,
   metricDeltaPresentation
 } from "../model/metricScopePresentation";
+import {
+  chartMetricKeys,
+  chartPairComparable,
+  snapshotAllowsContinuousTrend
+} from "../model/authoritativeSnapshots";
 import { AlertTriangle, GitBranch, Sparkles } from "lucide-react";
 import type { CSSProperties } from "react";
 
-export function buildInsightChartRenderer(scope: InsightsModuleProps & HotwordInsightsState & InsightDatasetState & InsightTimeRangeState & InsightComparisonState & InsightMetrics & InsightView & InsightSelectionState & InsightEvidenceActions & InsightChartSpecs & InsightChartSelection & InsightContext & InsightReportDraftBuilder & InsightReportState & InsightReportGuards & InsightReportExecution & InsightReportActions & InsightAgentAction) {
-  const { activeReport, activeTrendPointIndex, activeTrendSeriesKey, downstreamLabelForChart, handleOpenDownstreamAssets, metricByKey, metricProjectionItems, pct, runAgentAction, selectEvidence, setActiveModule, setActiveTrendPointIndex, setActiveTrendSeriesKey, setSelectedMetricKey } = scope;
-  const projectionMetricSnapshots = metricSnapshotsFromProjection(metricProjectionItems);
-  const authoritativeMetricSnapshots = projectionMetricSnapshots.length
-    ? projectionMetricSnapshots
-    : activeReport?.metricSnapshots ?? [];
+export function buildInsightChartRenderer(scope: InsightsModuleProps & HotwordInsightsState & InsightDatasetState & InsightTimeRangeState & InsightComparisonState & InsightMetrics & InsightView & InsightSelectionState & InsightEvidenceActions & InsightChartSpecs & InsightChartSelection & InsightContext & InsightReportDraftBuilder & InsightReportState & InsightReportGuards & InsightReportExecution & InsightReportActions & InsightAgentAction & AuthoritativeInsightMetrics) {
+  const { activeTrendPointIndex, activeTrendSeriesKey, authoritativeMetricSnapshots, downstreamLabelForChart, handleOpenDownstreamAssets, metricByKey, pct, runAgentAction, selectEvidence, setActiveModule, setActiveTrendPointIndex, setActiveTrendSeriesKey, setSelectedMetricKey } = scope;
   const metricSnapshotByKey = new Map(
     authoritativeMetricSnapshots.map((snapshot) => [snapshot.metric_key, snapshot])
   );
@@ -45,6 +46,20 @@ export function buildInsightChartRenderer(scope: InsightsModuleProps & HotwordIn
         );
       }
       if (chart.type === "line" && chart.series?.length && chart.xLabels?.length) {
+        const keys = chartMetricKeys(chart);
+        const scopedTrend = Boolean(keys.length) && keys.every((key) => {
+          const snapshot = metricSnapshotByKey.get(key);
+          return snapshot ? snapshotAllowsContinuousTrend(snapshot) : false;
+        });
+        if (!scopedTrend) {
+          return (
+            <div className="insight-empty-state" data-insight-structural-break={chart.id}>
+              <GitBranch size={18} />
+              <strong>结构断点 · 连续趋势已阻断</strong>
+              <span>服务端未提供逐点 MetricResult scope/comparison，禁止连接折线、目标线或展示伪涨跌。</span>
+            </div>
+          );
+        }
         const width = 840;
         const height = chart.summaryCards?.length ? 320 : 250;
         const pad = { left: 54, right: 28, top: 24, bottom: 42 };
@@ -248,6 +263,7 @@ export function buildInsightChartRenderer(scope: InsightsModuleProps & HotwordIn
         );
       }
       if (chart.type === "radar" && chart.axes?.length) {
+        const showComparison = chartPairComparable(chart, metricSnapshotByKey);
         const center = { x: 160, y: 126 };
         const radius = 86;
         const pointFor = (index: number, value: number) => {
@@ -261,8 +277,9 @@ export function buildInsightChartRenderer(scope: InsightsModuleProps & HotwordIn
             {[0.35, 0.68, 1].map((scale) => (
               <polygon key={scale} className="grid" points={chart.axes!.map((_, index) => pointFor(index, 100 * scale).join(",")).join(" ")} />
             ))}
-            <polygon className="compare" points={polygon("compare")} />
+            {showComparison && <polygon className="compare" points={polygon("compare")} />}
             <polygon className="value" points={polygon("value")} />
+            {!showComparison && <text x="160" y="238" textAnchor="middle">结构断点 · 目标比较已隐藏</text>}
             {chart.axes.map((axis, index) => {
               const [x, y] = pointFor(index, 113);
               const [dotX, dotY] = pointFor(index, axis.value);
