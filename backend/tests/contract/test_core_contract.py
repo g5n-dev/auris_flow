@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.core.auth import sign_auth_token
 from app.core.database import SessionLocal
+from app.core.oidc import OIDCProviderUnavailableError
 from app.core.rate_limit import InMemoryRateLimiter, RateLimitDecision
 from app.main import app, settings
 from app.models import (
@@ -113,6 +114,29 @@ def test_readyz_production_cannot_omit_dagster_from_explicit_dependencies(
     assert response.status_code == 503
     assert response.json()["data"]["required_checks"] == ["auth", "dagster", "database"]
     assert response.json()["data"]["missing_required"]["dagster"] == "not_ready"
+
+
+def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch):
+    class UnavailableOIDCFlow:
+        def discover(self, *, force_refresh: bool = False):
+            assert force_refresh is True
+            raise OIDCProviderUnavailableError
+
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database")
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+    monkeypatch.setattr(
+        "app.api.routers.auth.get_oidc_authorization_flow",
+        lambda: UnavailableOIDCFlow(),
+    )
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["missing_required"] == {"auth": "not_ready"}
 
 
 def test_ops_summary_contract(client, auth_headers):

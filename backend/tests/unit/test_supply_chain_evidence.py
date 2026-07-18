@@ -243,6 +243,7 @@ def _generate(
         npm_executable="npm",
         runner=runner,
         today=date(2026, 7, 18),
+        source_commit="1" * 40,
     )
 
 
@@ -289,6 +290,7 @@ def test_generation_is_deterministic_sorted_and_path_sanitized(tmp_path: Path) -
         "npm": 1,
         "total": 4,
     }
+    assert first["source_commit"] == "1" * 40
     assert set(first_bytes) == {
         "backend-python.cdx.json",
         "dagster-python.cdx.json",
@@ -307,7 +309,117 @@ def test_generation_is_deterministic_sorted_and_path_sanitized(tmp_path: Path) -
     ]
     reviewed = inventory["dependencies"][1]
     assert reviewed["license_status"] == "reviewed-exception"
+    assert reviewed["obligations"] == [
+        "comply-with-reviewed-exception-and-upstream-license-terms",
+        "retain-upstream-license-and-copyright-notices",
+    ]
     assert reviewed["review_exception"]["review_reference"] == "SEC-2026-0042"
+    approved = inventory["dependencies"][0]
+    assert approved["license_status"] == "approved-compatible"
+    assert approved["obligations"] == ["retain-upstream-license-and-copyright-notices"]
+    assert inventory["policy"] == {
+        "allowed_expression_operators": ["AND", "OR"],
+        "allowed_license_identifiers": [
+            "0BSD",
+            "Apache-2.0",
+            "BSD-2-Clause",
+            "BSD-3-Clause",
+            "ISC",
+            "MIT",
+            "MIT-0",
+            "MPL-2.0",
+            "PSF-2.0",
+        ],
+        "denied_without_exact_review_exception": [
+            "license-outside-allowlist",
+            "missing-or-unknown-license",
+            "non-spdx-or-ambiguous-license",
+            "spdx-license-exception",
+        ],
+        "review_exception_scope": "exact-ecosystem-name-version",
+        "review_exception_schema": "auris.license-review-exceptions.v1",
+    }
+
+
+@pytest.mark.parametrize(
+    "license_conclusion",
+    [
+        "BSD",
+        "Dual License",
+        "GPL-2.0-only",
+        "MIT WITH Classpath-exception-2.0",
+        "MIT OR",
+    ],
+)
+def test_ambiguous_or_unapproved_license_fails_without_exact_exception(
+    tmp_path: Path, license_conclusion: str
+) -> None:
+    generator = _load_generator()
+    _write_fixture_project(tmp_path)
+    runner = FakeRunner(
+        _python_inventory(reviewed_license="MIT"),
+        [_npm_sbom(serial="urn:uuid:test", timestamp="2026-07-18T00:00:00Z")],
+        dagster_python_inventory=_dagster_python_inventory(license_expression=license_conclusion),
+    )
+
+    with pytest.raises(generator.EvidenceError, match="allowlist|ambiguous|SPDX"):
+        _generate(generator, tmp_path, runner, exceptions_path=None)
+
+    assert not (tmp_path / "evidence").exists()
+
+
+def test_exact_review_exception_can_cover_unapproved_conclusion(
+    tmp_path: Path,
+) -> None:
+    generator = _load_generator()
+    _, _, _, exceptions = _write_fixture_project(tmp_path)
+    runner = FakeRunner(
+        _python_inventory(reviewed_license="GPL-2.0-only"),
+        [_npm_sbom(serial="urn:uuid:test", timestamp="2026-07-18T00:00:00Z")],
+    )
+
+    _generate(generator, tmp_path, runner, exceptions_path=exceptions)
+
+    inventory = json.loads(
+        (tmp_path / "evidence" / "dependency-licenses.json").read_text(encoding="utf-8")
+    )
+    reviewed = next(
+        item for item in inventory["dependencies"] if item["name"] == "reviewed-package"
+    )
+    assert reviewed["license"] == "GPL-2.0-only"
+    assert reviewed["license_status"] == "reviewed-exception"
+    assert reviewed["review_exception"]["review_reference"] == "SEC-2026-0042"
+
+
+def test_high_confidence_alias_and_spdx_expression_are_approved() -> None:
+    generator = _load_generator()
+
+    dependencies = generator.apply_license_policy(
+        [
+            {
+                "ecosystem": "npm",
+                "name": "bsd-lib",
+                "version": "1.0.0",
+                "license": "3-Clause BSD License",
+            },
+            {
+                "ecosystem": "npm",
+                "name": "dual-compatible-lib",
+                "version": "2.0.0",
+                "license": "(MIT OR Apache-2.0)",
+            },
+        ],
+        {},
+    )
+
+    assert dependencies[0]["license"] == "BSD-3-Clause"
+    assert dependencies[0]["license_status"] == "approved-compatible"
+    assert dependencies[1]["license"] == "(MIT OR Apache-2.0)"
+    assert dependencies[1]["license_status"] == "approved-compatible"
+    assert dependencies[1]["obligations"] == [
+        "preserve-apache-notice-and-state-changes",
+        "retain-upstream-license-and-copyright-notices",
+    ]
 
 
 @pytest.mark.parametrize("missing_ecosystem", ["backend-python", "dagster-python", "npm"])

@@ -129,6 +129,27 @@ def test_artifact_manifest_binds_checksums_to_commit_and_tag(tmp_path: Path) -> 
     assert "sbom/api.cdx.json" in checksums
 
 
+def test_artifact_manifest_can_limit_checksums_to_published_regular_assets(
+    tmp_path: Path,
+) -> None:
+    renderer = _load_renderer()
+    image_lock = _lock(renderer)
+    published = tmp_path / "auris-flow-v1.0.0-rc.1-deployment.tar.gz"
+    published.write_bytes(b"published")
+    (tmp_path / "internal-scan.json").write_text("{}\n", encoding="utf-8")
+
+    manifest, checksums = renderer.build_artifact_manifest(
+        base_dir=tmp_path,
+        image_lock=image_lock,
+        excluded=[],
+        included=[published],
+    )
+
+    assert [artifact["path"] for artifact in manifest["artifacts"]] == [published.name]
+    assert published.name in checksums
+    assert "internal-scan.json" not in checksums
+
+
 def test_cli_create_lock_is_deterministic(tmp_path: Path) -> None:
     renderer = _load_renderer()
     first = tmp_path / "first.json"

@@ -54,7 +54,8 @@
 | 0038 | `release_head_interval_closure` | 发布 generation 生效区间一次闭合 | 0037 |
 | 0039 | `label_fact_append_only_contract` | Fact append-only Contract 与 head 唯一真相源 | 0038 |
 | 0040 | `label_recomputation_fact_sets` | 全量重算 candidate FactSet/namespace | 0039 |
-| 0041 | `oidc_browser_sessions` | OIDC identity/state 与 hash-only browser session；当前 head | 0040 |
+| 0041 | `oidc_browser_sessions` | OIDC identity/state 与 hash-only browser session | 0040 |
+| 0042 | `task_run_control_plane` | RunRecord 运行时间、deadline、引擎观察、状态版本和取消终态控制字段；当前 head | 0041 |
 
 ## 3. 0001 Platform Foundation
 
@@ -94,7 +95,10 @@
 
 - `idempotency_records(tenant_id, project_id, user_id, operation, idempotency_key)` 唯一，避免不同用户共享重放结果。
 - `outbox_events(status, available_at, created_at)` 建索引，并保留 `attempt_count`、`last_error`；第一阶段死信用 `status = dead_letter` 表达，后续可按运维归档到独立 `dead_letter_events`。
-- `run_records` 保存通用 `run_id`、`run_type`、`status`、`partition_key`、`trace_id`。
+- `run_records` 保存通用 `run_id`、`run_type`、`status`、`partition_key`、`trace_id`；0042
+  expand 增加 submitted/started/finished/deadline、`next_status_sync_at`、单调 `monitor_generation`、
+  engine status observation、单调 status version、cancel request/reason 与 terminal reason，并建立
+  `status + deadline_at`、`status + next_status_sync_at`、`run_type + status + finished_at`、`engine_status` 索引。
 - 后续领域运行表可引用 `run_records.run_id`，也可使用同 ID 作为专表主键。
 
 ## 5. 0003 Connector Ingestion
@@ -334,6 +338,28 @@ S2.b 已在应用层实现可暂停、可重入的 taxonomy/LabelVersion 强字�
 
 `0041_oidc_browser_sessions.py` 在不修改既有 `users/auth_sessions` 兼容语义的前提下，expand 创建 `user_security_states`、`oidc_identities`、`oidc_authorization_states` 与 `browser_auth_sessions` 四张强表。升级为每个既有用户回填 `status=active, authz_version=1` 的安全状态；OIDC identity 必须由维护者显式 provision，并以 issuer/subject SHA-256 唯一映射内部 user/tenant/project。授权 state 只保存 hash，短期 verifier/nonce 一次性消费；浏览器 session 只保存 cookie 与 CSRF 的 SHA-256，原值不得持久化或记录日志。应用发布顺序为 expand → provision identity → 启用 OIDC canary → 切换前端 cookie session；Keycloak 只能作为参考 IdP，切换不得引入其私有协议依赖。downgrade 只按 FK 逆序删除四张 0041 表，保留全部权威用户与旧开发会话；生产已有活跃 OIDC 会话时优先用 forward migration，回退前先撤销/过期会话并切回受控认证路径。
 
+`0042_task_run_control_plane.py` 是 expand-only 迁移：为既有 `run_records` 添加 nullable 时间、deadline、
+下一次状态核对时间、引擎状态观察、取消原因和终态原因字段；`status_version=1`、
+`monitor_generation=0` 使用非空安全默认值回填，不重写 payload，不改变既有运行 ID 或状态。模型与迁移
+共同声明 `ix_run_records_status_deadline`、`ix_run_records_status_sync_due`、
+`ix_run_records_type_status_finished` 和 `ix_run_records_engine_status`。应用先升级 0042，再启用取消/状态同步 writer 与 monitor；回退只删除
+新增索引和列，因此生产已依赖控制审计、deadline 或终态原因时优先使用 forward compensation。
+
+0042 不对 RC 阶段既有 TaskRun 执行 deadline 或状态核对时间的隐式 DML 回填。升级后
+`deadline_at IS NULL` 的旧运行属于明确的 deadline grandfather：Worker 不得根据 `created_at`、默认超时或
+当前时间推导取消期限，也不得自动生成 deadline cancellation。对于状态为
+`submitted/running/completion_pending/cancelling` 且 `next_status_sync_at IS NULL` 的旧运行，Worker 只使用
+`coalesce(engine_status_observed_at, submitted_at, started_at, updated_at, created_at)`；超过一个核对周期后，
+通过正常行锁、`monitor_generation` 和 Outbox fencing 创建一次 status-sync control，并从该次受控动作开始
+写入下一次核对时间。这是运行时 next-status fallback，不是迁移回填，也不能把 Dagster `SUCCESS` 当作业务成功。
+
+上线 0042 前必须暂停旧 writer 创建新 TaskRun，备份 MySQL，并只读盘点所有非终态 `task_run` 的
+`run_id/status/created_at`、原始 Outbox 状态及可信 Dagster external ID。首选在旧版本排空至终态；无法排空的
+行必须登记 grandfather 清单并逐项选择：继续免 deadline 直至自然终态、通过公开 cancellation API 取消，
+或终止后按新版本创建 retry。禁止用批量 SQL 填充 `deadline_at`、伪造终态或直接推进 Outbox。升级 schema
+后先部署新 writer，再 canary Worker；必须观察旧有绑定运行产生 fenced status-sync、NULL deadline 行不产生
+deadline cancellation，且 Worker health 中 monitor 从 `pending` 进入 `healthy`，方可解除写入冻结。
+
 ## 18. 迁移验收
 
 - 空库可完整执行到最新版本。
@@ -341,5 +367,5 @@ S2.b 已在应用层实现可暂停、可重入的 taxonomy/LabelVersion 强字�
 - 回滚最近一版在本地可执行；生产回滚使用 forward migration。
 - `tenant_id + project_id` 索引覆盖所有项目级大表。
 - 幂等、审计、outbox 表先于任何业务写接口上线。
-- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表，以及 0041 OIDC/browser session hash-only 强表在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
+- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表、0041 OIDC/browser session hash-only 强表，以及 0042 task-run control 字段/索引在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
 - 0028 后每个 environment 只有一个 `release_bundle_heads` 行、每个 deployment 只有一个 active ReleaseCommand；0039 后每个 scope/namespace/logical key 只有一个 `label_fact_heads` current 指针，Fact 行本身不再承担可变 current 状态。

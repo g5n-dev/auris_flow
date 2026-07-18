@@ -1,0 +1,256 @@
+x-product-gate-app-environment: &product-gate-app-environment
+  APP_ENV: ci
+  AUTH_PROVIDER: dev
+  ALLOW_DEV_AUTH: "true"
+  DEPENDENCY_CHECK_MODE: strict
+  REQUIRED_DEPENDENCY_CHECKS: auth,database,redis,dagster
+  DATABASE_URL_FILE: /run/secrets/product_database_url
+  REDIS_URL: redis://redis:6379/0
+  AURIS_DAGSTER_ADAPTER: real
+  DAGSTER_GRAPHQL_URL: http://dagster-webserver:3000/graphql
+  DAGSTER_REPOSITORY_LOCATION_NAME: auris_flow_defs
+  DAGSTER_REPOSITORY_NAME: __repository__
+  DAGSTER_DEFAULT_JOB_NAME: auris_flow_generic_job
+  AURIS_OBJECT_STORAGE_ADAPTER: local
+  AURIS_QDRANT_ADAPTER: local
+  AURIS_EXTERNAL_CALLBACK_ADAPTER: local
+  AURIS_EMBEDDING_PROVIDER: deterministic_test
+  OBJECT_STORAGE_PROVIDER: minio
+  OBJECT_STORAGE_ENDPOINT: http://127.0.0.1:9
+  QDRANT_URL: http://127.0.0.1:9
+  COMPLETION_RECEIPT_KEY_BINDINGS_FILE: /run/secrets/completion_receipt_key_bindings
+  COMPLETION_RECEIPT_ALLOWED_SOURCES: dagster
+  TRUSTED_HOSTS: bff,127.0.0.1,localhost
+  OTEL_ENABLED: "false"
+  METRICS_ENABLED: "false"
+  TASK_RUN_MONITOR_ENABLED: "false"
+  TASK_RUN_DEFAULT_DEADLINE_SECONDS: "300"
+  OUTBOX_RETRY_BASE_SECONDS: "1"
+  OUTBOX_RETRY_MAX_SECONDS: "5"
+  OUTBOX_RETRY_JITTER_SECONDS: "0"
+
+services:
+  dagster-gate-secrets-init:
+    command: !override
+      - python
+      - -c
+      - |
+        import json
+        import secrets
+        from pathlib import Path
+
+        target = Path("/run/auris-secrets")
+        mysql_root = secrets.token_hex(32)
+        runtime_password = secrets.token_hex(32)
+        migration_password = secrets.token_hex(32)
+        dagster_password = secrets.token_hex(32)
+        completion_secret = secrets.token_urlsafe(48)
+        values = {
+            "mysql_root_password": mysql_root,
+            "mysql_runtime_password": runtime_password,
+            "mysql_migration_password": migration_password,
+            "dagster_db_password": dagster_password,
+            "dagster_database_url": (
+                f"mysql+pymysql://dagster:{dagster_password}@mysql:3306/dagster"
+            ),
+            "product_database_url": (
+                f"mysql+pymysql://auris_runtime:{runtime_password}@mysql:3306/auris_flow"
+            ),
+            "product_migration_database_url": (
+                f"mysql+pymysql://auris_migration:{migration_password}@mysql:3306/auris_flow"
+            ),
+            "completion_receipt_key_bindings": json.dumps(
+                {
+                    "dagster-v1": {
+                        "secret": completion_secret,
+                        "allowed_sources": ["dagster"],
+                        "allowed_scopes": [
+                            {"tenant_id": "aurora_auto", "project_id": "sales_qa"}
+                        ],
+                    }
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        for name, value in values.items():
+            path = target / name
+            path.write_text(value + "\n", encoding="utf-8")
+            path.chmod(0o444)
+
+  redis:
+    command: !override [redis-server, --appendonly, "no"]
+    secrets: !override []
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  dagster-product-gate-db-bootstrap:
+    image: ${MYSQL_IMAGE:-mysql:8.4.5}
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        read_secret() {
+          value="$$(cat "/run/secrets/$$1")"
+          case "$$value" in
+            *[!A-Za-z0-9._~-]*|'') echo "invalid gate credential" >&2; exit 2 ;;
+          esac
+          printf '%s' "$$value"
+        }
+        root_password="$$(read_secret mysql_root_password)"
+        runtime_password="$$(read_secret mysql_runtime_password)"
+        migration_password="$$(read_secret mysql_migration_password)"
+        MYSQL_PWD="$$root_password" mysql --protocol=tcp --host=mysql --user=root <<SQL
+        CREATE DATABASE IF NOT EXISTS auris_flow CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE USER IF NOT EXISTS 'auris_runtime'@'%' IDENTIFIED BY '$$runtime_password';
+        ALTER USER 'auris_runtime'@'%' IDENTIFIED BY '$$runtime_password';
+        CREATE USER IF NOT EXISTS 'auris_migration'@'%' IDENTIFIED BY '$$migration_password';
+        ALTER USER 'auris_migration'@'%' IDENTIFIED BY '$$migration_password';
+        GRANT SELECT, INSERT, UPDATE, DELETE ON auris_flow.* TO 'auris_runtime'@'%';
+        GRANT ALL PRIVILEGES ON auris_flow.* TO 'auris_migration'@'%';
+        FLUSH PRIVILEGES;
+        SQL
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      mysql:
+        condition: service_healthy
+      dagster-gate-secrets-init:
+        condition: service_completed_successfully
+
+  migrate:
+    environment: !override
+      APP_ENV: migration
+      DATABASE_URL_FILE: /run/secrets/product_migration_database_url
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    depends_on: !override
+      dagster-product-gate-db-bootstrap:
+        condition: service_completed_successfully
+
+  dagster-product-gate-seed:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command: [python, -m, app.seed, local_demo]
+    environment: !override
+      APP_ENV: ci
+      DATABASE_URL_FILE: /run/secrets/product_database_url
+      AUTH_PROVIDER: dev
+      ALLOW_DEV_AUTH: "true"
+      AURIS_EMBEDDING_PROVIDER: deterministic_test
+      OTEL_ENABLED: "false"
+      METRICS_ENABLED: "false"
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+      - ../doc/backend-spec/seed-fixture-v0.1.json:/doc/backend-spec/seed-fixture-v0.1.json:ro
+    networks:
+      - internal
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  dagster-code:
+    environment:
+      APP_ENV: ci
+      AURIS_BFF_INTERNAL_URL: http://bff:8000
+      AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: dagster-v1
+    depends_on: !override
+      dagster-gate-db-bootstrap:
+        condition: service_completed_successfully
+
+  bff:
+    environment: !override
+      <<: *product-gate-app-environment
+      WEB_CONCURRENCY: "1"
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:${AURIS_PRODUCT_DAGSTER_GATE_BFF_PORT}:8000"
+    depends_on: !override
+      dagster-product-gate-seed:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      dagster-webserver:
+        condition: service_healthy
+
+  worker:
+    environment: !override
+      <<: *product-gate-app-environment
+      OTEL_SERVICE_NAME: auris-flow-product-dagster-gate-worker
+      AURIS_DAGSTER_EXECUTION_MODE: ci-cancel-delay
+      AURIS_OUTBOX_WORKER_LIMIT: "50"
+      AURIS_OUTBOX_POLL_INTERVAL_SECONDS: "0.25"
+      AURIS_OUTBOX_MAX_IDLE_WAIT_SECONDS: "1"
+      AURIS_OUTBOX_HEARTBEAT_INTERVAL_SECONDS: "5"
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    depends_on: !override
+      bff:
+        condition: service_healthy
+
+  dagster-product-gate-verifier:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    user: "10001:10001"
+    init: true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/verify_product_dagster_path.py
+      - --base-url
+      - http://bff:8000
+      - --source-commit
+      - ${AURIS_PRODUCT_GATE_SOURCE_COMMIT:?set AURIS_PRODUCT_GATE_SOURCE_COMMIT}
+      - --artifact
+      - /artifacts/product-dagster-gate.json
+      - --timeout-seconds
+      - ${AURIS_PRODUCT_DAGSTER_GATE_RUN_TIMEOUT:-120}
+      - --run-suffix
+      - ${AURIS_PRODUCT_DAGSTER_GATE_RUN_SUFFIX:?set AURIS_PRODUCT_DAGSTER_GATE_RUN_SUFFIX}
+    environment: !override
+      <<: *product-gate-app-environment
+      AURIS_PRODUCT_GATE_SOURCE_COMMIT: ${AURIS_PRODUCT_GATE_SOURCE_COMMIT:?set AURIS_PRODUCT_GATE_SOURCE_COMMIT}
+      PYTHONPATH: /app
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+      - ../scripts/verify_product_dagster_path.py:/opt/auris-gate/verify_product_dagster_path.py:ro
+      - ${AURIS_PRODUCT_DAGSTER_GATE_ARTIFACT_DIR:?set AURIS_PRODUCT_DAGSTER_GATE_ARTIFACT_DIR}:/artifacts
+    networks:
+      - internal
+    depends_on:
+      bff:
+        condition: service_healthy
+      worker:
+        condition: service_healthy

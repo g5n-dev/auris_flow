@@ -823,6 +823,12 @@ def test_real_dagster_adapter_posts_graphql_run_request_without_network():
             "project_id": "sales_qa",
             "trace_id": "trace_real_dagster",
             "task_version_id": "task_version_v3_2_1",
+            "job_name": "caller_selected_job",
+            "dagster_run_draft": {"job_name": "draft_selected_job"},
+            "run_config": {
+                "execution": {"mode": "caller-selected-mode"},
+                "resources": {"unsafe": {"config": {"token": "must-not-forward"}}},
+            },
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "event_type": "task_run.requested",
             "dispatch_idempotency_key": "outbox:task-run:task_run_001",
@@ -838,7 +844,7 @@ def test_real_dagster_adapter_posts_graphql_run_request_without_network():
     assert dispatch.details["dagster_run_id"] == "real_dagster_run_001"
     assert dispatch.details["run_id"] == "task_run_001"
     assert dispatch.details["run_key"] == "outbox:task-run:task_run_001"
-    assert dispatch.details["job_name"] == "task_version_v3_2_1"
+    assert dispatch.details["job_name"] == "auris_generic_job"
     assert dispatch.details["response_typename"] == "LaunchRunSuccess"
     assert len(dispatch.details["graphql_payload_sha256"]) == 64
     assert dispatch.details["protocol_receipt"]["receipt_url"].endswith(
@@ -849,19 +855,24 @@ def test_real_dagster_adapter_posts_graphql_run_request_without_network():
     assert execution_params["selector"] == {
         "repositoryLocationName": "auris_defs",
         "repositoryName": "auris_repo",
-        "pipelineName": "task_version_v3_2_1",
+        "pipelineName": "auris_generic_job",
     }
-    assert execution_params["executionMetadata"]["runKey"] == "outbox:task-run:task_run_001"
+    assert execution_params["runConfigData"]["execution"] == {
+        "mode": "control-plane-acknowledgement"
+    }
+    assert "resources" not in execution_params["runConfigData"]
+    assert "runKey" not in execution_params["executionMetadata"]
     tags = {item["key"]: item["value"] for item in execution_params["executionMetadata"]["tags"]}
     assert tags["tenant_id"] == "aurora_auto"
     assert tags["project_id"] == "sales_qa"
     assert tags["trace_id"] == "trace_real_dagster"
     assert tags["run_id"] == "task_run_001"
     assert tags["dispatch_idempotency_key"] == "outbox:task-run:task_run_001"
+    assert tags["auris/dispatch_idempotency_key"] == "outbox:task-run:task_run_001"
     assert tags["outbox_fencing_token"] == "123:1"
 
 
-def test_real_dagster_run_config_preserves_custom_config_but_overrides_scope_context():
+def test_real_dagster_run_config_discards_caller_control_plane_config():
     client = RealDagsterClient(
         graphql_url="http://dagster.example.test/graphql",
         repository_location_name="auris_defs",
@@ -889,8 +900,9 @@ def test_real_dagster_run_config_preserves_custom_config_but_overrides_scope_con
 
     run_config = client._run_config(payload)
 
-    assert run_config["resources"] == payload["run_config"]["resources"]
-    assert run_config["auris_context"]["caller_hint"] == "preserved"
+    assert "resources" not in run_config
+    assert "caller_hint" not in run_config["auris_context"]
+    assert run_config["execution"] == {"mode": "control-plane-acknowledgement"}
     assert run_config["auris_context"]["tenant_id"] == "aurora_auto"
     assert run_config["auris_context"]["project_id"] == "sales_qa"
     assert run_config["auris_context"]["trace_id"] == "trace_server_authoritative"
@@ -898,6 +910,38 @@ def test_real_dagster_run_config_preserves_custom_config_but_overrides_scope_con
     assert run_config["auris_context"]["dispatch_idempotency_key"] == "outbox:task-run:task_run_002"
     assert run_config["auris_context"]["outbox_fencing_token"] == "456:2"
     assert payload["run_config"]["auris_context"]["tenant_id"] == "forged_tenant"
+
+
+def test_real_dagster_run_config_uses_explicit_ci_service_mode_not_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "ci")
+    client = RealDagsterClient(
+        graphql_url="http://dagster.example.test/graphql",
+        default_job_name="auris_generic_job",
+        execution_mode="ci-cancel-delay",
+    )
+
+    run_config = client._run_config(
+        {
+            "tenant_id": "aurora_auto",
+            "project_id": "sales_qa",
+            "trace_id": "trace_ci_controlled",
+            "run_id": "task_run_ci_controlled",
+            "run_config": {"execution": {"mode": "caller-selected-mode"}},
+        }
+    )
+
+    assert run_config["execution"] == {"mode": "ci-cancel-delay"}
+
+
+def test_real_dagster_rejects_ci_service_mode_outside_ci(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    with pytest.raises(ValueError, match="CI-only"):
+        RealDagsterClient(execution_mode="ci-cancel-delay")
 
 
 def test_real_dagster_run_config_propagates_current_otel_parent() -> None:

@@ -130,10 +130,19 @@ class FakeDagsterHandler(BaseHTTPRequestHandler):
             if isinstance(execution_params, dict)
             else {}
         )
-        run_key = (
-            execution_metadata.get("runKey")
+        execution_tags = (
+            execution_metadata.get("tags")
             if isinstance(execution_metadata, dict)
-            else None
+            else []
+        )
+        run_key = next(
+            (
+                str(tag.get("value"))
+                for tag in execution_tags
+                if isinstance(tag, dict)
+                and tag.get("key") == "auris/dispatch_idempotency_key"
+            ),
+            None,
         )
         run_id = f"fake_dagster_run_{request_sha256[:16]}"
         receipt_url = f"http://{self.server.server_address[0]}:{self.server.server_address[1]}/receipts/{run_id}"
@@ -148,9 +157,7 @@ class FakeDagsterHandler(BaseHTTPRequestHandler):
             "job_name": selector.get("pipelineName")
             if isinstance(selector, dict)
             else None,
-            "tags": execution_metadata.get("tags")
-            if isinstance(execution_metadata, dict)
-            else [],
+            "tags": execution_tags,
             "receipt_url": receipt_url,
         }
         self.state.record(receipt)

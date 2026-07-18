@@ -5,6 +5,7 @@ import logging
 
 import pytest
 
+from app.core.context import RequestContext
 from app.core.logging import LOGGER_NAME, get_logger, log_event
 from app.core.redaction import redact_structured_value
 
@@ -99,3 +100,46 @@ def test_structured_logging_uses_the_same_redaction_policy() -> None:
     assert payload["customerPhone"] == "[REDACTED_PII]"
     assert payload["transcript"] == "[REDACTED_TEXT length=6]"
     assert payload["secret_ref"] == "sec_provider_001"
+
+
+def test_structured_logging_context_cannot_be_overridden_by_caller_fields() -> None:
+    records: list[logging.LogRecord] = []
+
+    class CaptureHandler(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    ctx = RequestContext(
+        tenant_id="tenant-authoritative",
+        project_id="project-authoritative",
+        user_id="user-authoritative",
+        roles=("project_admin",),
+        request_id="request-authoritative",
+        trace_id="trace-authoritative",
+        idempotency_key="idem-authoritative",
+    )
+    root = logging.getLogger(LOGGER_NAME)
+    handler = CaptureHandler()
+    root.addHandler(handler)
+    try:
+        log_event(
+            get_logger("context-binding-test"),
+            "context.binding.test",
+            ctx=ctx,
+            tenant_id="tenant-forged",
+            project_id="project-forged",
+            user_id="user-forged",
+            request_id="request-forged",
+            trace_id="trace-forged",
+            idempotency_key="idem-forged",
+        )
+    finally:
+        root.removeHandler(handler)
+
+    payload = json.loads(records[-1].getMessage())
+    assert payload["tenant_id"] == ctx.tenant_id
+    assert payload["project_id"] == ctx.project_id
+    assert payload["user_id"] == ctx.user_id
+    assert payload["request_id"] == ctx.request_id
+    assert payload["trace_id"] == ctx.trace_id
+    assert payload["idempotency_key"] == ctx.idempotency_key

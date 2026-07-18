@@ -1,18 +1,23 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
-from app.auth_models import OidcIdentity, UserSecurityState
+from sqlalchemy import select
+
+from app.auth_models import BrowserAuthSession, OidcIdentity, UserSecurityState
 from app.core.auth import AuthActor
 from app.core.browser_session import create_browser_session
 from app.core.config import get_settings
 from app.core.database import SessionLocal
+from app.core.errors import ApiError
 from app.core.oidc import OIDCValidatedClaims
 from app.core.oidc_flow import (
     OIDCAuthorizationCallback,
     OIDCAuthorizationRequest,
     OIDCTokenSet,
 )
+from app.models import Project
 
 ISSUER = "https://identity.example.test/realms/auris"
 OIDC_STATE = "oidc-state-" + ("s" * 48)
@@ -69,13 +74,13 @@ class StubAuthorizationFlow:
             id_token="redacted-id-token",
             token_type="Bearer",
             expires_in=300,
-            refresh_token=None,
+            refresh_token="redacted-refresh-token",
             scope="openid profile email",
             claims=claims,
         )
 
 
-def _issue_admin_browser_session():
+def _issue_admin_browser_session(*, now: datetime | None = None):
     with SessionLocal.begin() as session:
         session.add(
             UserSecurityState(
@@ -99,6 +104,7 @@ def _issue_admin_browser_session():
             session,
             identity_id="oidc_identity_admin",
             ttl_seconds=3600,
+            now=now,
         )
 
 
@@ -179,6 +185,62 @@ def test_validated_oidc_bearer_is_mapped_to_provisioned_internal_identity(
     assert response.json()["data"]["roles"] == ["asset_manager", "project_admin"]
 
 
+def test_bearer_session_restore_infers_provisioned_scope_and_ignores_an_invalid_cookie(
+    client,
+    monkeypatch,
+) -> None:
+    _issue_admin_browser_session()
+    external_actor = AuthActor(
+        user_id="external-admin-subject",
+        roles=(),
+        provider="oidc_bearer",
+        issued_at=1_700_000_000,
+        expires_at=2_000_000_000,
+        oidc_issuer=ISSUER,
+        oidc_subject="external-admin-subject",
+    )
+    monkeypatch.setattr("app.core.context.resolve_actor", lambda _authorization: external_actor)
+    client.cookies.set("auris_session", "invalid-cookie-with-enough-opaque-token-length")
+
+    response = client.get(
+        "/api/v1/auth/session",
+        headers={"Authorization": "Bearer validated-by-stub"},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["data"]["user_id"] == "u_admin_001"
+    assert response.json()["data"]["tenant_id"] == "aurora_auto"
+    assert response.json()["data"]["project_id"] == "sales_qa"
+
+
+def test_invalid_bearer_never_falls_back_to_a_valid_cookie_or_bypasses_csrf(
+    client,
+    monkeypatch,
+) -> None:
+    issued = _issue_admin_browser_session()
+    client.cookies.set("auris_session", issued.raw_token)
+
+    def reject_bearer(_authorization: str | None) -> AuthActor:
+        raise ApiError("UNAUTHORIZED", "无效或过期 token", 401)
+
+    monkeypatch.setattr("app.core.context.resolve_actor", reject_bearer)
+    response = client.post(
+        "/api/v1/projects",
+        headers={
+            **_scope_headers(),
+            "Authorization": "Bearer invalid",
+            "Idempotency-Key": "invalid-bearer-must-not-use-cookie",
+            "Origin": "http://localhost:5173",
+        },
+        json={"project_id": "must-not-exist", "name": "Must Not Exist"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "UNAUTHORIZED"
+    with SessionLocal() as session:
+        assert session.get(Project, "must-not-exist") is None
+
+
 def test_unprovisioned_oidc_subject_is_default_denied_without_identity_leak(
     client,
     monkeypatch,
@@ -247,6 +309,16 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert "HttpOnly" in callback.headers["set-cookie"]
     assert "redacted-access-token" not in callback.text
     assert "redacted-id-token" not in callback.text
+    assert "redacted-refresh-token" not in callback.text
+
+    with SessionLocal() as session:
+        persisted = session.execute(select(BrowserAuthSession)).scalar_one()
+        persisted_values = repr(persisted.__dict__)
+        persisted_columns = set(BrowserAuthSession.__table__.columns.keys())
+    assert "redacted-access-token" not in persisted_values
+    assert "redacted-id-token" not in persisted_values
+    assert "redacted-refresh-token" not in persisted_values
+    assert {"access_token", "id_token", "refresh_token"}.isdisjoint(persisted_columns)
 
     restored = client.get("/api/v1/auth/session")
     assert restored.status_code == 200, restored.text
@@ -266,6 +338,60 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert logged_out.status_code == 200, logged_out.text
     assert logged_out.json()["data"]["status"] == "revoked"
     assert "Max-Age=0" in logged_out.headers["set-cookie"]
+
+
+def test_cross_site_or_concurrent_session_restore_does_not_invalidate_existing_csrf(
+    client,
+) -> None:
+    issued = _issue_admin_browser_session()
+    client.cookies.set("auris_session", issued.raw_token)
+
+    first = client.get("/api/v1/auth/session", headers=_scope_headers())
+    navigated = client.get(
+        "/api/v1/auth/session",
+        headers={
+            **_scope_headers(),
+            "Origin": "https://attacker.example",
+            "Sec-Fetch-Site": "cross-site",
+            "Sec-Fetch-Mode": "navigate",
+        },
+    )
+
+    assert first.status_code == 200, first.text
+    assert navigated.status_code == 200, navigated.text
+    first_csrf = first.json()["data"]["csrf_token"]
+    assert navigated.json()["data"]["csrf_token"] == first_csrf
+
+    logged_out = client.post(
+        "/api/v1/auth/logout",
+        headers={
+            "Origin": "http://localhost:5173",
+            "X-CSRF-Token": first_csrf,
+        },
+    )
+    assert logged_out.status_code == 200, logged_out.text
+
+
+def test_expired_browser_session_requires_a_new_code_pkce_login(client, monkeypatch) -> None:
+    expired = _issue_admin_browser_session(now=datetime.now(UTC) - timedelta(hours=2))
+    client.cookies.set("auris_session", expired.raw_token)
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(
+        "app.api.routers.auth.get_oidc_authorization_flow",
+        lambda: StubAuthorizationFlow(),
+    )
+
+    restored = client.get("/api/v1/auth/session", headers=_scope_headers())
+    assert restored.status_code == 401
+    assert restored.json()["error"]["code"] == "AUTH_SESSION_EXPIRED"
+
+    restarted = client.get(
+        "/api/v1/auth/oidc/login?return_path=/insights",
+        follow_redirects=False,
+    )
+    assert restarted.status_code == 303
+    assert restarted.headers["location"].startswith("https://identity.example.test/authorize")
 
 
 def test_oidc_login_rejects_open_redirect_return_path(client, monkeypatch) -> None:

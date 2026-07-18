@@ -102,6 +102,47 @@ OUTBOX_LEASE_INDEXES = {
     "uq_outbox_events_dispatch_idempotency_key",
 }
 
+TASK_RUN_CONTROL_COLUMNS = {
+    "submitted_at",
+    "started_at",
+    "finished_at",
+    "deadline_at",
+    "next_status_sync_at",
+    "monitor_generation",
+    "engine_status",
+    "engine_status_observed_at",
+    "status_version",
+    "cancel_requested_at",
+    "cancel_reason",
+    "terminal_reason",
+}
+
+TASK_RUN_CONTROL_INDEXES = {
+    "ix_run_records_engine_status",
+    "ix_run_records_monitor_control_active",
+    "ix_run_records_monitor_deadline",
+    "ix_run_records_monitor_sync_due",
+    "ix_run_records_status_deadline",
+    "ix_run_records_status_sync_due",
+    "ix_run_records_type_status_finished",
+}
+
+TASK_RUN_CONTROL_INDEX_COLUMNS = {
+    "ix_run_records_monitor_control_active": [
+        "tenant_id",
+        "project_id",
+        "run_key",
+        "run_type",
+        "status",
+    ],
+    "ix_run_records_monitor_deadline": ["run_type", "status", "deadline_at"],
+    "ix_run_records_monitor_sync_due": [
+        "run_type",
+        "status",
+        "next_status_sync_at",
+    ],
+}
+
 LABEL_VERSION_POLICY_COLUMNS = {
     "resource_version",
     "policy_version_id",
@@ -2080,6 +2121,38 @@ def assert_tables_present(database_url: str) -> None:
             security_count = connection.scalar(text("SELECT COUNT(*) FROM user_security_states"))
         if user_count != security_count:
             raise AssertionError("every migrated user must have an explicit security state")
+
+        run_record_columns = {
+            column["name"]: column for column in inspector.get_columns("run_records")
+        }
+        missing_task_run_control_columns = sorted(
+            TASK_RUN_CONTROL_COLUMNS - set(run_record_columns)
+        )
+        if missing_task_run_control_columns:
+            raise AssertionError(
+                "missing task-run control columns: " + ", ".join(missing_task_run_control_columns)
+            )
+        if run_record_columns["status_version"].get("nullable") is not False:
+            raise AssertionError("task-run status version must be non-null")
+        if run_record_columns["monitor_generation"].get("nullable") is not False:
+            raise AssertionError("task-run monitor generation must be non-null")
+        run_record_indexes = {
+            index.get("name"): index for index in inspector.get_indexes("run_records")
+        }
+        missing_task_run_control_indexes = sorted(
+            TASK_RUN_CONTROL_INDEXES - set(run_record_indexes)
+        )
+        if missing_task_run_control_indexes:
+            raise AssertionError(
+                "missing task-run control indexes: " + ", ".join(missing_task_run_control_indexes)
+            )
+        for index_name, expected_columns in TASK_RUN_CONTROL_INDEX_COLUMNS.items():
+            actual_columns = run_record_indexes[index_name].get("column_names")
+            if actual_columns != expected_columns:
+                raise AssertionError(
+                    f"task-run control index {index_name} must use columns "
+                    f"{expected_columns}, got {actual_columns}"
+                )
 
         assert_label_lifecycle_schema(inspector)
 

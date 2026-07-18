@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.error import HTTPError
 from urllib.request import Request
 
@@ -104,6 +106,60 @@ def test_http_embedding_provider_does_not_include_remote_error_body() -> None:
         provider.embed("query", purpose="query")
 
     assert "fixture-secret-must-not-leak" not in str(error.value)
+
+
+def test_http_embedding_provider_refuses_redirects_without_forwarding_authorization() -> None:
+    redirected_headers: list[str | None] = []
+
+    class RedirectTarget(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
+            redirected_headers.append(self.headers.get("Authorization"))
+            payload = json.dumps({"data": [{"embedding": [0.1, 0.2, 0.3, 0.4]}]}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    target = ThreadingHTTPServer(("127.0.0.1", 0), RedirectTarget)
+    target_url = f"http://127.0.0.1:{target.server_port}/redirect-target"
+
+    class RedirectSource(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
+            self.send_response(302)
+            self.send_header("Location", target_url)
+            self.end_headers()
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    source = ThreadingHTTPServer(("127.0.0.1", 0), RedirectSource)
+    threads = [
+        threading.Thread(target=server.serve_forever, daemon=True) for server in (target, source)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        provider = HTTPEmbeddingProvider(
+            endpoint=f"http://127.0.0.1:{source.server_port}/v1/embeddings",
+            model="multilingual-semantic-v1",
+            dimension=4,
+            api_key="redirect-auth-fixture-key",
+        )
+
+        with pytest.raises(EmbeddingResponseError, match="HTTP 302"):
+            provider.embed("query", purpose="query")
+
+        assert redirected_headers == []
+    finally:
+        for server in (source, target):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)
 
 
 def test_production_refuses_deterministic_test_embedding_provider(monkeypatch) -> None:

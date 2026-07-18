@@ -70,7 +70,6 @@ def main() -> None:
         "task_version_id": "task_version_v3_2_1",
         "trigger_type": "manual",
         "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
-        "run_config": {"mode": "smoke"},
     }
     first = client.post("/api/v1/task-runs", headers=idempotency_headers, json=payload)
     replay = client.post("/api/v1/task-runs", headers=idempotency_headers, json=payload)

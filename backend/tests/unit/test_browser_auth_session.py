@@ -5,14 +5,17 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from app.auth_models import BrowserAuthSession, OidcIdentity, UserSecurityState
+from app.core.auth import AuthActor
 from app.core.browser_session import (
     authenticate_browser_session,
+    browser_session_csrf_token,
     create_browser_session,
+    resolve_oidc_bearer_actor,
     revoke_browser_session,
 )
 from app.core.database import SessionLocal
 from app.core.errors import ApiError
-from app.models import Project
+from app.models import Project, Tenant
 
 ISSUER = "https://identity.example.test/realms/auris"
 
@@ -60,18 +63,68 @@ def _authenticate(
     method: str = "GET",
     csrf_token: str | None = None,
     origin: str | None = None,
+    tenant_id: str = "aurora_auto",
     project_id: str = "sales_qa",
 ):
     with SessionLocal.begin() as session:
         return authenticate_browser_session(
             session,
             raw_token=raw_token,
-            tenant_id="aurora_auto",
+            tenant_id=tenant_id,
             project_id=project_id,
             method=method,
             csrf_token=csrf_token,
             origin=origin,
             allowed_origins=("https://flow.example.test",),
+        )
+
+
+def _add_authorized_secondary_project() -> None:
+    with SessionLocal.begin() as session:
+        session.add(
+            Project(
+                project_id="sales_qa_secondary",
+                tenant_id="aurora_auto",
+                name="同租户第二项目",
+                status="active",
+                data={
+                    "members": [
+                        {
+                            "user_id": "u_annotator_001",
+                            "roles": ["annotator"],
+                        }
+                    ]
+                },
+            )
+        )
+
+
+def _add_cross_tenant_project() -> None:
+    with SessionLocal.begin() as session:
+        session.add(
+            Tenant(
+                tenant_id="nebula_auto",
+                tenant_code="NEBULA",
+                name="星云汽车",
+                status="active",
+                data={},
+            )
+        )
+        session.add(
+            Project(
+                project_id="nebula_sales_qa",
+                tenant_id="nebula_auto",
+                name="跨租户项目",
+                status="active",
+                data={
+                    "members": [
+                        {
+                            "user_id": "u_annotator_001",
+                            "roles": ["annotator"],
+                        }
+                    ]
+                },
+            )
         )
 
 
@@ -93,6 +146,33 @@ def test_opaque_session_persists_only_token_and_csrf_hashes() -> None:
         assert record.user_id == "u_annotator_001"
         assert record.tenant_id == "aurora_auto"
         assert record.project_id == "sales_qa"
+
+
+def test_csrf_token_is_stable_across_concurrent_session_restores() -> None:
+    issued = _issue()
+
+    with SessionLocal.begin() as session:
+        first = browser_session_csrf_token(
+            session,
+            raw_token=issued.raw_token,
+            session_id=issued.session_id,
+        )
+    with SessionLocal.begin() as session:
+        second = browser_session_csrf_token(
+            session,
+            raw_token=issued.raw_token,
+            session_id=issued.session_id,
+        )
+
+    assert first == issued.csrf_token
+    assert second == first
+    actor = _authenticate(
+        issued.raw_token,
+        method="POST",
+        csrf_token=first,
+        origin="https://flow.example.test",
+    )
+    assert actor.user_id == "u_annotator_001"
 
 
 def test_authentication_uses_current_user_and_project_roles() -> None:
@@ -125,6 +205,47 @@ def test_authentication_uses_current_user_and_project_roles() -> None:
 
     downgraded = _authenticate(issued.raw_token)
     assert downgraded.roles == ("annotator",)
+
+    with SessionLocal.begin() as session:
+        project = session.get(Project, "sales_qa")
+        assert project is not None
+        project.data = {
+            **project.data,
+            "members": [
+                {
+                    **member,
+                    "roles": ["project_admin"],
+                }
+                if member.get("user_id") == "u_annotator_001"
+                else member
+                for member in project.data["members"]
+            ],
+        }
+
+    with pytest.raises(ApiError) as captured:
+        _authenticate(issued.raw_token)
+    assert captured.value.code == "AUTHORIZATION_REJECTED"
+    assert captured.value.status_code == 403
+
+
+def test_duplicate_project_member_role_bindings_fail_closed() -> None:
+    issued = _issue()
+    with SessionLocal.begin() as session:
+        project = session.get(Project, "sales_qa")
+        assert project is not None
+        project.data = {
+            **project.data,
+            "members": [
+                {"user_id": "u_annotator_001", "roles": ["review_arbitrator"]},
+                {"id": "u_annotator_001", "roles": ["annotator"]},
+            ],
+        }
+
+    with pytest.raises(ApiError) as captured:
+        _authenticate(issued.raw_token)
+
+    assert captured.value.code == "AUTH_SCOPE_REJECTED"
+    assert captured.value.status_code == 404
 
 
 @pytest.mark.parametrize(
@@ -177,6 +298,131 @@ def test_disabled_identity_user_tenant_or_project_is_rejected_without_scope_leak
     assert captured.value.code == "AUTH_SUBJECT_DISABLED"
     assert captured.value.status_code == 401
     assert "u_annotator_001" not in captured.value.message
+
+
+@pytest.mark.parametrize(
+    ("disabled_target", "expected_code", "expected_status"),
+    [
+        ("identity", "AUTH_SUBJECT_DISABLED", 401),
+        ("tenant", "AUTH_SCOPE_REJECTED", 404),
+        ("project", "AUTH_SCOPE_REJECTED", 404),
+    ],
+)
+def test_live_identity_tenant_and_project_disablement_fails_closed_without_leak(
+    disabled_target: str,
+    expected_code: str,
+    expected_status: int,
+) -> None:
+    issued = _issue()
+
+    with SessionLocal.begin() as session:
+        if disabled_target == "identity":
+            target = session.get(OidcIdentity, "oidc_identity_annotator")
+        elif disabled_target == "tenant":
+            target = session.get(Tenant, "aurora_auto")
+        else:
+            target = session.get(Project, "sales_qa")
+        assert target is not None
+        target.status = "disabled"
+
+    with pytest.raises(ApiError) as captured:
+        _authenticate(issued.raw_token)
+
+    assert captured.value.code == expected_code
+    assert captured.value.status_code == expected_status
+    assert "aurora_auto" not in captured.value.message
+    assert "sales_qa" not in captured.value.message
+
+
+def test_oidc_browser_session_cannot_switch_to_another_authorized_project() -> None:
+    issued = _issue()
+    _add_authorized_secondary_project()
+
+    with pytest.raises(ApiError) as captured:
+        _authenticate(issued.raw_token, project_id="sales_qa_secondary")
+
+    assert captured.value.code == "AUTH_SCOPE_REJECTED"
+    assert captured.value.status_code == 404
+
+
+def test_oidc_browser_session_cannot_cross_tenant_even_with_project_membership() -> None:
+    issued = _issue()
+    _add_cross_tenant_project()
+
+    with pytest.raises(ApiError) as captured:
+        _authenticate(
+            issued.raw_token,
+            tenant_id="nebula_auto",
+            project_id="nebula_sales_qa",
+        )
+
+    assert captured.value.code == "AUTH_SCOPE_REJECTED"
+    assert captured.value.status_code == 404
+
+
+def test_oidc_bearer_cannot_switch_to_another_authorized_project() -> None:
+    _provision_identity()
+    _add_authorized_secondary_project()
+    actor = AuthActor(
+        user_id="external-subject-001",
+        roles=(),
+        provider="oidc_bearer",
+        issued_at=1_900_000_000,
+        expires_at=2_000_000_000,
+        oidc_issuer=ISSUER,
+        oidc_subject="external-subject-001",
+    )
+
+    with SessionLocal.begin() as session, pytest.raises(ApiError) as captured:
+        resolve_oidc_bearer_actor(
+            session,
+            actor,
+            tenant_id="aurora_auto",
+            project_id="sales_qa_secondary",
+        )
+
+    assert captured.value.code == "AUTH_SCOPE_REJECTED"
+    assert captured.value.status_code == 404
+
+
+def test_oidc_bearer_cannot_cross_tenant_even_with_project_membership() -> None:
+    _provision_identity()
+    _add_cross_tenant_project()
+    actor = AuthActor(
+        user_id="external-subject-001",
+        roles=(),
+        provider="oidc_bearer",
+        issued_at=1_900_000_000,
+        expires_at=2_000_000_000,
+        oidc_issuer=ISSUER,
+        oidc_subject="external-subject-001",
+    )
+
+    with SessionLocal.begin() as session, pytest.raises(ApiError) as captured:
+        resolve_oidc_bearer_actor(
+            session,
+            actor,
+            tenant_id="nebula_auto",
+            project_id="nebula_sales_qa",
+        )
+
+    assert captured.value.code == "AUTH_SCOPE_REJECTED"
+    assert captured.value.status_code == 404
+
+
+def test_existing_session_is_rejected_when_identity_project_binding_changes() -> None:
+    issued = _issue()
+    _add_authorized_secondary_project()
+    with SessionLocal.begin() as session:
+        identity = session.get(OidcIdentity, "oidc_identity_annotator")
+        assert identity is not None
+        identity.project_id = "sales_qa_secondary"
+
+    with pytest.raises(ApiError) as captured:
+        _authenticate(issued.raw_token)
+
+    assert captured.value.code == "AUTH_SCOPE_REJECTED"
+    assert captured.value.status_code == 404
 
 
 def test_expired_revoked_unknown_and_cross_project_sessions_fail_closed() -> None:

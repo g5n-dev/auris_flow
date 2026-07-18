@@ -5,8 +5,13 @@ from typing import Any
 
 import pytest
 
+from auris_flow_dagster import runtime
 from auris_flow_dagster.contracts import AurisRunContext
-from auris_flow_dagster.runtime import AurisWorkflowError, execute_and_report
+from auris_flow_dagster.runtime import (
+    AurisWorkflowError,
+    acknowledge_domain_workflow,
+    execute_and_report,
+)
 
 
 class RecordingCallback:
@@ -74,3 +79,53 @@ def test_failed_workflow_posts_sanitized_failure_then_reraises(scope: AurisRunCo
     assert callback.calls[0]["status"] == "failed"
     assert callback.calls[0]["error_code"] == "DAGSTER_WORKFLOW_FAILED"
     assert canary not in repr(callback.calls)
+
+
+def test_ci_cancel_delay_holds_execution_before_success_result(
+    scope: AurisRunContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setenv("APP_ENV", "ci")
+    monkeypatch.setattr(runtime.time, "sleep", sleeps.append)
+
+    result_ref, metrics = acknowledge_domain_workflow(
+        scope,
+        {"mode": "ci-cancel-delay", "delay_seconds": 12},
+    )
+
+    assert sleeps == [12.0]
+    assert result_ref["auris_run_id"] == scope.run_id
+    assert metrics == {"control_plane_acknowledged": 1}
+
+
+def test_ci_cancel_delay_fails_closed_outside_ci(
+    scope: AurisRunContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    with pytest.raises(ValueError, match="CI-only"):
+        acknowledge_domain_workflow(
+            scope,
+            {"mode": "ci-cancel-delay", "delay_seconds": 12},
+        )
+
+
+def test_ci_intentional_failure_reports_failed_completion(
+    scope: AurisRunContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    callback = RecordingCallback()
+    monkeypatch.setenv("APP_ENV", "ci")
+
+    with pytest.raises(AurisWorkflowError):
+        execute_and_report(
+            scope=scope,
+            dagster_run_id="dg-ci-failure",
+            execution={"mode": "ci-intentional-failure"},
+            callback=callback,  # type: ignore[arg-type]
+        )
+
+    assert callback.calls[0]["status"] == "failed"
+    assert callback.calls[0]["error_code"] == "DAGSTER_WORKFLOW_FAILED"

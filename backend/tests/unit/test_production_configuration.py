@@ -75,6 +75,36 @@ def test_secure_production_configuration_is_accepted() -> None:
     assert configured.otel_enabled is True
     assert configured.metrics_enabled is True
     assert configured.dependency_check_mode == "strict"
+    assert configured.task_run_monitor_enabled is True
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("task_run_default_deadline_seconds", 59),
+        ("task_run_default_deadline_seconds", 7 * 24 * 60 * 60 + 1),
+        ("task_run_status_sync_interval_seconds", 4),
+        ("task_run_status_sync_interval_seconds", 3601),
+        ("task_run_monitor_poll_seconds", 0),
+        ("task_run_monitor_poll_seconds", 301),
+        ("task_run_monitor_batch_size", 0),
+        ("task_run_monitor_batch_size", 501),
+    ],
+)
+def test_task_run_monitor_configuration_is_bounded(
+    field_name: str,
+    value: object,
+) -> None:
+    with pytest.raises(ValidationError, match=field_name.upper()):
+        Settings(_env_file=None, **secure_production_values(**{field_name: value}))
+
+
+def test_production_requires_task_run_monitor() -> None:
+    with pytest.raises(ValidationError, match="TASK_RUN_MONITOR_ENABLED"):
+        Settings(
+            _env_file=None,
+            **secure_production_values(task_run_monitor_enabled=False),
+        )
 
 
 @pytest.mark.parametrize(
@@ -305,3 +335,53 @@ def test_production_oidc_boundary_fails_closed(
 ) -> None:
     with pytest.raises(ValidationError, match=error):
         Settings(_env_file=None, **secure_production_values(**{field_name: value}))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("cors_allowed_origins", "null"),
+        ("cors_allowed_origins", "http://auris.example.com"),
+        ("cors_allowed_origins", "https://*.example.com"),
+        ("cors_allowed_origins", "https://auris.example.com/path"),
+        ("cors_allowed_origins", "https://user@auris.example.com"),
+        ("trusted_hosts", "*.example.com"),
+        ("trusted_hosts", "auris.example.com,*"),
+    ],
+)
+def test_production_browser_origins_and_hosts_must_be_exact(
+    field_name: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValidationError, match=field_name.upper()):
+        Settings(_env_file=None, **secure_production_values(**{field_name: value}))
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("cors_allowed_origins", "https://AURIS.example.com"),
+        ("cors_allowed_origins", "https://auris.example.com:443"),
+        ("cors_allowed_origins", "https://auris.example.com:"),
+        ("cors_allowed_origins", "https://auris.example.com."),
+        ("trusted_hosts", "AURIS.example.com"),
+        ("trusted_hosts", "auris.example.com:443"),
+        ("trusted_hosts", "auris.example.com."),
+        ("trusted_hosts", "auris.example.com\\suffix"),
+    ],
+)
+def test_production_browser_boundary_rejects_noncanonical_runtime_mismatches(
+    field_name: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValidationError, match=field_name.upper()):
+        Settings(_env_file=None, **secure_production_values(**{field_name: value}))
+
+
+def test_production_cors_allows_a_canonical_non_default_https_port() -> None:
+    configured = Settings(
+        _env_file=None,
+        **secure_production_values(cors_allowed_origins="https://auris.example.com:8443"),
+    )
+
+    assert configured.cors_allowed_origins == "https://auris.example.com:8443"

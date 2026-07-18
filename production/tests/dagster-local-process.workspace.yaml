@@ -1,0 +1,4 @@
+load_from:
+  - python_module:
+      module_name: auris_flow_dagster.definitions
+      location_name: auris_flow_defs

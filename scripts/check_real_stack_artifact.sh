@@ -13,11 +13,12 @@ fi
 
 PLATFORM_RESULT="${AURIS_REAL_STACK_PLATFORM_RESULT:-${ROOT}/prototype/auris-flow-ui/e2e/artifacts/platform-bff-result.json}"
 OUTBOX_RESULT="${AURIS_REAL_STACK_OUTBOX_RESULT:-${ROOT}/prototype/auris-flow-ui/e2e/artifacts/outbox-dispatch-result.json}"
-VERIFICATION_RESULT="${AURIS_REAL_STACK_VERIFICATION_RESULT:-${ROOT}/prototype/auris-flow-ui/e2e/artifacts/real-stack-verification.json}"
+VERIFICATION_RESULT="${AURIS_REAL_STACK_VERIFICATION_RESULT:-${ROOT}/build/release-evidence/real-stack-gate.json}"
 
 "${PYTHON_BIN}" - "${PLATFORM_RESULT}" "${OUTBOX_RESULT}" "${VERIFICATION_RESULT}" <<'PY'
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -52,6 +53,14 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
     return value
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def parse_time(value: Any, label: str) -> datetime:
     if not isinstance(value, str) or not value:
         fail(f"{label} is missing")
@@ -63,6 +72,9 @@ def parse_time(value: Any, label: str) -> datetime:
 
 platform = load_json(platform_path, "UI/BFF")
 outbox = load_json(outbox_path, "outbox")
+source_commit = os.environ.get("AURIS_REAL_STACK_SOURCE_COMMIT", "").strip().lower()
+if re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", source_commit) is None:
+    fail("real-stack gate requires an exact source commit")
 if platform.get("status") != "ok" or outbox.get("status") != "ok":
     fail(
         "real-stack source artifacts are not successful",
@@ -237,10 +249,16 @@ if coverage.get("qdrant_recall_count") != len(recalls) or coverage.get("audio_ra
     fail("outbox artifact coverage does not match real-stack proofs", {"coverage": coverage})
 
 verification = {
+    "schema_version": "auris.real-stack-gate.v1",
     "status": "ok",
+    "source_commit": source_commit,
+    "execution_environment": "compose-dependencies",
     "validated_at": datetime.now(UTC).isoformat(),
     "run_id": platform.get("runId"),
-    "source_artifacts": {"ui_bff": str(platform_path), "outbox": str(outbox_path)},
+    "source_artifacts": {
+        "ui_bff_sha256": sha256_file(platform_path),
+        "outbox_sha256": sha256_file(outbox_path),
+    },
     "database": {
         "backend": "mysql",
         "artifact_ref": database_ref,

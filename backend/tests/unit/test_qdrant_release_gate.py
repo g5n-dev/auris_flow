@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.error import HTTPError
 
 import pytest
 from pydantic import ValidationError
 
 from app.core.config import Settings
-from app.main import settings
+from app.main import OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS, settings
 
 SECURE_RELEASE_SETTINGS = {
     "database_url": f"mysql+pymysql://auris:{'M' * 48}@mysql:3306/auris_flow",
@@ -105,3 +106,128 @@ def test_readyz_sends_qdrant_api_key(client, monkeypatch):
     assert response.status_code == 200
     assert response.json()["data"]["checks"]["qdrant"] == "ok"
     assert observed_headers == [{"api-key": "readyz-secret"}]
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 429])
+def test_readyz_rejects_qdrant_4xx_responses(client, monkeypatch, status: int):
+    class Response:
+        def __init__(self) -> None:
+            self.status = status
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: Any) -> None:
+            return None
+
+    monkeypatch.setattr("app.main.urlopen", lambda _request, timeout: Response())
+    monkeypatch.setattr(settings, "required_dependency_checks", "qdrant")
+    monkeypatch.setattr(settings, "qdrant_url", "http://qdrant:6333")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["checks"]["qdrant"] == "not_ready"
+
+
+def test_readyz_minio_requires_authenticated_bucket_access(client, monkeypatch):
+    observed: list[tuple[str, float]] = []
+
+    class StorageClient:
+        bucket = "auris-production"
+
+        def head_bucket(
+            self,
+            bucket: str,
+            *,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            observed.append((bucket, timeout_seconds))
+            return {"status": 200}
+
+    monkeypatch.setattr(
+        "app.main.object_storage_client_for_provider",
+        lambda provider: StorageClient() if provider == "minio" else None,
+    )
+    monkeypatch.setattr(settings, "required_dependency_checks", "object_storage")
+    monkeypatch.setattr(settings, "object_storage_provider", "minio")
+    monkeypatch.setattr(settings, "object_storage_endpoint", "http://minio:9000")
+    monkeypatch.setattr(settings, "qdrant_url", "")
+    monkeypatch.setattr(settings, "dagster_graphql_url", "")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["checks"]["object_storage"] == "ok"
+    assert observed == [("auris-production", OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS)]
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_readyz_rejects_inaccessible_or_missing_object_storage_bucket(
+    client,
+    monkeypatch,
+    status: int,
+):
+    class StorageClient:
+        bucket = "auris-production"
+
+        def head_bucket(
+            self,
+            bucket: str,
+            *,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            assert bucket == self.bucket
+            assert timeout_seconds == OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS
+            raise HTTPError(
+                url=f"https://{bucket}.s3.example.test/",
+                code=status,
+                msg="bucket unavailable",
+                hdrs=None,
+                fp=None,
+            )
+
+    monkeypatch.setattr(
+        "app.main.object_storage_client_for_provider",
+        lambda _provider: StorageClient(),
+    )
+    monkeypatch.setattr(settings, "required_dependency_checks", "object_storage")
+    monkeypatch.setattr(settings, "object_storage_provider", "s3")
+    monkeypatch.setattr(settings, "qdrant_url", "")
+    monkeypatch.setattr(settings, "dagster_graphql_url", "")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["checks"]["object_storage"] == "not_ready"
+
+
+def test_readyz_bounds_object_storage_bucket_probe_timeout(client, monkeypatch):
+    observed_timeouts: list[float] = []
+
+    class StorageClient:
+        bucket = "auris-production"
+
+        def head_bucket(
+            self,
+            _bucket: str,
+            *,
+            timeout_seconds: float,
+        ) -> dict[str, object]:
+            observed_timeouts.append(timeout_seconds)
+            raise TimeoutError("object storage readiness deadline")
+
+    monkeypatch.setattr(
+        "app.main.object_storage_client_for_provider",
+        lambda _provider: StorageClient(),
+    )
+    monkeypatch.setattr(settings, "required_dependency_checks", "object_storage")
+    monkeypatch.setattr(settings, "qdrant_url", "")
+    monkeypatch.setattr(settings, "dagster_graphql_url", "")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["checks"]["object_storage"] == "not_ready"
+    assert observed_timeouts == [OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS]
+    assert 0 < OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS <= 0.5

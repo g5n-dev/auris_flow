@@ -56,7 +56,7 @@ assert body["data"]["asset_key"] == "auris/label/event_tags"
 assert body["data"]["trace_id"]
 PY
 
-BODY='{"task_version_id":"task_version_v3_2_1","trigger_type":"manual","partition_key":"aurora_auto/BJ-AURORA-001/2025-05-26/12","run_config":{"mode":"smoke"}}'
+BODY='{"task_version_id":"task_version_v3_2_1","trigger_type":"manual","partition_key":"aurora_auto/BJ-AURORA-001/2025-05-26/12"}'
 IDK="${TENANT}:${PROJECT}:task_version_v3_2_1:manual_run:smoke"
 curl -fsS "${common_headers[@]}" -H "Idempotency-Key: ${IDK}" -H "Content-Type: application/json" -d "${BODY}" "${BASE_URL}/api/v1/task-runs" >/tmp/auris_run_1.json
 curl -fsS "${common_headers[@]}" -H "Idempotency-Key: ${IDK}" -H "Content-Type: application/json" -d "${BODY}" "${BASE_URL}/api/v1/task-runs" >/tmp/auris_run_2.json
@@ -93,4 +93,3 @@ assert isinstance(trace["data"]["spans"], list)
 PY
 
 echo "backend smoke ok"
-

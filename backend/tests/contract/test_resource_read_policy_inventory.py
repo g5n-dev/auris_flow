@@ -57,6 +57,12 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
         ("repositories/outbox_events.py", "claim_events", "select", "OutboxEvent"): 2,
         ("repositories/outbox_events.py", "insert_or_get_event", "select", "OutboxEvent"): 1,
         ("repositories/outbox_events.py", "lock_owned_claim", "select", "OutboxEvent"): 1,
+        (
+            "repositories/outbox_events.py",
+            "owned_claim_trace_carrier",
+            "select",
+            "OutboxEvent",
+        ): 1,
         ("repositories/run_records.py", "get_by_id", "get", "RunRecord"): 1,
         ("repositories/run_records.py", "list", "select", "RunRecord"): 1,
         ("services/agentic_execution_service.py", "record_agent_completion", "get", "AgentRun"): 1,
@@ -317,6 +323,36 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
         ("services/run_service.py", "get_run", "select", "RunRecord"): 1,
         ("services/run_service.py", "retry_run", "select", "RunRecord"): 1,
         (
+            "services/task_run_control_service.py",
+            "_active_status_sync_control",
+            "select",
+            "RunRecord",
+        ): 1,
+        (
+            "services/task_run_control_service.py",
+            "_source_task_run",
+            "select",
+            "RunRecord",
+        ): 1,
+        (
+            "services/task_run_control_service.py",
+            "cancel_pending_task_run_dispatch",
+            "select",
+            "OutboxEvent",
+        ): 1,
+        (
+            "services/task_run_monitor_service.py",
+            "_due_candidates",
+            "select",
+            "RunRecord",
+        ): 1,
+        (
+            "services/task_run_monitor_service.py",
+            "_load_control_state",
+            "select",
+            "RunRecord",
+        ): 2,
+        (
             "workers/label_optimization_worker.py",
             "_create_eval_runs",
             "select",
@@ -353,6 +389,18 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "RunRecord",
         ): 1,
         ("workers/outbox_worker.py", "_delivery_attempt", "get", "OutboxDeliveryAttempt"): 1,
+        (
+            "workers/outbox_worker.py",
+            "_previous_attempt_is_exact_dagster_absence",
+            "select",
+            "OutboxDeliveryAttempt",
+        ): 1,
+        (
+            "workers/outbox_worker.py",
+            "_task_run_control_source",
+            "select",
+            "RunRecord",
+        ): 1,
         ("workers/outbox_worker.py", "_run_for_event", "select", "RunRecord"): 1,
     }
 )
@@ -505,3 +553,70 @@ def test_direct_sensitive_sql_api_inventory_and_trace_guards_are_explicit() -> N
     assert required_guards <= called_names, (
         f"Trace 聚合路由缺少显式读取保护：{sorted(required_guards - called_names)}"
     )
+
+
+def test_task_run_control_sensitive_sql_scope_guards_are_explicit() -> None:
+    def function_source(relative_path: str, function_name: str) -> str:
+        path = APP_ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name == function_name
+        )
+        return ast.unparse(function)
+
+    source_task_run = function_source("services/task_run_control_service.py", "_source_task_run")
+    for required_ctx_scope_check in (
+        "RunRecord.tenant_id == ctx.tenant_id",
+        "RunRecord.project_id == ctx.project_id",
+        "RunRecord.run_type == 'task_run'",
+    ):
+        assert required_ctx_scope_check in source_task_run
+
+    active_control = function_source(
+        "services/task_run_control_service.py", "_active_status_sync_control"
+    )
+    for required_source_scope_check in (
+        "RunRecord.tenant_id == source.tenant_id",
+        "RunRecord.project_id == source.project_id",
+        "RunRecord.run_key == source.run_id",
+        "RunRecord.run_type == 'task_run_status_sync'",
+    ):
+        assert required_source_scope_check in active_control
+
+    pending_dispatch = function_source(
+        "services/task_run_control_service.py", "cancel_pending_task_run_dispatch"
+    )
+    for required_source_event_scope_check in (
+        "OutboxEvent.tenant_id == source.tenant_id",
+        "OutboxEvent.project_id == source.project_id",
+        "OutboxEvent.aggregate_id == source.run_id",
+        "OutboxEvent.aggregate_type == 'task_run'",
+    ):
+        assert required_source_event_scope_check in pending_dispatch
+
+    control_state = function_source("services/task_run_monitor_service.py", "_load_control_state")
+    for required_bulk_scope_guard in (
+        "RunRecord.run_id.in_(planned_control_ids)",
+        "tuple_(RunRecord.tenant_id, RunRecord.project_id, RunRecord.run_key).in_(source_keys)",
+    ):
+        assert required_bulk_scope_guard in control_state
+
+    due_candidates = function_source("services/task_run_monitor_service.py", "_due_candidates")
+    for required_global_monitor_guard in (
+        "RunRecord.run_type == 'task_run'",
+        "or_(deadline_due, status_sync_due)",
+        "with_for_update(skip_locked=True)",
+    ):
+        assert required_global_monitor_guard in due_candidates
+
+    worker_source = function_source("workers/outbox_worker.py", "_task_run_control_source")
+    for required_event_scope_check in (
+        "RunRecord.tenant_id == event.tenant_id",
+        "RunRecord.project_id == event.project_id",
+        "RunRecord.run_id == source_run_id",
+        "RunRecord.run_type == 'task_run'",
+    ):
+        assert required_event_scope_check in worker_source

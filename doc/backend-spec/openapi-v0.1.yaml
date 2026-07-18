@@ -1069,6 +1069,67 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /task-runs/{id}/cancellations:
+    post:
+      tags: [task-runs]
+      summary: 请求取消任务运行
+      description: >
+        在租户与项目范围内创建独立取消控制运行和 outbox 事件。已绑定 Dagster 的运行使用
+        SAFE_TERMINATE；尚未分发的运行在本地安全取消。已进入终态的运行返回稳定 409，
+        同一个 Idempotency-Key 只产生一次控制运行和一次终态收敛。
+      operationId: postTaskRunsByIdCancellations
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskRunCancellationRequest"
+      responses:
+        "202":
+          description: 已创建独立取消控制运行
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunActionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /task-runs/{id}/status-syncs:
+    post:
+      tags: [task-runs]
+      summary: 请求同步任务运行的执行引擎状态
+      description: >
+        创建独立状态同步控制运行并查询可信 Dagster run binding。Dagster SUCCESS 只把业务运行
+        收敛到 completion_pending，不能伪造业务 success；业务成功仍必须由外部 ID 匹配的签名完成回执确认。
+      operationId: postTaskRunsByIdStatusSyncs
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TaskRunStatusSyncRequest"
+      responses:
+        "202":
+          description: 已创建独立状态同步控制运行
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunActionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /task-runs/{id}/completion-receipts:
     post:
       tags: [task-runs]
@@ -1507,6 +1568,14 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObject"
+        "202":
+          description: >
+            已验签 Dagster 回执早于 launch binding 到达，已持久化为 pending_binding；
+            仅在可信 launch external ID 完全匹配后应用业务终态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/GenericObjectResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -7022,7 +7091,7 @@ components:
           $ref: "#/components/schemas/ApiMeta"
     RunStatus:
       type: string
-      enum: [pending, running, submitted, success, failed, blocked, cancelled]
+      enum: [queued, pending, running, submitted, completion_pending, cancelling, success, failed, blocked, cancelled]
     EntityStatus:
       type: string
       enum: [pending, running, submitted, success, failed, blocked, cancelled, draft, active, inactive, normal, warning, risk, published, archived]
@@ -8207,6 +8276,51 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/RunStatus"
+        status_version:
+          type: integer
+          minimum: 1
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        deadline_at:
+          type: string
+          format: date-time
+          nullable: true
+        next_status_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 服务端下一次执行引擎状态核对时间；调用方不可写。
+        monitor_generation:
+          type: integer
+          minimum: 0
+          description: 服务端自动状态核对单调代次；调用方不可写。
+        engine_status:
+          type: string
+          nullable: true
+        engine_status_observed_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_requested_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_reason:
+          type: string
+          nullable: true
+        terminal_reason:
+          type: string
+          nullable: true
         partition_key:
           type: string
           nullable: true
@@ -8276,6 +8390,27 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/RunStatus"
+        status_version:
+          type: integer
+          minimum: 1
+        engine_status:
+          type: string
+          nullable: true
+        deadline_at:
+          type: string
+          format: date-time
+          nullable: true
+        next_status_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+        monitor_generation:
+          type: integer
+          minimum: 0
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
         trace_id:
           type: string
         created_at:
@@ -8294,6 +8429,51 @@ components:
           type: string
         status:
           $ref: "#/components/schemas/RunStatus"
+        status_version:
+          type: integer
+          minimum: 1
+        submitted_at:
+          type: string
+          format: date-time
+          nullable: true
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        finished_at:
+          type: string
+          format: date-time
+          nullable: true
+        deadline_at:
+          type: string
+          format: date-time
+          nullable: true
+        next_status_sync_at:
+          type: string
+          format: date-time
+          nullable: true
+          description: 服务端下一次执行引擎状态核对时间；调用方不可写。
+        monitor_generation:
+          type: integer
+          minimum: 0
+          description: 服务端自动状态核对单调代次；调用方不可写。
+        engine_status:
+          type: string
+          nullable: true
+        engine_status_observed_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_requested_at:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_reason:
+          type: string
+          nullable: true
+        terminal_reason:
+          type: string
+          nullable: true
         run_key:
           type: string
           nullable: true
@@ -8813,7 +8993,8 @@ components:
           type: object
     CreateTaskRunRequest:
       type: object
-      required: [task_version_id, trigger_type]
+      additionalProperties: false
+      required: [task_version_id]
       description: >
         `execution_mode=experiment` 时 experiment_id 与 experiment_subject_key 必须成对提交。
         服务端根据冻结实验设计选择实际 TaskVersion，并只持久化主体 HMAC；临时主体原文不会进入 RunRecord、审计或响应。
@@ -8823,6 +9004,7 @@ components:
         trigger_type:
           type: string
           enum: [manual, schedule, data_arrival, backfill]
+          default: manual
         execution_mode:
           type: string
           enum: [production, diagnostic, shadow, experiment]
@@ -8830,9 +9012,11 @@ components:
           description: production 仅允许已发布版本；draft 只允许 diagnostic/shadow；experiment 禁用外部回写。
         partition_key:
           type: string
+          nullable: true
         run_key:
           type: string
           maxLength: 256
+          nullable: true
         experiment_id:
           type: string
           minLength: 2
@@ -8844,8 +9028,81 @@ components:
           maxLength: 512
           nullable: true
           writeOnly: true
-        run_config:
+        external_outputs_enabled:
+          type: boolean
+          nullable: true
+          description: 客户端声明不授予外部写权限；服务端按 execution_mode 强制覆盖。
+        writeback_mode:
+          type: string
+          enum: [enabled, disabled, configured]
+          nullable: true
+          description: 客户端声明不授予回写权限；服务端按 execution_mode 强制覆盖。
+        business_context:
           type: object
+          maxProperties: 50
+          nullable: true
+          additionalProperties: true
+          description: 有界业务上下文；不得用于覆盖服务端冻结的任务版本、租户、项目或权限。
+        force_worker_error:
+          type: boolean
+          nullable: true
+          description: 仅 test/ci 失败注入；生产环境返回 RUNTIME_FAILURE_INJECTION_NOT_ALLOWED。
+        simulate_worker_failure:
+          type: boolean
+          nullable: true
+          description: 仅 test/ci 失败注入；生产环境返回 RUNTIME_FAILURE_INJECTION_NOT_ALLOWED。
+        failure_reason:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: 仅 test/ci 失败注入诊断，不得承载业务数据。
+        simulate_adapter_failure:
+          type: boolean
+          nullable: true
+          description: 仅 test/ci 失败注入；生产环境返回 RUNTIME_FAILURE_INJECTION_NOT_ALLOWED。
+        force_adapter_error:
+          type: boolean
+          nullable: true
+          description: 仅 test/ci 失败注入；生产环境返回 RUNTIME_FAILURE_INJECTION_NOT_ALLOWED。
+        adapter_error_code:
+          type: string
+          maxLength: 128
+          nullable: true
+          description: 仅 test/ci 失败注入。
+        adapter_error_message:
+          type: string
+          maxLength: 1000
+          nullable: true
+          description: 仅 test/ci 失败注入，不得承载业务数据。
+        adapter_retryable:
+          type: boolean
+          nullable: true
+          description: 仅 test/ci 失败注入。
+        retry_after_seconds:
+          type: integer
+          minimum: 0
+          maximum: 3600
+          nullable: true
+          description: 仅 test/ci 失败注入。
+        max_attempts:
+          type: integer
+          minimum: 1
+          maximum: 100
+          nullable: true
+          description: 仅 test/ci 失败注入。
+    TaskRunCancellationRequest:
+      type: object
+      additionalProperties: false
+      required: [reason]
+      properties:
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 500
+    TaskRunStatusSyncRequest:
+      type: object
+      additionalProperties: false
+      maxProperties: 0
     RunListResponse:
       type: object
       properties:

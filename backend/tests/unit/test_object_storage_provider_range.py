@@ -698,6 +698,46 @@ def test_oss_bucket_request_keeps_canonical_resource_trailing_slash(
     assert authorization.startswith("OSS4-HMAC-SHA256 ")
 
 
+def test_head_bucket_uses_the_readiness_callers_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: list[tuple[str, str, float]] = []
+
+    class Response:
+        status = 200
+        headers = Message()
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b""
+
+    def fake_urlopen(request: Request, timeout: float) -> Response:
+        observed.append((request.method, request.full_url, timeout))
+        return Response()
+
+    monkeypatch.setattr(storage_adapters, "urlopen", fake_urlopen)
+    client = storage_adapters.RealObjectStorageClient(
+        provider="minio",
+        endpoint="http://minio.example.test:9000",
+        bucket="audio-bucket",
+        access_key="minio-access",
+        secret_key="minio-secret",
+        region="us-east-1",
+        addressing_style="path",
+        signature_mode="s3v4",
+    )
+
+    result = client.head_bucket("audio-bucket", timeout_seconds=0.25)
+
+    assert result["status"] == 200
+    assert observed == [("HEAD", "http://minio.example.test:9000/audio-bucket/", 0.25)]
+
+
 @pytest.mark.parametrize("provider", ("s3", "obs", "oss"))
 def test_cloud_providers_never_create_or_probe_buckets(
     monkeypatch: pytest.MonkeyPatch,

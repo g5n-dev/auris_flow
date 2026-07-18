@@ -17,6 +17,7 @@ PROMETHEUS_CONFIG = OBSERVABILITY / "prometheus.yaml"
 ALERT_RULES = OBSERVABILITY / "alerts.yaml"
 DASHBOARD = OBSERVABILITY / "grafana" / "dashboards" / "production-overview.json"
 NGINX_CONFIG = REPOSITORY_ROOT / "production" / "edge" / "nginx.conf"
+EDGE_DOCKERFILE = REPOSITORY_ROOT / "production" / "edge" / "Dockerfile"
 METRICS_SOURCE = REPOSITORY_ROOT / "backend" / "app" / "core" / "metrics.py"
 BACKUP_SCRIPT = REPOSITORY_ROOT / "production" / "scripts" / "backup.sh"
 RUNBOOKS = REPOSITORY_ROOT / "doc" / "runbooks"
@@ -27,7 +28,17 @@ _PROMQL_MATCHER_LABEL_PATTERN = re.compile(
 )
 _PROMQL_GROUP_LABEL_PATTERN = re.compile(r"\b(?:by|without)\s*\(([^)]*)\)")
 _ALLOWED_METRIC_LABELS = frozenset(
-    {"dependency", "method", "outcome", "reason", "route", "status_class"}
+    {
+        "action",
+        "dependency",
+        "le",
+        "method",
+        "outcome",
+        "reason",
+        "route",
+        "status",
+        "status_class",
+    }
 )
 _FORBIDDEN_HIGH_CARDINALITY_LABELS = frozenset(
     {
@@ -303,6 +314,109 @@ def test_alerts_only_reference_existing_low_cardinality_auris_metrics() -> None:
         assert not _promql_labels(expression) & _FORBIDDEN_HIGH_CARDINALITY_LABELS
 
 
+def test_slo_and_metrics_collection_alerts_cover_emitted_operational_signals() -> None:
+    rules = {str(rule["alert"]): rule for rule in _rules(_load_yaml(ALERT_RULES))}
+
+    expected_by_alert = {
+        "AurisApiP95Latency": (
+            "auris_http_request_duration_seconds_bucket",
+            "> 0.75",
+            "10m",
+        ),
+        "AurisOutboxDeliveryDelayed": (
+            "auris_outbox_oldest_pending_age_seconds",
+            "> 300",
+            "5m",
+        ),
+        "AurisMetricsCollectionFailed": (
+            "auris_metrics_collection_success",
+            "== 0",
+            "5m",
+        ),
+        "AurisOutboxDeadLetters": (
+            "auris_worker_processing_total",
+            "increase(",
+            "1m",
+        ),
+        "AurisTaskRunP95Duration": (
+            "auris_task_run_duration_window_seconds_bucket",
+            "> 900",
+            "10m",
+        ),
+        "AurisTaskRunDeadlineOverdue": (
+            "auris_task_run_deadline_overdue",
+            "> 0",
+            "5m",
+        ),
+        "AurisTaskRunStatusSyncOverdue": (
+            "auris_task_run_status_sync_overdue",
+            "> 0",
+            "5m",
+        ),
+        "AurisRateLimitBackendUnavailable": (
+            "auris_rate_limit_decisions_total",
+            "increase(",
+            "2m",
+        ),
+    }
+    assert expected_by_alert.keys() <= rules.keys()
+    for alert_name, (metric_name, threshold, pending_for) in expected_by_alert.items():
+        rule = rules[alert_name]
+        expression = str(rule["expr"])
+        assert metric_name in expression
+        assert threshold in " ".join(expression.split())
+        assert rule["for"] == pending_for
+
+    for alert_name in ("AurisApiHighErrorRate", "AurisApiP95Latency"):
+        assert 'route=~"/api/v1/.*"' in str(rules[alert_name]["expr"])
+
+    assert 'outcome=~"failure|retry|dead_letter"' in str(
+        rules["AurisCallbackFailureRate"]["expr"]
+    )
+
+
+def test_capacity_alerts_only_use_writable_real_host_filesystems() -> None:
+    rules = {str(rule["alert"]): rule for rule in _rules(_load_yaml(ALERT_RULES))}
+    for alert_name in (
+        "AurisHostDiskWillFill",
+        "AurisHostDiskCritical",
+        "AurisHostDiskWillFillIn24Hours",
+    ):
+        expression = str(rules[alert_name]["expr"])
+        assert "node_filesystem_avail_bytes" in expression
+        assert "node_filesystem_readonly" in expression
+        assert "squashfs" in expression
+
+
+def test_node_exporter_scrapes_the_host_filesystem_backing_named_volumes() -> None:
+    prometheus = _load_yaml(PROMETHEUS_CONFIG)
+    assert isinstance(prometheus, dict)
+    scrape_configs = prometheus.get("scrape_configs")
+    assert isinstance(scrape_configs, list)
+    jobs = {config["job_name"]: config for config in scrape_configs}
+    assert jobs["node"]["static_configs"] == [{"targets": ["node-exporter:9100"]}]
+
+    compose = yaml.safe_load(COMPOSE_CONFIG.read_text(encoding="utf-8"))
+    assert isinstance(compose, dict)
+    node_exporter = compose["services"]["node-exporter"]
+    assert not node_exporter.get("ports")
+    assert "--path.rootfs=/host" in node_exporter["command"]
+    host_mounts = [
+        volume
+        for volume in node_exporter["volumes"]
+        if isinstance(volume, dict) and volume.get("target") == "/host"
+    ]
+    assert host_mounts == [
+        {
+            "type": "bind",
+            "source": "/",
+            "target": "/host",
+            "read_only": True,
+            "bind": {"propagation": "rslave"},
+        }
+    ]
+
+
 def test_every_alert_runbook_link_resolves_to_an_existing_markdown_anchor() -> None:
     for rule in _rules(_load_yaml(ALERT_RULES)):
         annotations = rule.get("annotations")
@@ -351,6 +465,11 @@ def test_grafana_dashboard_core_panels_use_real_auris_metrics() -> None:
         "API P95 latency": "auris_http_request_duration_seconds_bucket",
         "Outbox delivery": "auris_outbox_pending",
         "Dependency health": "auris_dependency_ready",
+        "TaskRun completion": "auris_task_run_terminal",
+        "TaskRun P95 duration (24h)": "auris_task_run_duration_window_seconds_bucket",
+        "Rate-limit decisions": "auris_rate_limit_decisions_total",
+        "Callback outcomes": "auris_callback_outcomes_total",
+        "Storage filesystem free ratio": "node_filesystem_avail_bytes",
     }
     assert core_metrics_by_panel.keys() <= expressions_by_title.keys()
     for panel_title, metric in core_metrics_by_panel.items():
@@ -377,3 +496,28 @@ def test_edge_blocks_metrics_and_proxies_strict_readiness_to_bff() -> None:
     assert re.search(r"\bproxy_pass\s+http://bff:8000/readyz\s*;", readiness)
     assert re.search(r"\bproxy_read_timeout\s+5s\s*;", readiness)
     assert re.search(r"\bproxy_set_header\s+X-Forwarded-Proto\s+https\s*;", readiness)
+
+
+def test_edge_breaks_oidc_readiness_cycle_on_internal_https_port() -> None:
+    compose = yaml.safe_load(COMPOSE_CONFIG.read_text(encoding="utf-8"))
+    assert isinstance(compose, dict)
+    services = compose.get("services")
+    assert isinstance(services, dict)
+    edge = services.get("edge")
+    assert isinstance(edge, dict)
+
+    # The BFF resolves the public OIDC issuer to this internal network alias. The
+    # edge must therefore be able to start before BFF readiness succeeds and
+    # must listen on the issuer's default HTTPS port inside the Compose network.
+    assert edge.get("depends_on", {}).get("bff") == {"condition": "service_started"}
+    assert edge.get("depends_on", {}).get("keycloak") == {
+        "condition": "service_healthy"
+    }
+    assert edge.get("cap_drop") == ["ALL"]
+    assert edge.get("cap_add") == ["NET_BIND_SERVICE"]
+    assert "${AURIS_HTTPS_PORT:-443}:443" in edge.get("ports", [])
+
+    nginx_config = NGINX_CONFIG.read_text(encoding="utf-8")
+    assert re.search(r"^\s*listen\s+443\s+ssl\s*;", nginx_config, re.MULTILINE)
+    dockerfile = EDGE_DOCKERFILE.read_text(encoding="utf-8")
+    assert re.search(r"^EXPOSE\s+8080\s+443\s*$", dockerfile, re.MULTILINE)

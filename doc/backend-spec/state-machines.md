@@ -203,6 +203,13 @@ TaskRun 是一次任务版本或草稿的执行记录，可映射到底层 Dagst
 - 进入 `waiting_human` 时必须创建或关联 `HumanReviewTask`。
 - 进入 `waiting_callback` 时必须创建 `ExternalCallback` 记录，并绑定回写 payload hash。
 - `partial_success` 必须列出失败分区、可重跑节点和下游影响。
+- 新 TaskRun 的 `deadline_at` 由服务端按有界生产策略设置，调用方不得注入或覆盖；重试创建新的
+  deadline，不继承旧运行的监控时钟。
+- Worker 以 `FOR UPDATE SKIP LOCKED` 扫描到期行。尚未分发的 pending Outbox 与 TaskRun 终止必须
+  同事务提交；可信 Dagster binding 已存在时迁移到 `cancelling`，并以 deadline 派生的确定性 control ID
+  保证只发出一个 SAFE_TERMINATE 控制。
+- `submitted/running/completion_pending` 使用 `next_status_sync_at + monitor_generation` 周期核对；同一代次
+  只允许一个 control/outbox。引擎 `SUCCESS` 仅迁移到 `completion_pending`，不得跳过签名业务回执。
 
 ### 阻断条件
 

@@ -160,6 +160,8 @@ auris:sales_quality:task_version:tv_123:run_once:v3:2025-05-26|aurora-center:sha
 | `pending` | 已创建，等待执行或排队。 | 否 |
 | `running` | 正在执行。 | 否 |
 | `submitted` | 已完成协议级分发或提交，等待外部系统、对象生成或业务完成回执。 | 否 |
+| `completion_pending` | 执行引擎已报告 SUCCESS，但签名业务结果尚未绑定和物化。 | 否 |
+| `cancelling` | SAFE_TERMINATE 已请求，等待执行引擎确认终态。 | 否 |
 | `success` | 完成并写入结果。 | 否 |
 | `failed` | 执行失败，可查看错误；是否可重试看 `retryable`。 | 条件 |
 | `blocked` | 被权限、门禁、依赖、审批或配额阻断。 | 条件 |
@@ -180,20 +182,26 @@ Agent 内部阶段使用 `phase` 扩展，不替代对外状态：
 
 业务完成回执通过资源化 endpoint 写入，例如 `POST /api/v1/task-runs/{id}/completion-receipts`、`POST /api/v1/exports/{id}/completion-receipts` 和 `POST /api/v1/output-sinks/platform-callbacks/{id}/completion-receipts`。服务端必须校验租户、项目、`Idempotency-Key`、当前运行状态、分发 adapter 和外部 ID，不能由前端或外部系统任意把 `running` 运行改成完成态。
 
+已验签 Dagster 完成回执可以在 launch 提交事务完成前以 `pending_binding` 进入持久化 inbox；worker
+写入可信 `external_run_id` 后才以常量时间比较绑定并应用。ID 不一致、运行已取消或已有其他终态时，
+回执进入 `rejected` 或返回 409，同时写 `task_run.completion_rejected` 审计，禁止产生第二个终态事件。
+
 ## 5. 异步事件清单
 
 ### 5.1 任务运行事件
 
 | 事件 | 触发条件 | 关键 payload |
 | --- | --- | --- |
-| `task_run.requested` | 用户运行一次、调度触发或上游事件触发。 | `task_version_id`、`canvas_version_id`、`trigger_type`、`input_refs`、`output_bindings`、`dagster_run_draft`。 |
+| `task_run.requested` | 用户运行一次、调度触发或上游事件触发。 | 服务端生成的 `run_id`、冻结 `task_version_id`、`trigger_type`、`partition_key`、`run_key`、输入/输出绑定摘要；禁止透传调用方 `job_name/run_config/dagster_run_draft`。 |
 | `task_run.started` | Worker 开始处理。 | `worker_id`、`started_at`。 |
 | `task_run.dagster_submitted` | 已提交 Dagster RunRequest。 | `dagster_run_id`、`job_name`、`run_key`、`asset_selection`、`run_config_ref`。 |
+| `task_run.cancel_requested` | 有权角色请求取消非终态运行，或服务端 deadline monitor 判定超时。 | 独立 control `run_id`、`source_run_id`、可信 `external_run_id`、`reason`、`source_status_version`、`monitor_control_id`（自动控制）、Trace。 |
+| `task_run.status_sync_requested` | 有权角色显式同步已绑定运行状态，或 monitor 按间隔核对漏回调运行。 | 独立 control `run_id`、`source_run_id`、可信 `external_run_id`、`source_status_version`、单调 `monitor_generation`（自动控制）、Trace。 |
 | `task_run.completion_received` | 收到并验证业务完成回执。 | `completion_receipt_id`、`adapter`、`external_id`、`result_ref`、`metrics`。 |
-| `task_run.succeeded` | 所有必要输出写入成功。 | `output_refs`、`materialization_refs`、`affected_objects`。 |
-| `task_run.failed` | 运行失败。 | `error`、`retryable`、`failed_stage`、`retry_count`。 |
+| `task_run.succeeded` | 所有必要输出写入成功。 | `run_id`、`status`、`reason`、`engine_status`、单调 `resource_version`、Trace。 |
+| `task_run.failed` | 运行失败。 | `run_id`、`status`、`reason`、`engine_status`、单调 `resource_version`、Trace。 |
 | `task_run.blocked` | 权限、审批、依赖、门禁阻断。 | `blocker_type`、`blocker_refs`、`required_actions`。 |
-| `task_run.cancelled` | 用户或系统取消。 | `cancelled_by`、`reason`。 |
+| `task_run.cancelled` | 用户或系统取消。 | `run_id`、`status`、`reason`、`engine_status`、单调 `resource_version`、Trace。 |
 
 ### 5.2 Dagster 映射事件
 
@@ -429,7 +437,7 @@ Qdrant payload 必须包含：
 | `task_version.job_name` | `job_name` | 已发布任务版本固化的 Job。 |
 | `task_run.partition_key` | `partition_key` | 与业务分区一致。 |
 | `task_version.asset_selection` | `asset_selection` | 资产选择，来自任务版本快照。 |
-| `task_run.run_config` | `run_config` | provider、模型版本、标签版本、自动化等级等。 |
+| 服务端冻结的 TaskVersion 执行绑定与 Auris 运行上下文 | `run_config` | 由 Worker/Adapter 生成；调用方不得直接提交 `job_name`、`run_config` 或 `dagster_run_draft`。 |
 | `task_run.idempotency_key` | `run_key` | 防止重复运行。 |
 | `task_run.trace_id` | `tags.trace_id` | 链路追踪。 |
 | `task_run.run_id` | `tags.run_id` | 业务运行 ID。 |
@@ -622,7 +630,10 @@ resolution
 
 ## 10. 阶段 1 必须落地的事件链路
 
-当前开源开发基线已经验证到 `RunRecord -> outbox -> Dagster-compatible GraphQL run request submitted`；`dagster.asset.materialized`、分区完成态和生产 Dagster 回调仍属于后续目标链路，不能用本地 receipt 代替。
+当前开源开发基线已经覆盖 `RunRecord -> outbox -> Dagster GraphQL launch`、显式/自动
+SAFE_TERMINATE、周期状态查询和签名完成回执的可靠绑定；自动 deadline 与漏回调 monitor 使用 MySQL
+行锁、强字段代次和 Outbox fencing。`dagster.asset.materialized` 的完整资产语义及真实依赖故障演练仍是
+发行验收项，不能用本地 receipt 或单元测试代替。
 
 第一阶段至少实现以下链路：
 

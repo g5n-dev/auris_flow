@@ -45,6 +45,12 @@ ONE_SHOT_SERVICES = frozenset(
 PUBLIC_SERVICES = frozenset({"edge", "keycloak", "grafana"})
 LOOPBACK_OPERATOR_SERVICES = frozenset({"keycloak", "grafana"})
 APP_SERVICES = frozenset({"bff", "worker"})
+EXPECTED_NETWORKS_BY_SERVICE = {
+    **{name: frozenset({"internal"}) for name in REQUIRED_SERVICES},
+    "bff": frozenset({"internal", "app-egress"}),
+    "worker": frozenset({"internal", "app-egress"}),
+    "edge": frozenset({"internal", "edge"}),
+}
 SECRET_NAME_PATTERN = re.compile(
     r"(?:PASSWORD|SECRET|TOKEN|API_KEY|DATABASE_URL|REDIS_URL)$"
 )
@@ -135,6 +141,9 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
     missing = sorted(REQUIRED_SERVICES - set(services))
     if missing:
         errors.append("missing production services: " + ", ".join(missing))
+    unexpected = sorted(set(services) - REQUIRED_SERVICES)
+    if unexpected:
+        errors.append("unexpected production services: " + ", ".join(unexpected))
 
     for name, raw_service in sorted(services.items()):
         if not isinstance(raw_service, dict):
@@ -151,6 +160,25 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
         cap_drop = raw_service.get("cap_drop") or []
         if "ALL" not in cap_drop:
             errors.append(f"{name}: Linux capabilities must be dropped")
+        cap_add = set(raw_service.get("cap_add") or [])
+        if name == "edge":
+            if cap_add != {"NET_BIND_SERVICE"}:
+                errors.append("edge: cap_add must contain only NET_BIND_SERVICE")
+        elif cap_add:
+            errors.append(f"{name}: added Linux capabilities are forbidden")
+        if raw_service.get("network_mode"):
+            errors.append(f"{name}: host network mode is forbidden")
+        if raw_service.get("privileged") is True:
+            errors.append(f"{name}: privileged mode is forbidden")
+        if raw_service.get("extra_hosts"):
+            errors.append(f"{name}: extra_hosts is forbidden")
+        expected_networks = EXPECTED_NETWORKS_BY_SERVICE.get(name)
+        actual_networks = set(raw_service.get("networks") or {})
+        if expected_networks is not None and actual_networks != expected_networks:
+            errors.append(
+                f"{name}: networks must be exactly "
+                + ", ".join(sorted(expected_networks))
+            )
         security_options = raw_service.get("security_opt") or []
         if "no-new-privileges:true" not in security_options:
             errors.append(f"{name}: no-new-privileges is required")
@@ -213,10 +241,64 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
                 f"{name}: all production dependencies must be strict readiness checks"
             )
 
+    edge_service = services.get("edge")
+    if isinstance(edge_service, dict):
+        edge_dependencies = edge_service.get("depends_on") or {}
+        bff_dependency = (
+            edge_dependencies.get("bff")
+            if isinstance(edge_dependencies, dict)
+            else None
+        )
+        if (
+            not isinstance(bff_dependency, dict)
+            or bff_dependency.get("condition") != "service_started"
+        ):
+            errors.append("edge: BFF dependency must use service_started")
+        keycloak_dependency = (
+            edge_dependencies.get("keycloak")
+            if isinstance(edge_dependencies, dict)
+            else None
+        )
+        if (
+            not isinstance(keycloak_dependency, dict)
+            or keycloak_dependency.get("condition") != "service_healthy"
+        ):
+            errors.append("edge: Keycloak dependency must use service_healthy")
+        https_targets = {
+            str(port.get("target", ""))
+            for port in (edge_service.get("ports") or [])
+            if isinstance(port, dict) and str(port.get("published", "")) == "443"
+        }
+        if https_targets != {"443"}:
+            errors.append("edge: internal HTTPS target must be 443")
+
     networks = document.get("networks") or {}
+    if not isinstance(networks, dict):
+        errors.append("compose networks map is missing")
+        networks = {}
+    unexpected_networks = sorted(set(networks) - {"internal", "app-egress", "edge"})
+    if unexpected_networks:
+        errors.append("unexpected compose networks: " + ", ".join(unexpected_networks))
     internal = networks.get("internal") if isinstance(networks, dict) else None
     if not isinstance(internal, dict) or internal.get("internal") is not True:
         errors.append("internal network must set internal: true")
+    app_egress = networks.get("app-egress")
+    if (
+        not isinstance(app_egress, dict)
+        or app_egress.get("driver") != "bridge"
+        or app_egress.get("internal", False) is not False
+        or app_egress.get("external", False) is not False
+        or app_egress.get("attachable", False) is not False
+    ):
+        errors.append("app-egress network must be a non-internal bridge")
+    edge_network = networks.get("edge")
+    if (
+        not isinstance(edge_network, dict)
+        or edge_network.get("internal", False) is not False
+        or edge_network.get("external", False) is not False
+        or edge_network.get("attachable", False) is not False
+    ):
+        errors.append("edge network must be managed and non-internal")
     volumes = document.get("volumes") or {}
     for required_volume in (
         "mysql_data",

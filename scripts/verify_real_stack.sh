@@ -15,7 +15,8 @@ ARTIFACT_DIR="${ROOT}/prototype/auris-flow-ui/e2e/artifacts"
 ARTIFACT_SUFFIX="${AURIS_REAL_STACK_ARTIFACT_SUFFIX:-$(date +%s)-$$}"
 PLATFORM_RESULT="${AURIS_REAL_STACK_PLATFORM_RESULT:-${ARTIFACT_DIR}/platform-bff-result-${ARTIFACT_SUFFIX}.json}"
 OUTBOX_RESULT="${AURIS_REAL_STACK_OUTBOX_RESULT:-${ARTIFACT_DIR}/outbox-dispatch-result-${ARTIFACT_SUFFIX}.json}"
-VERIFICATION_RESULT="${AURIS_REAL_STACK_VERIFICATION_RESULT:-${ARTIFACT_DIR}/real-stack-verification-${ARTIFACT_SUFFIX}.json}"
+VERIFICATION_RESULT="${AURIS_REAL_STACK_VERIFICATION_RESULT:-${ROOT}/build/release-evidence/real-stack-gate.json}"
+SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse --verify HEAD^{commit})"
 DATABASE_NAME="auris_flow_e2e_$(date +%s)_$$"
 DATABASE_USER="auris_e2e_$$"
 DATABASE_PASSWORD="auris_e2e"
@@ -23,6 +24,24 @@ DATABASE_CREATED=0
 RUN_STARTED_AT="$(date +%s)"
 COMPOSE=(docker compose -f "${COMPOSE_FILE}")
 SERVICES=(mysql redis minio qdrant)
+MINIO_BOOTSTRAP_TIMEOUT_SECONDS="${AURIS_MINIO_BOOTSTRAP_TIMEOUT_SECONDS:-60}"
+
+run_minio_bootstrap() {
+  local container_name status
+  container_name="auris-flow-minio-bootstrap-$(date +%s)-$$"
+  if "${PYTHON_BIN}" "${ROOT}/scripts/run_with_deadline.py" \
+    --timeout-seconds "${MINIO_BOOTSTRAP_TIMEOUT_SECONDS}" \
+    --label "MinIO bootstrap" -- \
+    "${COMPOSE[@]}" run --name "${container_name}" --rm --no-deps minio-bootstrap; then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "${status}" -eq 124 ]; then
+    docker rm --force "${container_name}" >/dev/null 2>&1 || true
+  fi
+  return "${status}"
+}
 
 mysql_exec() {
   "${COMPOSE[@]}" exec -T -e MYSQL_PWD=auris_root mysql \
@@ -194,12 +213,14 @@ if ! docker info >/dev/null 2>&1; then
 fi
 
 "${COMPOSE[@]}" config --quiet
-mkdir -p "${ARTIFACT_DIR}"
+mkdir -p "${ARTIFACT_DIR}" "$(dirname "${VERIFICATION_RESULT}")"
 rm -f "${PLATFORM_RESULT}" "${OUTBOX_RESULT}" "${VERIFICATION_RESULT}"
 
 echo "Starting MySQL/Redis/MinIO/Qdrant and waiting for health checks..."
 "${COMPOSE[@]}" up --detach --wait --wait-timeout "${AURIS_REAL_STACK_WAIT_TIMEOUT:-180}" "${SERVICES[@]}"
 assert_compose_health
+echo "Bootstrapping the authenticated MinIO release-test bucket..."
+run_minio_bootstrap
 verify_qdrant_api_key_gate
 
 DATABASE_CREATED=1
@@ -277,6 +298,7 @@ AURIS_REAL_STACK_PLATFORM_RESULT="${PLATFORM_RESULT}" \
   AURIS_REAL_STACK_MYSQL_RUN_COUNT="${MYSQL_RUN_COUNT}" \
   AURIS_REAL_STACK_MYSQL_STORAGE_OBJECT_COUNT="${MYSQL_STORAGE_OBJECT_COUNT}" \
   AURIS_REAL_STACK_STARTED_AT="${RUN_STARTED_AT}" \
+  AURIS_REAL_STACK_SOURCE_COMMIT="${SOURCE_COMMIT}" \
   bash "${ROOT}/scripts/check_real_stack_artifact.sh"
 
 echo "verify_real_stack ok: ${VERIFICATION_RESULT}"

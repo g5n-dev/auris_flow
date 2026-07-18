@@ -1,0 +1,159 @@
+services:
+  dagster-gate-secrets-init:
+    image: python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+    restart: "no"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - -c
+      - |
+        import json
+        import secrets
+        from pathlib import Path
+
+        target = Path("/run/auris-secrets")
+        mysql_root = secrets.token_hex(32)
+        dagster_password = secrets.token_hex(32)
+        completion_secret = secrets.token_urlsafe(48)
+        values = {
+            "mysql_root_password": mysql_root,
+            "dagster_db_password": dagster_password,
+            "dagster_database_url": (
+                f"mysql+pymysql://dagster:{dagster_password}@mysql:3306/dagster"
+            ),
+            "completion_receipt_key_bindings": json.dumps(
+                {
+                    "dagster-v1": {
+                        "secret": completion_secret,
+                        "allowed_sources": ["dagster"],
+                        "allowed_scopes": [
+                            {"tenant_id": "aurora_auto", "project_id": "sales_qa"}
+                        ],
+                    }
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        for name, value in values.items():
+            path = target / name
+            path.write_text(value + "\n", encoding="utf-8")
+            path.chmod(0o444)
+    volumes:
+      - dagster_gate_secrets:/run/auris-secrets
+
+  mysql:
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    depends_on: !override
+      dagster-gate-secrets-init:
+        condition: service_completed_successfully
+
+  dagster-gate-db-bootstrap:
+    image: ${MYSQL_IMAGE:-mysql:8.4.5}
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    entrypoint: [/bin/sh, -ec]
+    command:
+      - |
+        read_secret() {
+          value="$$(cat "/run/secrets/$$1")"
+          case "$$value" in
+            *[!A-Za-z0-9._~-]*|'') echo "invalid secret format: $$1" >&2; exit 2 ;;
+          esac
+          printf '%s' "$$value"
+        }
+        root_password="$$(read_secret mysql_root_password)"
+        dagster_password="$$(read_secret dagster_db_password)"
+        MYSQL_PWD="$$root_password" mysql --protocol=tcp --host=mysql --user=root <<SQL
+        CREATE DATABASE IF NOT EXISTS dagster CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+        CREATE USER IF NOT EXISTS 'dagster'@'%' IDENTIFIED BY '$$dagster_password';
+        ALTER USER 'dagster'@'%' IDENTIFIED BY '$$dagster_password';
+        GRANT ALL PRIVILEGES ON dagster.* TO 'dagster'@'%';
+        FLUSH PRIVILEGES;
+        SQL
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    networks:
+      - internal
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  dagster-gate-callback:
+    build:
+      context: ..
+      dockerfile: production/tests/dagster-gate-callback.Dockerfile
+    init: true
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    secrets: !override []
+    ports:
+      - "127.0.0.1:${AURIS_DAGSTER_GATE_CALLBACK_PORT}:8080"
+    networks:
+      - internal
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=2)
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 3s
+    depends_on:
+      dagster-gate-secrets-init:
+        condition: service_completed_successfully
+
+  dagster-code:
+    environment:
+      APP_ENV: ci
+      OTEL_ENABLED: "false"
+      AURIS_BFF_INTERNAL_URL: http://dagster-gate-callback:8080
+      AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: dagster-v1
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    # This gate validates Dagster itself. Keep MySQL-backed Dagster bootstrap,
+    # but do not pull unrelated OTel/Tempo or product-database users into the gate.
+    depends_on: !override
+      dagster-gate-db-bootstrap:
+        condition: service_completed_successfully
+      dagster-gate-callback:
+        condition: service_healthy
+
+  dagster-webserver:
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:${AURIS_DAGSTER_GATE_PORT}:3000"
+
+  dagster-daemon:
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+
+volumes:
+  dagster_gate_secrets:

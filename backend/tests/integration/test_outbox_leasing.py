@@ -109,7 +109,12 @@ def test_expired_lease_reclaim_fences_previous_owner():
         assert lock_owned_claim(session, second_claim) is not None
 
 
-def test_enqueue_event_overwrites_untrusted_delivery_scope_fields():
+def test_enqueue_event_overwrites_untrusted_delivery_scope_fields(monkeypatch):
+    trusted_carrier = {"traceparent": "00-11111111111111111111111111111111-2222222222222222-01"}
+    monkeypatch.setattr(
+        "app.services.outbox_service.current_trace_carrier",
+        lambda: trusted_carrier,
+    )
     trusted = _context(trace_id="trace_trusted")
     with SessionLocal() as session:
         event = enqueue_event(
@@ -124,6 +129,9 @@ def test_enqueue_event_overwrites_untrusted_delivery_scope_fields():
                 "trace_id": "trace_attacker",
                 "event_type": "attacker.event",
                 "idempotency_key": "attacker-key",
+                "otel_trace_context": {
+                    "traceparent": "00-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bbbbbbbbbbbbbbbb-01"
+                },
             },
         )
         session.flush()
@@ -136,3 +144,4 @@ def test_enqueue_event_overwrites_untrusted_delivery_scope_fields():
         assert event.payload["event_type"] == "test.scope.requested"
         assert event.payload["idempotency_key"] == trusted.idempotency_key
         assert event.payload["dispatch_idempotency_key"] == event.dispatch_idempotency_key
+        assert event.payload["otel_trace_context"] == trusted_carrier

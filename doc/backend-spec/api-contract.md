@@ -35,12 +35,14 @@ bearer。Keycloak 只作为参考 IdP，认证契约只依赖标准 OIDC discove
 | `GET /api/v1/auth/oidc/login?return_path=/insights` | 生成 state、nonce、PKCE S256 challenge 并 303 到 IdP | `return_path` 仅接受站内绝对路径；state/nonce/verifier 短期、一次性 |
 | `GET /api/v1/auth/oidc/callback` | 一次性消费 state、交换 code、校验 ID token 并 303 回站内页面 | 精确校验 issuer/audience、RS256 签名、exp/iat、nonce；未知 `kid` 只允许刷新 JWKS 后重试；IdP token 不返回浏览器 |
 | `GET /api/v1/auth/session` | 由 bearer 或 HttpOnly cookie 恢复内部用户、scope 与当前角色 | cookie 可省略 scope Header；响应 `Cache-Control: no-store`，浏览器会话轮换 `csrf_token` |
-| `POST /api/v1/auth/logout` | 幂等撤销服务端会话并清除 cookie | cookie 路径必须同时验证 `X-CSRF-Token` 与受信 `Origin`；开发 bearer 路径保留 scope Header 兼容 |
+| `POST /api/v1/auth/logout` | 幂等撤销本地 BFF 会话并清除 cookie | cookie 路径必须同时验证 `X-CSRF-Token` 与受信 `Origin`；开发 bearer 路径保留 scope Header 兼容；不宣称终止 IdP 全局 SSO 会话 |
 
 `prod/release` cookie 固定命名为 `__Host-auris_session`，并设置 `HttpOnly; Secure;
 SameSite=Lax; Path=/` 且不设置 Domain。cookie 是高熵不透明值，MySQL 仅保存 token SHA-256
 与 CSRF SHA-256；OIDC access token、ID token、refresh token 和 cookie/CSRF 原值不得写入数据库、
 浏览器持久存储或日志。本地 HTTP 可配置 `auris_session`，但不改变生产约束。
+当前 scope 禁止 `offline_access`，BFF 不保留 refresh token；会话过期后客户端必须重新发起 Code +
+PKCE。目标 IdP 如支持 RP-Initiated Logout，应作为独立可选集成验证，不能把本地撤销伪装为全局登出。
 
 浏览器 cookie 请求可省略 scope Header，由服务端使用会话冻结的 tenant/project；如果显式传入，
 必须精确匹配。bearer 和需要显式选择 scope 的兼容调用使用：
@@ -56,7 +58,7 @@ X-Project-Id: <project_id>
 还必须带内存中的 CSRF token 和浏览器 Origin：
 
 ```http
-X-CSRF-Token: <rotated_csrf_token>
+X-CSRF-Token: <session_bound_csrf_token>
 Origin: https://flow.example.com
 ```
 
@@ -84,7 +86,7 @@ BFF 解析后的 `auth_context` 至少包含：
 
 - `tenant_id` 是强隔离边界，任何查询、写入、运行、召回、导出都必须带租户过滤。
 - `project_id` 是工作空间边界，跨项目读取默认拒绝；需要共享时只返回脱敏引用。
-- OIDC `(issuer, subject)` 必须先映射到明确 provision 的 `oidc_identities`；未知主体 default-deny，响应不回显 subject。
+- OIDC `(issuer, subject)` 必须先映射到明确 provision 的 `oidc_identities`；未知主体 default-deny，响应不回显 subject。请求 tenant/project 必须同时与 identity 及已签发 browser session 的冻结 scope 精确一致；同租户内第二项目的成员资格不能扩张原会话。
 - 每次认证都读取 `user_security_states`、identity、租户、项目与当前项目成员角色；ID token/session 中的旧角色不授权，用户禁用、identity 禁用和角色降权即时生效。
 - 浏览器写请求必须同时校验 CSRF token 和显式 allowlist Origin；缺失、错误或跨站请求返回稳定 403，且不执行写入。
 - `store_id`、`date`、`model_version`、`label_version` 是业务筛选上下文，不替代租户项目校验。
@@ -283,6 +285,8 @@ X-Request-Id: req_01J...
 
 - `POST /api/v1/task-runs`
 - `POST /api/v1/task-runs/{id}/retries`
+- `POST /api/v1/task-runs/{id}/cancellations`
+- `POST /api/v1/task-runs/{id}/status-syncs`
 - `POST /api/v1/knowledge-sources/{id}/sync-runs`
 - `POST /api/v1/knowledge-indexes/{id}/build-runs`
 - `POST /api/v1/label-optimization-runs`
@@ -327,6 +331,9 @@ X-Request-Id: req_01J...
 | --- | --- | --- |
 | `pending` | 已创建，等待执行 | pending、按钮禁用、可轮询 |
 | `running` | 执行中 | pending、显示进度或阶段 |
+| `submitted` | 已提交执行引擎，等待状态或业务完成回执 | pending、显示外部执行已接单 |
+| `completion_pending` | 执行引擎已报告成功，但可信业务结果尚未物化 | pending、继续等待签名完成回执 |
+| `cancelling` | 已请求安全终止，等待执行引擎确认 | pending、禁用重复取消 |
 | `success` | 完成并写入结果 | success、可查看结果 |
 | `failed` | 失败，可查看错误 | failed、可重试 |
 | `blocked` | 权限、门禁、依赖或审批阻断 | blocked、展示原因和处理入口 |
@@ -487,7 +494,21 @@ PATCH /api/v1/{resources}/{id}
 | `GET /api/v1/task-runs` | 运行记录列表 | `id`、`task_version_id`、`status`、`trigger`、`started_at`、`finished_at`、`retry_count` |
 | `GET /api/v1/task-runs/{id}` | 运行详情 | `id`、`status`、`progress`、`error`、`asset_outputs[]`、`trace_id`、`dagster_binding_ref` |
 | `POST /api/v1/task-runs/{id}/retries` | 失败或死信运行的人工重试，创建新的运行记录 | `retry_run_id`、`retry_of_run_id`、`retry_of_event_id`、`retry_of_trace_id`、`status`、`trace_id` |
+| `POST /api/v1/task-runs/{id}/cancellations` | 创建独立取消控制运行；未分发任务本地取消，已绑定 Dagster 任务执行 SAFE_TERMINATE | `run_id`、`run_type=task_run_cancellation`、`source_run_id`、`control_action=cancel`、`status`、`trace_id` |
+| `POST /api/v1/task-runs/{id}/status-syncs` | 创建独立状态同步控制运行；读取可信 Dagster binding 并收敛状态 | `run_id`、`run_type=task_run_status_sync`、`source_run_id`、`control_action=status_sync`、`status`、`trace_id` |
+
+TaskRun 的 `deadline_at`、`next_status_sync_at` 与 `monitor_generation` 全部由服务端生成，
+`POST /task-runs` 对同名或其他控制面字段执行 `additionalProperties=false` 拒绝。生产 Worker 周期扫描
+权威 `run_records`：超时且仍 pending 的原始 Outbox 在同一事务内撤销；已有可信 Dagster binding 的
+运行进入 `cancelling` 并只生成一个 deadline cancel control；未超时的
+`submitted/running/completion_pending` 按间隔生成单调代次的 status-sync control。多 Worker 使用行锁、
+确定性 ID 与 Outbox fencing 去重；观察到引擎 `SUCCESS` 只能进入 `completion_pending`，仍须匹配且验签
+的业务完成回执才能进入 `success`。
 | `POST /api/v1/task-versions/{id}/publish` | 发布任务版本 | `version`、`release_gate`、`affected_objects`、`rollback_version`、`trace_id` |
+
+`POST /api/v1/task-runs` 只接受业务输入。`run_id/task_run_id`、`job_name`、`pipeline_name`、
+`repository_name`、`repository_location_name`、`dagster_run_draft` 和 `run_config` 均为服务端控制面字段，
+调用方注入时返回 422；运行 ID、Dagster job 与 run config 由服务端从已发布 TaskVersion 和固定部署配置生成。
 
 任务运行最低字段：
 
@@ -496,10 +517,17 @@ PATCH /api/v1/{resources}/{id}
   "id": "task_run_128",
   "task_version_id": "tv_19_rc2",
   "status": "running",
+  "status_version": 2,
   "trigger": "manual",
   "run_key": "sales_qa:tv_19_rc2:2026-07-06:BJ-AURORA-001",
   "partition_key": "2026-07-06|BJ-AURORA-001",
-  "run_config": {},
+  "submitted_at": "2026-07-06T02:00:01Z",
+  "started_at": "2026-07-06T02:00:00Z",
+  "deadline_at": "2026-07-06T04:00:00Z",
+  "next_status_sync_at": "2026-07-06T02:01:01Z",
+  "monitor_generation": 0,
+  "engine_status": "STARTED",
+  "engine_status_observed_at": "2026-07-06T02:00:02Z",
   "asset_outputs": [
     {
       "asset_key": "auris/label/event_tags",
@@ -509,6 +537,11 @@ PATCH /api/v1/{resources}/{id}
   "trace_id": "tr_01J..."
 }
 ```
+
+Dagster `SUCCESS` 只证明执行引擎结束，状态同步最多把业务运行推进到 `completion_pending`；
+只有 external ID 与可信 launch binding 完全一致的签名完成回执才能写入 `success`。签名回执若早于
+launch 最终提交到达，会先以 `pending_binding` 持久化；绑定不一致时回执标记 `rejected` 并写审计，
+不得修改业务终态。取消与完成并发时依赖 scoped row lock 和单向状态机只提交一个终态事件。
 
 ### 3.6 数据管理
 

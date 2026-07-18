@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -18,6 +22,45 @@ MANIFEST = BACKUP_TOOLS / "manifest.py"
 MINIO = BACKUP_TOOLS / "minio_versions.py"
 QDRANT = BACKUP_TOOLS / "qdrant_snapshots.py"
 MYSQL_DUMP = BACKUP_TOOLS / "mysql_dump.py"
+RELEASE_BUNDLE = REPOSITORY_ROOT / "scripts" / "release_bundle.py"
+SOURCE_COMMIT = "0123456789abcdef0123456789abcdef01234567"
+RELEASE_TAG = "v1.0.0"
+TEST_IMAGE = "ghcr.io/auris-flow/auris-flow-bff:v1.0.0@sha256:" + ("a" * 64)
+AUTHORITY_IMAGES = {
+    service: f"registry.example.com/auris/{service}:v1.0.0@sha256:{character * 64}"
+    for service, character in (
+        ("mysql", "1"),
+        ("minio", "2"),
+        ("qdrant", "3"),
+        ("redis", "4"),
+    )
+}
+
+
+def load_release_bundle() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("release_bundle", RELEASE_BUNDLE)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def make_release_metadata() -> dict[str, object]:
+    return {
+        "schema_version": "auris.release-deployment-metadata.v2",
+        "release_tag": RELEASE_TAG,
+        "source_commit": SOURCE_COMMIT,
+        "compose": {"path": "production/compose.yaml", "sha256": "b" * 64},
+        "image_lock": {
+            "path": "production/images.lock.json",
+            "sha256": "c" * 64,
+        },
+        "restore_policy": {
+            "path": "production/restore-compatibility.json",
+            "sha256": "d" * 64,
+        },
+        "images": AUTHORITY_IMAGES,
+    }
 
 
 def run_tool(
@@ -84,6 +127,21 @@ def make_backup_root(tmp_path: Path) -> Path:
         },
     )
     write_json(root / "metadata" / "tool-versions.json", {"commands": {"mysql": "8.4"}})
+    write_json(root / "metadata" / "release-metadata.json", make_release_metadata())
+    write_json(
+        root / "metadata" / "release-metadata.sigstore.json",
+        {"fixture": "sigstore-bundle"},
+    )
+    write_json(
+        root / "metadata" / "running-images.json",
+        {
+            "schema_version": "auris.release-running-images.v1",
+            "release_tag": RELEASE_TAG,
+            "source_commit": SOURCE_COMMIT,
+            "verification_scope": "all-running-release-services",
+            "images": AUTHORITY_IMAGES,
+        },
+    )
     write_json(
         root / "qdrant" / "snapshots.json",
         {
@@ -108,13 +166,17 @@ def create_manifest(root: Path) -> None:
         "--created-at-utc",
         "2026-07-18T12:00:00Z",
         "--git-commit",
-        "0123456789abcdef0123456789abcdef01234567",
+        SOURCE_COMMIT,
         "--release-version",
-        "v1.0.0",
+        RELEASE_TAG,
         "--counts",
         root / "metadata" / "counts.json",
         "--tool-versions",
         root / "metadata" / "tool-versions.json",
+        "--release-metadata",
+        root / "metadata" / "release-metadata.json",
+        "--running-images",
+        root / "metadata" / "running-images.json",
     )
 
 
@@ -130,6 +192,65 @@ def test_manifest_round_trip_and_tamper_detection(tmp_path: Path) -> None:
     rejected = run_tool(MANIFEST, "verify", "--root", root, check=False)
     assert rejected.returncode == 2
     assert "checksum mismatch" in rejected.stderr
+
+
+def test_restore_snapshot_is_no_follow_private_and_source_independent(
+    tmp_path: Path,
+) -> None:
+    source = make_backup_root(tmp_path)
+    create_manifest(source)
+    snapshot_root = tmp_path / "snapshot-root"
+    snapshot_root.mkdir(mode=0o700)
+
+    created = run_tool(
+        MANIFEST,
+        "snapshot",
+        "--source",
+        source,
+        "--snapshot-root",
+        snapshot_root,
+    )
+    assert json.loads(created.stdout)["status"] == "created"
+    snapshot = snapshot_root / "backup"
+    assert run_tool(MANIFEST, "verify", "--root", snapshot).returncode == 0
+
+    (source / "mysql" / "table-counts.tsv").write_text(
+        "auris_flow.audit_logs\t999\n", encoding="utf-8"
+    )
+    assert run_tool(MANIFEST, "verify", "--root", snapshot).returncode == 0
+    assert (snapshot / "mysql" / "table-counts.tsv").read_text(
+        encoding="utf-8"
+    ) == "auris_flow.audit_logs\t3\n"
+
+    destroyed = run_tool(
+        MANIFEST,
+        "destroy-snapshot",
+        "--snapshot-root",
+        snapshot_root,
+    )
+    assert json.loads(destroyed.stdout)["status"] == "destroyed"
+    assert not snapshot_root.exists()
+
+
+def test_restore_snapshot_rejects_symlinked_backup_members(tmp_path: Path) -> None:
+    source = make_backup_root(tmp_path)
+    target = tmp_path / "outside"
+    target.write_text("outside\n", encoding="utf-8")
+    os.symlink(target, source / "unsafe-link")
+    snapshot_root = tmp_path / "snapshot-root"
+    snapshot_root.mkdir(mode=0o700)
+
+    rejected = run_tool(
+        MANIFEST,
+        "snapshot",
+        "--source",
+        source,
+        "--snapshot-root",
+        snapshot_root,
+        check=False,
+    )
+    assert rejected.returncode == 2
+    assert "symlink or special file" in rejected.stderr
 
 
 def test_offline_verification_wrapper_accepts_a_complete_backup(tmp_path: Path) -> None:
@@ -359,6 +480,17 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
     assert "mc ls --recursive --versions" in backup
     assert "auris_backup_last_success_timestamp_seconds" in backup
     assert "auris_backup.prom" in backup
+    assert "verify-running-images" in backup
+    assert "release-metadata.sigstore.json" in backup
+    assert "--all-running-release-services" in backup
+    assert "--verify-signature" in backup
+    assert "db-bootstrap minio-bootstrap identity-bootstrap" in backup
+    assert '--project-name "${PRODUCTION_PROJECT_NAME}"' in backup
+    assert '--docker-context "${DOCKER_CONTEXT_NAME}"' in backup
+    assert "paths_overlap" in backup
+    assert "AURIS_SOURCE_COMMIT is forbidden" in backup
+    assert "git -C" not in backup
+    assert 'COMPOSE_FILE="${PRODUCTION_ROOT}/compose.yaml"' in backup
 
     restore = (SCRIPTS / "restore.sh").read_text(encoding="utf-8")
     assert (
@@ -370,3 +502,291 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
     assert "target MinIO bucket contains object versions" in restore
     assert "target Qdrant contains collections" in restore
     assert "Redis was not restored" in restore
+    assert "release_bundle.py" in restore
+    assert "identity" in restore
+    assert "--allow-release-migration-from" in restore
+    assert "verify-restore-source" in restore
+    assert 'manifest.py" snapshot' in restore
+    assert 'BACKUP_ROOT="${RESTORE_SNAPSHOT_ROOT}/backup"' in restore
+    assert "git -C" not in restore
+    assert "verify-running-images" in restore
+    assert "--all-running-release-services" in restore
+    assert "--verify-signature" in restore
+    assert "db-bootstrap minio-bootstrap identity-bootstrap" in restore
+    assert '--project-name "${PRODUCTION_PROJECT_NAME}"' in restore
+    assert '--docker-context "${DOCKER_CONTEXT_NAME}"' in restore
+    assert "paths_overlap" in restore
+
+    verify_backup = (SCRIPTS / "verify-backup.sh").read_text(encoding="utf-8")
+    assert "compose_drill pull" in verify_backup
+    assert "compose_drill build" not in verify_backup
+    assert "verify-running-images" in verify_backup
+    assert "--verify-signature" in verify_backup
+    assert '--project-name "${DRILL_PROJECT}"' in verify_backup
+    assert '--docker-context "${DOCKER_CONTEXT_NAME}"' in verify_backup
+
+
+def test_backup_manifest_binds_release_metadata_and_rejects_tampering(
+    tmp_path: Path,
+) -> None:
+    root = make_backup_root(tmp_path)
+    create_manifest(root)
+    document = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
+
+    assert document["schema_version"] == "auris-flow.backup-manifest/v2"
+    assert document["source"]["git_commit"] == SOURCE_COMMIT
+    assert document["source"]["release_version"] == RELEASE_TAG
+    assert document["source"]["release_metadata"] == make_release_metadata()
+    assert (
+        document["source"]["release_metadata_sha256"]
+        == hashlib.sha256(
+            (root / "metadata" / "release-metadata.json").read_bytes()
+        ).hexdigest()
+    )
+
+    metadata_path = root / "metadata" / "release-metadata.json"
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata["source_commit"] = "f" * 40
+    write_json(metadata_path, metadata)
+    rejected = run_tool(MANIFEST, "verify", "--root", root, check=False)
+    assert rejected.returncode == 2
+    assert "checksum mismatch" in rejected.stderr
+
+
+def test_release_bundle_real_assembly_unpack_and_readme_contract(
+    tmp_path: Path,
+) -> None:
+    compose_path = tmp_path / "compose.release.json"
+    lock_path = tmp_path / "images.lock.json"
+    write_json(
+        compose_path,
+        {
+            "name": "auris-flow",
+            "services": {"bff": {"image": TEST_IMAGE}},
+            "volumes": {},
+        },
+    )
+    write_json(
+        lock_path,
+        {
+            "schema_version": "auris.release-image-lock.v1",
+            "release_tag": RELEASE_TAG,
+            "source_commit": SOURCE_COMMIT,
+            "images": {"bff": TEST_IMAGE},
+        },
+    )
+    bundle = tmp_path / "deployment"
+    assembled = subprocess.run(
+        [
+            sys.executable,
+            RELEASE_BUNDLE,
+            "assemble",
+            "--repository-root",
+            REPOSITORY_ROOT,
+            "--output",
+            bundle,
+            "--rendered-compose",
+            compose_path,
+            "--image-lock",
+            lock_path,
+            "--release-tag",
+            RELEASE_TAG,
+            "--source-commit",
+            SOURCE_COMMIT,
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert assembled.returncode == 0, assembled.stderr
+
+    archive_path = tmp_path / "auris-flow-v1.0.0-deployment.tar"
+    with tarfile.open(archive_path, "w") as archive:
+        archive.add(bundle, arcname="auris-flow-v1.0.0-deployment", recursive=True)
+    extracted = tmp_path / "extracted"
+    extracted.mkdir()
+    with tarfile.open(archive_path, "r:") as archive:
+        archive.extractall(extracted, filter="data")
+    root = extracted / "auris-flow-v1.0.0-deployment"
+
+    verified = subprocess.run(
+        [
+            sys.executable,
+            root / "scripts/release_bundle.py",
+            "verify",
+            "--bundle-root",
+            root,
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert verified.returncode == 0, verified.stderr
+    assert (root / "production/compose.yaml").read_bytes() == compose_path.read_bytes()
+    assert not (root / "production/compose.release.json").exists()
+    assert not (root / ".git").exists()
+    assert (root / "production/compose.oidc-confidential.yaml").is_file()
+    assert (root / "production/restore-compatibility.json").is_file()
+
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    assert "--file production/compose.yaml" in readme
+    assert "python3 scripts/release_bundle.py verify --bundle-root ." in readme
+    assert "--verify-signature" in readme
+    assert "release-metadata.sigstore.json" in readme
+    assert "doc/runbooks/backup-restore.md" in readme
+    assert "doc/runbooks/key-rotation.md" in readme
+    assert "doc/runbooks/security-incident-response.md" in readme
+    assert "build/release" not in readme
+    assert "compose.release.json" not in readme
+    assert "images.lock.env" not in readme
+
+    release_bundle = load_release_bundle()
+    commands: list[tuple[str, ...]] = []
+
+    def fake_cosign(
+        command: tuple[str, ...], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        commands.append(command)
+        return subprocess.CompletedProcess(command, 0, "verified", "")
+
+    canonical_signature = root / "production/release-metadata.sigstore.json"
+    assert not canonical_signature.exists()
+    with pytest.raises(release_bundle.ReleaseBundleError, match="Sigstore bundle"):
+        release_bundle.verify_bundle_signature(root, run=fake_cosign)
+    assert commands == []
+
+    downloaded_signature = (
+        extracted / "auris-flow-v1.0.0-release-metadata.sigstore.json"
+    )
+    downloaded_signature.write_text("{}\n", encoding="utf-8")
+    shutil.copyfile(downloaded_signature, canonical_signature)
+    signed = release_bundle.verify_bundle_signature(root, run=fake_cosign)
+    assert signed["schema_version"] == "auris.release-deployment-metadata.v2"
+    assert commands[0][0:2] == ("cosign", "verify-blob")
+    assert (
+        "https://github.com/auris-flow/auris-flow/.github/workflows/"
+        "release-images.yml@refs/tags/v1.0.0"
+    ) in commands[0]
+
+    with pytest.raises(
+        release_bundle.ReleaseBundleError,
+        match="outside the signed restore compatibility policy",
+    ):
+        release_bundle.verify_restore_source(
+            bundle_root=root,
+            backup_release_tag="v0.9.0",
+            backup_source_commit="f" * 40,
+            backup_metadata_sha256="e" * 64,
+        )
+
+
+def test_running_image_validation_requires_config_and_content_digest() -> None:
+    release_bundle = load_release_bundle()
+    repo_digest = "ghcr.io/auris-flow/auris-flow-bff@sha256:" + ("a" * 64)
+    release_bundle.validate_running_image(
+        expected=TEST_IMAGE,
+        configured=TEST_IMAGE,
+        image_id="sha256:" + ("d" * 64),
+        repo_digests=[repo_digest],
+    )
+
+    with pytest.raises(release_bundle.ReleaseBundleError, match="unexpected image"):
+        release_bundle.validate_running_image(
+            expected=TEST_IMAGE,
+            configured="ghcr.io/auris-flow/auris-flow-bff:v1.0.0",
+            image_id="sha256:" + ("d" * 64),
+            repo_digests=[repo_digest],
+        )
+    with pytest.raises(release_bundle.ReleaseBundleError, match="release digest"):
+        release_bundle.validate_running_image(
+            expected=TEST_IMAGE,
+            configured=TEST_IMAGE,
+            image_id="sha256:" + ("d" * 64),
+            repo_digests=["ghcr.io/auris-flow/auris-flow-bff@sha256:" + ("e" * 64)],
+        )
+
+
+def test_running_image_evidence_covers_every_running_release_service(
+    tmp_path: Path,
+) -> None:
+    release_bundle = load_release_bundle()
+    images = {**AUTHORITY_IMAGES, "bff": TEST_IMAGE}
+    compose_path = tmp_path / "compose.json"
+    lock_path = tmp_path / "images.lock.json"
+    write_json(
+        compose_path,
+        {"services": {service: {"image": image} for service, image in images.items()}},
+    )
+    write_json(
+        lock_path,
+        {
+            "schema_version": "auris.release-image-lock.v1",
+            "release_tag": RELEASE_TAG,
+            "source_commit": SOURCE_COMMIT,
+            "images": images,
+        },
+    )
+    bundle = tmp_path / "bundle"
+    release_bundle.assemble_bundle(
+        repository_root=REPOSITORY_ROOT,
+        output_root=bundle,
+        rendered_compose=compose_path,
+        image_lock_file=lock_path,
+        release_tag=RELEASE_TAG,
+        source_commit=SOURCE_COMMIT,
+    )
+    image_ids = {
+        service: f"sha256:{index:064x}"
+        for index, service in enumerate(sorted(images), start=1)
+    }
+
+    def fake_docker(
+        command: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        if "compose" in command:
+            records = [
+                {"ID": f"container-{service}", "Service": service, "State": "running"}
+                for service in sorted(images)
+            ]
+            return subprocess.CompletedProcess(command, 0, json.dumps(records), "")
+        if command[1] == "inspect":
+            service = command[2].removeprefix("container-")
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps(
+                    [
+                        {
+                            "Config": {"Image": images[service]},
+                            "Image": image_ids[service],
+                        }
+                    ]
+                ),
+                "",
+            )
+        service = next(
+            service for service, image_id in image_ids.items() if image_id == command[3]
+        )
+        reference = images[service]
+        repository = release_bundle._repository_without_tag(reference)
+        digest = reference.rsplit("@", 1)[1]
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps([{"RepoDigests": [f"{repository}@{digest}"]}]),
+            "",
+        )
+
+    evidence = release_bundle.verify_running_images(
+        bundle_root=bundle,
+        project_directory=bundle / "production",
+        env_file=bundle / "production/.env.example",
+        project_name="auris-flow",
+        services=("mysql", "minio", "qdrant", "redis"),
+        include_all_running=True,
+        run=fake_docker,
+    )
+
+    assert evidence["verification_scope"] == "all-running-release-services"
+    assert evidence["images"] == images
+    assert evidence["images"]["bff"] == TEST_IMAGE

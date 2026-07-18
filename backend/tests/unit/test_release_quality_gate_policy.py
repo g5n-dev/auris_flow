@@ -68,5 +68,18 @@ def test_readiness_contract_requires_every_production_release_gate() -> None:
         "mypy production/dagster/src",
         "ruff format --check backend scripts production/tests",
         "ruff check backend scripts production/tests",
+        "bash scripts/verify_production_path.sh",
     ):
-        assert pattern in required_patterns
+        if pattern == "bash scripts/verify_production_path.sh":
+            assert pattern in quality_check.contains["scripts/verify_release.sh"]
+        else:
+            assert pattern in required_patterns
+
+    for path in (
+        "scripts/verify_production_path.sh",
+        "scripts/verify_production_path_gate.py",
+        "production/tests/production-path-gate.compose.yaml",
+        "production/tests/production-path-gate.md",
+        "backend/tests/unit/test_production_path_gate.py",
+    ):
+        assert path in quality_check.paths or path in readiness.RELEASE_REQUIRED_TRACKED_PATHS

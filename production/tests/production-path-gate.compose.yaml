@@ -1,0 +1,24 @@
+# This is a machine-readable fail-closed contract, not a runnable success gate.
+# It intentionally contributes no services until one runtime driver can prove the
+# complete production path and resilience matrix in the same isolated Compose project.
+x-auris-production-path-gate:
+  schema_version: auris.production-path-gate-contract.v1
+  status: blocked
+  source_compose: production/compose.yaml
+  runtime_driver: scripts/verify_production_path_runtime.py
+  required_external_stubs:
+    - production-gate-embedding
+    - production-gate-callback
+  missing_capabilities:
+    - OIDC Authorization Code + PKCE through Keycloak discovery, JWKS and token exchange
+    - HTTPS semantic embedding provider request followed by real Qdrant point and recall proof
+    - signed HTTPS external callback with replay rejection and receipt reconciliation
+    - real MinIO object write/read bound to the same business trace
+    - cross-service OTel trace exported by BFF, Worker and Dagster through the Collector
+    - commit-bound runtime driver that emits one non-forgeable production Compose artifact
+    - MySQL restart and Worker crash recovery proof
+    - duplicate delivery proof without duplicate business outcomes
+    - callback timeout recovery and reconciliation proof
+    - Qdrant and Redis transient-outage recovery proof
+
+services: {}

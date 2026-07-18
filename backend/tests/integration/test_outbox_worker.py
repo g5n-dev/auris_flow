@@ -19,6 +19,7 @@ from app.models import (
     AssetLineageEdge,
     AssetMaterialization,
     AssetPartition,
+    AuditLog,
     ExternalCallbackReceipt,
     JsonResource,
     OutboxEvent,
@@ -1929,7 +1930,30 @@ def test_outbox_worker_dead_letters_after_max_attempts(client, auth_headers):
     assert process_once() == 1
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
-        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        event = (
+            session.query(OutboxEvent)
+            .filter(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "task_run.requested",
+            )
+            .one()
+        )
+        audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.tenant_id == event.tenant_id,
+                AuditLog.project_id == event.project_id,
+                AuditLog.object_id == run_id,
+                AuditLog.action == "task_run.failed",
+            )
+        )
+        terminal_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.tenant_id == event.tenant_id,
+                OutboxEvent.project_id == event.project_id,
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "task_run.failed",
+            )
+        )
         assert run is not None
         assert run.status == "failed"
         assert run.payload["error"] == "RuntimeError: permanent callback failure"
@@ -1944,6 +1968,31 @@ def test_outbox_worker_dead_letters_after_max_attempts(client, auth_headers):
             {"from": "pending", "to": "running", "reason": "outbox_dispatch_started"},
             {"from": "running", "to": "failed", "reason": "outbox_dispatch_dead_letter"},
         ]
+        assert audit is not None
+        assert audit.trace_id == run.trace_id == event.payload["trace_id"]
+        assert audit.idempotency_key == event.payload["idempotency_key"]
+        assert audit.before_json == {"status": "running"}
+        assert audit.after_json["status"] == "failed"
+        assert audit.after_json["reason"] == "outbox_dispatch_dead_letter"
+        assert terminal_event is not None
+        assert terminal_event.status == "pending"
+        assert terminal_event.payload["trace_id"] == run.trace_id
+        assert terminal_event.payload["idempotency_key"] == event.payload["idempotency_key"]
+        assert terminal_event.payload["reason"] == "outbox_dispatch_dead_letter"
+
+    # The terminal event is a projection only: delivering it cannot re-enter or
+    # mutate the failed source TaskRun state machine.
+    assert process_once() == 1
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        terminal_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "task_run.failed",
+            )
+        )
+        assert run is not None and run.status == "failed"
+        assert terminal_event is not None and terminal_event.status == "processed"
 
     trace = client.get(
         f"/api/v1/traces/{response.json()['meta']['trace_id']}", headers=auth_headers
@@ -1980,7 +2029,12 @@ def test_dead_letter_task_run_can_create_retry_run(client, auth_headers):
     with SessionLocal() as session:
         failed_run = session.get(RunRecord, failed_run_id)
         failed_event = (
-            session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == failed_run_id).one()
+            session.query(OutboxEvent)
+            .filter(
+                OutboxEvent.aggregate_id == failed_run_id,
+                OutboxEvent.event_type == "task_run.requested",
+            )
+            .one()
         )
         assert failed_run is not None
         assert failed_run.status == "failed"
@@ -2172,7 +2226,14 @@ def test_outbox_worker_dead_letters_terminal_adapter_failure(client, auth_header
     assert process_once() == 1
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
-        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        event = (
+            session.query(OutboxEvent)
+            .filter(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "task_run.requested",
+            )
+            .one()
+        )
         assert run is not None
         assert run.status == "failed"
         assert event.status == "dead_letter"

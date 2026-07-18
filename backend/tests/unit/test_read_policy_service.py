@@ -351,6 +351,8 @@ def test_all_static_audit_and_outbox_object_types_have_trace_policies() -> None:
         ("label_version_deprecation_preflight", "label_versions"),
         ("oidc_identity", "oidc_identities"),
         ("release_bundle_head_event", "task_versions"),
+        ("task_run_cancellation", "task_versions"),
+        ("task_run_status_sync", "task_versions"),
     ],
 )
 def test_new_governed_trace_types_resolve_to_their_parent_collection(
