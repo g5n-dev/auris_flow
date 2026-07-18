@@ -16,6 +16,7 @@ from app.models import (
     RunRecord,
 )
 
+
 @pytest.fixture(autouse=True)
 def _seed_locked_bundle(client):
     with SessionLocal() as session:
