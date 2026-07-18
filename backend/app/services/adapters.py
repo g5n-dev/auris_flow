@@ -6,9 +6,11 @@ import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import uuid
 from base64 import b64encode
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from email.utils import format_datetime
@@ -18,6 +20,22 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
 from urllib.request import Request, urlopen
 
+from app.core.callback_signature import (
+    CallbackKeyBinding,
+    CallbackKeyring,
+    CallbackKeyState,
+    CallbackSignatureError,
+    CallbackSignatureRequest,
+    parse_callback_keyring,
+    sign_callback,
+)
+from app.core.embeddings import (
+    EmbeddingConfigurationError,
+    EmbeddingProvider,
+    EmbeddingResponseError,
+    build_embedding_provider,
+)
+from app.core.observability import current_trace_context
 from app.core.redaction import redact_structured_value
 from app.core.runtime_guards import failure_injection_enabled
 
@@ -51,12 +69,6 @@ def _stable_uuid(payload: dict[str, Any], *keys: str) -> str:
     parts = {key: payload.get(key) for key in keys if payload.get(key) is not None}
     raw = json.dumps(parts or payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"auris-flow:{raw}"))
-
-
-def _deterministic_vector(payload: dict[str, Any], size: int) -> list[float]:
-    raw = json.dumps(payload, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
-    digest = hashlib.sha256(raw.encode("utf-8")).digest()
-    return [round((digest[index % len(digest)] / 255.0) * 2 - 1, 6) for index in range(size)]
 
 
 def _sigv4_timestamp() -> str:
@@ -220,6 +232,29 @@ def _invalid_qdrant_payload(missing_fields: list[str]) -> DispatchResult:
         error_code="QDRANT_PAYLOAD_INVALID",
         error_message=f"Qdrant payload missing required fields: {', '.join(missing_fields)}",
         retryable=False,
+    )
+
+
+def _embedding_document_text(
+    payload: dict[str, Any],
+    qdrant_payload: dict[str, Any],
+    *,
+    provider: EmbeddingProvider,
+) -> str:
+    for source in (payload, qdrant_payload):
+        for key in ("embedding_text", "document_text", "content", "text"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if provider.is_semantic:
+        raise EmbeddingResponseError(
+            "semantic embedding input is missing; provide embedding_text or document content"
+        )
+    return json.dumps(
+        qdrant_payload,
+        sort_keys=True,
+        ensure_ascii=True,
+        separators=(",", ":"),
     )
 
 
@@ -673,6 +708,7 @@ class RealDagsterClient:
     def _run_config(self, payload: dict[str, Any]) -> dict[str, Any]:
         run_config = payload.get("run_config")
         caller_context = run_config.get("auris_context") if isinstance(run_config, dict) else None
+        otel_context = current_trace_context()
         authoritative_context = {
             "tenant_id": payload.get("tenant_id"),
             "project_id": payload.get("project_id"),
@@ -691,6 +727,11 @@ class RealDagsterClient:
             "experiment_id": payload.get("experiment_id"),
             "experiment_arm": payload.get("experiment_arm"),
             "experiment_design_sha256": payload.get("experiment_design_sha256"),
+            **{
+                "otel_trace_id": otel_context.get("otel_trace_id"),
+                "otel_parent_span_id": otel_context.get("otel_span_id"),
+                "otel_trace_flags": otel_context.get("otel_trace_flags"),
+            },
         }
         return {
             **(run_config if isinstance(run_config, dict) else {}),
@@ -1500,11 +1541,18 @@ class RealQdrantIndexClient:
         base_url: str | None = None,
         vector_size: int | None = None,
         api_key: str | None = None,
+        embedding_provider: EmbeddingProvider | None = None,
     ) -> None:
         self.base_url = (
             base_url or os.environ.get("QDRANT_URL") or "http://127.0.0.1:6333"
         ).rstrip("/")
-        self.vector_size = vector_size or int(os.environ.get("QDRANT_VECTOR_SIZE", "8"))
+        configured_size = vector_size or int(os.environ.get("QDRANT_VECTOR_SIZE", "8"))
+        self.embedding_provider = embedding_provider or build_embedding_provider(
+            dimension=configured_size
+        )
+        if self.embedding_provider.dimension != configured_size:
+            raise EmbeddingConfigurationError("QDRANT_VECTOR_SIZE must match EMBEDDING_DIMENSION")
+        self.vector_size = self.embedding_provider.dimension
         self.api_key = api_key or os.environ.get("QDRANT_API_KEY")
 
     def upsert_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
@@ -1530,6 +1578,12 @@ class RealQdrantIndexClient:
             "collection",
         )
         try:
+            document_text = _embedding_document_text(
+                payload,
+                qdrant_payload,
+                provider=self.embedding_provider,
+            )
+            vector = self.embedding_provider.embed(document_text, purpose="document")
             self._ensure_collection(collection)
             upsert_response = self._request(
                 "PUT",
@@ -1538,11 +1592,28 @@ class RealQdrantIndexClient:
                     "points": [
                         {
                             "id": point_id,
-                            "vector": _deterministic_vector(qdrant_payload, self.vector_size),
+                            "vector": vector,
                             "payload": qdrant_payload,
                         }
                     ]
                 },
+            )
+        except (EmbeddingConfigurationError, EmbeddingResponseError) as exc:
+            return DispatchResult(
+                adapter="qdrant",
+                operation="upsert_payload",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "qdrant_url": self.base_url,
+                    "collection": collection,
+                    "embedding_provider": self.embedding_provider.provider_name,
+                    "embedding_model": self.embedding_provider.model_name,
+                },
+                error_code="EMBEDDING_GENERATION_FAILED",
+                error_message=str(exc),
+                retryable=True,
+                retry_after_seconds=10,
             )
         except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
             return DispatchResult(
@@ -1571,6 +1642,9 @@ class RealQdrantIndexClient:
                 "qdrant_payload": qdrant_payload,
                 "qdrant_url": self.base_url,
                 "vector_size": self.vector_size,
+                "embedding_provider": self.embedding_provider.provider_name,
+                "embedding_model": self.embedding_provider.model_name,
+                "semantic_embedding": self.embedding_provider.is_semantic,
                 "operation_id": result.get("operation_id"),
                 "upsert_status": result.get("status") or upsert_response.get("status"),
             },
@@ -1585,16 +1659,7 @@ class RealQdrantIndexClient:
             {"key": "project_id", "match": {"value": qdrant_payload["project_id"]}},
         ]
         search_payload = {
-            "vector": _deterministic_vector(
-                {
-                    "query": query,
-                    "collection": collection,
-                    "tenant_id": qdrant_payload.get("tenant_id"),
-                    "project_id": qdrant_payload.get("project_id"),
-                    "knowledge_index_id": qdrant_payload.get("knowledge_index_id"),
-                },
-                self.vector_size,
-            ),
+            "vector": self.embedding_provider.embed(query, purpose="query"),
             "limit": top_k,
             "with_payload": True,
             "with_vector": False,
@@ -1616,6 +1681,9 @@ class RealQdrantIndexClient:
             "points": points if isinstance(points, list) else [],
             "filter": search_payload["filter"],
             "vector_size": self.vector_size,
+            "embedding_provider": self.embedding_provider.provider_name,
+            "embedding_model": self.embedding_provider.model_name,
+            "semantic_embedding": self.embedding_provider.is_semantic,
         }
 
     def reconcile_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
@@ -1812,6 +1880,10 @@ def _callback_ip_is_forbidden(address: ipaddress.IPv4Address | ipaddress.IPv6Add
     return not address.is_global
 
 
+def _callback_epoch_time() -> int:
+    return int(datetime.now(UTC).timestamp())
+
+
 class RealExternalCallbackClient:
     def __init__(
         self,
@@ -1819,6 +1891,12 @@ class RealExternalCallbackClient:
         secret: str | None = None,
         app_env: str | None = None,
         allowed_hosts: str | tuple[str, ...] | list[str] | None = None,
+        key_bindings: str | None = None,
+        active_key_id: str | None = None,
+        legacy_hmac_enabled: bool | None = None,
+        signature_tolerance_seconds: int = 300,
+        clock: Callable[[], int | float] | None = None,
+        nonce_factory: Callable[[], str] | None = None,
     ) -> None:
         self.callback_url = (
             callback_url
@@ -1826,13 +1904,53 @@ class RealExternalCallbackClient:
             or os.environ.get("AURIS_EXTERNAL_CALLBACK_URL")
             or "http://127.0.0.1:8089/callbacks/platform"
         ).strip()
-        self.secret = (
+        self.app_env = (app_env or os.environ.get("APP_ENV") or "local").strip().lower()
+        configured_secret = (
             secret
             or os.environ.get("EXTERNAL_CALLBACK_SECRET")
             or os.environ.get("AURIS_EXTERNAL_CALLBACK_SECRET")
             or "auris-dev-callback-secret"
         )
-        self.app_env = (app_env or os.environ.get("APP_ENV") or "local").strip().lower()
+        configured_bindings = (
+            key_bindings
+            if key_bindings is not None
+            else os.environ.get("EXTERNAL_CALLBACK_KEY_BINDINGS", "")
+        ).strip()
+        configured_active_key_id = (
+            active_key_id
+            if active_key_id is not None
+            else os.environ.get("EXTERNAL_CALLBACK_ACTIVE_KEY_ID", "")
+        ).strip()
+        env_legacy = os.environ.get("EXTERNAL_CALLBACK_LEGACY_HMAC_ENABLED", "").strip().lower()
+        self.legacy_hmac_enabled = (
+            legacy_hmac_enabled
+            if legacy_hmac_enabled is not None
+            else env_legacy in {"1", "true", "yes", "on"}
+        )
+        self._explicit_keyring = bool(configured_bindings)
+        self.keyring: CallbackKeyring | None
+        if configured_bindings:
+            self.keyring = parse_callback_keyring(
+                configured_bindings,
+                active_key_id=configured_active_key_id,
+            )
+        elif self.legacy_hmac_enabled or (secret is not None and not self.production_mode):
+            legacy_secret = configured_secret.strip().encode("utf-8")
+            self.keyring = CallbackKeyring(
+                (
+                    CallbackKeyBinding(
+                        key_id="local-dev-callback",
+                        secret=legacy_secret,
+                        state=CallbackKeyState.ACTIVE,
+                    ),
+                ),
+                active_key_id="local-dev-callback",
+            )
+        else:
+            self.keyring = None
+        self.signature_tolerance_seconds = signature_tolerance_seconds
+        self._clock = clock or _callback_epoch_time
+        self._nonce_factory = nonce_factory or (lambda: secrets.token_urlsafe(24))
         configured_hosts = (
             allowed_hosts
             if allowed_hosts is not None
@@ -1858,30 +1976,36 @@ class RealExternalCallbackClient:
 
         body_bytes = self._callback_body_bytes(payload)
         request_sha256 = hashlib.sha256(body_bytes).hexdigest()
-        timestamp = os.environ.get("AURIS_FIXED_CALLBACK_TIME") or datetime.now(UTC).isoformat()
-        signature = hmac.new(
-            self.secret.encode("utf-8"),
-            f"{timestamp}.{request_sha256}".encode(),
-            hashlib.sha256,
-        ).hexdigest()
-        signature_id = _stable_receipt_id("sig", payload, "run_id", "target")
         idempotency_key = self._idempotency_key(payload)
-        headers = {
-            "Content-Type": "application/json",
-            "X-Auris-Timestamp": timestamp,
-            "X-Auris-Signature": f"sha256={signature}",
-            "X-Auris-Signature-Id": signature_id,
-            "X-Auris-Signature-Mode": "hmac-sha256",
-            "X-Auris-Idempotency-Key": idempotency_key,
-            "X-Auris-Tenant-Id": str(payload.get("tenant_id") or ""),
-            "X-Auris-Project-Id": str(payload.get("project_id") or ""),
-            "X-Auris-Trace-Id": str(payload.get("trace_id") or ""),
-            "X-Auris-Run-Id": str(payload.get("run_id") or ""),
-            "X-Auris-Fencing-Token": str(payload.get("outbox_fencing_token") or ""),
-        }
+        signature_id = (
+            self.keyring.active_key.key_id if self.keyring is not None else "unconfigured"
+        )
+        signature = ""
+        signed_request: CallbackSignatureRequest | None = None
         try:
+            signed_request, signature = self._signed_callback_request(
+                body=body_bytes,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            )
+            signature_id = signed_request.key_id
+            headers = {
+                "Content-Type": "application/json",
+                "X-Auris-Signature-Version": signed_request.version,
+                "X-Auris-Timestamp": str(signed_request.timestamp),
+                "X-Auris-Nonce": signed_request.nonce,
+                "X-Auris-Key-Id": signed_request.key_id,
+                "X-Auris-Signature": signature,
+                "X-Auris-Signature-Mode": "hmac-sha256-v2",
+                "X-Auris-Idempotency-Key": idempotency_key,
+                "X-Auris-Tenant-Id": str(payload.get("tenant_id") or ""),
+                "X-Auris-Project-Id": str(payload.get("project_id") or ""),
+                "X-Auris-Trace-Id": str(payload.get("trace_id") or ""),
+                "X-Auris-Run-Id": str(payload.get("run_id") or ""),
+                "X-Auris-Fencing-Token": str(payload.get("outbox_fencing_token") or ""),
+            }
             response = self._request(body_bytes, headers)
-        except _ExternalCallbackSecurityError as exc:
+        except (CallbackSignatureError, _ExternalCallbackSecurityError) as exc:
             return DispatchResult(
                 adapter="external_callback",
                 operation="send_signed_callback",
@@ -1894,8 +2018,9 @@ class RealExternalCallbackClient:
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                 },
                 error_code="EXTERNAL_CALLBACK_SECURITY_REJECTED",
                 error_message=str(exc),
@@ -1918,12 +2043,13 @@ class RealExternalCallbackClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "callback_url": self.callback_url,
+                    "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                 },
                 error_code="EXTERNAL_CALLBACK_SEND_FAILED",
                 error_message=str(exc),
@@ -1941,13 +2067,14 @@ class RealExternalCallbackClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "callback_url": self.callback_url,
+                    "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "status_code": status_code,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                 },
                 error_code="EXTERNAL_CALLBACK_REDIRECT_REJECTED",
                 error_message="external callback redirects are forbidden",
@@ -1973,14 +2100,15 @@ class RealExternalCallbackClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "callback_url": self.callback_url,
+                    "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "response_sha256": response_sha256,
                     "status_code": status_code,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                 },
                 error_code="EXTERNAL_CALLBACK_RESPONSE_INVALID",
                 error_message=f"callback endpoint returned invalid JSON: {exc}",
@@ -2013,14 +2141,15 @@ class RealExternalCallbackClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "callback_url": self.callback_url,
+                    "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "response_sha256": response_sha256,
                     "status_code": status_code,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                 },
                 error_code="EXTERNAL_CALLBACK_RECEIPT_MISSING",
                 error_message="callback endpoint did not return callback_receipt_id",
@@ -2040,14 +2169,15 @@ class RealExternalCallbackClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "callback_url": self.callback_url,
+                    "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "response_sha256": response_sha256,
                     "status_code": status_code,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                     "receipt_url_sha256": hashlib.sha256(
                         str(response_data.get("receipt_url") or "").encode("utf-8")
                     ).hexdigest(),
@@ -2067,7 +2197,7 @@ class RealExternalCallbackClient:
             operation="send_signed_callback",
             details={
                 "mode": "real",
-                "callback_url": self.callback_url,
+                "callback_url": self._callback_url_for_audit(),
                 "http_method": "POST",
                 "status_code": status_code,
                 "callback_receipt_id": callback_receipt_id,
@@ -2081,8 +2211,9 @@ class RealExternalCallbackClient:
                 "run_id": payload.get("run_id"),
                 "request_sha256": request_sha256,
                 "response_sha256": response_sha256,
-                "signature_id": signature_id,
-                "signature_mode": "hmac-sha256",
+                "signature_key_id": signature_id,
+                "signature_mode": "hmac-sha256-v2",
+                "signature_version": "v2",
                 "fencing_token": payload.get("outbox_fencing_token"),
                 "signature_sha256": hashlib.sha256(signature.encode("utf-8")).hexdigest(),
                 "protocol_receipt": protocol_receipt,
@@ -2244,6 +2375,10 @@ class RealExternalCallbackClient:
             or _stable_receipt_id("cb_key", payload, "run_id", "target")
         )
 
+    def _callback_url_for_audit(self) -> str:
+        parsed = urlparse(self.callback_url)
+        return parsed._replace(query="", fragment="").geturl()
+
     def _callback_body(self, payload: dict[str, Any]) -> dict[str, Any]:
         callback_payload = payload.get("payload_template")
         if not isinstance(callback_payload, dict):
@@ -2270,6 +2405,43 @@ class RealExternalCallbackClient:
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
+
+    def _signed_callback_request(
+        self,
+        *,
+        body: bytes,
+        payload: dict[str, Any],
+        idempotency_key: str,
+    ) -> tuple[CallbackSignatureRequest, str]:
+        if self.production_mode and self.legacy_hmac_enabled:
+            raise _ExternalCallbackSecurityError(
+                "legacy callback HMAC mode is forbidden in production"
+            )
+        if self.production_mode and not self._explicit_keyring:
+            raise _ExternalCallbackSecurityError(
+                "explicit callback key bindings are required in production"
+            )
+        if self.keyring is None:
+            raise _ExternalCallbackSecurityError("callback signing keyring is not configured")
+        if not 1 <= self.signature_tolerance_seconds <= 900:
+            raise _ExternalCallbackSecurityError(
+                "callback signature tolerance must be between 1 and 900 seconds"
+            )
+        parsed = urlparse(self.callback_url)
+        timestamp = int(self._clock())
+        request = CallbackSignatureRequest(
+            method="POST",
+            path=parsed.path or "/",
+            query=parsed.query,
+            tenant_id=str(payload.get("tenant_id") or ""),
+            project_id=str(payload.get("project_id") or ""),
+            idempotency_key=idempotency_key,
+            timestamp=timestamp,
+            nonce=self._nonce_factory(),
+            key_id=self.keyring.active_key.key_id,
+            body=body,
+        )
+        return request, sign_callback(request, self.keyring)
 
     def _request(self, body: bytes, headers: dict[str, str]) -> dict[str, Any]:
         return self._request_url(
@@ -2369,9 +2541,13 @@ class RealExternalCallbackClient:
             raise _ExternalCallbackSecurityError(f"{purpose} URL must not contain a fragment")
         if not 1 <= port <= 65535:
             raise _ExternalCallbackSecurityError(f"{purpose} URL port is invalid")
-        if self.production_mode and len(self.secret.strip()) < 32:
+        if self.production_mode and self.legacy_hmac_enabled:
             raise _ExternalCallbackSecurityError(
-                "EXTERNAL_CALLBACK_SECRET must be at least 32 characters in production"
+                "legacy callback HMAC mode is forbidden in production"
+            )
+        if self.production_mode and not self._explicit_keyring:
+            raise _ExternalCallbackSecurityError(
+                "explicit callback key bindings are required in production"
             )
         if self.production_mode and not self.allowed_hosts:
             raise _ExternalCallbackSecurityError(
@@ -2503,13 +2679,14 @@ class RealExternalCallbackClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "callback_url": self.callback_url,
+                    "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "status_code": status_code,
-                    "signature_id": signature_id,
-                    "signature_mode": "hmac-sha256",
+                    "signature_key_id": signature_id,
+                    "signature_mode": "hmac-sha256-v2",
+                    "signature_version": "v2",
                 },
                 error_code="EXTERNAL_CALLBACK_REDIRECT_REJECTED",
                 error_message="external callback redirects are forbidden",
@@ -2523,14 +2700,15 @@ class RealExternalCallbackClient:
             status="failed",
             details={
                 "mode": "real",
-                "callback_url": self.callback_url,
+                "callback_url": self._callback_url_for_audit(),
                 "target": payload.get("target"),
                 "idempotency_key": idempotency_key,
                 "request_sha256": request_sha256,
                 "response_sha256": response_sha256,
                 "status_code": status_code,
-                "signature_id": signature_id,
-                "signature_mode": "hmac-sha256",
+                "signature_key_id": signature_id,
+                "signature_mode": "hmac-sha256-v2",
+                "signature_version": "v2",
             },
             error_code="EXTERNAL_CALLBACK_HTTP_ERROR",
             error_message=f"callback endpoint returned HTTP {status_code}",
@@ -2554,14 +2732,15 @@ class RealExternalCallbackClient:
             status="failed",
             details={
                 "mode": "real",
-                "callback_url": self.callback_url,
+                "callback_url": self._callback_url_for_audit(),
                 "target": payload.get("target"),
                 "idempotency_key": idempotency_key,
                 "request_sha256": request_sha256,
                 "response_sha256": response_sha256,
                 "status_code": status_code,
-                "signature_id": signature_id,
-                "signature_mode": "hmac-sha256",
+                "signature_key_id": signature_id,
+                "signature_mode": "hmac-sha256-v2",
+                "signature_version": "v2",
             },
             error_code="EXTERNAL_CALLBACK_RECEIPT_INVALID",
             error_message=message,
@@ -2620,8 +2799,18 @@ def _default_external_callback_client() -> ExternalCallbackClient:
                 or runtime_settings.external_callback_url
             ),
             secret=(
-                os.environ.get("AURIS_EXTERNAL_CALLBACK_SECRET")
-                or runtime_settings.external_callback_secret
+                (
+                    os.environ.get("AURIS_EXTERNAL_CALLBACK_SECRET")
+                    or runtime_settings.external_callback_secret
+                )
+                if runtime_settings.external_callback_legacy_hmac_enabled
+                else None
+            ),
+            key_bindings=runtime_settings.external_callback_key_bindings,
+            active_key_id=runtime_settings.external_callback_active_key_id,
+            legacy_hmac_enabled=runtime_settings.external_callback_legacy_hmac_enabled,
+            signature_tolerance_seconds=(
+                runtime_settings.external_callback_signature_tolerance_seconds
             ),
             app_env=runtime_settings.app_env,
             allowed_hosts=runtime_settings.external_callback_allowed_hosts,

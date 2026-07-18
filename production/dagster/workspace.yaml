@@ -1,0 +1,5 @@
+load_from:
+  - grpc_server:
+      host: dagster-code
+      port: 4000
+      location_name: auris_flow_defs

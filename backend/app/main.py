@@ -4,6 +4,8 @@ import hashlib
 import logging
 import time
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest
 from urllib.request import urlopen
@@ -11,9 +13,10 @@ from urllib.request import urlopen
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from redis import Redis
 from sqlalchemy import text
+from starlette.middleware.base import RequestResponseEndpoint
 
 from app.api.routers import (
     audio_sessions,
@@ -31,6 +34,7 @@ from app.api.routers import (
     label_lifecycle,
     label_mappings,
     label_optimization_orchestrator,
+    label_recomputations,
     labels,
     ops,
     prompt_candidate_reviews,
@@ -42,9 +46,11 @@ from app.api.routers import (
 )
 from app.core.auth import get_auth_provider
 from app.core.config import _csv_items, get_settings, is_production_environment
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, engine
 from app.core.errors import ApiError
 from app.core.logging import configure_logging, get_logger, log_event
+from app.core.metrics import is_metrics_client_allowed, metrics
+from app.core.observability import annotate_current_span, configure_observability
 from app.core.rate_limit import build_rate_limiter
 from app.services.adapters import object_storage_client_for_provider
 
@@ -52,7 +58,14 @@ settings = get_settings()
 configure_logging(settings.log_level)
 logger = get_logger("app")
 
-app = FastAPI(title="Auris Flow BFF", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    yield
+    application.state.observability.shutdown()
+
+
+app = FastAPI(title="Auris Flow BFF", version="0.1.0", lifespan=lifespan)
 app.state.rate_limiter = build_rate_limiter(settings)
 trusted_hosts = list(_csv_items(settings.trusted_hosts))
 if trusted_hosts:
@@ -66,7 +79,7 @@ app.add_middleware(
 )
 
 
-def apply_security_headers(response) -> None:
+def apply_security_headers(response: Response) -> None:
     if not settings.security_headers_enabled:
         return
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
@@ -88,10 +101,17 @@ def apply_security_headers(response) -> None:
 
 
 @app.middleware("http")
-async def request_logging_middleware(request: Request, call_next):
+async def request_logging_middleware(
+    request: Request,
+    call_next: RequestResponseEndpoint,
+) -> Response:
     request.state.trace_id = f"trace_{uuid.uuid4().hex}"
     request.state.server_trace_initialized = True
     request.state.request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    annotate_current_span(
+        business_trace_id=request.state.trace_id,
+        request_id=request.state.request_id,
+    )
     started = time.perf_counter()
     log_health_probe = request.url.path != "/healthz"
     if log_health_probe:
@@ -103,11 +123,12 @@ async def request_logging_middleware(request: Request, call_next):
             request_id=request.state.request_id,
             trace_id=request.state.trace_id,
         )
-    response = None
+    response: Response | None = None
     rate_limit_decision = None
     if settings.rate_limit_per_minute > 0 and request.url.path not in {
         "/healthz",
         "/readyz",
+        "/metrics",
         "/docs",
         "/openapi.json",
     }:
@@ -156,6 +177,14 @@ async def request_logging_middleware(request: Request, call_next):
         try:
             response = await call_next(request)
         except Exception as exc:
+            duration_seconds = max(0.0, time.perf_counter() - started)
+            route = request.scope.get("route")
+            metrics.observe_http(
+                method=request.method,
+                route=getattr(route, "path", None),
+                status_code=500,
+                duration_seconds=duration_seconds,
+            )
             log_event(
                 logger,
                 "http.request.error",
@@ -168,6 +197,13 @@ async def request_logging_middleware(request: Request, call_next):
             )
             raise
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
+    route = request.scope.get("route")
+    metrics.observe_http(
+        method=request.method,
+        route=getattr(route, "path", None),
+        status_code=response.status_code,
+        duration_seconds=duration_ms / 1000,
+    )
     response.headers["X-Trace-Id"] = request.state.trace_id
     response.headers["X-Request-Id"] = request.state.request_id
     apply_security_headers(response)
@@ -244,6 +280,23 @@ def healthz() -> dict:
     return {"status": "ok", "data": {"status": "success", "service": settings.app_name}}
 
 
+@app.get("/metrics", include_in_schema=False)
+def prometheus_metrics(request: Request) -> Response:
+    if not settings.metrics_enabled:
+        return Response(status_code=404)
+    peer_host = request.client.host if request.client else None
+    if not is_metrics_client_allowed(peer_host, settings.metrics_trusted_cidrs):
+        return Response(status_code=403)
+    metrics.refresh_operational_metrics(session_factory=SessionLocal, engine=engine)
+    return Response(
+        content=metrics.render(),
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Type": metrics.content_type,
+        },
+    )
+
+
 @app.get("/readyz")
 def readyz() -> JSONResponse:
     def required_checks() -> set[str]:
@@ -255,10 +308,15 @@ def readyz() -> JSONResponse:
         )
         if strict_mode:
             checks = {"auth"}
+            if is_production_environment(settings.app_env):
+                checks.add("dagster")
             if configured and configured != "auto":
                 checks.update(item.strip() for item in configured.split(",") if item.strip())
                 return checks
-            return {"auth", "database", "redis", "object_storage", "qdrant"}
+            automatic = {"auth", "database", "redis", "object_storage", "qdrant"}
+            if is_production_environment(settings.app_env):
+                automatic.add("dagster")
+            return automatic
         if configured and configured != "auto":
             return {item.strip() for item in configured.split(",") if item.strip()}
         return {"database"}
@@ -318,6 +376,7 @@ def readyz() -> JSONResponse:
         checks["database"] = "ok"
     except Exception:
         checks["database"] = "failed"
+    metrics.set_dependency_readiness(checks)
     required = required_checks()
     missing_required = {
         key: checks.get(key, "not_configured")
@@ -353,6 +412,7 @@ for router in [
     label_lifecycle.router,
     label_mappings.router,
     label_optimization_orchestrator.router,
+    label_recomputations.router,
     labels.router,
     insights.router,
     evaluation.router,
@@ -363,3 +423,6 @@ for router in [
     generic.router,
 ]:
     app.include_router(router, prefix=settings.api_prefix)
+
+
+app.state.observability = configure_observability(app, settings, engine=engine)

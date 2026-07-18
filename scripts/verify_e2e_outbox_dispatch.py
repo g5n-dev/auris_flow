@@ -1047,8 +1047,9 @@ def validate_real_external_callback(
             "request_sha256",
             "response_sha256",
             "receipt_url",
-            "signature_id",
+            "signature_key_id",
             "signature_mode",
+            "signature_version",
             "signature_sha256",
             "status_code",
             "tenant_id",
@@ -1073,8 +1074,9 @@ def validate_real_external_callback(
         "idempotency_key": details.get("idempotency_key"),
         "request_sha256": details.get("request_sha256"),
         "response_sha256": details.get("response_sha256"),
-        "signature_id": details.get("signature_id"),
+        "signature_key_id": details.get("signature_key_id"),
         "signature_mode": details.get("signature_mode"),
+        "signature_version": details.get("signature_version"),
         "signature_sha256": details.get("signature_sha256"),
         "remote_trace_id": details.get("remote_trace_id"),
     }
@@ -1330,8 +1332,9 @@ def validate_dispatch(
                     "receipt_url",
                     "request_sha256",
                     "response_sha256",
-                    "signature_id",
+                    "signature_key_id",
                     "signature_mode",
+                    "signature_version",
                     "signature_sha256",
                 )
                 if not details.get(key)

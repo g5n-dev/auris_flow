@@ -22,8 +22,14 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, object_session
 
 from app.core.config import get_settings
-from app.core.database import SessionLocal
+from app.core.database import SessionLocal, engine
 from app.core.logging import get_logger, log_event
+from app.core.metrics import metrics
+from app.core.observability import (
+    annotate_current_span,
+    configure_worker_observability,
+    internal_span,
+)
 from app.core.runtime_guards import failure_injection_enabled
 from app.models import (
     ExternalCallbackReceipt,
@@ -675,11 +681,23 @@ def _dispatch_prepared(prepared: PreparedDelivery) -> DispatchResult:
     ):
         raise RuntimeError(str(payload.get("failure_reason", "simulated worker failure")))
     delivery = reconcile_event if payload.get("delivery_mode") == "reconcile" else dispatch_event
-    dispatch = delivery(
-        str(payload["event_type"]),
-        str(payload["aggregate_type"]),
-        payload,
-    )
+    with internal_span(
+        "outbox.adapter.dispatch",
+        attributes={
+            "auris.event_type": str(payload["event_type"]),
+            "auris.aggregate_type": str(payload["aggregate_type"]),
+            "auris.delivery_mode": str(payload.get("delivery_mode") or "dispatch"),
+            "auris.business_trace_id": str(payload.get("trace_id") or "unknown"),
+        },
+    ) as span:
+        dispatch = delivery(
+            str(payload["event_type"]),
+            str(payload["aggregate_type"]),
+            payload,
+        )
+        span.set_attribute("auris.adapter", dispatch.adapter[:64])
+        span.set_attribute("auris.adapter_operation", dispatch.operation[:128])
+        span.set_attribute("auris.adapter_status", dispatch.status[:32])
     if dispatch.status != "success":
         failed_dispatch = {
             "adapter": dispatch.adapter,
@@ -716,6 +734,7 @@ def _mark_blocked(event: OutboxEvent, claim: OutboxClaim) -> None:
     event.processed_at = database_utc_now(session)
     _complete_attempt(event, claim, status="blocked")
     clear_claim(event)
+    metrics.record_worker_processing("blocked")
     log_event(
         logger,
         "outbox.process.blocked",
@@ -878,6 +897,9 @@ def _finalize_success(
     event.processed_at = database_utc_now(session)
     _complete_attempt(event, claim, status="succeeded", dispatch=dispatch)
     clear_claim(event)
+    metrics.record_worker_processing("success")
+    if dispatch.adapter == "external_callback":
+        metrics.record_callback_outcome("success")
     log_event(
         logger,
         "outbox.process.success",
@@ -931,6 +953,9 @@ def _mark_retry_or_dead_letter(
         event.processed_at = database_utc_now(session)
         _complete_attempt(event, claim, status="dead_letter", error=error)
         clear_claim(event)
+        metrics.record_worker_processing("dead_letter")
+        if event.event_type == "external_callback.requested":
+            metrics.record_callback_outcome("dead_letter")
         if run and run.status in {"pending", "queued", "running"}:
             if run.status in {"pending", "queued"}:
                 transition_run(run, "running", reason="outbox_dispatch_started")
@@ -982,6 +1007,9 @@ def _mark_retry_or_dead_letter(
         error=error,
     )
     clear_claim(event)
+    metrics.record_worker_processing("retry")
+    if event.event_type == "external_callback.requested":
+        metrics.record_callback_outcome("retry")
     if run:
         run.payload = {
             **run.payload,
@@ -1120,7 +1148,7 @@ def _finalize_dispatch(
         return True
 
 
-def _process_claim(claim: OutboxClaim) -> None:
+def _process_claim_traced(claim: OutboxClaim) -> None:
     settings = get_settings()
     log_event(
         logger,
@@ -1137,6 +1165,10 @@ def _process_claim(claim: OutboxClaim) -> None:
         return
     if prepared is None:
         return
+    annotate_current_span(
+        business_trace_id=str(prepared.payload.get("trace_id") or "unknown"),
+        request_id=str(prepared.payload.get("request_id") or f"outbox-{claim.event_id}"),
+    )
     if prepared.blocked:
         _finalize_blocked(claim)
         return
@@ -1183,11 +1215,25 @@ def _process_claim(claim: OutboxClaim) -> None:
         _finalize_failure(claim, PostDispatchFinalizeError(exc))
 
 
+def _process_claim(claim: OutboxClaim) -> None:
+    with internal_span(
+        "outbox.process",
+        attributes={
+            "messaging.system": "auris-outbox",
+            "messaging.operation.name": "process",
+            "auris.outbox_event_id": claim.event_id,
+            "auris.outbox_lease_generation": claim.lease_generation,
+        },
+    ):
+        _process_claim_traced(claim)
+
+
 def _process_claims(claims: list[OutboxClaim]) -> int:
     for claim in claims:
         try:
             _process_claim(claim)
         except Exception as exc:  # noqa: BLE001 - one event cannot stop the worker batch.
+            metrics.record_worker_processing("failure")
             log_event(
                 logger,
                 "outbox.process.unhandled",
@@ -1499,30 +1545,34 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
 def main(argv: Sequence[str] | None = None) -> None:
     args = _parse_args(argv)
     worker_id = _worker_identity(args.worker_id)
-    if args.once:
-        count = process_once(args.limit, worker_id=worker_id)
-        log_event(
-            logger,
-            "outbox.process.complete",
-            worker_id=worker_id,
-            processed=count,
-            mode="once",
-        )
-        return
+    observability = configure_worker_observability(get_settings(), engine=engine)
+    try:
+        if args.once:
+            count = process_once(args.limit, worker_id=worker_id)
+            log_event(
+                logger,
+                "outbox.process.complete",
+                worker_id=worker_id,
+                processed=count,
+                mode="once",
+            )
+            return
 
-    stop_event = Event()
-    with graceful_shutdown_signals(stop_event):
-        run_forever(
-            limit=args.limit,
-            worker_id=worker_id,
-            stop_event=stop_event,
-            poll_interval_seconds=args.poll_interval,
-            max_idle_wait_seconds=args.max_idle_wait,
-            error_backoff_base_seconds=args.error_backoff_base,
-            error_backoff_max_seconds=args.error_backoff_max,
-            heartbeat_interval_seconds=args.heartbeat_interval,
-            health_path=args.health_file,
-        )
+        stop_event = Event()
+        with graceful_shutdown_signals(stop_event):
+            run_forever(
+                limit=args.limit,
+                worker_id=worker_id,
+                stop_event=stop_event,
+                poll_interval_seconds=args.poll_interval,
+                max_idle_wait_seconds=args.max_idle_wait,
+                error_backoff_base_seconds=args.error_backoff_base,
+                error_backoff_max_seconds=args.error_backoff_max,
+                heartbeat_interval_seconds=args.heartbeat_interval,
+                health_path=args.health_file,
+            )
+    finally:
+        observability.shutdown()
 
 
 if __name__ == "__main__":

@@ -1,0 +1,47 @@
+[project]
+name = "auris-flow-dagster"
+version = "1.0.0"
+description = "Pinned Dagster execution runtime for Auris Flow"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "dagster==1.13.1",
+  "dagster-mysql==0.29.1",
+  "dagster-webserver==1.13.1",
+  "click==8.3.3",
+  "opentelemetry-api==1.44.0",
+  "opentelemetry-exporter-otlp-proto-http==1.44.0",
+  "opentelemetry-instrumentation-urllib==0.65b0",
+  "opentelemetry-sdk==1.44.0",
+  "pymysql==1.1.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "mypy==1.16.0",
+  "pytest==8.4.0",
+  "ruff==0.11.13",
+]
+
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/auris_flow_dagster"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+warn_unused_configs = true

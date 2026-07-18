@@ -52,6 +52,9 @@ def log_event(
     ctx: RequestContext | None = None,
     **fields: Any,
 ) -> None:
+    # Imported lazily to keep logging usable during early configuration failures.
+    from app.core.observability import current_trace_context
+
     safe_fields = redact_structured_value(
         {**_context_payload(ctx), **fields},
         field_name="log_fields",
@@ -64,5 +67,7 @@ def log_event(
         "event": event,
         "component": logger.name.removeprefix(f"{LOGGER_NAME}."),
         **safe_fields,
+        # Active W3C identifiers are authoritative and cannot be forged by a caller field.
+        **current_trace_context(),
     }
     logger.log(level, json.dumps(payload, ensure_ascii=False, default=str))

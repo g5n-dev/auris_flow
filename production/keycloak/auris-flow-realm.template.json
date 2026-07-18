@@ -1,0 +1,92 @@
+{
+  "realm": "auris-flow",
+  "enabled": true,
+  "displayName": "Auris Flow",
+  "sslRequired": "external",
+  "registrationAllowed": false,
+  "resetPasswordAllowed": true,
+  "rememberMe": false,
+  "bruteForceProtected": true,
+  "failureFactor": 5,
+  "waitIncrementSeconds": 60,
+  "maxFailureWaitSeconds": 900,
+  "accessTokenLifespan": 300,
+  "ssoSessionIdleTimeout": 1800,
+  "ssoSessionMaxLifespan": 28800,
+  "clients": [
+    {
+      "clientId": "auris-flow-web",
+      "name": "Auris Flow Web",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "bearerOnly": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "frontchannelLogout": true,
+      "redirectUris": [
+        "https://__AURIS_PUBLIC_HOST__/api/v1/auth/oidc/callback"
+      ],
+      "postLogoutRedirectUris": [
+        "https://__AURIS_PUBLIC_HOST__/*"
+      ],
+      "webOrigins": [
+        "https://__AURIS_PUBLIC_HOST__"
+      ],
+      "attributes": {
+        "pkce.code.challenge.method": "S256",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "backchannel.logout.session.required": "true",
+        "backchannel.logout.revoke.offline.tokens": "true"
+      },
+      "protocolMappers": [
+        {
+          "name": "auris-flow-api-audience",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "auris-flow-api",
+            "id.token.claim": "true",
+            "access.token.claim": "true",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "profile",
+        "email",
+        "roles"
+      ],
+      "optionalClientScopes": []
+    }
+  ],
+  "users": [
+    {
+      "id": "9d1c5cc4-e661-4af6-8a6f-7402d2555c35",
+      "username": "bootstrap-operator",
+      "email": "bootstrap-operator@auris.invalid",
+      "emailVerified": true,
+      "enabled": true,
+      "requiredActions": [
+        "UPDATE_PASSWORD"
+      ],
+      "credentials": [
+        {
+          "type": "password",
+          "value": "__AURIS_BOOTSTRAP_OPERATOR_PASSWORD__",
+          "temporary": true
+        }
+      ],
+      "attributes": {
+        "aurisBootstrapManaged": [
+          "true"
+        ]
+      }
+    }
+  ]
+}

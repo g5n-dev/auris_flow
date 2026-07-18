@@ -8,6 +8,8 @@ import time
 from urllib.error import HTTPError
 
 import pytest
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
 from pydantic import ValidationError
 
 from app.core.audio_playback import create_audio_playback_grant, verify_audio_playback_grant
@@ -32,19 +34,61 @@ from app.services.adapters import (
 )
 
 SECURE_PROD_SETTINGS = {
-    "auth_provider": "signed",
+    "database_url": f"mysql+pymysql://auris:{'M' * 48}@mysql:3306/auris_flow",
+    "redis_url": f"redis://:{'R' * 48}@redis:6379/0",
+    "auth_provider": "oidc",
     "allow_dev_auth": False,
-    "auth_token_secret": "unit-auth-token-secret-32-characters",
+    "oidc_issuer": "https://identity.example.com/realms/auris",
+    "oidc_client_id": "auris-flow-bff",
+    "oidc_client_secret": "I" * 48,
+    "oidc_audience": "auris-flow-api",
+    "oidc_redirect_uri": "https://auris.example.com/api/v1/auth/oidc/callback",
+    "browser_session_cookie_name": "__Host-auris_session",
     "audio_playback_grant_secret": "unit-playback-secret-32-characters",
     "completion_receipt_secret": "unit-completion-secret-32-characters",
+    "experiment_assignment_secret": "unit-experiment-assignment-secret-32-characters",
     "cors_allowed_origins": "https://auris.example.com",
     "trusted_hosts": "auris.example.com",
+    "auris_object_storage_adapter": "real",
+    "object_storage_endpoint": "http://minio:9000",
+    "object_storage_bucket": "auris-unit",
+    "object_storage_access_key": "auris-unit-access",
+    "object_storage_secret_key": "O" * 48,
+    "auris_qdrant_adapter": "real",
+    "qdrant_api_key": "Q" * 48,
+    "auris_embedding_provider": "http",
+    "embedding_endpoint": "https://embeddings.example.com/v1/embeddings",
+    "embedding_model": "multilingual-semantic-v1",
+    "embedding_dimension": 1024,
+    "embedding_api_key": "G" * 48,
+    "auris_dagster_adapter": "real",
+    "dagster_graphql_url": "http://dagster:3000/graphql",
+    "auris_external_callback_adapter": "real",
+    "external_callback_url": "https://callback.example.com/callbacks/platform",
+    "external_callback_allowed_hosts": "callback.example.com",
+    "external_callback_key_bindings": json.dumps(
+        {
+            "callback-2026-07": {
+                "secret": "callback-production-key-material-2026-07-B!",
+                "state": "active",
+            }
+        }
+    ),
+    "external_callback_active_key_id": "callback-2026-07",
+    "dependency_check_mode": "strict",
+    "otel_enabled": True,
+    "otel_exporter_otlp_endpoint": "https://telemetry.example.com/v1/traces",
+    "metrics_enabled": True,
 }
 
 
 def prod_settings(**overrides):
     values = {**SECURE_PROD_SETTINGS, **overrides}
     return Settings(app_env="prod", **values)
+
+
+def transitional_signed_settings(**overrides):
+    return Settings(app_env="staging", auth_provider="signed", **overrides)
 
 
 def _signed_raw_token(secret: str, payload: dict[str, object]) -> str:
@@ -222,7 +266,7 @@ def test_completion_result_reference_families_are_canonical_and_complete() -> No
 
 
 def test_dev_auth_provider_disables_demo_tokens_outside_local_without_override():
-    provider = StaticDevAuthProvider(prod_settings(allow_dev_auth=False))
+    provider = StaticDevAuthProvider(Settings(app_env="staging", allow_dev_auth=False))
     with pytest.raises(ApiError) as exc:
         provider.authenticate("dev-token")
     assert exc.value.code == "DEV_TOKEN_DISABLED"
@@ -337,9 +381,7 @@ def test_signed_auth_provider_accepts_scoped_signed_token():
         project_ids=("sales_qa",),
         expires_at=int(time.time()) + 300,
     )
-    provider = SignedTokenAuthProvider(
-        prod_settings(auth_provider="signed", auth_token_secret=token_key)
-    )
+    provider = SignedTokenAuthProvider(transitional_signed_settings(auth_token_secret=token_key))
 
     actor = provider.authenticate(token)
 
@@ -366,9 +408,7 @@ def test_signed_auth_provider_rejects_legacy_token_missing_required_claims():
             "exp": int(time.time()) + 300,
         },
     )
-    provider = SignedTokenAuthProvider(
-        prod_settings(auth_provider="signed", auth_token_secret=token_key)
-    )
+    provider = SignedTokenAuthProvider(transitional_signed_settings(auth_token_secret=token_key))
 
     with pytest.raises(ApiError) as exc:
         provider.authenticate(legacy)
@@ -380,8 +420,7 @@ def test_signed_auth_provider_rejects_wrong_audience_and_honors_clock_skew():
     token_key = "unit-signing-key-for-provider-tests-32"
     current_time = int(time.time())
     provider = SignedTokenAuthProvider(
-        prod_settings(
-            auth_provider="signed",
+        transitional_signed_settings(
             auth_token_secret=token_key,
             auth_token_clock_skew_seconds=30,
         )
@@ -434,9 +473,7 @@ def test_signed_auth_provider_rejects_tampered_or_expired_token():
         project_ids=("sales_qa",),
         expires_at=int(time.time()) + 300,
     )
-    provider = SignedTokenAuthProvider(
-        prod_settings(auth_provider="signed", auth_token_secret=token_key)
-    )
+    provider = SignedTokenAuthProvider(transitional_signed_settings(auth_token_secret=token_key))
     with pytest.raises(ApiError) as tampered:
         provider.authenticate(f"{valid[:-1]}x")
     assert tampered.value.code == "UNAUTHORIZED"
@@ -468,9 +505,7 @@ def test_signed_auth_provider_fails_closed_without_secret_or_scope():
         project_ids=("sales_qa",),
         expires_at=int(time.time()) + 300,
     )
-    provider = SignedTokenAuthProvider(
-        prod_settings(auth_provider="signed", auth_token_secret=token_key)
-    )
+    provider = SignedTokenAuthProvider(transitional_signed_settings(auth_token_secret=token_key))
     with pytest.raises(ApiError) as missing_scope:
         provider.authenticate(token)
     assert missing_scope.value.code == "UNAUTHORIZED"
@@ -865,11 +900,40 @@ def test_real_dagster_run_config_preserves_custom_config_but_overrides_scope_con
     assert payload["run_config"]["auris_context"]["tenant_id"] == "forged_tenant"
 
 
-def test_real_external_callback_adapter_signs_and_records_protocol_receipt(monkeypatch):
-    monkeypatch.setenv("AURIS_FIXED_CALLBACK_TIME", "2026-07-08T01:02:03+00:00")
+def test_real_dagster_run_config_propagates_current_otel_parent() -> None:
+    client = RealDagsterClient(
+        graphql_url="http://dagster.example.test/graphql",
+        repository_location_name="auris_defs",
+        repository_name="auris_repo",
+        default_job_name="auris_generic_job",
+    )
+    payload = {
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": "trace_server_authoritative",
+        "run_id": "task_run_otel",
+        "dispatch_idempotency_key": "outbox:task-run:task_run_otel",
+        "outbox_fencing_token": "456:3",
+    }
+    provider = TracerProvider()
+    tracer = provider.get_tracer("dagster-propagation-test")
+    try:
+        with tracer.start_as_current_span("outbox.dispatch") as span:
+            span_context = span.get_span_context()
+            run_context = client._run_config(payload)["auris_context"]
+    finally:
+        provider.shutdown()
+
+    assert run_context["otel_trace_id"] == trace.format_trace_id(span_context.trace_id)
+    assert run_context["otel_parent_span_id"] == trace.format_span_id(span_context.span_id)
+    assert run_context["otel_trace_flags"] == f"{int(span_context.trace_flags):02x}"
+
+
+def test_real_external_callback_adapter_signs_and_records_protocol_receipt():
     client = RealExternalCallbackClient(
         callback_url="http://callback.example.test/callbacks/platform",
-        secret="unit-secret",
+        secret="unit-callback-key-material-at-least-32-bytes",
+        clock=lambda: 1_783_474_523,
     )
     captured = {}
 
@@ -908,8 +972,10 @@ def test_real_external_callback_adapter_signs_and_records_protocol_receipt(monke
     assert len(dispatch.details["response_sha256"]) == 64
     assert len(dispatch.details["signature_sha256"]) == 64
     assert captured["headers"]["X-Auris-Idempotency-Key"] == "idem_callback_unit"
-    assert captured["headers"]["X-Auris-Signature-Mode"] == "hmac-sha256"
-    assert captured["headers"]["X-Auris-Signature"].startswith("sha256=")
+    assert captured["headers"]["X-Auris-Signature-Mode"] == "hmac-sha256-v2"
+    assert captured["headers"]["X-Auris-Signature"].startswith("v2=")
+    assert captured["headers"]["X-Auris-Key-Id"] == "local-dev-callback"
+    assert "X-Auris-Signature-Id" not in captured["headers"]
     body = captured["body"].decode("utf-8")
     assert "processed_wav_url" in body
 

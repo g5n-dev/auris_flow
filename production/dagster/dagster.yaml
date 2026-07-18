@@ -1,0 +1,33 @@
+local_artifact_storage:
+  module: dagster._core.storage.root
+  class: LocalArtifactStorage
+  config:
+    base_dir: /var/lib/auris-flow-dagster
+
+run_storage:
+  module: dagster_mysql.run_storage
+  class: MySQLRunStorage
+  config:
+    mysql_url:
+      env: DAGSTER_MYSQL_URL
+
+event_log_storage:
+  module: dagster_mysql.event_log
+  class: MySQLEventLogStorage
+  config:
+    mysql_url:
+      env: DAGSTER_MYSQL_URL
+
+schedule_storage:
+  module: dagster_mysql.schedule_storage
+  class: MySQLScheduleStorage
+  config:
+    mysql_url:
+      env: DAGSTER_MYSQL_URL
+
+run_launcher:
+  module: dagster._core.launcher
+  class: DefaultRunLauncher
+
+telemetry:
+  enabled: false

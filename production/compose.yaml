@@ -1,0 +1,744 @@
+name: ${COMPOSE_PROJECT_NAME:-auris-flow}
+
+x-service-security: &service-security
+  restart: unless-stopped
+  init: true
+  cap_drop: [ALL]
+  security_opt:
+    - no-new-privileges:true
+  networks:
+    - internal
+
+x-app-environment: &app-environment
+  APP_ENV: prod
+  AUTH_PROVIDER: oidc
+  ALLOW_DEV_AUTH: "false"
+  DEPENDENCY_CHECK_MODE: strict
+  REQUIRED_DEPENDENCY_CHECKS: auth,database,redis,object_storage,qdrant,dagster
+  DATABASE_URL_FILE: /run/secrets/runtime_database_url
+  REDIS_URL_FILE: /run/secrets/redis_url
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_BUCKET: auris-flow
+  OBJECT_STORAGE_PROVIDER: minio
+  OBJECT_STORAGE_REGION: us-east-1
+  OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/object_storage_access_key
+  OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key
+  OBJECT_STORAGE_ALLOWED_BUCKETS: auris-flow
+  AURIS_OBJECT_STORAGE_ADAPTER: real
+  QDRANT_URL: http://qdrant:6333
+  QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+  AURIS_QDRANT_ADAPTER: real
+  AURIS_EMBEDDING_PROVIDER: http
+  EMBEDDING_ENDPOINT: ${AURIS_EMBEDDING_ENDPOINT:?set AURIS_EMBEDDING_ENDPOINT}
+  EMBEDDING_MODEL: ${AURIS_EMBEDDING_MODEL:?set AURIS_EMBEDDING_MODEL}
+  EMBEDDING_DIMENSION: ${AURIS_EMBEDDING_DIMENSION:-1024}
+  QDRANT_VECTOR_SIZE: ${AURIS_EMBEDDING_DIMENSION:-1024}
+  EMBEDDING_API_KEY_FILE: /run/secrets/embedding_api_key
+  DAGSTER_GRAPHQL_URL: http://dagster-webserver:3000/graphql
+  DAGSTER_REPOSITORY_LOCATION_NAME: auris_flow_defs
+  DAGSTER_REPOSITORY_NAME: __repository__
+  DAGSTER_DEFAULT_JOB_NAME: auris_flow_generic_job
+  AURIS_DAGSTER_ADAPTER: real
+  AURIS_EXTERNAL_CALLBACK_ADAPTER: real
+  EXTERNAL_CALLBACK_URL: ${AURIS_EXTERNAL_CALLBACK_URL:?set AURIS_EXTERNAL_CALLBACK_URL}
+  EXTERNAL_CALLBACK_ALLOWED_HOSTS: ${AURIS_EXTERNAL_CALLBACK_HOST:?set AURIS_EXTERNAL_CALLBACK_HOST}
+  EXTERNAL_CALLBACK_KEY_BINDINGS_FILE: /run/secrets/external_callback_key_bindings
+  EXTERNAL_CALLBACK_ACTIVE_KEY_ID: callback-v1
+  EXTERNAL_CALLBACK_LEGACY_HMAC_ENABLED: "false"
+  COMPLETION_RECEIPT_KEY_BINDINGS_FILE: /run/secrets/completion_receipt_key_bindings
+  COMPLETION_RECEIPT_ALLOWED_SOURCES: dagster,object_storage,external_callback
+  AUDIO_PLAYBACK_GRANT_SECRET_FILE: /run/secrets/audio_playback_grant_secret
+  EXPERIMENT_ASSIGNMENT_SECRET_FILE: /run/secrets/experiment_assignment_secret
+  OIDC_ISSUER: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow
+  OIDC_DISCOVERY_URL: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow/.well-known/openid-configuration
+  OIDC_CLIENT_ID: auris-flow-web
+  OIDC_AUDIENCE: auris-flow-api
+  OIDC_REDIRECT_URI: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/api/v1/auth/oidc/callback
+  OIDC_SCOPES: openid profile email
+  BROWSER_SESSION_COOKIE_NAME: __Host-auris_session
+  CORS_ALLOWED_ORIGINS: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
+  TRUSTED_HOSTS: ${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST},bff
+  SECURITY_HEADERS_ENABLED: "true"
+  OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
+  OTEL_SERVICE_NAME: auris-flow-bff
+  OTEL_TRACE_SAMPLE_RATIO: ${AURIS_OTEL_TRACE_SAMPLE_RATIO:-0.1}
+  METRICS_ENABLED: "true"
+  METRICS_TRUSTED_CIDRS: ${AURIS_METRICS_TRUSTED_CIDRS:-}
+
+x-app-secrets: &app-secrets
+  - runtime_database_url
+  - redis_url
+  - object_storage_access_key
+  - object_storage_secret_key
+  - qdrant_api_key
+  - embedding_api_key
+  - audio_playback_grant_secret
+  - completion_receipt_key_bindings
+  - external_callback_key_bindings
+  - experiment_assignment_secret
+
+services:
+  mysql:
+    <<: *service-security
+    image: ${MYSQL_IMAGE:-mysql:8.4.5}
+    environment:
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
+    command:
+      - mysqld
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --local-infile=0
+      - --skip-name-resolve
+      - --slow-query-log=1
+      - --long-query-time=1
+    secrets:
+      - mysql_root_password
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: [CMD-SHELL, "MYSQL_PWD=$$(cat /run/secrets/mysql_root_password) mysqladmin ping --protocol=tcp --host=127.0.0.1 --user=root --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    stop_grace_period: 60s
+
+  db-bootstrap:
+    <<: *service-security
+    image: ${MYSQL_IMAGE:-mysql:8.4.5}
+    restart: "no"
+    entrypoint: [/bin/sh, /opt/auris/mysql-bootstrap.sh]
+    environment:
+      MYSQL_HOST: mysql
+    secrets:
+      - mysql_root_password
+      - mysql_runtime_password
+      - mysql_migration_password
+      - keycloak_db_password
+      - dagster_db_password
+    configs:
+      - source: mysql_bootstrap
+        target: /opt/auris/mysql-bootstrap.sh
+        mode: 0555
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  redis:
+    <<: *service-security
+    image: ${REDIS_IMAGE:-redis:7.4.2-alpine3.21}
+    user: "999:999"
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --aclfile
+      - /run/secrets/redis_users_acl
+      - --maxmemory-policy
+      - noeviction
+    secrets:
+      - redis_users_acl
+      - redis_url
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: [CMD-SHELL, "REDISCLI_AUTH=$$(cut -d: -f3 /run/secrets/redis_url | cut -d@ -f1) redis-cli --user default ping | grep -qx PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+
+  minio:
+    <<: *service-security
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    user: "1000:1000"
+    entrypoint: [/bin/sh, /opt/auris/minio-entrypoint.sh]
+    command: [server, /data, --console-address, ":9001"]
+    environment:
+      MINIO_BROWSER: "off"
+    secrets:
+      - object_storage_access_key
+      - object_storage_secret_key
+    configs:
+      - source: minio_entrypoint
+        target: /opt/auris/minio-entrypoint.sh
+        mode: 0555
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: [CMD, curl, --fail, --silent, --show-error, http://127.0.0.1:9000/minio/health/ready]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  minio-bootstrap:
+    <<: *service-security
+    image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
+    restart: "no"
+    entrypoint: [/bin/sh, /opt/auris/minio-bootstrap.sh]
+    secrets:
+      - object_storage_access_key
+      - object_storage_secret_key
+    configs:
+      - source: minio_bootstrap
+        target: /opt/auris/minio-bootstrap.sh
+        mode: 0555
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  qdrant:
+    <<: *service-security
+    image: ${QDRANT_IMAGE:-qdrant/qdrant:v1.14.1}
+    user: "1000:1000"
+    entrypoint: [/bin/sh, /opt/auris/qdrant-entrypoint.sh]
+    secrets:
+      - qdrant_api_key
+    configs:
+      - source: qdrant_entrypoint
+        target: /opt/auris/qdrant-entrypoint.sh
+        mode: 0555
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/6333 && printf 'GET /healthz HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q 'HTTP/1.1 200' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  migrate:
+    <<: *service-security
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    restart: "no"
+    working_dir: /app
+    command: [python, -m, alembic, upgrade, head]
+    environment:
+      APP_ENV: migration
+      DATABASE_URL_FILE: /run/secrets/migration_database_url
+    secrets:
+      - migration_database_url
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+
+  keycloak:
+    <<: *service-security
+    image: ${KEYCLOAK_IMAGE:-quay.io/keycloak/keycloak:26.2.5}
+    user: "1000:0"
+    entrypoint: [/bin/sh, /opt/auris/keycloak-entrypoint.sh]
+    environment:
+      AURIS_PUBLIC_HOST: ${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
+      KC_DB: mysql
+      KC_DB_URL: jdbc:mysql://mysql:3306/keycloak?characterEncoding=UTF-8
+      KC_DB_USERNAME: keycloak
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+    secrets:
+      - keycloak_db_password
+      - keycloak_admin_user
+      - keycloak_admin_password
+      - keycloak_bootstrap_operator_password
+    configs:
+      - source: keycloak_entrypoint
+        target: /opt/auris/keycloak-entrypoint.sh
+        mode: 0555
+      - source: keycloak_realm_template
+        target: /opt/auris/auris-flow-realm.template.json
+        mode: 0444
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+    tmpfs:
+      - /opt/keycloak/data/import:size=4m,mode=0700,uid=1000,gid=0
+    ports:
+      - ${AURIS_KEYCLOAK_ADMIN_PORT:-127.0.0.1:18080}:8080
+    healthcheck:
+      test: [CMD, bash, -c, "exec 3<>/dev/tcp/127.0.0.1/9000 && printf 'GET /health/ready HTTP/1.1\\r\\nHost: localhost\\r\\nConnection: close\\r\\n\\r\\n' >&3 && grep -q '200' <&3"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 60s
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+
+  identity-bootstrap:
+    <<: *service-security
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    command: [python, -m, app.identity_bootstrap]
+    environment:
+      APP_ENV: bootstrap
+      DATABASE_URL_FILE: /run/secrets/runtime_database_url
+      AURIS_BOOTSTRAP_OIDC_ISSUER: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow
+      AURIS_BOOTSTRAP_OIDC_SUBJECT: 9d1c5cc4-e661-4af6-8a6f-7402d2555c35
+      AURIS_BOOTSTRAP_IDENTITY_ID: oidc_bootstrap_operator_001
+      AURIS_BOOTSTRAP_USER_ID: u_bootstrap_operator_001
+      AURIS_BOOTSTRAP_USERNAME: bootstrap-operator
+      AURIS_BOOTSTRAP_EMAIL: bootstrap-operator@auris.invalid
+      AURIS_BOOTSTRAP_DISPLAY_NAME: Bootstrap Operator
+      AURIS_BOOTSTRAP_TENANT_ID: ${AURIS_BOOTSTRAP_TENANT_ID:-aurora_auto}
+      AURIS_BOOTSTRAP_TENANT_NAME: ${AURIS_BOOTSTRAP_TENANT_NAME:-Auris Flow Default Tenant}
+      AURIS_BOOTSTRAP_PROJECT_ID: ${AURIS_BOOTSTRAP_PROJECT_ID:-sales_qa}
+      AURIS_BOOTSTRAP_PROJECT_NAME: ${AURIS_BOOTSTRAP_PROJECT_NAME:-Auris Flow Default Project}
+    secrets:
+      - runtime_database_url
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_healthy
+
+  dagster-code:
+    <<: *service-security
+    image: ${AURIS_DAGSTER_IMAGE:-auris-flow-dagster:dev}
+    build:
+      context: ..
+      dockerfile: production/dagster/Dockerfile
+    command: [grpc]
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+      APP_ENV: prod
+      OTEL_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
+      OTEL_SERVICE_NAME: auris-flow-dagster-code
+      OTEL_TRACE_SAMPLE_RATIO: ${AURIS_OTEL_TRACE_SAMPLE_RATIO:-0.1}
+      OTEL_EXPORT_TIMEOUT_SECONDS: "3"
+      AURIS_BFF_INTERNAL_URL: http://bff:8000
+      AURIS_COMPLETION_RECEIPT_KEYRING_FILE: /run/secrets/completion_receipt_key_bindings
+      AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: ${AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID:-dagster-v1}
+    secrets:
+      - dagster_database_url
+      - completion_receipt_key_bindings
+    volumes:
+      - dagster_compute:/var/lib/auris-flow-dagster
+    healthcheck:
+      test: [CMD, dagster, api, grpc-health-check, --host, 127.0.0.1, --port, "4000"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+
+  dagster-webserver:
+    <<: *service-security
+    image: ${AURIS_DAGSTER_IMAGE:-auris-flow-dagster:dev}
+    build:
+      context: ..
+      dockerfile: production/dagster/Dockerfile
+    command: [webserver]
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+    secrets:
+      - dagster_database_url
+    volumes:
+      - dagster_home:/opt/dagster/home/storage
+    healthcheck:
+      test: [CMD-SHELL, "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/server_info', timeout=2)\""]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    depends_on:
+      dagster-code:
+        condition: service_healthy
+
+  dagster-daemon:
+    <<: *service-security
+    image: ${AURIS_DAGSTER_IMAGE:-auris-flow-dagster:dev}
+    build:
+      context: ..
+      dockerfile: production/dagster/Dockerfile
+    command: [daemon]
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+    secrets:
+      - dagster_database_url
+    volumes:
+      - dagster_home:/opt/dagster/home/storage
+    healthcheck:
+      test: [CMD, /opt/auris/dagster-entrypoint.sh, health]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      dagster-code:
+        condition: service_healthy
+
+  bff:
+    <<: *service-security
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers, --forwarded-allow-ips, "*"]
+    environment:
+      <<: *app-environment
+      WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-2}
+    secrets: *app-secrets
+    healthcheck:
+      test: [CMD-SHELL, "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+      minio-bootstrap:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+      dagster-webserver:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+      identity-bootstrap:
+        condition: service_completed_successfully
+      otel-collector:
+        condition: service_started
+
+  worker:
+    <<: *service-security
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /run/auris:size=16m,mode=0750,uid=10001,gid=10001
+    command: [python, -m, app.workers.outbox_worker, --health-file, /run/auris/outbox-worker.json]
+    environment:
+      <<: *app-environment
+      OTEL_SERVICE_NAME: auris-flow-worker
+      AURIS_OUTBOX_WORKER_LIMIT: "50"
+      AURIS_OUTBOX_HEARTBEAT_INTERVAL_SECONDS: "15"
+    secrets: *app-secrets
+    healthcheck:
+      test: [CMD, python, /app/scripts/check_worker_health.py, /run/auris/outbox-worker.json, "45"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    depends_on:
+      bff:
+        condition: service_healthy
+      otel-collector:
+        condition: service_started
+
+  otel-collector:
+    <<: *service-security
+    image: ${OTEL_COLLECTOR_IMAGE:-otel/opentelemetry-collector-contrib:0.128.0}
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    command: [--config=/etc/otelcol-contrib/config.yaml]
+    configs:
+      - source: otel_collector_config
+        target: /etc/otelcol-contrib/config.yaml
+        mode: 0444
+    healthcheck:
+      test: [CMD, /otelcol-contrib, --version]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      tempo:
+        condition: service_healthy
+
+  tempo:
+    <<: *service-security
+    image: ${TEMPO_IMAGE:-grafana/tempo:2.8.0}
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    command: [-config.file=/etc/tempo.yaml]
+    configs:
+      - source: tempo_config
+        target: /etc/tempo.yaml
+        mode: 0444
+    volumes:
+      - tempo_data:/var/tempo
+    healthcheck:
+      test: [CMD, /tempo, -version]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+  prometheus:
+    <<: *service-security
+    image: ${PROMETHEUS_IMAGE:-prom/prometheus:v3.4.1}
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    command:
+      - --config.file=/etc/prometheus/prometheus.yaml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=30d
+      - --web.enable-lifecycle=false
+    configs:
+      - source: prometheus_config
+        target: /etc/prometheus/prometheus.yaml
+        mode: 0444
+      - source: prometheus_alerts
+        target: /etc/prometheus/alerts.yaml
+        mode: 0444
+    volumes:
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: [CMD, /bin/prometheus, --version]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    depends_on:
+      otel-collector:
+        condition: service_healthy
+      node-exporter:
+        condition: service_healthy
+
+  grafana:
+    <<: *service-security
+    image: ${GRAFANA_IMAGE:-grafana/grafana:12.0.1}
+    user: "472:472"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /var/log/grafana:size=32m,mode=0750,uid=472,gid=472
+    environment:
+      GF_SECURITY_ADMIN_USER__FILE: /run/secrets/grafana_admin_user
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/secrets/grafana_admin_password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_HTTP_PORT: "3000"
+    secrets:
+      - grafana_admin_user
+      - grafana_admin_password
+    configs:
+      - source: grafana_datasources
+        target: /etc/grafana/provisioning/datasources/auris-flow.yaml
+        mode: 0444
+      - source: grafana_dashboard_provider
+        target: /etc/grafana/provisioning/dashboards/auris-flow.yaml
+        mode: 0444
+      - source: grafana_production_dashboard
+        target: /var/lib/grafana/dashboards/production-overview.json
+        mode: 0444
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - ${AURIS_GRAFANA_PORT:-127.0.0.1:13000}:3000
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:3000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      prometheus:
+        condition: service_healthy
+      tempo:
+        condition: service_healthy
+
+  node-exporter:
+    <<: *service-security
+    image: ${NODE_EXPORTER_IMAGE:-prom/node-exporter:v1.9.1}
+    user: "65534:65534"
+    read_only: true
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/var/lib/node_exporter/textfile_collector
+      - --collector.filesystem.mount-points-exclude=^/(dev|proc|sys|var/lib/docker/.+)($$|/)
+    volumes:
+      - type: bind
+        source: /
+        target: /host
+        read_only: true
+        bind:
+          propagation: rslave
+      - type: bind
+        source: ./runtime-metrics
+        target: /var/lib/node_exporter/textfile_collector
+        read_only: true
+    healthcheck:
+      test: [CMD, /bin/node_exporter, --version]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  edge:
+    restart: unless-stopped
+    image: ${AURIS_EDGE_IMAGE:-auris-flow-edge:dev}
+    build:
+      context: ..
+      dockerfile: production/edge/Dockerfile
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+      - /var/cache/nginx:size=64m,mode=0755,uid=101,gid=101
+      - /var/run:size=8m,mode=0755,uid=101,gid=101
+    secrets:
+      - source: tls_cert
+        target: tls_cert
+        uid: "101"
+        gid: "101"
+        mode: 0444
+      - source: tls_key
+        target: tls_key
+        uid: "101"
+        gid: "101"
+        mode: 0400
+    ports:
+      - ${AURIS_HTTP_PORT:-80}:8080
+      - ${AURIS_HTTPS_PORT:-443}:8443
+    networks:
+      internal:
+        aliases:
+          - ${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
+      edge: {}
+    healthcheck:
+      test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    depends_on:
+      bff:
+        condition: service_healthy
+      keycloak:
+        condition: service_healthy
+
+configs:
+  mysql_bootstrap:
+    file: ./mysql/bootstrap.sh
+  minio_entrypoint:
+    file: ./minio/entrypoint.sh
+  minio_bootstrap:
+    file: ./minio/bootstrap.sh
+  qdrant_entrypoint:
+    file: ./qdrant/entrypoint.sh
+  keycloak_entrypoint:
+    file: ./keycloak/entrypoint.sh
+  keycloak_realm_template:
+    file: ./keycloak/auris-flow-realm.template.json
+  otel_collector_config:
+    file: ./observability/otel-collector.yaml
+  tempo_config:
+    file: ./observability/tempo.yaml
+  prometheus_config:
+    file: ./observability/prometheus.yaml
+  prometheus_alerts:
+    file: ./observability/alerts.yaml
+  grafana_datasources:
+    file: ./observability/grafana/provisioning/datasources/auris-flow.yaml
+  grafana_dashboard_provider:
+    file: ./observability/grafana/provisioning/dashboards/auris-flow.yaml
+  grafana_production_dashboard:
+    file: ./observability/grafana/dashboards/production-overview.json
+
+secrets:
+  mysql_root_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/mysql_root_password
+  mysql_runtime_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/mysql_runtime_password
+  mysql_migration_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/mysql_migration_password
+  keycloak_db_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/keycloak_db_password
+  dagster_db_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/dagster_db_password
+  keycloak_admin_user:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/keycloak_admin_user
+  keycloak_admin_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/keycloak_admin_password
+  keycloak_bootstrap_operator_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/keycloak_bootstrap_operator_password
+  redis_users_acl:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/redis_users.acl
+  runtime_database_url:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/runtime_database_url
+  migration_database_url:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/migration_database_url
+  dagster_database_url:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/dagster_database_url
+  redis_url:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/redis_url
+  object_storage_access_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/object_storage_access_key
+  object_storage_secret_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/object_storage_secret_key
+  qdrant_api_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/qdrant_api_key
+  embedding_api_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/embedding_api_key
+  audio_playback_grant_secret:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/audio_playback_grant_secret
+  completion_receipt_key_bindings:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/completion_receipt_key_bindings
+  external_callback_key_bindings:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/external_callback_key_bindings
+  experiment_assignment_secret:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/experiment_assignment_secret
+  tls_cert:
+    file: ${AURIS_TLS_DIR:-./tls}/fullchain.pem
+  tls_key:
+    file: ${AURIS_TLS_DIR:-./tls}/privkey.pem
+  grafana_admin_user:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/grafana_admin_user
+  grafana_admin_password:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/grafana_admin_password
+
+volumes:
+  mysql_data:
+  redis_data:
+  minio_data:
+  qdrant_data:
+  keycloak_data:
+  dagster_home:
+  dagster_compute:
+  tempo_data:
+  prometheus_data:
+  grafana_data:
+
+networks:
+  edge:
+  internal:
+    internal: true

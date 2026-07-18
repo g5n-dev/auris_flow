@@ -1,0 +1,101 @@
+groups:
+  - name: auris-flow-availability
+    rules:
+      - alert: AurisTargetDown
+        expr: up{job=~"auris-flow-bff|otel-collector|keycloak|node"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Auris Flow production dependency is offline"
+          runbook: "operations.md#dependency-offline"
+
+      - alert: AurisApiHighErrorRate
+        expr: |
+          sum(rate(auris_http_requests_total{status_class="5xx"}[5m]))
+          /
+          clamp_min(sum(rate(auris_http_requests_total[5m])), 0.001)
+          > 0.05
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Auris Flow API 5xx ratio exceeds 5%"
+          runbook: "operations.md#api-error-rate"
+
+      - alert: AurisAuthenticationFailureSpike
+        expr: sum(rate(auris_auth_failures_total[5m])) > 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Authentication failures are increasing"
+          runbook: "operations.md#authentication-failures"
+
+  - name: auris-flow-async-delivery
+    rules:
+      - alert: AurisOutboxBacklog
+        expr: auris_outbox_pending > 100
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Outbox backlog exceeds 100 events"
+          runbook: "operations.md#outbox-backlog"
+
+      - alert: AurisOutboxDeadLetters
+        expr: auris_outbox_dead_letter > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "New dead-letter events detected"
+          runbook: "operations.md#dead-letters"
+
+      - alert: AurisCallbackFailureRate
+        expr: sum(rate(auris_callback_outcomes_total{outcome=~"failure|dead_letter"}[10m])) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "External callback failure rate is elevated"
+          runbook: "operations.md#callback-failures"
+
+  - name: auris-flow-capacity-and-recovery
+    rules:
+      - alert: AurisHostDiskWillFill
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+            /
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+          ) < 0.15
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Host filesystem has less than 15% free space"
+          runbook: "operations.md#disk-capacity"
+
+      - alert: AurisHostDiskCritical
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+            /
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+          ) < 0.08
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host filesystem has less than 8% free space"
+          runbook: "operations.md#disk-capacity"
+
+      - alert: AurisBackupStale
+        expr: time() - auris_backup_last_success_timestamp_seconds > 90000
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No successful backup has been observed for 25 hours"
+          runbook: "operations.md#backup-failure"

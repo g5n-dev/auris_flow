@@ -13,17 +13,47 @@ from app.services import adapters as adapter_module
 from app.services.adapters import RealExternalCallbackClient
 
 SECURE_PRODUCTION_SETTINGS = {
-    "auth_provider": "signed",
+    "database_url": f"mysql+pymysql://auris:{'M' * 48}@mysql:3306/auris_flow",
+    "redis_url": f"redis://:{'R' * 48}@redis:6379/0",
+    "auth_provider": "oidc",
     "allow_dev_auth": False,
-    "auth_token_secret": "unit-auth-token-secret-32-characters",
+    "oidc_issuer": "https://identity.example.com/realms/auris",
+    "oidc_client_id": "auris-flow-bff",
+    "oidc_client_secret": "I" * 48,
+    "oidc_audience": "auris-flow-api",
+    "oidc_redirect_uri": "https://auris.example.com/api/v1/auth/oidc/callback",
+    "browser_session_cookie_name": "__Host-auris_session",
     "audio_playback_grant_secret": "unit-playback-secret-32-characters",
     "completion_receipt_secret": "unit-completion-secret-32-characters",
+    "experiment_assignment_secret": "unit-experiment-assignment-secret-32-characters",
     "cors_allowed_origins": "https://auris.example.com",
     "trusted_hosts": "auris.example.com",
+    "auris_object_storage_adapter": "real",
+    "object_storage_endpoint": "http://minio:9000",
+    "object_storage_bucket": "auris-unit",
+    "object_storage_access_key": "auris-unit-access",
+    "object_storage_secret_key": "O" * 48,
+    "auris_qdrant_adapter": "real",
+    "qdrant_api_key": "Q" * 48,
+    "auris_embedding_provider": "http",
+    "embedding_endpoint": "https://embeddings.example.com/v1/embeddings",
+    "embedding_model": "multilingual-semantic-v1",
+    "embedding_dimension": 1024,
+    "embedding_api_key": "G" * 48,
+    "auris_dagster_adapter": "real",
+    "dagster_graphql_url": "http://dagster:3000/graphql",
+    "dependency_check_mode": "strict",
+    "otel_enabled": True,
+    "otel_exporter_otlp_endpoint": "https://telemetry.example.com/v1/traces",
+    "metrics_enabled": True,
 }
 CALLBACK_HOST = "callback.example.com"
 CALLBACK_URL = f"https://{CALLBACK_HOST}/callbacks/platform"
 CALLBACK_SECRET = "unit-callback-secret-at-least-32-characters"
+CALLBACK_KEY_ID = "callback-security-2026-07"
+CALLBACK_KEY_BINDINGS = json.dumps(
+    {CALLBACK_KEY_ID: {"secret": CALLBACK_SECRET, "state": "active"}}
+)
 RECEIPT_ID = "callback_receipt_123"
 
 
@@ -92,7 +122,8 @@ def _production_client(
 ) -> RealExternalCallbackClient:
     return RealExternalCallbackClient(
         callback_url=callback_url,
-        secret=CALLBACK_SECRET,
+        key_bindings=CALLBACK_KEY_BINDINGS,
+        active_key_id=CALLBACK_KEY_ID,
         app_env="prod",
         allowed_hosts=allowed_hosts,
     )
@@ -102,7 +133,8 @@ def test_production_settings_require_https_and_an_explicit_callback_allowlist() 
     common = {
         **SECURE_PRODUCTION_SETTINGS,
         "auris_external_callback_adapter": "real",
-        "external_callback_secret": CALLBACK_SECRET,
+        "external_callback_key_bindings": CALLBACK_KEY_BINDINGS,
+        "external_callback_active_key_id": CALLBACK_KEY_ID,
     }
 
     with pytest.raises(ValidationError, match="EXTERNAL_CALLBACK_URL must use HTTPS"):
@@ -128,7 +160,8 @@ def test_production_settings_reject_callback_host_outside_allowlist() -> None:
             app_env="production",
             auris_external_callback_adapter="real",
             external_callback_url=CALLBACK_URL,
-            external_callback_secret=CALLBACK_SECRET,
+            external_callback_key_bindings=CALLBACK_KEY_BINDINGS,
+            external_callback_active_key_id=CALLBACK_KEY_ID,
             external_callback_allowed_hosts="receipts.example.com",
             **SECURE_PRODUCTION_SETTINGS,
         )
@@ -380,7 +413,7 @@ def test_local_mode_keeps_loopback_http_callback_for_e2e(
     receipt_url = f"http://127.0.0.1:8089/receipts/{RECEIPT_ID}"
     client = RealExternalCallbackClient(
         callback_url=callback_url,
-        secret="auris-dev-callback-secret",
+        secret="auris-local-callback-key-material-32-bytes",
         app_env="local",
         allowed_hosts="",
     )

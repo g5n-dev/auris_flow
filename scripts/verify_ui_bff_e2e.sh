@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "${ROOT}"
 DEFAULT_COMPLETION_HMAC_VALUE="auris-e2e-completion-secret-32chars-minimum"
 DEFAULT_PLAYBACK_GRANT_HMAC_VALUE="auris-e2e-playback-grant-secret-32chars-minimum"
+DEFAULT_CALLBACK_HMAC_VALUE="auris-e2e-callback-key-material-32chars-minimum"
 
 if [ -n "${PYTHON:-}" ]; then
   PYTHON_BIN="${PYTHON}"
@@ -33,6 +34,22 @@ print(
                 ],
             }
         },
+        separators=(",", ":"),
+    )
+)
+PY
+)"
+CALLBACK_HMAC_KEY_ID="${AURIS_E2E_CALLBACK_HMAC_KEY_ID:-auris-e2e-callback}"
+CALLBACK_HMAC_VALUE="${AURIS_E2E_CALLBACK_SHARED_TOKEN:-${DEFAULT_CALLBACK_HMAC_VALUE}}"
+CALLBACK_KEY_BINDINGS_JSON="$(
+  "${PYTHON_BIN}" - "${CALLBACK_HMAC_KEY_ID}" "${CALLBACK_HMAC_VALUE}" <<'PY'
+import json
+import sys
+
+key_id, key_material = sys.argv[1:]
+print(
+    json.dumps(
+        {key_id: {"secret": key_material, "state": "active"}},
         separators=(",", ":"),
     )
 )
@@ -367,14 +384,16 @@ if [ "${FORCE_AUTOSTART}" = "1" ] || ! curl -fsS "${E2E_URL%/}/healthz" >/dev/nu
     wait_for_url "http://127.0.0.1:${DAGSTER_PORT}/healthz" "Dagster protocol fake" "${TMP_DIR}/dagster.log"
     CALLBACK_PORT="${AURIS_E2E_CALLBACK_PORT:-$(free_port)}"
     EXTERNAL_CALLBACK_URL="${EXTERNAL_CALLBACK_URL:-http://127.0.0.1:${CALLBACK_PORT}/callbacks/platform}"
-    CALLBACK_TEST_SHARED_TOKEN="${AURIS_E2E_CALLBACK_SHARED_TOKEN:-auris-dev-callback-token}"
-    EXTERNAL_CALLBACK_SECRET=${CALLBACK_TEST_SHARED_TOKEN}
-    export EXTERNAL_CALLBACK_URL EXTERNAL_CALLBACK_SECRET
+    EXTERNAL_CALLBACK_KEY_BINDINGS="${CALLBACK_KEY_BINDINGS_JSON}"
+    EXTERNAL_CALLBACK_ACTIVE_KEY_ID="${CALLBACK_HMAC_KEY_ID}"
+    export EXTERNAL_CALLBACK_URL EXTERNAL_CALLBACK_KEY_BINDINGS
+    export EXTERNAL_CALLBACK_ACTIVE_KEY_ID
     CALLBACK_RECEIPT_LOG="${TMP_DIR}/callback-receipts.jsonl"
     "${PYTHON_BIN}" scripts/fake_platform_callback_server.py \
       --host 127.0.0.1 \
       --port "${CALLBACK_PORT}" \
-      --secret "${EXTERNAL_CALLBACK_SECRET}" \
+      --key-bindings "${EXTERNAL_CALLBACK_KEY_BINDINGS}" \
+      --active-key-id "${EXTERNAL_CALLBACK_ACTIVE_KEY_ID}" \
       --receipt-log "${CALLBACK_RECEIPT_LOG}" >"${TMP_DIR}/callback.log" 2>&1 &
     CALLBACK_PID=$!
     wait_for_url "http://127.0.0.1:${CALLBACK_PORT}/healthz" "Platform callback fake" "${TMP_DIR}/callback.log"
