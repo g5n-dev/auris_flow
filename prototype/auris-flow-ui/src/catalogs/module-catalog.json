@@ -1,0 +1,1618 @@
+{
+  "moduleConfigs": {
+    "home": {
+      "eyebrow": "租户总览 / 极光汽车",
+      "title": "运营首页",
+      "scope": "今日接入、异常提醒、最近资产",
+      "tabs": [
+        {
+          "id": "overview",
+          "label": "总览"
+        },
+        {
+          "id": "tasks",
+          "label": "待处理"
+        },
+        {
+          "id": "alerts",
+          "label": "异常提醒"
+        },
+        {
+          "id": "assets",
+          "label": "最近资产"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "项目数",
+          "value": "12",
+          "delta": "运行中 9",
+          "tone": "teal"
+        },
+        {
+          "label": "今日音频",
+          "value": "8,426",
+          "delta": "+18.6%",
+          "tone": "blue"
+        },
+        {
+          "label": "自动通过率",
+          "value": "86.4%",
+          "delta": "+2.1%",
+          "tone": "green"
+        },
+        {
+          "label": "待人工复核",
+          "value": "317",
+          "delta": "高优先 42",
+          "tone": "amber"
+        },
+        {
+          "label": "异常资产",
+          "value": "4",
+          "delta": "需回填 2",
+          "tone": "red"
+        },
+        {
+          "label": "模型异常",
+          "value": "2",
+          "delta": "边界/标签",
+          "tone": "violet"
+        }
+      ]
+    },
+    "tenants": {
+      "eyebrow": "平台管理 / 多租户隔离",
+      "title": "租户管理",
+      "scope": "资源配额、成员权限、ASR 数据接入、全局审计",
+      "tabs": [
+        {
+          "id": "overview",
+          "label": "概览"
+        },
+        {
+          "id": "projects",
+          "label": "项目"
+        },
+        {
+          "id": "members",
+          "label": "成员"
+        },
+        {
+          "id": "asr",
+          "label": "ASR 接入"
+        },
+        {
+          "id": "quota",
+          "label": "资源配额"
+        },
+        {
+          "id": "audit",
+          "label": "审计日志"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "活跃租户",
+          "value": "8",
+          "delta": "企业客户",
+          "tone": "teal"
+        },
+        {
+          "label": "项目总数",
+          "value": "31",
+          "delta": "本月 +4",
+          "tone": "blue"
+        },
+        {
+          "label": "ASR 接入",
+          "value": "6",
+          "delta": "2 待授权",
+          "tone": "green"
+        },
+        {
+          "label": "存储使用",
+          "value": "42.8 TB",
+          "delta": "配额 68%",
+          "tone": "amber"
+        },
+        {
+          "label": "审计事件",
+          "value": "1,284",
+          "delta": "高风险 6",
+          "tone": "violet"
+        }
+      ]
+    },
+    "projects": {
+      "eyebrow": "项目工作区 / 极光汽车",
+      "title": "项目管理",
+      "scope": "数据源、成员、标签体系、模型链路",
+      "tabs": [
+        {
+          "id": "overview",
+          "label": "项目概览"
+        },
+        {
+          "id": "sources",
+          "label": "数据源"
+        },
+        {
+          "id": "members",
+          "label": "成员"
+        },
+        {
+          "id": "labels",
+          "label": "标签体系"
+        },
+        {
+          "id": "quality",
+          "label": "质量目标"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "运行项目",
+          "value": "9",
+          "delta": "暂停 1",
+          "tone": "green"
+        },
+        {
+          "label": "今日新增",
+          "value": "8,426",
+          "delta": "5 门店",
+          "tone": "blue"
+        },
+        {
+          "label": "待处理任务",
+          "value": "86",
+          "delta": "积压 12",
+          "tone": "amber"
+        },
+        {
+          "label": "最近评测",
+          "value": "91.2",
+          "delta": "+1.8",
+          "tone": "teal"
+        }
+      ]
+    },
+    "canvas": {
+      "eyebrow": "任务配置 / 数据流程编排",
+      "title": "任务配置",
+      "scope": "流程模板、执行映射、模型链、实验分流、导出运行",
+      "tabs": [
+        {
+          "id": "flow",
+          "label": "流程配置"
+        },
+        {
+          "id": "definition",
+          "label": "流程模板"
+        },
+        {
+          "id": "canvases",
+          "label": "编排版本"
+        },
+        {
+          "id": "io",
+          "label": "输入输出"
+        },
+        {
+          "id": "schedule",
+          "label": "触发与调度"
+        },
+        {
+          "id": "experiments",
+          "label": "AB实验"
+        },
+        {
+          "id": "runs",
+          "label": "运行记录"
+        },
+        {
+          "id": "versions",
+          "label": "版本发布"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "流程模板",
+          "value": "4",
+          "delta": "可复用 / 可派生",
+          "tone": "blue"
+        },
+        {
+          "label": "编排版本",
+          "value": "4",
+          "delta": "主线 v3 / 候选 v4",
+          "tone": "violet"
+        },
+        {
+          "label": "实验分流",
+          "value": "80/20",
+          "delta": "影子评测中",
+          "tone": "amber"
+        },
+        {
+          "label": "平台同步",
+          "value": "5",
+          "delta": "CRM / 单据 / PBX / S3 / 事件",
+          "tone": "teal"
+        },
+        {
+          "label": "触发方式",
+          "value": "15 分钟",
+          "delta": "可改为手动",
+          "tone": "amber"
+        },
+        {
+          "label": "最近运行",
+          "value": "94.8%",
+          "delta": "成功率",
+          "tone": "green"
+        }
+      ]
+    },
+    "data": {
+      "eyebrow": "数据管理 / 多维聚合",
+      "title": "数据管理",
+      "scope": "时间、地点、人物、事件、单据连续上下文",
+      "tabs": [
+        {
+          "id": "audio",
+          "label": "音频数据"
+        },
+        {
+          "id": "people",
+          "label": "人物/声纹"
+        },
+        {
+          "id": "events",
+          "label": "事件"
+        },
+        {
+          "id": "relations",
+          "label": "关联视图"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "音频片段",
+          "value": "128,420",
+          "delta": "有效 74%",
+          "tone": "blue"
+        },
+        {
+          "label": "客户组",
+          "value": "18,932",
+          "delta": "今日 612",
+          "tone": "teal"
+        },
+        {
+          "label": "事件关联",
+          "value": "92.1%",
+          "delta": "漏单 39",
+          "tone": "green"
+        },
+        {
+          "label": "串音候选",
+          "value": "244",
+          "delta": "高优先 24",
+          "tone": "amber"
+        }
+      ]
+    },
+    "knowledge": {
+      "eyebrow": "知识库 / 知识对象生命周期",
+      "title": "知识库",
+      "scope": "连接器、索引构建、知识可视化、质量门禁、效果评估",
+      "tabs": [
+        {
+          "id": "overview",
+          "label": "知识总览"
+        },
+        {
+          "id": "connectors",
+          "label": "知识连接器"
+        },
+        {
+          "id": "indexing",
+          "label": "索引构建"
+        },
+        {
+          "id": "graph",
+          "label": "知识可视化"
+        },
+        {
+          "id": "quality",
+          "label": "质量管理"
+        },
+        {
+          "id": "effects",
+          "label": "效果展示"
+        },
+        {
+          "id": "runs",
+          "label": "运行记录"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "知识对象",
+          "value": "12,846",
+          "delta": "7 类来源",
+          "tone": "blue"
+        },
+        {
+          "label": "索引覆盖",
+          "value": "91.8%",
+          "delta": "+3.4pp",
+          "tone": "green"
+        },
+        {
+          "label": "质量门禁",
+          "value": "6/8",
+          "delta": "2 待处理",
+          "tone": "amber"
+        },
+        {
+          "label": "召回命中",
+          "value": "84.6%",
+          "delta": "R@5",
+          "tone": "teal"
+        },
+        {
+          "label": "效果回写",
+          "value": "37",
+          "delta": "任务/报告",
+          "tone": "violet"
+        }
+      ]
+    },
+    "labels": {
+      "eyebrow": "标签治理 / 版本与冲突",
+      "title": "标签生产治理台",
+      "scope": "标签体系、智能抽取、Prompt 优化、效果评价、发布门禁",
+      "tabs": [
+        {
+          "id": "schema",
+          "label": "标签体系"
+        },
+        {
+          "id": "extraction",
+          "label": "智能抽取"
+        },
+        {
+          "id": "rulesPrompt",
+          "label": "规则/Prompt"
+        },
+        {
+          "id": "review",
+          "label": "评测人审"
+        },
+        {
+          "id": "release",
+          "label": "版本发布"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "标签总数",
+          "value": "118",
+          "delta": "启用 96",
+          "tone": "teal"
+        },
+        {
+          "label": "当前版本",
+          "value": "v1.8.4",
+          "delta": "待发布 v1.9",
+          "tone": "blue"
+        },
+        {
+          "label": "冲突样本",
+          "value": "42",
+          "delta": "待仲裁 6",
+          "tone": "amber"
+        },
+        {
+          "label": "规则命中率",
+          "value": "81.7%",
+          "delta": "+4.9%",
+          "tone": "green"
+        }
+      ]
+    },
+    "insights": {
+      "eyebrow": "洞察 / 智能 BI 大盘",
+      "title": "业务洞察",
+      "scope": "基于标签、音频、单据和复核证据生成北极星指标、归因、报告和 Agent 行动",
+      "tabs": [
+        {
+          "id": "business",
+          "label": "业务大盘"
+        },
+        {
+          "id": "store",
+          "label": "门店归因"
+        },
+        {
+          "id": "sales",
+          "label": "销售绩效"
+        },
+        {
+          "id": "tags",
+          "label": "标签资产"
+        },
+        {
+          "id": "quality",
+          "label": "模型质量"
+        },
+        {
+          "id": "reports",
+          "label": "报告中心"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "北极星",
+          "value": "53.3",
+          "delta": "30 天经营质量",
+          "tone": "blue"
+        },
+        {
+          "label": "成交推进率",
+          "value": "87.5%",
+          "delta": "试驾/异议承接",
+          "tone": "green"
+        },
+        {
+          "label": "报价一致率",
+          "value": "60.0%",
+          "delta": "金额冲突待审",
+          "tone": "amber"
+        },
+        {
+          "label": "报告资产",
+          "value": "4",
+          "delta": "日报/周报/训练包",
+          "tone": "violet"
+        }
+      ]
+    },
+    "evaluation": {
+      "eyebrow": "评测中心 / 模型闭环",
+      "title": "评测中心",
+      "scope": "模型评测、打标评测、Prompt 候选、影子评测、badcase 回流",
+      "tabs": [
+        {
+          "id": "auto",
+          "label": "自动化评测"
+        },
+        {
+          "id": "labeling",
+          "label": "打标评测"
+        },
+        {
+          "id": "prompt",
+          "label": "Prompt优化"
+        },
+        {
+          "id": "manual",
+          "label": "人工评测"
+        },
+        {
+          "id": "sets",
+          "label": "评测集"
+        },
+        {
+          "id": "compare",
+          "label": "模型对比"
+        },
+        {
+          "id": "badcase",
+          "label": "badcase"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "综合得分",
+          "value": "91.2",
+          "delta": "+1.8",
+          "tone": "green"
+        },
+        {
+          "label": "打标 F1",
+          "value": "93.4",
+          "delta": "人审一致 91%",
+          "tone": "teal"
+        },
+        {
+          "label": "Prompt 候选收益",
+          "value": "+2.6pp",
+          "delta": "影子评测",
+          "tone": "blue"
+        },
+        {
+          "label": "badcase 回流",
+          "value": "64",
+          "delta": "Prompt 18",
+          "tone": "violet"
+        }
+      ]
+    },
+    "assets": {
+      "eyebrow": "数据资产 / 目录与血缘",
+      "title": "数据资产",
+      "scope": "资产目录、血缘、回填、质量、资产任务",
+      "tabs": [
+        {
+          "id": "catalog",
+          "label": "资产目录"
+        },
+        {
+          "id": "detail",
+          "label": "资产详情"
+        },
+        {
+          "id": "lineage",
+          "label": "资产血缘"
+        },
+        {
+          "id": "backfill",
+          "label": "数据回填"
+        },
+        {
+          "id": "quality",
+          "label": "资产质量"
+        },
+        {
+          "id": "tasks",
+          "label": "资产任务"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "数据资产",
+          "value": "46",
+          "delta": "已生成 39",
+          "tone": "teal"
+        },
+        {
+          "label": "质量均分",
+          "value": "92.7",
+          "delta": "+1.2",
+          "tone": "green"
+        },
+        {
+          "label": "待回填",
+          "value": "5",
+          "delta": "影响 12 下游",
+          "tone": "amber"
+        },
+        {
+          "label": "失败任务",
+          "value": "4",
+          "delta": "可重跑 3",
+          "tone": "red"
+        }
+      ]
+    },
+    "settings": {
+      "eyebrow": "系统配置 / 项目级策略",
+      "title": "设置",
+      "scope": "模型、工具、阈值、权限、存储、通知",
+      "tabs": [
+        {
+          "id": "model",
+          "label": "模型配置"
+        },
+        {
+          "id": "tools",
+          "label": "工具配置"
+        },
+        {
+          "id": "thresholds",
+          "label": "阈值配置"
+        },
+        {
+          "id": "permission",
+          "label": "权限配置"
+        },
+        {
+          "id": "storage",
+          "label": "存储配置"
+        },
+        {
+          "id": "notice",
+          "label": "通知配置"
+        }
+      ],
+      "metrics": [
+        {
+          "label": "模型链路",
+          "value": "prod-v5",
+          "delta": "灰度 20%",
+          "tone": "blue"
+        },
+        {
+          "label": "工具可用",
+          "value": "18/20",
+          "delta": "2 降级",
+          "tone": "teal"
+        },
+        {
+          "label": "人工网关",
+          "value": "6",
+          "delta": "高风险动作",
+          "tone": "amber"
+        },
+        {
+          "label": "审计覆盖",
+          "value": "100%",
+          "delta": "Trace 开启",
+          "tone": "green"
+        }
+      ]
+    }
+  },
+  "moduleInteractionModels": {
+    "home": {
+      "searchPlaceholder": "搜索项目、异常、实体、证据链",
+      "search": [
+        {
+          "label": "报价金额与单据冲突",
+          "meta": "P0 / 北京 SKP 店 / 去证据审查",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "reviewSample",
+            "objectId": "sample-af-128",
+            "focusMode": "evidence",
+            "title": "报价金额与单据冲突",
+            "detail": "12:27:18 / 报价单 #BJ-041",
+            "origin": {
+              "label": "首页搜索",
+              "module": "home"
+            }
+          }
+        },
+        {
+          "label": "极光中心店实体画像",
+          "meta": "跨项目门店 / 数据聚合树",
+          "route": "data",
+          "target": {
+            "module": "data",
+            "tab": "relations",
+            "objectKind": "dataAsset",
+            "objectId": "AF-128",
+            "title": "极光中心店实体画像",
+            "detail": "空间优先 / AF-128",
+            "origin": {
+              "label": "首页搜索",
+              "module": "home"
+            }
+          }
+        },
+        {
+          "label": "事件标签资产待回填",
+          "meta": "影响 12 下游 / 数据资产",
+          "route": "assets",
+          "target": {
+            "module": "assets",
+            "tab": "backfill",
+            "objectKind": "asset",
+            "objectId": "auris/label/event_tags",
+            "focusMode": "detail",
+            "title": "事件标签资产待回填",
+            "origin": {
+              "label": "首页搜索",
+              "module": "home"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "12 项目 / 8,426 音频",
+          "detail": "保留今日接入、异常和最近资产"
+        },
+        {
+          "label": "待人工",
+          "result": "317 项",
+          "detail": "低置信、金额冲突、串音候选进入人工网关"
+        },
+        {
+          "label": "异常资产",
+          "result": "4 项",
+          "detail": "优先展示待回填和失败分区"
+        }
+      ],
+      "crud": [
+        {
+          "action": "新建项目",
+          "target": "项目工作区",
+          "route": "projects",
+          "detail": "先建项目，再接入数据源和标签体系"
+        },
+        {
+          "action": "处理复核",
+          "target": "调听证据",
+          "route": "listening",
+          "detail": "进入当前高优先证据样本"
+        },
+        {
+          "action": "创建回填",
+          "target": "数据资产",
+          "route": "assets",
+          "detail": "从异常资产生成回填草稿"
+        }
+      ],
+      "exportName": "运营首页处理闭环报表"
+    },
+    "tenants": {
+      "searchPlaceholder": "搜索租户、成员、项目、ASR 接入、审计事件",
+      "search": [
+        {
+          "label": "极光汽车",
+          "meta": "活跃 / 12 项目 / 存储 18.4 TB",
+          "route": "tenants"
+        },
+        {
+          "label": "ASR 增量拉取",
+          "meta": "火山 ASR / 5 分钟 sensor / 41 成功",
+          "route": "tenants"
+        },
+        {
+          "label": "成员角色变更",
+          "meta": "14:22 / 全局审计 / 标注主管变更",
+          "route": "tenants"
+        },
+        {
+          "label": "北区经销集团",
+          "meta": "高风险 1 / 售后维修工单关联",
+          "route": "projects"
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "8 租户",
+          "detail": "显示所有隔离边界"
+        },
+        {
+          "label": "有风险",
+          "result": "3 租户",
+          "detail": "配额、审计或项目健康异常"
+        },
+        {
+          "label": "试运行",
+          "result": "2 租户",
+          "detail": "适合补齐场景和资源配额"
+        },
+        {
+          "label": "暂停",
+          "result": "1 租户",
+          "detail": "仅保留审计与历史资产查看"
+        }
+      ],
+      "crud": [
+        {
+          "action": "新建租户",
+          "target": "租户边界",
+          "route": "tenants",
+          "detail": "创建隔离边界，不自动造业务数据"
+        },
+        {
+          "action": "配置 ASR 接入",
+          "target": "租户授权",
+          "route": "tenants",
+          "detail": "登记外部 ASR 拉取凭证、游标、输出资产和审计范围"
+        },
+        {
+          "action": "调整配额",
+          "target": "资源配额",
+          "route": "tenants",
+          "detail": "写入配额草稿并进入审计"
+        },
+        {
+          "action": "分配成员",
+          "target": "成员权限",
+          "route": "tenants",
+          "detail": "成员变更记录到全局审计"
+        }
+      ],
+      "exportName": "租户配额与审计清单"
+    },
+    "projects": {
+      "searchPlaceholder": "搜索项目、数据源、成员、质量目标",
+      "search": [
+        {
+          "label": "销售话术质检",
+          "meta": "运行中 / 平台登录 + 音频 URL + 认证事件",
+          "route": "projects"
+        },
+        {
+          "label": "音频 URL 接口",
+          "meta": "项目数据源 / 去任务配置",
+          "route": "canvas"
+        },
+        {
+          "label": "标签体系 v1.8.4",
+          "meta": "项目引用 / 去标签治理",
+          "route": "labels"
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "9 项目",
+          "detail": "显示当前租户所有项目"
+        },
+        {
+          "label": "运行中",
+          "result": "6 项",
+          "detail": "数据源、标签体系和任务均已生效"
+        },
+        {
+          "label": "需处理",
+          "result": "3 项",
+          "detail": "待接入、评测中或资产异常"
+        }
+      ],
+      "crud": [
+        {
+          "action": "新建项目",
+          "target": "项目容器",
+          "route": "projects",
+          "detail": "创建业务范围和负责人"
+        },
+        {
+          "action": "接入数据",
+          "target": "任务配置",
+          "route": "canvas",
+          "detail": "配置后台登录、租户/员工、音频 URL、认证事件接口"
+        },
+        {
+          "action": "调整质量目标",
+          "target": "质量目标",
+          "route": "evaluation",
+          "detail": "进入评测中心校准阈值"
+        }
+      ],
+      "exportName": "项目工作区配置清单"
+    },
+    "canvas": {
+      "searchPlaceholder": "搜索流程模板、接口节点、运行记录、发布版本",
+      "search": [
+        {
+          "label": "后台登录平台",
+          "meta": "认证前置 / platform_session / 外部数据源",
+          "route": "canvas",
+          "target": {
+            "module": "canvas",
+            "tab": "inputs",
+            "objectKind": "canvasNode",
+            "objectId": "platformAuth",
+            "focusMode": "detail",
+            "title": "后台登录平台",
+            "origin": {
+              "label": "任务配置搜索",
+              "module": "canvas"
+            }
+          }
+        },
+        {
+          "label": "音频 URL 接口",
+          "meta": "录音 URL、开始时间、时长、设备信息",
+          "route": "canvas",
+          "target": {
+            "module": "canvas",
+            "tab": "inputs",
+            "objectKind": "canvasNode",
+            "objectId": "audioUrlApi",
+            "focusMode": "detail",
+            "title": "音频 URL 接口",
+            "origin": {
+              "label": "任务配置搜索",
+              "module": "canvas"
+            }
+          }
+        },
+        {
+          "label": "认证事件接口",
+          "meta": "报价、试驾、接待、风险事件",
+          "route": "canvas",
+          "target": {
+            "module": "canvas",
+            "tab": "inputs",
+            "objectKind": "canvasNode",
+            "objectId": "eventApi",
+            "focusMode": "detail",
+            "title": "认证事件接口",
+            "origin": {
+              "label": "任务配置搜索",
+              "module": "canvas"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "5 阶段 / 4 画布",
+          "detail": "输入、Agent、模型链、实验、导出"
+        },
+        {
+          "label": "待配置",
+          "result": "3 节点",
+          "detail": "接口字段、IO Manager 或权限缺失"
+        },
+        {
+          "label": "高风险",
+          "result": "2 变更",
+          "detail": "发布、回填和覆盖人工标注需要确认"
+        },
+        {
+          "label": "运行失败",
+          "result": "3 run",
+          "detail": "可重跑或转人工处理"
+        }
+      ],
+      "crud": [
+        {
+          "action": "添加节点",
+          "target": "画布节点",
+          "route": "canvas",
+          "detail": "只加入当前任务草稿"
+        },
+        {
+          "action": "保存草稿",
+          "target": "任务版本",
+          "route": "canvas",
+          "detail": "保存配置，不修改全局数据源"
+        },
+        {
+          "action": "发布版本",
+          "target": "任务版本",
+          "route": "canvas",
+          "detail": "进入兼容性校验和发布记录"
+        }
+      ],
+      "exportName": "任务配置与接口映射"
+    },
+    "data": {
+      "searchPlaceholder": "搜索空间、时间、人物、事件、单据、音频资产",
+      "search": [
+        {
+          "label": "北京区域 / 极光中心店",
+          "meta": "空间聚合 / 2 待处理",
+          "route": "data",
+          "target": {
+            "module": "data",
+            "tab": "relations",
+            "objectKind": "dataAsset",
+            "objectId": "AF-128",
+            "title": "北京区域 / 极光中心店",
+            "origin": {
+              "label": "数据管理搜索",
+              "module": "data"
+            }
+          }
+        },
+        {
+          "label": "销售A / 陈先生",
+          "meta": "人物聚合 / AF-128 / 去调听",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "dataAsset",
+            "objectId": "AF-128",
+            "focusMode": "evidence",
+            "title": "销售A / 陈先生",
+            "origin": {
+              "label": "数据管理搜索",
+              "module": "data"
+            }
+          }
+        },
+        {
+          "label": "报价单 #BJ-041",
+          "meta": "业务单据 / 金额冲突",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "reviewSample",
+            "objectId": "sample-af-128",
+            "focusMode": "evidence",
+            "title": "报价单 #BJ-041",
+            "detail": "金额冲突 / 12:27:18",
+            "origin": {
+              "label": "数据管理搜索",
+              "module": "data"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "128,420 音频片段",
+          "detail": "保留空间、时间、人物、事件聚合"
+        },
+        {
+          "label": "待处理",
+          "result": "244 串音候选",
+          "detail": "过滤低置信、串音、单据冲突"
+        },
+        {
+          "label": "已关联单据",
+          "result": "92.1%",
+          "detail": "只看音频与业务单据已对齐样本"
+        },
+        {
+          "label": "缺资产",
+          "result": "39 漏单",
+          "detail": "缺音频 URL、单据或标签资产"
+        }
+      ],
+      "crud": [
+        {
+          "action": "新增数据源",
+          "target": "任务配置",
+          "route": "canvas",
+          "detail": "从连接器接入，不在列表里造数据"
+        },
+        {
+          "action": "编辑聚合",
+          "target": "聚合优先级",
+          "route": "data",
+          "detail": "拖拽空间/时间/人物/事件重排"
+        },
+        {
+          "action": "进入调听",
+          "target": "叶子对象",
+          "route": "listening",
+          "detail": "保留当前选中叶子和证据链"
+        }
+      ],
+      "exportName": "多维聚合数据清单"
+    },
+    "knowledge": {
+      "searchPlaceholder": "搜索知识源、SOP、FAQ、标签样本、索引版本、质量门禁",
+      "search": [
+        {
+          "label": "销售话术 SOP",
+          "meta": "文档库 / chunk 1,284 / 索引 v3",
+          "route": "knowledge",
+          "target": {
+            "module": "knowledge",
+            "tab": "connectors",
+            "objectKind": "knowledge",
+            "objectId": "sop",
+            "focusMode": "source",
+            "title": "销售话术 SOP",
+            "origin": {
+              "label": "知识库搜索",
+              "module": "knowledge"
+            }
+          }
+        },
+        {
+          "label": "车型价格知识",
+          "meta": "产品资料 + 报价单样本 / 质量 94",
+          "route": "knowledge",
+          "target": {
+            "module": "knowledge",
+            "tab": "connectors",
+            "objectKind": "knowledge",
+            "objectId": "product",
+            "focusMode": "source",
+            "title": "车型价格知识",
+            "origin": {
+              "label": "知识库搜索",
+              "module": "knowledge"
+            }
+          }
+        },
+        {
+          "label": "报价异议标签样本",
+          "meta": "标签资产 / 召回训练集 / 去标签治理",
+          "route": "labels",
+          "target": {
+            "module": "labels",
+            "tab": "versions",
+            "objectKind": "labelIntent",
+            "objectId": "priceObjection",
+            "title": "报价异议标签样本",
+            "origin": {
+              "label": "知识库搜索",
+              "module": "knowledge"
+            }
+          }
+        },
+        {
+          "label": "音频证据包",
+          "meta": "调听片段 / 低置信样本 / 去证据审查",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "evidence",
+            "objectId": "EVP-quote-128",
+            "focusMode": "evidence",
+            "title": "音频证据包",
+            "origin": {
+              "label": "知识库搜索",
+              "module": "knowledge"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "12,846 知识对象",
+          "detail": "文档、FAQ、标签样本、证据资产和实体关系"
+        },
+        {
+          "label": "待同步",
+          "result": "3 来源",
+          "detail": "CRM FAQ、产品手册和音频证据包等待同步"
+        },
+        {
+          "label": "质量风险",
+          "result": "2 门禁",
+          "detail": "重复切片和冲突实体需要处理"
+        },
+        {
+          "label": "可发布",
+          "result": "6 知识集",
+          "detail": "通过召回、脱敏和新鲜度检查"
+        }
+      ],
+      "crud": [
+        {
+          "action": "新增知识源",
+          "target": "知识连接器",
+          "route": "canvas",
+          "detail": "进入任务配置绑定文档库、API 或资产来源"
+        },
+        {
+          "action": "构建索引",
+          "target": "索引版本",
+          "route": "knowledge",
+          "detail": "生成切片、向量和召回索引版本"
+        },
+        {
+          "action": "运行质量检测",
+          "target": "知识质量",
+          "route": "knowledge",
+          "detail": "检查新鲜度、重复率、冲突、脱敏和召回效果"
+        },
+        {
+          "action": "下钻证据",
+          "target": "调听样本",
+          "route": "listening",
+          "detail": "从知识命中回到原始音频证据"
+        }
+      ],
+      "exportName": "知识库质量与效果报告"
+    },
+    "labels": {
+      "searchPlaceholder": "搜索标签体系、候选版本、规则、冲突样本",
+      "search": [
+        {
+          "label": "成交意向",
+          "meta": "L5 意图标签 / 候选版本 v1.9.0-rc2",
+          "route": "labels",
+          "target": {
+            "module": "labels",
+            "tab": "schema",
+            "objectKind": "labelIntent",
+            "objectId": "dealIntent",
+            "title": "成交意向",
+            "origin": {
+              "label": "标签治理搜索",
+              "module": "labels"
+            }
+          }
+        },
+        {
+          "label": "报价金额",
+          "meta": "L4 实体标签 / 金额冲突 15",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "reviewSample",
+            "objectId": "sample-af-128",
+            "focusMode": "evidence",
+            "title": "报价金额",
+            "detail": "金额冲突 15",
+            "origin": {
+              "label": "标签治理搜索",
+              "module": "labels"
+            }
+          }
+        },
+        {
+          "label": "Human Loop HR-1029",
+          "meta": "待人工 / 规则 vs ASR",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "labelReview",
+            "objectId": "HR-1029",
+            "focusMode": "evidence",
+            "title": "Human Loop HR-1029",
+            "origin": {
+              "label": "标签治理搜索",
+              "module": "labels"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "118 标签",
+          "detail": "体系、版本、规则、冲突都可追踪"
+        },
+        {
+          "label": "候选版本",
+          "result": "v1.9.0-rc2 / 5 层命中",
+          "detail": "只写候选，不覆盖生效版本"
+        },
+        {
+          "label": "有冲突",
+          "result": "42 样本",
+          "detail": "字段差异、ASR、人工标注冲突"
+        },
+        {
+          "label": "待人工",
+          "result": "2 项",
+          "detail": "接受、修改、拒绝都回写候选版本"
+        }
+      ],
+      "crud": [
+        {
+          "action": "创建候选标签",
+          "target": "标签草稿",
+          "route": "labels",
+          "detail": "从意图和证据生成候选标签"
+        },
+        {
+          "action": "修改规则",
+          "target": "标签规则",
+          "route": "labels",
+          "detail": "规则变更进入实验和发布门禁"
+        },
+        {
+          "action": "处理冲突",
+          "target": "证据审查",
+          "route": "listening",
+          "detail": "带着标签上下文回到原始证据"
+        }
+      ],
+      "exportName": "标签版本与冲突仲裁记录"
+    },
+    "insights": {
+      "searchPlaceholder": "搜索门店、销售、标签、模型质量和证据样本",
+      "search": [
+        {
+          "label": "价格异议上升",
+          "meta": "18.8% / 北京 SKP 店 / 去证据样本",
+          "route": "listening"
+        },
+        {
+          "label": "门店异常",
+          "meta": "7 个 / 极光中心店串音风险",
+          "route": "data"
+        },
+        {
+          "label": "Boundary F1 下降",
+          "meta": "88.6 / 发布观察",
+          "route": "evaluation"
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "5 洞察视图",
+          "detail": "业务、门店、销售、标签、模型质量"
+        },
+        {
+          "label": "可下钻",
+          "result": "96.8%",
+          "detail": "有音频、单据或标签证据链"
+        },
+        {
+          "label": "高风险",
+          "result": "7 异常",
+          "detail": "门店、标签或模型质量异常"
+        },
+        {
+          "label": "待回写",
+          "result": "4 资产",
+          "detail": "洞察报告、评测样本、标签资产待同步"
+        }
+      ],
+      "crud": [
+        {
+          "action": "生成报告",
+          "target": "洞察报告资产",
+          "route": "assets",
+          "detail": "把结论和证据链写入报告资产"
+        },
+        {
+          "action": "下钻证据",
+          "target": "调听样本",
+          "route": "listening",
+          "detail": "从聚合指标回到原始片段"
+        },
+        {
+          "action": "创建动作",
+          "target": "任务/标签/评测",
+          "route": "canvas",
+          "detail": "从洞察推荐生成处理草稿"
+        }
+      ],
+      "exportName": "业务洞察证据链报告"
+    },
+    "evaluation": {
+      "searchPlaceholder": "搜索模型版本、评测集、badcase、发布阻断",
+      "search": [
+        {
+          "label": "边界 F1 下降",
+          "meta": "prod-v5 / -2.1 / 观察",
+          "route": "evaluation",
+          "target": {
+            "module": "evaluation",
+            "tab": "compare",
+            "objectKind": "evaluationCapability",
+            "objectId": "boundary",
+            "title": "边界 F1 下降",
+            "origin": {
+              "label": "评测中心搜索",
+              "module": "evaluation"
+            }
+          }
+        },
+        {
+          "label": "C-1028 串音误归属",
+          "meta": "badcase / 去证据审查",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "evaluationBadcase",
+            "objectId": "C-1028",
+            "focusMode": "matrix",
+            "title": "C-1028 串音误归属",
+            "origin": {
+              "label": "评测中心搜索",
+              "module": "evaluation"
+            }
+          }
+        },
+        {
+          "label": "标签准确率 93.4",
+          "meta": "候选版本回流",
+          "route": "labels",
+          "target": {
+            "module": "labels",
+            "tab": "versions",
+            "objectKind": "labelIntent",
+            "objectId": "quote",
+            "title": "标签准确率 93.4",
+            "origin": {
+              "label": "评测中心搜索",
+              "module": "evaluation"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "4 能力维度",
+          "detail": "ASR、边界、串音、标签"
+        },
+        {
+          "label": "阻断",
+          "result": "1 项",
+          "detail": "边界 F1 下降需观察"
+        },
+        {
+          "label": "新增 badcase",
+          "result": "64 条",
+          "detail": "可回流到规则和训练样本"
+        },
+        {
+          "label": "可发布",
+          "result": "3 项",
+          "detail": "无发布阻断的能力项"
+        }
+      ],
+      "crud": [
+        {
+          "action": "新增评测集",
+          "target": "评测样本",
+          "route": "evaluation",
+          "detail": "从证据样本或 badcase 生成"
+        },
+        {
+          "action": "标记 badcase",
+          "target": "证据审查",
+          "route": "listening",
+          "detail": "回到原始片段补充归因"
+        },
+        {
+          "action": "回流规则",
+          "target": "标签治理",
+          "route": "labels",
+          "detail": "将误差转成规则候选"
+        }
+      ],
+      "exportName": "模型评测与 badcase 报告"
+    },
+    "assets": {
+      "searchPlaceholder": "搜索资产 Key、分区、血缘、回填、运行记录",
+      "search": [
+        {
+          "label": "事件标签资产",
+          "meta": "待回填 / 影响 12 下游",
+          "route": "assets",
+          "target": {
+            "module": "assets",
+            "tab": "backfill",
+            "objectKind": "asset",
+            "objectId": "auris/label/event_tags",
+            "title": "事件标签资产",
+            "origin": {
+              "label": "资产搜索",
+              "module": "assets"
+            }
+          }
+        },
+        {
+          "label": "ASR 转写资产",
+          "meta": "失败 3 分区 / 可重跑",
+          "route": "assets",
+          "target": {
+            "module": "assets",
+            "tab": "quality",
+            "objectKind": "asset",
+            "objectId": "auris/model/asr_transcripts",
+            "title": "ASR 转写资产",
+            "origin": {
+              "label": "资产搜索",
+              "module": "assets"
+            }
+          }
+        },
+        {
+          "label": "报价金额冲突证据包",
+          "meta": "证据链 / 去调听",
+          "route": "listening",
+          "target": {
+            "module": "listening",
+            "objectKind": "evidence",
+            "objectId": "EVP-quote-128",
+            "focusMode": "evidence",
+            "title": "报价金额冲突证据包",
+            "origin": {
+              "label": "资产搜索",
+              "module": "assets"
+            }
+          }
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "46 数据资产",
+          "detail": "目录、详情、血缘、回填、质量、任务"
+        },
+        {
+          "label": "待回填",
+          "result": "5 项",
+          "detail": "展示影响下游和审批策略"
+        },
+        {
+          "label": "失败任务",
+          "result": "4 项",
+          "detail": "可重跑或进入人工确认"
+        },
+        {
+          "label": "需人工",
+          "result": "2 门禁",
+          "detail": "覆盖回填和人工标注影响"
+        }
+      ],
+      "crud": [
+        {
+          "action": "创建回填草稿",
+          "target": "数据回填",
+          "route": "assets",
+          "detail": "先评估影响范围，再提交审批"
+        },
+        {
+          "action": "重跑质量校验",
+          "target": "资产质量",
+          "route": "assets",
+          "detail": "不会覆盖人工确认结果"
+        },
+        {
+          "action": "查看血缘",
+          "target": "资产血缘",
+          "route": "assets",
+          "detail": "从资产回到上游数据和下游洞察"
+        }
+      ],
+      "exportName": "数据资产血缘与回填计划"
+    },
+    "settings": {
+      "searchPlaceholder": "搜索模型、工具、阈值、权限、存储、通知配置",
+      "search": [
+        {
+          "label": "低置信阈值",
+          "meta": "0.78 / Human Review Gateway",
+          "route": "settings"
+        },
+        {
+          "label": "批量回填审批",
+          "meta": "高风险动作 / 需管理员确认",
+          "route": "settings"
+        },
+        {
+          "label": "ASR 服务接入",
+          "meta": "v2.3.1 / 输出拆分",
+          "route": "canvas"
+        }
+      ],
+      "filters": [
+        {
+          "label": "全部",
+          "result": "6 配置域",
+          "detail": "模型、工具、阈值、权限、存储、通知"
+        },
+        {
+          "label": "需审批",
+          "result": "3 项",
+          "detail": "模型、阈值、批量影响配置"
+        },
+        {
+          "label": "高风险",
+          "result": "6 动作",
+          "detail": "人工覆盖、回填、发布阻断等"
+        },
+        {
+          "label": "草稿",
+          "result": "1 版本",
+          "detail": "v3.3.0-rc1 等待 Policy Guard"
+        }
+      ],
+      "crud": [
+        {
+          "action": "编辑配置",
+          "target": "配置草稿",
+          "route": "settings",
+          "detail": "先保存草稿，再进入 Policy Guard"
+        },
+        {
+          "action": "发布版本",
+          "target": "配置版本",
+          "route": "settings",
+          "detail": "审批通过后生效，可回滚"
+        },
+        {
+          "action": "查看任务引用",
+          "target": "任务配置",
+          "route": "canvas",
+          "detail": "确认模型和工具被哪些流程使用"
+        }
+      ],
+      "exportName": "项目级配置与发布审计"
+    }
+  }
+}

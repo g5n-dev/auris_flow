@@ -1,0 +1,918 @@
+from __future__ import annotations
+
+from typing import Any
+
+from fastapi import APIRouter
+from sqlalchemy import select
+
+from app.api.deps import ContextDep, SessionDep
+from app.core.response import envelope
+from app.models import (
+    AgentDecision,
+    AgentRun,
+    AssetLineageEdge,
+    AssetMaterialization,
+    AuditLog,
+    HumanReviewDecision,
+    HumanReviewTask,
+    JsonResource,
+    KnowledgeEffect,
+    KnowledgeIndex,
+    KnowledgeQualityGate,
+    KnowledgeSource,
+    LabelCandidate,
+    LabelVersion,
+    ListeningAnnotation,
+    OutboxDeliveryAttempt,
+    OutboxEvent,
+    PromptVersionCandidate,
+    RunRecord,
+    ToolCall,
+    TraceRef,
+    VoiceprintEnrollment,
+)
+from app.services.read_policy_service import (
+    can_read_human_review_task,
+    can_read_resource_collection,
+    readable_resource_collections,
+    require_trace_read,
+    trace_payload_field_names,
+    trace_reference_ids,
+    trace_reference_is_visible,
+)
+
+router = APIRouter(tags=["traces"])
+
+NON_ADMIN_TRACE_SCALAR_FIELDS = frozenset(
+    {
+        "action",
+        "adapter",
+        "agent_run_id",
+        "aggregate_id",
+        "aggregate_type",
+        "annotation_id",
+        "attempt_count",
+        "attempt_id",
+        "attempt_number",
+        "audio_session_id",
+        "available_at",
+        "candidate_id",
+        "collection",
+        "completed_at",
+        "correlation_id",
+        "decision_id",
+        "decision_type",
+        "delivery_mode",
+        "delivery_state",
+        "edge_id",
+        "effect_id",
+        "enrollment_id",
+        "error_code",
+        "event_id",
+        "event_type",
+        "gate_id",
+        "hit_rate",
+        "id",
+        "index_id",
+        "knowledge_effect_id",
+        "knowledge_gate_id",
+        "knowledge_index_id",
+        "knowledge_source_id",
+        "kind",
+        "label_version_id",
+        "lease_generation",
+        "lineage_source",
+        "materialization_id",
+        "object_id",
+        "operation",
+        "parent_trace_id",
+        "partition_key",
+        "processed_at",
+        "reconcile_attempt_count",
+        "ref_role",
+        "request_id",
+        "retry_after_seconds",
+        "retryable",
+        "review_task_id",
+        "root_trace_id",
+        "run_id",
+        "run_type",
+        "score",
+        "source_asset_key",
+        "source_field",
+        "source_id",
+        "source_run_id",
+        "source_run_type",
+        "source_type",
+        "started_at",
+        "status",
+        "target_asset_key",
+        "tool",
+        "tool_call_id",
+        "trace_ref_id",
+        "vector_collection",
+        "voiceprint_id",
+    }
+)
+NON_ADMIN_TRACE_FIELD_LISTS = frozenset(
+    {
+        "adapter_dispatch_fields",
+        "dispatch_fields",
+        "input_ref_fields",
+        "result_ref_fields",
+        "write_policy_fields",
+    }
+)
+
+
+def _allows_raw_trace_payloads(ctx: ContextDep) -> bool:
+    return bool({"project_admin", "system"}.intersection(ctx.roles))
+
+
+def _non_admin_trace_span(span: dict[str, Any]) -> dict[str, Any]:
+    """Project a span to reviewed scalars and JSON field names only."""
+    projected: dict[str, Any] = {
+        field: value
+        for field, value in span.items()
+        if field in NON_ADMIN_TRACE_SCALAR_FIELDS
+        and (value is None or isinstance(value, str | int | float | bool))
+    }
+    for field in NON_ADMIN_TRACE_FIELD_LISTS:
+        value = span.get(field)
+        if isinstance(value, list) and all(isinstance(item, str) for item in value):
+            projected[field] = value
+    return projected
+
+
+def _nested_payload_fields(values: list[dict[str, Any]]) -> list[str]:
+    return sorted({field for value in values for field in trace_payload_field_names(value)})
+
+
+def _decision_task_id(decision: HumanReviewDecision) -> str | None:
+    return decision.review_task_id or decision.payload.get("review_task_id")
+
+
+def outbox_span(event: OutboxEvent) -> dict:
+    adapter_dispatch = event.payload.get("adapter_dispatch")
+    error_code = None
+    retryable = None
+    retry_after_seconds = event.payload.get("retry_after_seconds")
+    if isinstance(adapter_dispatch, dict):
+        error_code = adapter_dispatch.get("error_code")
+        retryable = adapter_dispatch.get("retryable")
+        retry_after_seconds = adapter_dispatch.get("retry_after_seconds", retry_after_seconds)
+    if error_code is None and event.last_error and ":" in event.last_error:
+        error_code = event.last_error.split(":", 1)[0]
+    if retryable is None and event.last_error:
+        retryable = event.status == "pending"
+    next_actions = []
+    if event.status == "pending" and event.last_error:
+        next_actions.append(
+            {
+                "key": "retry_scheduled",
+                "label": "等待自动重试",
+                "available_at": event.available_at.isoformat() if event.available_at else None,
+            }
+        )
+    if event.status == "dead_letter":
+        next_actions.append({"key": "retry", "label": "创建重试运行"})
+    if event.payload.get("trace_id"):
+        next_actions.append(
+            {
+                "key": "view_trace",
+                "label": "查看 Trace",
+                "route": f"traces/{event.payload.get('trace_id')}",
+            }
+        )
+    return {
+        "kind": "outbox",
+        "id": event.event_id,
+        "event_type": event.event_type,
+        "aggregate_type": event.aggregate_type,
+        "aggregate_id": event.aggregate_id,
+        "status": event.status,
+        "attempt_count": event.attempt_count,
+        "reconcile_attempt_count": event.reconcile_attempt_count,
+        "delivery_state": event.delivery_state,
+        "retryable": retryable,
+        "retry_after_seconds": retry_after_seconds,
+        "available_at": event.available_at.isoformat() if event.available_at else None,
+        "last_error": event.last_error,
+        "error_code": error_code,
+        "processed_at": event.processed_at.isoformat() if event.processed_at else None,
+        "adapter_dispatch": adapter_dispatch,
+        "adapter_dispatch_fields": trace_payload_field_names(adapter_dispatch),
+        "next_actions": next_actions,
+    }
+
+
+def outbox_attempt_span(attempt: OutboxDeliveryAttempt) -> dict:
+    return {
+        "kind": "outbox_delivery_attempt",
+        "id": attempt.attempt_id,
+        "attempt_id": attempt.attempt_id,
+        "event_id": attempt.event_id,
+        "status": attempt.status,
+        "attempt_number": attempt.attempt_number,
+        "lease_generation": attempt.lease_generation,
+        "claimed_by": attempt.claimed_by,
+        "delivery_mode": attempt.delivery_mode,
+        "dispatch_idempotency_key": attempt.dispatch_idempotency_key,
+        "request_sha256": attempt.request_sha256,
+        "adapter": attempt.adapter,
+        "operation": attempt.operation,
+        "remote_id": attempt.remote_id,
+        "error_code": attempt.error_code,
+        "error_message": attempt.error_message,
+        "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
+        "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+    }
+
+
+@router.get("/traces/{trace_id}")
+def get_traces_by_trace_id(
+    trace_id: str,
+    session: SessionDep,
+    ctx: ContextDep,
+) -> dict[str, Any]:
+    require_trace_read(ctx)
+    scope_filter = (
+        RunRecord.trace_id == trace_id,
+        RunRecord.tenant_id == ctx.tenant_id,
+        RunRecord.project_id == ctx.project_id,
+    )
+    runs = list(session.scalars(select(RunRecord).where(*scope_filter)))
+    audits = list(
+        session.scalars(
+            select(AuditLog).where(
+                AuditLog.trace_id == trace_id,
+                AuditLog.tenant_id == ctx.tenant_id,
+                AuditLog.project_id == ctx.project_id,
+            )
+        )
+    )
+    events = list(
+        session.scalars(
+            select(OutboxEvent).where(
+                OutboxEvent.tenant_id == ctx.tenant_id,
+                OutboxEvent.project_id == ctx.project_id,
+                OutboxEvent.payload["trace_id"].as_string() == trace_id,
+            )
+        )
+    )
+    readable_collections = readable_resource_collections(ctx)
+    resources = list(
+        session.scalars(
+            select(JsonResource).where(
+                JsonResource.trace_id == trace_id,
+                JsonResource.tenant_id == ctx.tenant_id,
+                JsonResource.project_id == ctx.project_id,
+                JsonResource.collection.in_(readable_collections),
+            )
+        )
+    )
+    materializations = list(
+        session.scalars(
+            select(AssetMaterialization).where(
+                AssetMaterialization.trace_id == trace_id,
+                AssetMaterialization.tenant_id == ctx.tenant_id,
+                AssetMaterialization.project_id == ctx.project_id,
+            )
+        )
+    )
+    lineage_edges = list(
+        session.scalars(
+            select(AssetLineageEdge).where(
+                AssetLineageEdge.trace_id == trace_id,
+                AssetLineageEdge.tenant_id == ctx.tenant_id,
+                AssetLineageEdge.project_id == ctx.project_id,
+            )
+        )
+    )
+    listening_annotations = list(
+        session.scalars(
+            select(ListeningAnnotation).where(
+                ListeningAnnotation.trace_id == trace_id,
+                ListeningAnnotation.tenant_id == ctx.tenant_id,
+                ListeningAnnotation.project_id == ctx.project_id,
+            )
+        )
+    )
+    can_read_voiceprints = can_read_resource_collection(ctx, "voiceprint_enrollments")
+    voiceprint_enrollments = (
+        list(
+            session.scalars(
+                select(VoiceprintEnrollment).where(
+                    VoiceprintEnrollment.trace_id == trace_id,
+                    VoiceprintEnrollment.tenant_id == ctx.tenant_id,
+                    VoiceprintEnrollment.project_id == ctx.project_id,
+                )
+            )
+        )
+        if can_read_voiceprints
+        else []
+    )
+    prompt_candidates = list(
+        session.scalars(
+            select(PromptVersionCandidate).where(
+                PromptVersionCandidate.trace_id == trace_id,
+                PromptVersionCandidate.tenant_id == ctx.tenant_id,
+                PromptVersionCandidate.project_id == ctx.project_id,
+            )
+        )
+    )
+    label_versions = list(
+        session.scalars(
+            select(LabelVersion).where(
+                LabelVersion.trace_id == trace_id,
+                LabelVersion.tenant_id == ctx.tenant_id,
+                LabelVersion.project_id == ctx.project_id,
+            )
+        )
+    )
+    label_candidates = list(
+        session.scalars(
+            select(LabelCandidate).where(
+                LabelCandidate.trace_id == trace_id,
+                LabelCandidate.tenant_id == ctx.tenant_id,
+                LabelCandidate.project_id == ctx.project_id,
+            )
+        )
+    )
+    human_review_tasks = (
+        list(
+            session.scalars(
+                select(HumanReviewTask).where(
+                    HumanReviewTask.trace_id == trace_id,
+                    HumanReviewTask.tenant_id == ctx.tenant_id,
+                    HumanReviewTask.project_id == ctx.project_id,
+                )
+            )
+        )
+        if can_read_resource_collection(ctx, "human_review_tasks")
+        else []
+    )
+    human_review_decisions = (
+        list(
+            session.scalars(
+                select(HumanReviewDecision).where(
+                    HumanReviewDecision.trace_id == trace_id,
+                    HumanReviewDecision.tenant_id == ctx.tenant_id,
+                    HumanReviewDecision.project_id == ctx.project_id,
+                )
+            )
+        )
+        if can_read_resource_collection(ctx, "human_review_decisions")
+        else []
+    )
+    knowledge_sources = list(
+        session.scalars(
+            select(KnowledgeSource).where(
+                KnowledgeSource.trace_id == trace_id,
+                KnowledgeSource.tenant_id == ctx.tenant_id,
+                KnowledgeSource.project_id == ctx.project_id,
+            )
+        )
+    )
+    knowledge_indexes = list(
+        session.scalars(
+            select(KnowledgeIndex).where(
+                KnowledgeIndex.trace_id == trace_id,
+                KnowledgeIndex.tenant_id == ctx.tenant_id,
+                KnowledgeIndex.project_id == ctx.project_id,
+            )
+        )
+    )
+    knowledge_quality_gates = list(
+        session.scalars(
+            select(KnowledgeQualityGate).where(
+                KnowledgeQualityGate.trace_id == trace_id,
+                KnowledgeQualityGate.tenant_id == ctx.tenant_id,
+                KnowledgeQualityGate.project_id == ctx.project_id,
+            )
+        )
+    )
+    knowledge_effects = list(
+        session.scalars(
+            select(KnowledgeEffect).where(
+                KnowledgeEffect.trace_id == trace_id,
+                KnowledgeEffect.tenant_id == ctx.tenant_id,
+                KnowledgeEffect.project_id == ctx.project_id,
+            )
+        )
+    )
+    agent_runs = list(
+        session.scalars(
+            select(AgentRun).where(
+                AgentRun.trace_id == trace_id,
+                AgentRun.tenant_id == ctx.tenant_id,
+                AgentRun.project_id == ctx.project_id,
+            )
+        )
+    )
+    tool_calls = list(
+        session.scalars(
+            select(ToolCall).where(
+                ToolCall.trace_id == trace_id,
+                ToolCall.tenant_id == ctx.tenant_id,
+                ToolCall.project_id == ctx.project_id,
+            )
+        )
+    )
+    agent_decisions = list(
+        session.scalars(
+            select(AgentDecision).where(
+                AgentDecision.trace_id == trace_id,
+                AgentDecision.tenant_id == ctx.tenant_id,
+                AgentDecision.project_id == ctx.project_id,
+            )
+        )
+    )
+    trace_refs = list(
+        session.scalars(
+            select(TraceRef).where(
+                TraceRef.trace_id == trace_id,
+                TraceRef.tenant_id == ctx.tenant_id,
+                TraceRef.project_id == ctx.project_id,
+            )
+        )
+    )
+
+    resource_review_tasks = {
+        resource.resource_key: resource.data
+        for resource in resources
+        if resource.collection == "human_review_tasks"
+    }
+    resource_review_decisions = {
+        resource.resource_key: resource.data
+        for resource in resources
+        if resource.collection == "human_review_decisions"
+    }
+    authorization_values: list[object] = [
+        *[
+            {
+                "type": event.aggregate_type,
+                "id": event.aggregate_id,
+                "payload": event.payload,
+            }
+            for event in events
+        ],
+        *[
+            {
+                "type": audit.object_type,
+                "id": audit.object_id,
+                "before": audit.before_json,
+                "after": audit.after_json,
+            }
+            for audit in audits
+        ],
+        *[run.payload for run in runs],
+        *[materialization.payload for materialization in materializations],
+        *[edge.payload for edge in lineage_edges],
+        *[ref.payload for ref in trace_refs],
+        *[agent.payload for agent in agent_runs],
+        *[tool.payload for tool in tool_calls],
+        *[decision.payload for decision in agent_decisions],
+    ]
+    referenced_review_task_ids = {
+        task_id for decision in human_review_decisions if (task_id := _decision_task_id(decision))
+    }
+    referenced_review_task_ids.update(
+        task_id
+        for resource in resources
+        if resource.collection == "human_review_decisions"
+        and isinstance((task_id := resource.data.get("review_task_id")), str)
+        and task_id
+    )
+    referenced_review_decision_ids: set[str] = set()
+    for value in authorization_values:
+        referenced_review_task_ids.update(trace_reference_ids(value, "human_review_tasks"))
+        referenced_review_decision_ids.update(trace_reference_ids(value, "human_review_decisions"))
+
+    authorization_decisions = {
+        decision.decision_id: decision for decision in human_review_decisions
+    }
+    missing_review_decision_ids = referenced_review_decision_ids - set(authorization_decisions)
+    if missing_review_decision_ids and can_read_resource_collection(ctx, "human_review_decisions"):
+        linked_decisions = session.scalars(
+            select(HumanReviewDecision).where(
+                HumanReviewDecision.tenant_id == ctx.tenant_id,
+                HumanReviewDecision.project_id == ctx.project_id,
+                HumanReviewDecision.decision_id.in_(missing_review_decision_ids),
+            )
+        )
+        authorization_decisions.update(
+            {decision.decision_id: decision for decision in linked_decisions}
+        )
+    referenced_review_task_ids.update(
+        task_id
+        for decision in authorization_decisions.values()
+        if (task_id := _decision_task_id(decision))
+    )
+    referenced_review_task_ids.update(
+        task_id
+        for decision in resource_review_decisions.values()
+        if isinstance((task_id := decision.get("review_task_id")), str) and task_id
+    )
+    authorization_tasks = {task.review_task_id: task.payload for task in human_review_tasks}
+    authorization_tasks.update(resource_review_tasks)
+    missing_review_task_ids = referenced_review_task_ids - set(authorization_tasks)
+    if missing_review_task_ids and can_read_resource_collection(ctx, "human_review_tasks"):
+        linked_tasks = session.scalars(
+            select(HumanReviewTask).where(
+                HumanReviewTask.tenant_id == ctx.tenant_id,
+                HumanReviewTask.project_id == ctx.project_id,
+                HumanReviewTask.review_task_id.in_(missing_review_task_ids),
+            )
+        )
+        authorization_tasks.update({task.review_task_id: task.payload for task in linked_tasks})
+
+    visible_review_task_ids = {
+        task_id
+        for task_id, payload in authorization_tasks.items()
+        if can_read_human_review_task(payload, ctx)
+    }
+    human_review_tasks = [
+        task for task in human_review_tasks if task.review_task_id in visible_review_task_ids
+    ]
+    human_review_decisions = [
+        decision
+        for decision in human_review_decisions
+        if _decision_task_id(decision) in visible_review_task_ids
+    ]
+    visible_review_decision_ids = {
+        decision_id
+        for decision_id, decision in authorization_decisions.items()
+        if _decision_task_id(decision) in visible_review_task_ids
+    }
+    visible_review_decision_ids.update(
+        decision_id
+        for decision_id, decision in resource_review_decisions.items()
+        if decision.get("review_task_id") in visible_review_task_ids
+    )
+
+    resources = [
+        resource
+        for resource in resources
+        if (
+            resource.collection == "human_review_tasks"
+            and resource.resource_key in visible_review_task_ids
+        )
+        or (
+            resource.collection == "human_review_decisions"
+            and (
+                resource.resource_key in visible_review_decision_ids
+                or resource.data.get("review_task_id") in visible_review_task_ids
+            )
+        )
+        or resource.collection not in {"human_review_tasks", "human_review_decisions"}
+    ]
+
+    def trace_value_is_visible(value: object) -> bool:
+        return trace_reference_is_visible(
+            value,
+            ctx,
+            visible_review_task_ids=visible_review_task_ids,
+            visible_review_decision_ids=visible_review_decision_ids,
+        )
+
+    def event_is_visible(event: OutboxEvent) -> bool:
+        return trace_value_is_visible(
+            {
+                "type": event.aggregate_type,
+                "id": event.aggregate_id,
+                "payload": event.payload,
+            }
+        )
+
+    events = [event for event in events if event_is_visible(event)]
+    event_ids = [event.event_id for event in events]
+    delivery_attempts = (
+        list(
+            session.scalars(
+                select(OutboxDeliveryAttempt).where(
+                    OutboxDeliveryAttempt.tenant_id == ctx.tenant_id,
+                    OutboxDeliveryAttempt.project_id == ctx.project_id,
+                    OutboxDeliveryAttempt.event_id.in_(event_ids),
+                )
+            )
+        )
+        if event_ids
+        else []
+    )
+
+    def audit_is_visible(audit: AuditLog) -> bool:
+        return trace_value_is_visible(
+            {
+                "type": audit.object_type,
+                "id": audit.object_id,
+                "before": audit.before_json,
+                "after": audit.after_json,
+            }
+        )
+
+    audits = [audit for audit in audits if audit_is_visible(audit)]
+    all_run_ids = {run.run_id for run in runs}
+    runs = [run for run in runs if trace_value_is_visible(run.payload)]
+    visible_run_ids = {run.run_id for run in runs}
+    materializations = [
+        materialization
+        for materialization in materializations
+        if trace_value_is_visible(materialization.payload)
+    ]
+    lineage_edges = [edge for edge in lineage_edges if trace_value_is_visible(edge.payload)]
+    trace_refs = [ref for ref in trace_refs if trace_value_is_visible(ref.payload)]
+    visible_agent_runs: list[tuple[AgentRun, list[dict[str, Any]]]] = []
+    for agent in agent_runs:
+        source_run_id = agent.payload.get("source_run_id")
+        if source_run_id in all_run_ids and source_run_id not in visible_run_ids:
+            continue
+        if not trace_value_is_visible(agent.payload):
+            continue
+        raw_refs = agent.payload.get("input_refs", [])
+        visible_refs = [
+            ref for ref in raw_refs if isinstance(ref, dict) and trace_value_is_visible(ref)
+        ]
+        visible_agent_runs.append((agent, visible_refs))
+    visible_agent_run_ids = {agent.agent_run_id for agent, _ in visible_agent_runs}
+    tool_calls = [
+        tool
+        for tool in tool_calls
+        if tool.payload.get("agent_run_id") in visible_agent_run_ids
+        and trace_value_is_visible(tool.payload)
+    ]
+    agent_decisions = [
+        decision
+        for decision in agent_decisions
+        if decision.payload.get("agent_run_id") in visible_agent_run_ids
+        and trace_value_is_visible(decision.payload)
+    ]
+    response = envelope(
+        {
+            "trace_id": trace_id,
+            "spans": [
+                *[
+                    {
+                        "kind": "resource",
+                        "id": resource.resource_key,
+                        "collection": resource.collection,
+                        "status": resource.status,
+                        "object_id": resource.resource_key,
+                    }
+                    for resource in resources
+                ],
+                *[
+                    {
+                        "kind": "run",
+                        "id": run.run_id,
+                        "run_id": run.run_id,
+                        "status": run.status,
+                        "run_type": run.run_type,
+                    }
+                    for run in runs
+                ],
+                *[
+                    {
+                        "kind": "materialization",
+                        "id": materialization.materialization_id,
+                        "materialization_id": materialization.materialization_id,
+                        "status": materialization.status,
+                        "asset_key": materialization.payload.get("asset_key"),
+                        "partition_key": materialization.payload.get("partition_key"),
+                        "run_id": materialization.payload.get("run_id"),
+                        "storage_refs": materialization.payload.get("storage_refs", []),
+                    }
+                    for materialization in materializations
+                ],
+                *[
+                    {
+                        "kind": "asset_lineage_edge",
+                        "id": edge.edge_id,
+                        "edge_id": edge.edge_id,
+                        "status": edge.status,
+                        "source_asset_key": edge.payload.get("source_asset_key"),
+                        "target_asset_key": edge.payload.get("target_asset_key"),
+                        "materialization_id": edge.payload.get("materialization_id"),
+                        "run_id": edge.payload.get("run_id"),
+                        "partition_key": edge.payload.get("partition_key"),
+                        "lineage_source": edge.payload.get("lineage_source"),
+                    }
+                    for edge in lineage_edges
+                ],
+                *[
+                    {
+                        "kind": "listening_annotation",
+                        "id": annotation.annotation_id,
+                        "annotation_id": annotation.annotation_id,
+                        "audio_session_id": annotation.audio_session_id,
+                        "status": annotation.status,
+                        "object_id": annotation.annotation_id,
+                    }
+                    for annotation in listening_annotations
+                ],
+                *[
+                    {
+                        "kind": "voiceprint_enrollment",
+                        "id": enrollment.enrollment_id,
+                        "enrollment_id": enrollment.enrollment_id,
+                        "voiceprint_id": enrollment.voiceprint_id,
+                        "status": enrollment.status,
+                        "object_id": enrollment.enrollment_id,
+                    }
+                    for enrollment in voiceprint_enrollments
+                ],
+                *[
+                    {
+                        "kind": "prompt_version_candidate",
+                        "id": candidate.candidate_id,
+                        "candidate_id": candidate.candidate_id,
+                        "status": candidate.status,
+                        "source_run_id": candidate.payload.get("source_run_id"),
+                        "base_prompt_version": candidate.payload.get("base_prompt_version"),
+                        "change_set_id": candidate.payload.get("change_set_id"),
+                        "object_id": candidate.candidate_id,
+                    }
+                    for candidate in prompt_candidates
+                ],
+                *[
+                    {
+                        "kind": "label_version",
+                        "id": label_version.label_version_id,
+                        "label_version_id": label_version.label_version_id,
+                        "status": label_version.status,
+                        "object_id": label_version.label_version_id,
+                    }
+                    for label_version in label_versions
+                ],
+                *[
+                    {
+                        "kind": "label_candidate",
+                        "id": candidate.candidate_id,
+                        "candidate_id": candidate.candidate_id,
+                        "status": candidate.status,
+                        "evidence_pack_id": candidate.payload.get("evidence_pack_id"),
+                        "label_version_id": candidate.payload.get("label_version_id")
+                        or candidate.payload.get("label_version"),
+                        "object_id": candidate.candidate_id,
+                    }
+                    for candidate in label_candidates
+                ],
+                *[
+                    {
+                        "kind": "human_review_task",
+                        "id": task.review_task_id,
+                        "review_task_id": task.review_task_id,
+                        "status": task.status,
+                        "queue": task.payload.get("queue"),
+                        "evidence_pack_id": task.payload.get("evidence_pack_id"),
+                        "object_id": task.review_task_id,
+                    }
+                    for task in human_review_tasks
+                ],
+                *[
+                    {
+                        "kind": "human_review_decision",
+                        "id": decision.decision_id,
+                        "decision_id": decision.decision_id,
+                        "status": decision.status,
+                        "review_task_id": decision.payload.get("review_task_id"),
+                        "object_id": decision.decision_id,
+                    }
+                    for decision in human_review_decisions
+                ],
+                *[
+                    {
+                        "kind": "knowledge_source",
+                        "id": source.knowledge_source_id,
+                        "knowledge_source_id": source.knowledge_source_id,
+                        "status": source.status,
+                        "source_type": source.payload.get("source_type"),
+                        "object_id": source.knowledge_source_id,
+                    }
+                    for source in knowledge_sources
+                ],
+                *[
+                    {
+                        "kind": "knowledge_index",
+                        "id": index.knowledge_index_id,
+                        "knowledge_index_id": index.knowledge_index_id,
+                        "status": index.status,
+                        "vector_collection": index.payload.get("vector_collection"),
+                        "source_id": index.payload.get("source_id"),
+                        "object_id": index.knowledge_index_id,
+                    }
+                    for index in knowledge_indexes
+                ],
+                *[
+                    {
+                        "kind": "knowledge_quality_gate",
+                        "id": gate.knowledge_gate_id,
+                        "knowledge_gate_id": gate.knowledge_gate_id,
+                        "status": gate.status,
+                        "knowledge_index_id": gate.payload.get("knowledge_index_id"),
+                        "score": gate.payload.get("score"),
+                        "object_id": gate.knowledge_gate_id,
+                    }
+                    for gate in knowledge_quality_gates
+                ],
+                *[
+                    {
+                        "kind": "knowledge_effect",
+                        "id": effect.effect_id,
+                        "effect_id": effect.effect_id,
+                        "status": effect.status,
+                        "knowledge_index_id": effect.payload.get("knowledge_index_id"),
+                        "hit_rate": effect.payload.get("hit_rate"),
+                        "object_id": effect.effect_id,
+                    }
+                    for effect in knowledge_effects
+                ],
+                *[
+                    {
+                        "kind": "agent_run",
+                        "id": agent.agent_run_id,
+                        "agent_run_id": agent.agent_run_id,
+                        "status": agent.status,
+                        "source_run_id": agent.payload.get("source_run_id"),
+                        "source_run_type": agent.payload.get("source_run_type"),
+                        "input_refs": visible_refs,
+                        "input_ref_fields": _nested_payload_fields(visible_refs),
+                        "write_policy": agent.payload.get("write_policy", {}),
+                        "write_policy_fields": trace_payload_field_names(
+                            agent.payload.get("write_policy")
+                        ),
+                    }
+                    for agent, visible_refs in visible_agent_runs
+                ],
+                *[
+                    {
+                        "kind": "tool_call",
+                        "id": tool.tool_call_id,
+                        "tool_call_id": tool.tool_call_id,
+                        "status": tool.status,
+                        "agent_run_id": tool.payload.get("agent_run_id"),
+                        "source_run_id": tool.payload.get("source_run_id"),
+                        "tool": tool.payload.get("tool"),
+                        "purpose": tool.payload.get("purpose"),
+                        "dispatch": tool.payload.get("dispatch"),
+                        "dispatch_fields": trace_payload_field_names(tool.payload.get("dispatch")),
+                    }
+                    for tool in tool_calls
+                ],
+                *[
+                    {
+                        "kind": "agent_decision",
+                        "id": decision.decision_id,
+                        "decision_id": decision.decision_id,
+                        "status": decision.status,
+                        "agent_run_id": decision.payload.get("agent_run_id"),
+                        "source_run_id": decision.payload.get("source_run_id"),
+                        "decision_type": decision.payload.get("decision_type"),
+                        "result": decision.payload.get("result"),
+                        "result_ref": decision.payload.get("result_ref", {}),
+                        "result_ref_fields": trace_payload_field_names(
+                            decision.payload.get("result_ref")
+                        ),
+                    }
+                    for decision in agent_decisions
+                ],
+                *[
+                    {
+                        "kind": "trace_ref",
+                        "id": ref.trace_ref_id,
+                        "trace_ref_id": ref.trace_ref_id,
+                        "status": ref.status,
+                        "agent_run_id": ref.payload.get("agent_run_id"),
+                        "source_run_id": ref.payload.get("source_run_id"),
+                        "ref_role": ref.payload.get("ref_role"),
+                        "ref_type": ref.payload.get("type"),
+                        "ref_id": ref.payload.get("id"),
+                        "source_field": ref.payload.get("source_field"),
+                        "root_trace_id": ref.payload.get("root_trace_id"),
+                        "parent_trace_id": ref.payload.get("parent_trace_id"),
+                        "correlation_id": ref.payload.get("correlation_id"),
+                        "request_id": ref.payload.get("request_id"),
+                        "source": ref.payload.get("source"),
+                    }
+                    for ref in trace_refs
+                ],
+                *[
+                    {
+                        "kind": "audit",
+                        "id": audit.audit_id,
+                        "action": audit.action,
+                        "object_id": audit.object_id,
+                    }
+                    for audit in audits
+                ],
+                *[outbox_span(event) for event in events],
+                *[outbox_attempt_span(attempt) for attempt in delivery_attempts],
+            ],
+        },
+        ctx,
+    )
+    if not _allows_raw_trace_payloads(ctx):
+        response["data"]["spans"] = [
+            _non_admin_trace_span(span) for span in response["data"]["spans"]
+        ]
+    return response

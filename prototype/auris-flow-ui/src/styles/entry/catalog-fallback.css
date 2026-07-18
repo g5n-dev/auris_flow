@@ -1,0 +1,37 @@
+/* Entry-level fallback remains available even when the catalog/App chunk fails. */
+.boot-error {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: #f7f8fa;
+  color: #1d2129;
+}
+
+.boot-error__panel {
+  width: min(440px, 100%);
+  padding: 24px;
+  border: 1px solid #e5e6eb;
+  border-radius: 6px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgb(29 33 41 / 8%);
+}
+
+.boot-error__panel strong {
+  font-size: 18px;
+}
+
+.boot-error__panel p {
+  margin: 10px 0 20px;
+  color: #4e5969;
+}
+
+.boot-error__panel button {
+  min-height: 36px;
+  padding: 0 16px;
+  border: 1px solid #165dff;
+  border-radius: 4px;
+  background: #165dff;
+  color: #fff;
+  cursor: pointer;
+}

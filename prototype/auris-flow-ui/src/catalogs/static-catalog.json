@@ -1,0 +1,4185 @@
+{
+  "moduleWriteArchitectures": {
+    "home": {
+      "createObject": "运营工作项 / 回填草稿",
+      "updateObject": "处理状态 / 异常优先级",
+      "api": "POST /api/v1/ops/work-items",
+      "payload": "tenant_id, project_id, source_signal, action_type, evidence_ref",
+      "guardrail": "首页不直接改业务资产，只创建跨模块处理草稿。",
+      "downstream": "项目、调听、资产回填、洞察报告",
+      "missing": [
+        "首页动作原来只有跳转，缺少可追踪工作项",
+        "异常卡片缺少处理状态回写"
+      ]
+    },
+    "tenants": {
+      "createObject": "TenantBoundary / MemberInvite / QuotaDraft",
+      "updateObject": "租户状态、配额、成员角色",
+      "api": "POST /api/v1/tenants · PATCH /api/v1/tenants/:tenantId",
+      "payload": "tenant_id, admin_user, quota_policy, asr_binding_ref, audit_scope",
+      "guardrail": "租户页只能改隔离边界和授权，不自动生成项目业务数据。",
+      "downstream": "项目权限、ASR 接入、全局审计",
+      "missing": [
+        "成员分配缺少可编辑角色草稿",
+        "ASR 授权缺少保存后审计回执"
+      ]
+    },
+    "projects": {
+      "createObject": "ProjectWorkspace",
+      "updateObject": "数据源绑定、成员范围、质量目标",
+      "api": "POST /api/v1/projects · PATCH /api/v1/projects/:projectId",
+      "payload": "project_id, scene, owner, data_source_refs, label_version, quality_target",
+      "guardrail": "项目页只创建业务容器，数据源必须进入任务配置接入。",
+      "downstream": "任务配置、标签治理、评测目标、资产分区",
+      "missing": [
+        "质量目标缺少修改后保存回执",
+        "成员页缺少邀请/移除操作"
+      ]
+    },
+    "canvas": {
+      "createObject": "FlowNode / TaskVersionDraft / 运行请求",
+      "updateObject": "节点 IO、编排连线、调度策略",
+      "api": "POST /api/v1/task-versions · POST /api/v1/task-runs",
+      "payload": "flow_template, canvas_variant, node_bindings, run_config, overwrite_policy",
+      "guardrail": "只写当前任务版本草稿；发布前必须兼容性校验。",
+      "downstream": "数据资产物化、运行记录、版本发布",
+      "missing": [
+        "节点库添加后需要生成草稿记录",
+        "运行一次需要展示 run_id 与输出资产"
+      ]
+    },
+    "data": {
+      "createObject": "DataSourceBinding / AggregationViewDraft",
+      "updateObject": "聚合优先级、叶子对象状态、关联修复",
+      "api": "POST /api/v1/connectors · PATCH /api/v1/data-aggregation-views/:id",
+      "payload": "source_ref, aggregate_order, selected_leaf, relation_fix, partition_key",
+      "guardrail": "数据页不手造音频或单据，只保存连接器绑定和聚合视图。",
+      "downstream": "调听上下文、资产血缘、业务洞察",
+      "missing": [
+        "聚合拖拽缺少保存后的版本号",
+        "关联视图修复缺少提交入口"
+      ]
+    },
+    "knowledge": {
+      "createObject": "KnowledgeSourceBinding / IndexVersionDraft / QualityGateRun",
+      "updateObject": "知识源同步状态、切片策略、索引版本、发布门禁",
+      "api": "POST /api/v1/knowledge-sources/:id/sync-runs · POST /api/v1/knowledge-indexes/:id/build-runs",
+      "payload": "source_ref, chunk_policy, embedding_profile, label_refs, evidence_refs, quality_gate",
+      "guardrail": "知识库只写知识源绑定和索引草稿，真实数据接入仍通过任务配置完成。",
+      "downstream": "调听证据、标签治理、评测中心、业务洞察、数据资产",
+      "missing": [
+        "知识源需要可见同步记录",
+        "索引发布前需要质量门禁和效果回执"
+      ]
+    },
+    "labels": {
+      "createObject": "LabelDraft / RuleCandidate / ConflictDecision",
+      "updateObject": "标签规则、冲突仲裁、人审状态",
+      "api": "POST /api/v1/label-versions · POST /api/v1/human-review-tasks/:id/decisions",
+      "payload": "label_version, label_level, rule_expr, evidence_refs, human_decision",
+      "guardrail": "只写候选版本，不覆盖线上 v1.8.4。",
+      "downstream": "评测样本、业务洞察、资产回填、Human Loop",
+      "missing": [
+        "标签体系页缺少显式新增标签入口",
+        "版本实验通过后缺少发布记录落账"
+      ]
+    },
+    "insights": {
+      "createObject": "InsightReportDraft / ActionDraft",
+      "updateObject": "指标口径、报告状态、动作队列",
+      "api": "POST /api/v1/insights/metric-runs · POST /api/v1/insights/reports · POST /api/v1/insights/actions",
+      "payload": "metric_keys, metric_result_ids, evidence_refs, report_sections, action_owner",
+      "guardrail": "洞察结论必须引用标签命中和证据链，不能手填孤立指标。",
+      "downstream": "报告资产、任务草稿、标签治理、调听证据",
+      "missing": [
+        "指标分析缺少口径编辑保存",
+        "生成报告缺少报告资产 ID"
+      ]
+    },
+    "evaluation": {
+      "createObject": "EvaluationSet / BadcasePackage / FeedbackTask",
+      "updateObject": "评测阻断、badcase 状态、回流目标",
+      "api": "POST /api/v1/eval-runs · POST /api/v1/eval-runs/:id/feedback-tasks",
+      "payload": "dataset_id, model_version, label_version, sample_refs, failure_reason",
+      "guardrail": "评测结果只能进入发布门禁或回流任务，不直接改模型线上版本。",
+      "downstream": "标签规则、模型发布、训练样本、Human Loop",
+      "missing": [
+        "新增评测集缺少样本选择确认",
+        "badcase 标记缺少回流任务状态"
+      ]
+    },
+    "assets": {
+      "createObject": "BackfillDraft / AssetCheckRun",
+      "updateObject": "资产质量状态、回填审批、物化记录",
+      "api": "POST /api/v1/data-assets/:assetKey/backfills · POST /api/v1/data-assets/:assetKey/checks/retry",
+      "payload": "asset_key, partition_key, impact_scope, approval_policy, run_request",
+      "guardrail": "影响人工标注或线上报告的资产必须先审批，再物化。",
+      "downstream": "下游洞察、评测集、标签资产、运行记录",
+      "missing": [
+        "资产详情缺少局部字段修复入口",
+        "回填任务缺少审批提交后的状态变化"
+      ]
+    },
+    "settings": {
+      "createObject": "ConfigDraft / PolicyGuardRun",
+      "updateObject": "模型链、工具、阈值、权限、通知策略",
+      "api": "PATCH /api/v1/settings/drafts · POST /api/v1/settings/publish-requests",
+      "payload": "config_domain, changed_fields, risk_level, approver, rollback_version",
+      "guardrail": "高风险配置先保存草稿，Policy Guard 通过后才能发布。",
+      "downstream": "任务运行、调听判定、标签发布、评测门禁",
+      "missing": [
+        "配置项缺少字段级 diff",
+        "发布审批缺少可回滚版本记录"
+      ]
+    }
+  },
+  "canvasNodeTemplates": [
+    {
+      "key": "platform-login-adapter",
+      "category": "平台数据同步抽取",
+      "title": "平台登录适配器",
+      "description": "统一承载后台平台服务地址、账户名、密码登录和 Session Token。",
+      "adapterKind": "认证连接器",
+      "authMode": "账户名 + 密码 / session token",
+      "method": "POST",
+      "endpoint": "/api/v1/platform-connections/{connection_id}/session",
+      "dagsterDefinition": "SourceAsset",
+      "defaultOpPrefix": "load",
+      "defaultIoManager": "platform_auth_io_manager",
+      "outputSchema": [
+        "account_id",
+        "user_name",
+        "access_token",
+        "tenant_scope",
+        "expires_at"
+      ],
+      "outputContract": {
+        "assetKey": "auris/sources/platform_session",
+        "displayName": "平台会话资产",
+        "kind": "外部数据源",
+        "description": "只保存会话引用、授权范围和过期时间；明文凭证留在 Secret/连接器配置中。",
+        "api": "POST /api/v1/platform-connections/{connection_id}/session",
+        "partition": "tenant_id × connection_id",
+        "materialization": "AssetObservation + session_ref",
+        "upstream": [
+          "platform_connection",
+          "secret_ref"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "connection_id",
+          "session_id"
+        ],
+        "schema": [
+          [
+            "identity",
+            "account_ref, user_ref"
+          ],
+          [
+            "auth",
+            "access_token_ref, refresh_token_ref, expires_at"
+          ],
+          [
+            "scope",
+            "tenant_scope[], store_scope[]"
+          ],
+          [
+            "trace",
+            "connection_id, observed_at, trace_id"
+          ]
+        ]
+      },
+      "depsHint": "none",
+      "x": 72,
+      "y": 470,
+      "node": {
+        "name": "平台登录适配器",
+        "icon": "Database",
+        "status": "待配置",
+        "metaA": "POST",
+        "metaB": "/platform-connections/session",
+        "role": "账号登录 / 连接配置",
+        "confidence": 96,
+        "intentKeys": [
+          "entity",
+          "review"
+        ],
+        "tags": [
+          "Auth",
+          "Session",
+          "Connector"
+        ]
+      },
+      "context": {
+        "type": "输入引用",
+        "relation": "当前任务引用后台平台账号登录配置，拿到后续租户、员工、音频 URL 和事件接口所需 Session。",
+        "impact": "只在当前任务草稿中绑定服务地址、账户名和凭证引用，不修改全局账号或保存明文密码。",
+        "version": "InputBinding 草稿",
+        "usedBy": [
+          "多平台证据数据流",
+          "AIZJ 数据同步",
+          "跨租户接口适配"
+        ],
+        "fields": [
+          [
+            "接口",
+            "POST /api/v1/platform-connections/{connection_id}/session"
+          ],
+          [
+            "认证",
+            "credential_ref + secret_ref"
+          ],
+          [
+            "输入角色",
+            "账号登录 / 连接配置"
+          ],
+          [
+            "可选上下文",
+            "tenant_scope / tenant_config_id"
+          ],
+          [
+            "输出资产",
+            "auris/sources/platform_session"
+          ],
+          [
+            "底层映射",
+            "外部数据源: platform_session"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "rest-source-adapter",
+      "category": "平台数据同步抽取",
+      "title": "REST Source 接口",
+      "description": "适配租户、员工、门店、组织等列表接口，按 schema 输出主数据。",
+      "adapterKind": "REST 数据源",
+      "authMode": "Bearer Session / Cookie Session",
+      "method": "GET",
+      "endpoint": "/api/v1/data-sources/{source_id}/records",
+      "dagsterDefinition": "SourceAsset",
+      "defaultOpPrefix": "fetch",
+      "defaultIoManager": "platform_api_io_manager",
+      "outputSchema": [
+        "id",
+        "tenant_id",
+        "name",
+        "updated_at",
+        "raw_payload"
+      ],
+      "outputContract": {
+        "assetKey": "auris/sources/platform_master_data",
+        "displayName": "平台主数据资产",
+        "kind": "外部数据源",
+        "description": "按资源类型生成租户、门店、员工或组织资产，保留原始 payload 与标准化字段。",
+        "api": "GET /api/v1/data-sources/{source_id}/records?resource=tenant|employee|store",
+        "partition": "tenant_id × resource × cursor_window",
+        "materialization": "外部数据源观测 + 原始批次",
+        "upstream": [
+          "auris/sources/platform_session"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "store_id",
+          "employee_id",
+          "resource_id"
+        ],
+        "schema": [
+          [
+            "entity",
+            "resource_id, tenant_id, store_id, employee_id"
+          ],
+          [
+            "profile",
+            "display_name, role, org_path, status"
+          ],
+          [
+            "sync",
+            "source_updated_at, cursor, raw_payload_ref"
+          ],
+          [
+            "trace",
+            "source_id, batch_id, trace_id"
+          ]
+        ]
+      },
+      "depsHint": "auris/sources/platform_session",
+      "x": 72,
+      "y": 470,
+      "node": {
+        "name": "REST Source 接口",
+        "icon": "Link2",
+        "status": "待配置",
+        "metaA": "GET",
+        "metaB": "/data-sources/{source_id}/records",
+        "role": "租户/员工/门店主数据",
+        "confidence": 94,
+        "intentKeys": [
+          "entity",
+          "review"
+        ],
+        "tags": [
+          "REST",
+          "Source",
+          "Schema"
+        ]
+      },
+      "context": {
+        "type": "输入引用",
+        "relation": "当前任务用登录 Session 调用任意 REST 列表接口，可落到租户、员工、门店或组织主数据。",
+        "impact": "只新增当前任务的数据源引用和字段映射，不修改源系统。",
+        "version": "InputBinding 草稿",
+        "usedBy": [
+          "主体映射",
+          "多平台证据数据流",
+          "AIZJ 租户目录"
+        ],
+        "fields": [
+          [
+            "接口",
+            "GET /api/v1/data-sources/{source_id}/records"
+          ],
+          [
+            "认证",
+            "platform_session.access_token"
+          ],
+          [
+            "输入角色",
+            "租户/员工/门店主数据"
+          ],
+          [
+            "输出资产",
+            "auris/sources/platform_master_data"
+          ],
+          [
+            "底层映射",
+            "外部数据源: generic_rest_source"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "audio-url-adapter",
+      "category": "平台数据同步抽取",
+      "title": "音频 URL 同步接口",
+      "description": "兼容平台音频 URL、AIZJ URL 同步和原始音频同步。",
+      "adapterKind": "音频引用源",
+      "authMode": "Bearer Session / tenant_config_id",
+      "method": "POST",
+      "endpoint": "/api/v1/audio-ingest/recordings",
+      "dagsterDefinition": "SourceAsset",
+      "defaultOpPrefix": "fetch",
+      "defaultIoManager": "audio_url_io_manager",
+      "outputSchema": [
+        "recording_id",
+        "audio_url",
+        "started_at",
+        "duration",
+        "device_id"
+      ],
+      "outputContract": {
+        "assetKey": "auris/sources/audio_url_index",
+        "displayName": "录音索引资产",
+        "kind": "外部数据源",
+        "description": "记录 wav 引用、有效期、设备和业务窗口，后续 VAD/ASR 只消费资产引用。",
+        "api": "POST /api/v1/audio-ingest/recordings",
+        "partition": "tenant_id × store_id × business_date × hour",
+        "materialization": "外部数据源生成记录 + URL 清单",
+        "upstream": [
+          "auris/sources/platform_session",
+          "auris/sources/platform_master_data"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "store_id",
+          "recording_id",
+          "device_id"
+        ],
+        "schema": [
+          [
+            "recording",
+            "recording_id, source_url_ref, checksum"
+          ],
+          [
+            "time",
+            "started_at, ended_at, duration_ms"
+          ],
+          [
+            "device",
+            "device_id, channel, store_id"
+          ],
+          [
+            "trace",
+            "ingest_batch_id, expires_at, trace_id"
+          ]
+        ]
+      },
+      "depsHint": "auris/sources/platform_session",
+      "x": 72,
+      "y": 470,
+      "node": {
+        "name": "音频 URL 同步接口",
+        "icon": "Headphones",
+        "status": "待配置",
+        "metaA": "POST",
+        "metaB": "/aizj/sync/url",
+        "role": "录音地址输入",
+        "confidence": 92,
+        "intentKeys": [
+          "audio",
+          "review"
+        ],
+        "tags": [
+          "AudioURL",
+          "WAV",
+          "Device"
+        ]
+      },
+      "context": {
+        "type": "输入引用",
+        "relation": "当前任务可从平台音频接口拿 URL，也可用 AIZJ 的 URL 同步或原始音频同步生成录音引用资产。",
+        "impact": "只保存当前任务的音频引用、过期时间和切片元数据，不删除原始录音。",
+        "version": "InputBinding 草稿",
+        "usedBy": [
+          "音频转写处理",
+          "串音排查",
+          "AIZJ 同步"
+        ],
+        "fields": [
+          [
+            "接口",
+            "POST /api/v1/audio-ingest/recordings"
+          ],
+          [
+            "认证",
+            "platform_session.access_token / tenant_config_id"
+          ],
+          [
+            "输入角色",
+            "录音地址输入"
+          ],
+          [
+            "输出资产",
+            "auris/sources/audio_url_index"
+          ],
+          [
+            "映射方案",
+            "AudioUrl Mapping 草稿"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "event-source-adapter",
+      "category": "平台数据同步抽取",
+      "title": "认证事件接口",
+      "description": "携带认证上下文拉取接待、报价、试驾、风险或修正事件。",
+      "adapterKind": "认证事件源",
+      "authMode": "Bearer Session / tenant_config_id",
+      "method": "GET",
+      "endpoint": "/api/v1/authenticated-events",
+      "dagsterDefinition": "SourceAsset",
+      "defaultOpPrefix": "fetch",
+      "defaultIoManager": "authenticated_event_io_manager",
+      "outputSchema": [
+        "event_id",
+        "event_type",
+        "tenant_id",
+        "employee_id",
+        "occurred_at"
+      ],
+      "outputContract": {
+        "assetKey": "auris/sources/authenticated_events",
+        "displayName": "认证事件资产",
+        "kind": "外部数据源",
+        "description": "拉取接待、报价、试驾和风险事件，与录音和主体映射按窗口聚合。",
+        "api": "GET /api/v1/authenticated-events",
+        "partition": "tenant_id × store_id × business_date",
+        "materialization": "外部数据源生成记录 + 事件批次",
+        "upstream": [
+          "auris/sources/platform_session",
+          "auris/sources/platform_master_data"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "store_id",
+          "employee_id",
+          "event_id",
+          "recording_id"
+        ],
+        "schema": [
+          [
+            "event",
+            "event_id, event_type, occurred_at, status"
+          ],
+          [
+            "actor",
+            "tenant_id, store_id, employee_id, customer_id"
+          ],
+          [
+            "link",
+            "recording_id, doc_id, risk_hint"
+          ],
+          [
+            "trace",
+            "source_event_id, batch_id, trace_id"
+          ]
+        ]
+      },
+      "depsHint": "auris/sources/platform_session",
+      "x": 72,
+      "y": 470,
+      "node": {
+        "name": "认证事件接口",
+        "icon": "ShieldCheck",
+        "status": "待配置",
+        "metaA": "GET",
+        "metaB": "/authenticated-events",
+        "role": "认证业务事件",
+        "confidence": 90,
+        "intentKeys": [
+          "asset",
+          "review"
+        ],
+        "tags": [
+          "Event",
+          "Token",
+          "Risk"
+        ]
+      },
+      "context": {
+        "type": "输入引用",
+        "relation": "当前任务携带认证上下文调用事件接口，或对接 AIZJ 修正数据同步，把业务事件转成可审查证据。",
+        "impact": "只读取当前任务授权范围内事件，不修改事件源系统。",
+        "version": "InputBinding 草稿",
+        "usedBy": [
+          "多平台证据数据流",
+          "证据资产生成",
+          "修正数据同步"
+        ],
+        "fields": [
+          [
+            "接口",
+            "GET /api/v1/authenticated-events"
+          ],
+          [
+            "认证",
+            "platform_session.access_token / tenant_config_id"
+          ],
+          [
+            "输入角色",
+            "认证业务事件"
+          ],
+          [
+            "输出资产",
+            "auris/sources/authenticated_events"
+          ],
+          [
+            "映射方案",
+            "AuthenticatedEvent Mapping 草稿"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "aizj-sync-job",
+      "category": "平台数据同步抽取",
+      "title": "平台数据同步抽取",
+      "description": "从平台同步全量、增量、URL、原始音频或修正数据，形成输入资产。",
+      "adapterKind": "平台同步抽取",
+      "authMode": "tenant_config_id + project_id",
+      "method": "POST",
+      "endpoint": "/api/v1/platform-sync-jobs",
+      "dagsterDefinition": "SourceAsset",
+      "defaultOpPrefix": "sync",
+      "defaultIoManager": "sync_job_io_manager",
+      "outputSchema": [
+        "job_id",
+        "status",
+        "mode",
+        "stats_json"
+      ],
+      "outputContract": {
+        "assetKey": "auris/sources/platform_sync_batch",
+        "displayName": "平台同步批次资产",
+        "kind": "外部数据源",
+        "description": "一次同步任务的批次清单，指向会话、主数据、录音索引和事件资产。",
+        "api": "POST /api/v1/platform-sync-jobs",
+        "partition": "tenant_id × project_id × sync_window",
+        "materialization": "外部数据源生成记录 + 批次清单",
+        "upstream": [
+          "auris/sources/platform_session"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "project_id",
+          "sync_job_id",
+          "batch_id"
+        ],
+        "schema": [
+          [
+            "job",
+            "sync_job_id, mode, status, started_at, finished_at"
+          ],
+          [
+            "scope",
+            "tenant_id, project_id, resource_types[]"
+          ],
+          [
+            "outputs",
+            "asset_keys[], materialization_ids[]"
+          ],
+          [
+            "stats",
+            "inserted, updated, skipped, failed"
+          ]
+        ]
+      },
+      "depsHint": "auris/sources/platform_session",
+      "x": 590,
+      "y": 500,
+      "node": {
+        "name": "平台数据同步抽取",
+        "icon": "RotateCcw",
+        "status": "待配置",
+        "metaA": "POST",
+        "metaB": "/aizj/sync",
+        "role": "平台数据同步抽取",
+        "confidence": 89,
+        "intentKeys": [
+          "audio",
+          "asset",
+          "review"
+        ],
+        "tags": [
+          "Platform",
+          "Sync",
+          "Extract"
+        ]
+      },
+      "context": {
+        "type": "输入引用",
+        "relation": "当前任务按配置从业务平台抽取数据，把同步批次、URL、原始音频或修正数据落成可追踪输入资产。",
+        "impact": "只作为当前任务版本的数据抽取配置，不直接改动平台全局同步配置。",
+        "version": "InputBinding 草稿",
+        "usedBy": [
+          "平台数据同步抽取",
+          "音频 URL 拉取",
+          "修正数据同步"
+        ],
+        "fields": [
+          [
+            "接口",
+            "POST /api/v1/platform-sync-jobs"
+          ],
+          [
+            "输入",
+            "tenant_config_id + project_id + filters"
+          ],
+          [
+            "输出资产",
+            "auris/sources/platform_sync_batch"
+          ],
+          [
+            "抽取策略",
+            "可全量、增量、URL、原始音频、修正数据"
+          ],
+          [
+            "底层映射",
+            "外部数据源: platform_sync_batch"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "risk-policy-step",
+      "category": "智能处理流水线",
+      "title": "风险策略判断",
+      "description": "按金额冲突、低置信、串音等规则判断是否进入复核。",
+      "x": 590,
+      "y": 500,
+      "node": {
+        "name": "风险策略判断",
+        "icon": "ShieldCheck",
+        "status": "待配置",
+        "metaA": "规则集",
+        "metaB": "risk-v3",
+        "role": "复核准入策略",
+        "confidence": 91,
+        "intentKeys": [
+          "review",
+          "asset"
+        ],
+        "tags": [
+          "Policy",
+          "Risk",
+          "Gate"
+        ]
+      },
+      "context": {
+        "type": "处理步骤",
+        "relation": "在当前任务内按风险规则判断样本是否需要进入人工复核。",
+        "impact": "规则绑定只写入当前任务版本；共享规则集需要在策略中心单独发布。",
+        "version": "StepConfig 草稿",
+        "usedBy": [
+          "复核导出闭环流",
+          "报价差异审查"
+        ],
+        "fields": [
+          [
+            "规则集",
+            "risk-v3"
+          ],
+          [
+            "输入",
+            "identity_map + transcript_asset"
+          ],
+          [
+            "输出",
+            "risk_signal"
+          ],
+          [
+            "失败策略",
+            "失败转人工复核"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "summary-step",
+      "category": "智能处理流水线",
+      "title": "复核摘要生成",
+      "description": "把证据、命中规则和上下文压缩为人工复核摘要。",
+      "x": 590,
+      "y": 500,
+      "node": {
+        "name": "复核摘要生成",
+        "icon": "BrainCircuit",
+        "status": "待配置",
+        "metaA": "模型",
+        "metaB": "summary-v2",
+        "role": "人工复核摘要",
+        "confidence": 88,
+        "intentKeys": [
+          "review"
+        ],
+        "tags": [
+          "LLM",
+          "Summary",
+          "Review"
+        ]
+      },
+      "context": {
+        "type": "处理步骤",
+        "relation": "为当前任务的人工复核队列生成摘要和证据说明。",
+        "impact": "摘要模板只影响当前任务版本，不改变全局提示词模板。",
+        "version": "StepConfig 草稿",
+        "usedBy": [
+          "复核导出闭环流"
+        ],
+        "fields": [
+          [
+            "模型",
+            "summary-v2"
+          ],
+          [
+            "输入",
+            "risk_signal + evidence_pack"
+          ],
+          [
+            "输出",
+            "review_summary"
+          ],
+          [
+            "模板",
+            "人工复核摘要草稿"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "alert-output",
+      "category": "平台处理结果推送",
+      "title": "风险告警输出",
+      "description": "把高风险样本写入告警队列或下游系统。",
+      "x": 895,
+      "y": 430,
+      "node": {
+        "name": "风险告警输出",
+        "icon": "Bell",
+        "status": "待发布",
+        "metaA": "输出",
+        "metaB": "risk_alerts",
+        "role": "下游告警资产",
+        "confidence": 86,
+        "intentKeys": [
+          "review",
+          "asset"
+        ],
+        "tags": [
+          "Output",
+          "Alert",
+          "Webhook"
+        ]
+      },
+      "context": {
+        "type": "输出资产",
+        "relation": "当前任务把高风险样本输出到风险告警队列。",
+        "impact": "只新增当前任务的输出绑定，不影响已有资产消费者。",
+        "version": "OutputBinding 草稿",
+        "usedBy": [
+          "风险看板",
+          "运营告警"
+        ],
+        "fields": [
+          [
+            "输出资产",
+            "risk_alerts"
+          ],
+          [
+            "写入方式",
+            "追加写入"
+          ],
+          [
+            "下游消费",
+            "风险看板 / 运营告警"
+          ],
+          [
+            "回滚策略",
+            "按任务版本回滚"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "obs-wav-output",
+      "category": "平台处理结果推送",
+      "title": "处理后 WAV 上传",
+      "description": "把降噪、切片或转码后的 WAV 写入 OBS/S3，并生成可回传平台的访问 URL。",
+      "adapterKind": "对象存储输出",
+      "authMode": "STS / Service Account",
+      "method": "PUT",
+      "endpoint": "obs://auris-processed-audio/{tenant}/{task_run}/{recording}.wav",
+      "dagsterDefinition": "Asset",
+      "defaultOpPrefix": "upload",
+      "defaultIoManager": "obs_audio_io_manager",
+      "outputSchema": [
+        "recording_id",
+        "processed_wav_url",
+        "object_key",
+        "expires_at",
+        "checksum"
+      ],
+      "outputContract": {
+        "assetKey": "auris/task/platform_login_risk_review_task_v3/processed_wav_url",
+        "displayName": "处理后音频资产",
+        "kind": "Asset",
+        "description": "把处理后的 wav 对象、签名 URL 和校验信息作为可追踪资产物化。",
+        "api": "PUT obs://auris-processed-audio/{tenant}/{task_run}/{recording}.wav",
+        "partition": "tenant_id × task_run_id × recording_id",
+        "materialization": "资产生成记录 + 对象元数据",
+        "upstream": [
+          "auris/audio/voice_segments",
+          "auris/sources/audio_url_index"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "task_run_id",
+          "recording_id",
+          "object_key"
+        ],
+        "schema": [
+          [
+            "recording",
+            "recording_id, segment_ids[], source_checksum"
+          ],
+          [
+            "object",
+            "bucket, object_key, processed_wav_url_ref"
+          ],
+          [
+            "security",
+            "expires_at, signature_policy"
+          ],
+          [
+            "trace",
+            "task_run_id, materialization_id, trace_id"
+          ]
+        ]
+      },
+      "depsHint": "auris/task/login_risk_review_task_v3/voice_segments",
+      "x": 1420,
+      "y": 562,
+      "node": {
+        "name": "处理后 WAV 上传",
+        "icon": "Database",
+        "status": "待配置",
+        "metaA": "OBS",
+        "metaB": "processed_wav_url",
+        "role": "对象存储上传",
+        "confidence": 90,
+        "intentKeys": [
+          "audio",
+          "asset",
+          "review"
+        ],
+        "tags": [
+          "OBS",
+          "WAV",
+          "Output"
+        ]
+      },
+      "context": {
+        "type": "输出资产",
+        "relation": "当前任务把处理后的 WAV 上传到 OBS/S3，生成平台可读取的 processed_wav_url。",
+        "impact": "只新增当前任务版本的对象存储输出绑定；不会触发浏览器下载，也不会覆盖原始录音。",
+        "version": "OutputSink 草稿",
+        "usedBy": [
+          "平台音频回传",
+          "证据包生成",
+          "调听工作台"
+        ],
+        "fields": [
+          [
+            "目标存储",
+            "OBS/S3 bucket: auris-processed-audio"
+          ],
+          [
+            "输入",
+            "voice_segments / cleaned_wav"
+          ],
+          [
+            "输出资产",
+            "auris/task/platform_login_risk_review_task_v3/processed_wav_url"
+          ],
+          [
+            "写入策略",
+            "按 tenant/task_run/recording 分区写入"
+          ],
+          [
+            "访问策略",
+            "签名 URL / 短期有效 / 可刷新"
+          ],
+          [
+            "失败策略",
+            "3 次重试 + 死信队列"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "platform-callback-output",
+      "category": "平台处理结果推送",
+      "title": "平台处理结果推送",
+      "description": "把处理后 WAV URL、标签结果、证据包和复核结论回写业务平台。",
+      "adapterKind": "平台结果推送",
+      "authMode": "Service Token + 幂等键",
+      "method": "POST",
+      "endpoint": "/api/v1/output-sinks/platform-callbacks",
+      "dagsterDefinition": "Asset",
+      "defaultOpPrefix": "callback",
+      "defaultIoManager": "platform_callback_io_manager",
+      "outputSchema": [
+        "callback_id",
+        "recording_id",
+        "processed_wav_url",
+        "labels",
+        "evidence_pack_url",
+        "status"
+      ],
+      "outputContract": {
+        "assetKey": "auris/task/platform_login_risk_review_task_v3/platform_callback_asset",
+        "displayName": "平台回写资产",
+        "kind": "Asset",
+        "description": "回写不是裸 API 调用，而是带幂等键、证据引用和结果状态的 Output Sink 资产。",
+        "api": "POST /api/v1/output-sinks/platform-callbacks",
+        "partition": "tenant_id × task_run_id × recording_id",
+        "materialization": "资产生成记录 + 回调回执",
+        "upstream": [
+          "auris/task/platform_login_risk_review_task_v3/processed_wav_url",
+          "auris/labels/label_candidates",
+          "auris/task/platform_login_risk_review_task_v3/review_queue"
+        ],
+        "aggregateKeys": [
+          "tenant_id",
+          "task_run_id",
+          "recording_id",
+          "callback_id"
+        ],
+        "schema": [
+          [
+            "payload",
+            "recording_id, processed_wav_url_ref, evidence_pack_ref"
+          ],
+          [
+            "labels",
+            "label_codes[], risk_signal, review_result"
+          ],
+          [
+            "idempotency",
+            "tenant_id, task_run_id, recording_id"
+          ],
+          [
+            "receipt",
+            "callback_id, status, remote_trace_id"
+          ]
+        ]
+      },
+      "depsHint": "auris/task/login_risk_review_task_v3/processed_wav_url",
+      "x": 1420,
+      "y": 724,
+      "node": {
+        "name": "平台处理结果推送",
+        "icon": "Link2",
+        "status": "待配置",
+        "metaA": "POST",
+        "metaB": "/output-sinks/callbacks",
+        "role": "平台处理结果推送",
+        "confidence": 88,
+        "intentKeys": [
+          "audio",
+          "asset",
+          "review"
+        ],
+        "tags": [
+          "Push",
+          "Callback",
+          "Result"
+        ]
+      },
+      "context": {
+        "type": "输出资产",
+        "relation": "当前任务把 processed_wav_url、标签结果、证据包 URL 和人工复核结论推送回业务平台。",
+        "impact": "只配置当前任务版本的回写目标、字段映射和重试策略；不作为页面下载导出。",
+        "version": "OutputSink 草稿",
+        "usedBy": [
+          "CRM 平台",
+          "工单系统",
+          "质检看板",
+          "外部业务平台"
+        ],
+        "fields": [
+          [
+            "接口",
+            "POST /api/v1/output-sinks/platform-callbacks"
+          ],
+          [
+            "输入",
+            "processed_wav_url + review_result + labels + evidence_pack_url"
+          ],
+          [
+            "鉴权方式",
+            "Service Token + tenant_id"
+          ],
+          [
+            "幂等键",
+            "tenant_id + task_run_id + recording_id"
+          ],
+          [
+            "推送字段",
+            "wav_url, label_codes, evidence_pack_url, review_result, trace_id"
+          ],
+          [
+            "失败策略",
+            "指数退避重试 + callback_dead_letter"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "human-gate",
+      "category": "人工与控制",
+      "title": "人工复核网关",
+      "description": "把低置信或高风险样本转给人工处理。",
+      "runtimeLinks": [
+        [
+          "处理入口",
+          "运营首页 / 待处理、调听工作台 / Human Loop",
+          "队列里的复核任务在这里分派、接受、修改或拒绝。"
+        ],
+        [
+          "查看入口",
+          "任务配置 / 运行记录、节点详情 / 执行计划",
+          "查看当前网关触发次数、超时、处理人和下游输出。"
+        ],
+        [
+          "产出对象",
+          "review_task + human_decision + evidence_pack_ref",
+          "人工处理结果回写为当前任务版本的输出资产。"
+        ]
+      ],
+      "x": 690,
+      "y": 86,
+      "node": {
+        "name": "人工复核网关",
+        "icon": "UserCheck",
+        "status": "待配置",
+        "metaA": "队列",
+        "metaB": "review_queue",
+        "role": "人工介入控制",
+        "confidence": 100,
+        "intentKeys": [
+          "review"
+        ],
+        "tags": [
+          "Human",
+          "Queue",
+          "Control"
+        ]
+      },
+      "context": {
+        "type": "控制节点",
+        "relation": "当前任务在风险或低置信情况下转入人工复核队列。",
+        "impact": "只增加当前任务的控制分支，不改变人工队列全局配置。",
+        "version": "ControlNode 草稿",
+        "usedBy": [
+          "复核导出闭环流",
+          "串音排查"
+        ],
+        "fields": [
+          [
+            "队列",
+            "review_queue"
+          ],
+          [
+            "进入条件",
+            "risk_score >= 0.8 或低置信"
+          ],
+          [
+            "处理人",
+            "质检主管"
+          ],
+          [
+            "超时策略",
+            "24 小时提醒"
+          ],
+          [
+            "处理入口",
+            "运营首页 / 待处理、调听工作台 / Human Loop"
+          ],
+          [
+            "查看入口",
+            "任务配置 / 运行记录、节点详情 / 执行计划"
+          ]
+        ]
+      }
+    },
+    {
+      "key": "condition-branch",
+      "category": "人工与控制",
+      "title": "条件分支",
+      "description": "按字段、规则或置信度把流程分流。",
+      "runtimeLinks": [
+        [
+          "处理入口",
+          "任务配置 / 流程配置",
+          "这里配置 if / else 条件、命中路径、未命中路径和兜底动作。"
+        ],
+        [
+          "查看入口",
+          "运行记录 / 分支命中明细",
+          "查看每次运行命中了哪个分支、跳过了哪些样本、哪些被转人工。"
+        ],
+        [
+          "产出对象",
+          "branch_decision + route_tag",
+          "分支结果作为后续节点的输入和运行标签。"
+        ]
+      ],
+      "x": 690,
+      "y": 86,
+      "node": {
+        "name": "条件分支",
+        "icon": "GitBranch",
+        "status": "待配置",
+        "metaA": "条件",
+        "metaB": "if / else",
+        "role": "流程分流控制",
+        "confidence": 100,
+        "intentKeys": [
+          "entity",
+          "audio",
+          "asset",
+          "review"
+        ],
+        "tags": [
+          "Branch",
+          "Rule",
+          "Control"
+        ]
+      },
+      "context": {
+        "type": "控制节点",
+        "relation": "当前任务按条件把样本分到不同处理路径。",
+        "impact": "只在当前任务草稿中新增分支，不影响已有运行记录。",
+        "version": "ControlNode 草稿",
+        "usedBy": [
+          "当前任务草稿"
+        ],
+        "fields": [
+          [
+            "分支条件",
+            "待配置"
+          ],
+          [
+            "命中路径",
+            "继续处理"
+          ],
+          [
+            "未命中路径",
+            "跳过或转人工"
+          ],
+          [
+            "配置状态",
+            "草稿"
+          ],
+          [
+            "处理入口",
+            "任务配置 / 流程配置"
+          ],
+          [
+            "查看入口",
+            "运行记录 / 分支命中明细"
+          ]
+        ]
+      }
+    }
+  ],
+  "settingsRows": {
+    "model": [
+      {
+        "name": "音频智能服务",
+        "value": "chain-v3.2",
+        "desc": "统一承载 VAD / Diar / ASR，provider 可切阿里、火山、自研、开源",
+        "risk": "中风险",
+        "scope": "调听、证据审查、资产血缘",
+        "owner": "模型平台组",
+        "api": "PATCH /api/v1/settings/model-chain",
+        "asset": "auris/model/asr_transcripts",
+        "policy": "发布前跑影子评测，失败不覆盖线上链路"
+      },
+      {
+        "name": "Provider 路由",
+        "value": "自研优先",
+        "desc": "云厂商、私有化和开源实现通过 provider_ref 与 run_config 切换",
+        "risk": "高风险",
+        "scope": "ASR 成本、延迟、WER、回退策略",
+        "owner": "音频算法组",
+        "api": "PATCH /api/v1/settings/provider-route",
+        "asset": "auris/audio/provider_metrics",
+        "policy": "必须保留回退 provider，并校验最近 24 小时样本"
+      },
+      {
+        "name": "Tagger 模型",
+        "value": "v1.8",
+        "desc": "标签版本 v1.8.4 / 候选 v1.9.0-rc2",
+        "risk": "高风险",
+        "scope": "标签资产、Human Loop、业务洞察",
+        "owner": "质检策略组",
+        "api": "PATCH /api/v1/settings/tagger",
+        "asset": "auris/label/event_tags",
+        "policy": "候选版本只写草稿，发布前进入标签冲突仲裁"
+      },
+      {
+        "name": "LLM Judge",
+        "value": "prod-v5",
+        "desc": "只写候选结论，不覆盖人工标注",
+        "risk": "中风险",
+        "scope": "审音候选、Agent 建议、发布阻断",
+        "owner": "Agent 平台组",
+        "api": "PATCH /api/v1/settings/judge",
+        "asset": "auris/eval/quality_metrics",
+        "policy": "只允许生成候选，不允许自动改人工结论"
+      }
+    ],
+    "tools": [
+      {
+        "name": "Audio Intelligence Tool",
+        "value": "可用",
+        "desc": "VAD / Diar / ASR 分阶段超时、重试和成本统计",
+        "risk": "中风险",
+        "scope": "调听波形、片段切分、ASR 资产",
+        "owner": "工具平台组",
+        "api": "PATCH /api/v1/tools/audio-intelligence",
+        "asset": "auris/audio/voice_segments",
+        "policy": "工具调用必须记录 trace_id 和 provider_ref"
+      },
+      {
+        "name": "Crosstalk Tool",
+        "value": "可用",
+        "desc": "读取同门店同时间多设备能量峰",
+        "risk": "高风险",
+        "scope": "串音排查、主录音判定、重复收录",
+        "owner": "音频算法组",
+        "api": "PATCH /api/v1/tools/crosstalk",
+        "asset": "auris/audio/overlap_index",
+        "policy": "不能自动删除录音，只能生成候选证据"
+      },
+      {
+        "name": "Backfill Tool",
+        "value": "受控",
+        "desc": "批量回填必须携带审批单和影响范围",
+        "risk": "高风险",
+        "scope": "资产回填、下游重算、发布门禁",
+        "owner": "数据平台组",
+        "api": "PATCH /api/v1/tools/backfill",
+        "asset": "auris/task/backfill_requests",
+        "policy": "审批通过后按 run_key 幂等执行"
+      },
+      {
+        "name": "CRM / 单据 Tool",
+        "value": "可用",
+        "desc": "只读报价单、试驾单、订单字段",
+        "risk": "中风险",
+        "scope": "单据关联、金额冲突、客户上下文",
+        "owner": "业务系统组",
+        "api": "PATCH /api/v1/tools/document-api",
+        "asset": "auris/events/document_links",
+        "policy": "只读接入，跨租户字段直接拒绝"
+      }
+    ],
+    "thresholds": [
+      {
+        "name": "低置信阈值",
+        "value": "0.78",
+        "desc": "低于阈值自动进入 Human Review Gateway",
+        "risk": "中风险",
+        "scope": "人审队列、标签接受率、质检效率",
+        "owner": "质检策略组",
+        "api": "PATCH /api/v1/settings/thresholds/low-confidence",
+        "asset": "auris/review/queue",
+        "policy": "变更后先模拟队列增量，再保存草稿"
+      },
+      {
+        "name": "串音候选阈值",
+        "value": "0.61",
+        "desc": "跨设备重叠且能量峰相似时提示人工排除",
+        "risk": "高风险",
+        "scope": "主录音/串音判定、完整对话边界",
+        "owner": "音频算法组",
+        "api": "PATCH /api/v1/settings/thresholds/crosstalk",
+        "asset": "auris/audio/overlap_index",
+        "policy": "必须抽样复核，不允许自动确认串音"
+      },
+      {
+        "name": "字段冲突阈值",
+        "value": "0.12",
+        "desc": "报价金额差异超过 12% 标记冲突",
+        "risk": "中风险",
+        "scope": "金额冲突、报价承诺、单据一致性",
+        "owner": "业务质检组",
+        "api": "PATCH /api/v1/settings/thresholds/field-diff",
+        "asset": "auris/events/document_links",
+        "policy": "变更会触发近 7 天冲突样本重算"
+      },
+      {
+        "name": "发布阻断阈值",
+        "value": "2 高风险",
+        "desc": "超过即阻断标签/模型发布",
+        "risk": "高风险",
+        "scope": "模型发布、标签发布、配置发布",
+        "owner": "项目管理员",
+        "api": "PATCH /api/v1/settings/policy-guard",
+        "asset": "auris/config/policy_guard",
+        "policy": "只能提高风险强度，降低必须双人审批"
+      }
+    ],
+    "permission": [
+      {
+        "name": "租户隔离",
+        "value": "强制",
+        "desc": "所有工具调用带 tenant_id / project_id / user_id",
+        "risk": "高风险",
+        "scope": "全模块、全部 API、审计日志",
+        "owner": "平台管理员",
+        "api": "PATCH /api/v1/settings/permissions/tenant-guard",
+        "asset": "auris/audit/access_logs",
+        "policy": "不可关闭，只能调整授权继承范围"
+      },
+      {
+        "name": "人工覆盖",
+        "value": "禁止自动",
+        "desc": "覆盖人工标注必须管理员确认",
+        "risk": "高风险",
+        "scope": "调听标注、标签回填、模型候选",
+        "owner": "质检负责人",
+        "api": "PATCH /api/v1/settings/permissions/human-override",
+        "asset": "auris/label/manual_annotations",
+        "policy": "所有覆盖写入审计，必须可回滚"
+      },
+      {
+        "name": "批量回填",
+        "value": "审批",
+        "desc": "回填影响下游资产时必须走审批",
+        "risk": "中风险",
+        "scope": "数据资产、任务配置、运行记录",
+        "owner": "数据平台组",
+        "api": "PATCH /api/v1/settings/permissions/backfill",
+        "asset": "auris/task/backfill_requests",
+        "policy": "审批单绑定 asset_key、partition、run_key"
+      },
+      {
+        "name": "跨项目访问",
+        "value": "拒绝",
+        "desc": "只允许当前项目授权数据域",
+        "risk": "高风险",
+        "scope": "项目管理、资产、洞察、导出",
+        "owner": "平台管理员",
+        "api": "PATCH /api/v1/settings/permissions/cross-project",
+        "asset": "auris/audit/access_logs",
+        "policy": "跨项目只允许创建脱敏引用，不允许直接读取原始音频"
+      }
+    ],
+    "storage": [
+      {
+        "name": "对象存储",
+        "value": "S3 / OSS",
+        "desc": "原始音频、ASR JSON、证据包资产",
+        "risk": "中风险",
+        "scope": "原始音频、证据包、回放下载",
+        "owner": "数据接入组",
+        "api": "PATCH /api/v1/settings/storage/object",
+        "asset": "auris/audio/raw_recordings",
+        "policy": "切换存储必须完成双写校验"
+      },
+      {
+        "name": "召回索引",
+        "value": "Qdrant",
+        "desc": "知识切片、相似证据、标签样本召回",
+        "risk": "中风险",
+        "scope": "知识库、标签、洞察、调听证据",
+        "owner": "数据平台组",
+        "api": "PATCH /api/v1/settings/storage/vector-index",
+        "asset": "auris/knowledge/chunk_index",
+        "policy": "索引迁移只增量回放，不阻塞当前调听"
+      },
+      {
+        "name": "业务库",
+        "value": "MySQL",
+        "desc": "项目配置、权限、版本、审计和聚合指标",
+        "risk": "高风险",
+        "scope": "租户、项目、任务、设置、洞察",
+        "owner": "平台工程组",
+        "api": "PATCH /api/v1/settings/storage/business-db",
+        "asset": "auris/config/project_settings",
+        "policy": "只允许维护窗口发布，必须保留回滚快照"
+      },
+      {
+        "name": "保留策略",
+        "value": "180 天",
+        "desc": "原始音频可按租户配置归档",
+        "risk": "中风险",
+        "scope": "资产生命周期、导出、合规审计",
+        "owner": "合规管理员",
+        "api": "PATCH /api/v1/settings/storage/retention",
+        "asset": "auris/audio/raw_recordings",
+        "policy": "缩短保留期需展示影响资产数量和客户范围"
+      }
+    ],
+    "notice": [
+      {
+        "name": "资产失败",
+        "value": "企业微信 + 邮件",
+        "desc": "失败分区、回填完成、质量下降",
+        "risk": "中风险",
+        "scope": "资产任务、数据回填、模型质量",
+        "owner": "数据平台组",
+        "api": "PATCH /api/v1/settings/notifications/asset-failure",
+        "asset": "auris/task/run_events",
+        "policy": "失败通知需要去重，避免同一 run_id 重复轰炸"
+      },
+      {
+        "name": "人工复核",
+        "value": "站内 + 企业微信",
+        "desc": "高风险标签、声纹合并、金额冲突",
+        "risk": "高风险",
+        "scope": "Human Loop、审音候选、标签冲突",
+        "owner": "质检负责人",
+        "api": "PATCH /api/v1/settings/notifications/human-review",
+        "asset": "auris/review/queue",
+        "policy": "高风险样本必须通知到角色，不绑定单个员工"
+      },
+      {
+        "name": "发布阻断",
+        "value": "项目管理员",
+        "desc": "模型/标签版本阻断必须确认",
+        "risk": "高风险",
+        "scope": "版本发布、Policy Guard、审计",
+        "owner": "项目管理员",
+        "api": "PATCH /api/v1/settings/notifications/release-block",
+        "asset": "auris/config/release_records",
+        "policy": "阻断通知必须含风险项、影响资产和回滚入口"
+      },
+      {
+        "name": "日报",
+        "value": "09:30",
+        "desc": "资产质量、待回填、待复核、异常门店",
+        "risk": "低风险",
+        "scope": "运营首页、洞察、项目日报",
+        "owner": "运营负责人",
+        "api": "PATCH /api/v1/settings/notifications/daily-report",
+        "asset": "auris/report/daily_digest",
+        "policy": "只读汇总，不包含原始音频和敏感客户字段"
+      }
+    ]
+  },
+  "settingPolicyBundles": [
+    {
+      "id": "quality-loop",
+      "title": "质检稳态链路",
+      "intent": "模型升级时保持调听、标签和人审口径一致",
+      "objective": "降低误判，保留人工结论和回滚路径",
+      "owner": "模型平台组 + 质检策略组",
+      "risk": "中高风险",
+      "tone": "blue",
+      "targets": [
+        "音频智能服务",
+        "Tagger 模型",
+        "低置信阈值",
+        "人工覆盖",
+        "人工复核",
+        "日报"
+      ],
+      "gates": [
+        "影子评测",
+        "标签冲突仲裁",
+        "Human Loop"
+      ],
+      "outcome": "Agent 会把模型链路、阈值和人审通知绑定成一个可校验的发布单。"
+    },
+    {
+      "id": "cost-route",
+      "title": "成本优先路由",
+      "intent": "在不牺牲关键证据质量的前提下降低 ASR 和回填成本",
+      "objective": "按 provider 指标自动建议主备路由",
+      "owner": "音频算法组 + 数据平台组",
+      "risk": "中风险",
+      "tone": "green",
+      "targets": [
+        "Provider 路由",
+        "Audio Intelligence Tool",
+        "对象存储",
+        "分析索引",
+        "资产失败"
+      ],
+      "gates": [
+        "24h 样本校验",
+        "双写校验",
+        "失败通知去重"
+      ],
+      "outcome": "Agent 会先模拟成本、延迟和 WER，再把变更拆成 provider、存储和通知三类草稿。"
+    },
+    {
+      "id": "risk-gate",
+      "title": "高风险人工门禁",
+      "intent": "金额冲突、串音、批量回填必须进入人工复核和发布阻断",
+      "objective": "避免自动化动作覆盖关键证据",
+      "owner": "项目管理员 + 质检负责人",
+      "risk": "高风险",
+      "tone": "amber",
+      "targets": [
+        "串音候选阈值",
+        "Crosstalk Tool",
+        "发布阻断阈值",
+        "批量回填",
+        "发布阻断"
+      ],
+      "gates": [
+        "抽样复核",
+        "双人审批",
+        "审计可回滚"
+      ],
+      "outcome": "Agent 会把阈值、工具权限和通知接收人连成同一条 Policy Guard 规则。"
+    },
+    {
+      "id": "tenant-boundary",
+      "title": "租户合规边界",
+      "intent": "跨项目、跨租户和音频保留策略统一受控",
+      "objective": "所有数据引用只保留脱敏资产和审计链路",
+      "owner": "平台管理员 + 合规管理员",
+      "risk": "高风险",
+      "tone": "violet",
+      "targets": [
+        "租户隔离",
+        "跨项目访问",
+        "业务库",
+        "保留策略",
+        "CRM / 单据 Tool"
+      ],
+      "gates": [
+        "租户权限校验",
+        "脱敏引用",
+        "保留期影响分析"
+      ],
+      "outcome": "Agent 会先展开影响资产数量、项目范围和权限继承，再允许创建草稿。"
+    }
+  ],
+  "homeCatalog": {
+    "agentTasks": [
+      {
+        "level": "P0",
+        "title": "报价金额与单据冲突",
+        "context": "北京 SKP 店 · 销售A · 12:27:18",
+        "reason": "ASR 报价 28.19 万，报价单字段为 31.69 万，建议进入证据审查核对落地价构成。",
+        "confidence": "82%",
+        "route": "listening",
+        "chips": ["报价单 #BJ-041", "金额冲突", "人工复核"]
+      },
+      {
+        "level": "P1",
+        "title": "同门店多设备串音待排除",
+        "context": "极光中心店 · B-2001 与 Hall-Mic",
+        "reason": "同一时间窗能量峰重叠，ASR 片段重复，建议切到串音矩阵确认主录音归属。",
+        "confidence": "78%",
+        "route": "listening",
+        "chips": ["串音候选", "主录音 A-1001", "设备同峰"]
+      },
+      {
+        "level": "P2",
+        "title": "事件标签资产需要回填",
+        "context": "daily-20250526 · 标签版本 v1.8.4",
+        "reason": "标签规则修正后影响报价承诺、试驾预约、售后跟进三个下游资产。",
+        "confidence": "91%",
+        "route": "assets",
+        "chips": ["影响 12 下游", "可重跑", "需审批"]
+      }
+    ],
+    "entityRelations": [
+      {
+        "kind": "门店实体",
+        "entity": "北京区域 / 极光中心店",
+        "entityId": "entity://store/BJ-AURORA-001",
+        "context": "同一门店同时参与销售话术质检、试驾流程分析和门店接待洞察，首页不能只落到当前项目。",
+        "sourceProjects": ["销售话术质检", "试驾流程分析", "门店接待洞察"],
+        "chain": ["租户", "门店", "设备", "接待会话"],
+        "links": [
+          { "label": "项目详情", "scope": "跨项目门店画像", "route": "projects" },
+          { "label": "数据聚合树", "scope": "空间优先 / 极光中心店", "route": "data" },
+          { "label": "业务洞察", "scope": "门店异常趋势", "route": "insights" }
+        ]
+      },
+      {
+        "kind": "人员实体",
+        "entity": "销售A / A-1001 工牌",
+        "entityId": "entity://person/EMP-A1001",
+        "context": "同一个员工实体会出现在销售质检、金融保险陪练和售后跟进项目，跳转要保留员工主体关系。",
+        "sourceProjects": ["销售话术质检", "金融保险陪练", "售后维修工单关联"],
+        "chain": ["员工", "工牌", "声纹", "会话片段"],
+        "links": [
+          { "label": "证据审查", "scope": "S20250526-000128 / 销售A", "route": "listening" },
+          { "label": "标签治理", "scope": "报价承诺 / 价格异议", "route": "labels" },
+          { "label": "评测回流", "scope": "员工话术 badcase", "route": "evaluation" }
+        ]
+      },
+      {
+        "kind": "业务事件",
+        "entity": "报价单 #BJ-041",
+        "entityId": "entity://doc/quote/BJ-041",
+        "context": "报价单来自业务系统，但证据来自音频、ASR、标签和 Agent 建议，需要可回跳到每个来源。",
+        "sourceProjects": ["销售话术质检", "门店接待洞察"],
+        "chain": ["报价单", "报价事件", "金额实体", "风险复核"],
+        "links": [
+          { "label": "证据审查", "scope": "12:27:18 / 金额冲突", "route": "listening" },
+          { "label": "资产血缘", "scope": "quote_event -> evidence_pack", "route": "assets" },
+          { "label": "处理画布", "scope": "认证事件接口 / 风险策略", "route": "canvas" }
+        ]
+      },
+      {
+        "kind": "音频资产",
+        "entity": "A-1001_20250526_122300.wav",
+        "entityId": "asset://audio/A-1001/20250526/122300",
+        "context": "一个完整对话可能跨多个 wav 切片，被不同项目复用为主录音、串音候选或训练样本。",
+        "sourceProjects": ["销售话术质检", "试驾流程分析", "模型评测集"],
+        "chain": ["音频 URL", "切片", "ASR", "标签轨道"],
+        "links": [
+          { "label": "数据资产", "scope": "原始音频 / 切片索引", "route": "data" },
+          { "label": "证据审查", "scope": "Minimap / 当前片段", "route": "listening" },
+          { "label": "资产血缘", "scope": "audio_url -> transcript_asset", "route": "assets" }
+        ]
+      }
+    ]
+  },
+  "canvasCatalog": {
+    "intents": [
+      {
+        "key": "entity",
+        "label": "主体映射",
+        "description": "流程先接入多平台身份、门店、员工和设备数据，把租户、门店、员工、工牌映射到统一主体上。",
+        "taskId": "platform_identity_sync_v3",
+        "output": "平台主体映射表",
+        "step": "登录认证、租户拉取、员工拉取、主体映射",
+        "trigger": "后台登录成功后运行",
+        "scope": "极光中心店 / 当前租户 / 最近 24 小时",
+        "checks": [
+          "后台登录会话有效",
+          "租户接口返回 tenant_id",
+          "员工接口返回 employee_id 与工牌"
+        ]
+      },
+      {
+        "key": "audio",
+        "label": "音频模型链",
+        "description": "流程通过 PBX、S3 或平台音频接口获取 wav/mp3 URL，再经过 VAD、Diar、ASR 和标签模型生成片段资产。",
+        "taskId": "platform_audio_url_processing_v3",
+        "output": "转写片段资产",
+        "step": "获取音频 URL、VAD、Diar、ASR、标签生成",
+        "trigger": "音频 URL 接口有新记录",
+        "scope": "recording_url_api / A-1001 / 12:23-12:33",
+        "checks": [
+          "音频 URL 可访问",
+          "URL 过期时间充足",
+          "VAD 与 ASR 版本已绑定"
+        ]
+      },
+      {
+        "key": "asset",
+        "label": "事件入库",
+        "description": "流程使用认证上下文调用事件接口，获取接待、报价、试驾、风险等业务事件，并与音频片段和单据对齐。",
+        "taskId": "platform_authenticated_event_ingest_v3",
+        "output": "复核证据包",
+        "step": "认证事件拉取、音频对齐、证据包生成",
+        "trigger": "事件接口认证通过后运行",
+        "scope": "authenticated_event_api / event_time 最近 24 小时",
+        "checks": [
+          "事件接口携带有效 Token",
+          "事件包含 tenant_id 与 employee_id",
+          "事件可回到音频 URL"
+        ]
+      },
+      {
+        "key": "review",
+        "label": "复核导出",
+        "description": "流程基于主体、音频、标签、单据和事件生成复核队列，支持 Human Loop、A/B 实验、资产导出和回写。",
+        "taskId": "platform_login_risk_review_task_v3",
+        "output": "复核任务队列",
+        "step": "认证上下文聚合、风险命中、人工复核分派",
+        "trigger": "每 15 分钟定时运行",
+        "scope": "后台登录风险 / 认证事件 / 音频证据",
+        "checks": [
+          "登录平台状态正常",
+          "事件接口认证成功",
+          "人工仲裁可回写"
+        ]
+      }
+    ],
+    "apiContracts": [
+      {
+        "name": "平台会话",
+        "method": "POST",
+        "path": "/api/v1/platform-sessions",
+        "auth": "凭证引用 + 租户配置",
+        "request": "tenant_config_id, account_ref, password_secret_ref",
+        "response": "session_id, access_token_ref, tenant_scope, expires_at",
+        "dagster": "外部数据源 auris/sources/platform_session"
+      },
+      {
+        "name": "租户门店",
+        "method": "GET",
+        "path": "/api/v1/platform-tenants?tenant_config_id=tc_aurora",
+        "auth": "Bearer platform_session",
+        "request": "tenant_config_id, cursor, updated_after",
+        "response": "tenant_id, store_id, org_path, status",
+        "dagster": "外部数据源 auris/sources/tenant_list"
+      },
+      {
+        "name": "员工工牌",
+        "method": "GET",
+        "path": "/api/v1/platform-employees?tenant_id=aurora",
+        "auth": "Bearer platform_session",
+        "request": "tenant_id, store_id, role, cursor",
+        "response": "employee_id, badge_id, store_id, role",
+        "dagster": "外部数据源 auris/sources/employee_list"
+      },
+      {
+        "name": "录音地址",
+        "method": "GET",
+        "path": "/api/v1/audio-recording-urls?started_at[after]=2025-05-26T00:00:00%2B08:00",
+        "auth": "Bearer platform_session",
+        "request": "store_id, started_at[after], limit",
+        "response": "recording_id, audio_url_ref, device_id, started_at, duration",
+        "dagster": "外部数据源 auris/sources/audio_url_index"
+      },
+      {
+        "name": "认证事件",
+        "method": "GET",
+        "path": "/api/v1/authenticated-events?event_time[after]=2025-05-26T00:00:00%2B08:00",
+        "auth": "Bearer platform_session",
+        "request": "tenant_id, store_id, event_type, event_time[after]",
+        "response": "event_id, event_type, employee_id, recording_id, risk_hint",
+        "dagster": "外部数据源 auris/sources/authenticated_events"
+      },
+      {
+        "name": "复核任务",
+        "method": "POST",
+        "path": "/api/v1/review-tasks",
+        "auth": "Service Token + 幂等键",
+        "request": "task_run_id, risk_signal, evidence_refs, assignee_rule",
+        "response": "review_task_id, status, queue, trace_id",
+        "dagster": "Asset auris/task/platform_login_risk_review_task_v3/review_queue"
+      }
+    ],
+    "compatibility": [
+      {
+        "item": "任务定义",
+        "business": "数据流程版本",
+        "dagster": "evidence_dataflow_canvas_v3_job",
+        "status": "兼容",
+        "detail": "由当前流程草稿生成 graph/job，发布后不可覆盖历史版本。"
+      },
+      {
+        "item": "Assets",
+        "business": "平台会话、主体映射、音频转写、说话人、标签候选、复核队列",
+        "dagster": "外部数据源 + 资产生成记录",
+        "status": "兼容",
+        "detail": "每个输入/输出都能落到 asset key，并带 tenant/project/version 标签。"
+      },
+      {
+        "item": "Partitions",
+        "business": "租户 + 门店 + 日期",
+        "dagster": "MultiPartitionsDefinition",
+        "status": "兼容",
+        "detail": "支持同一天同门店回填，也支持只重跑某个门店分区。"
+      },
+      {
+        "item": "运行请求",
+        "business": "手动运行 / 定时运行 / 数据到达触发",
+        "dagster": "run_key + run_config + tags",
+        "status": "兼容",
+        "detail": "BFF 用幂等 run_key 包装执行请求，避免重复触发。"
+      },
+      {
+        "item": "Sensor",
+        "business": "平台登录成功、音频 URL、单据和认证事件到达",
+        "dagster": "事件监听",
+        "status": "兼容",
+        "detail": "传感器只创建运行请求，不在 UI 中暴露底层轮询细节。"
+      },
+      {
+        "item": "Backfill",
+        "business": "按日期/门店批量补数",
+        "dagster": "BackfillPolicy + partition selection",
+        "status": "需确认",
+        "detail": "发布前需要确认回填并发、失败重试和是否重算下游 ASR。"
+      }
+    ],
+    "scenarioPolicies": [
+      [
+        "Token 过期",
+        "刷新 platform_session；刷新失败则阻断运行并生成配置复核任务。"
+      ],
+      [
+        "事件有但录音缺失",
+        "生成低置信复核任务，保留事件证据，不强行创建音频资产。"
+      ],
+      [
+        "录音 URL 过期",
+        "先重取 audio_url_ref，再运行 VAD/ASR；失败进入死信队列。"
+      ],
+      [
+        "员工跨门店",
+        "主体映射降置信度，要求人工确认后才能写入复核队列。"
+      ],
+      [
+        "重复触发",
+        "run_key = tenant:project:store:date:window，执行侧幂等去重。"
+      ]
+    ],
+    "taskTypeBlueprints": [
+      {
+        "key": "evidence-dataflow",
+        "name": "多平台证据数据流",
+        "intentKey": "review",
+        "status": "生产中",
+        "owner": "质检运营",
+        "sla": "15 分钟生成参数并运行",
+        "reusableCanvases": "5 阶段 / 4 画布",
+        "description": "从 CRM、订单、PBX/S3 音频和认证事件接入，经过 Agent 参数生成、模型链、实验和导出形成证据资产。",
+        "defaultCanvas": "evidence_dataflow_canvas_v3"
+      },
+      {
+        "key": "audio-intelligence-flow",
+        "name": "音频智能处理流",
+        "intentKey": "audio",
+        "status": "可复用",
+        "owner": "音频平台",
+        "sla": "5 分钟产出音频资产",
+        "reusableCanvases": "Audio Intelligence / Tagger / LLM Judge",
+        "description": "从平台录音 URL、PBX 或 S3 读取音频，执行 VAD、Diarization、ASR、标签和对象存储上传。",
+        "defaultCanvas": "audio_intelligence_canvas_v2"
+      },
+      {
+        "key": "entity-resolution-flow",
+        "name": "主体解析映射流",
+        "intentKey": "entity",
+        "status": "基础类型",
+        "owner": "数据治理",
+        "sla": "每日增量 + 手动回填",
+        "reusableCanvases": "主数据 + 关联规则",
+        "description": "把租户、门店、员工、工牌、录音、单据和事件映射到统一主体，给下游流程复用。",
+        "defaultCanvas": "entity_resolution_canvas_v3"
+      },
+      {
+        "key": "review-export-flow",
+        "name": "复核导出闭环流",
+        "intentKey": "asset",
+        "status": "实验中",
+        "owner": "AI 质检",
+        "sla": "运行成功后入资产目录",
+        "reusableCanvases": "证据包 + 回写 + 导出",
+        "description": "把认证事件、ASR 片段、标签、单据和人工结论生成可追溯证据包，并支持外部导出。",
+        "defaultCanvas": "review_export_canvas_v2"
+      }
+    ],
+    "flowStages": [
+      {
+        "key": "ingest",
+        "title": "多平台关联接入",
+        "intentKey": "entity",
+        "nodeId": "platformAuth",
+        "dagsterObject": "外部数据源 + 质量检查",
+        "product": "CRM / 订单 / PBX / S3 / 认证事件",
+        "output": "platform_session, tenant_list, audio_url_index, authenticated_events",
+        "edgeLabel": "输入资产",
+        "detail": "用户先配置连接器和认证上下文，流程只引用数据源，不在任务里造业务数据。",
+        "chips": [
+          "平台主体同步",
+          "音频 URL 拉取",
+          "认证事件入库",
+          "单据事件"
+        ]
+      },
+      {
+        "key": "agent",
+        "title": "Agent 参数生成",
+        "intentKey": "review",
+        "nodeId": "ai",
+        "dagsterObject": "Op + Run Config Builder",
+        "product": "定时 Agent 分析分区、门店、人群、模型版本",
+        "output": "run_config, partitions, asset_selection, human_loop_policy",
+        "edgeLabel": "运行参数",
+        "detail": "Agent 根据输入资产新鲜度、风险规则和模型能力生成运行参数，人工可确认后发布。",
+        "chips": [
+          "15 分钟调度",
+          "运行请求",
+          "参数草稿",
+          "人工确认"
+        ]
+      },
+      {
+        "key": "models",
+        "title": "音频智能与模型链执行",
+        "intentKey": "audio",
+        "nodeId": "asr",
+        "dagsterObject": "Asset Graph",
+        "product": "Audio Intelligence(VAD/Diar/ASR) → Tagger → LLM 解释",
+        "output": "voice_segments, speaker_turns, transcript_asset, label_candidates",
+        "edgeLabel": "模型资产",
+        "detail": "不同模型版本作为画布节点和资产版本运行，结果进入证据审查、标签治理和模型评测。",
+        "chips": [
+          "ASR",
+          "Diar",
+          "标签",
+          "模型版本"
+        ]
+      },
+      {
+        "key": "experiment",
+        "title": "AB实验",
+        "intentKey": "review",
+        "nodeId": "dagster",
+        "dagsterObject": "运行标签 + 资产生成记录",
+        "product": "AB分流、影子运行、人工复核、发布闸门",
+        "output": "experiment_metrics, review_queue, acceptance_rate",
+        "edgeLabel": "评测队列",
+        "detail": "实验只改变 canvas_variant、model_version 和 run tags，不覆盖数据源和历史运行。",
+        "chips": [
+          "80/20",
+          "Shadow",
+          "人工接受率",
+          "误报率"
+        ]
+      },
+      {
+        "key": "export",
+        "title": "资产导出回写",
+        "intentKey": "asset",
+        "nodeId": "dagster",
+        "dagsterObject": "IO Manager + Output Asset",
+        "product": "证据包、处理后 WAV、标签结果、API/Webhook/CSV",
+        "output": "evidence_pack, processed_wav_url, export_manifest",
+        "edgeLabel": "导出资产",
+        "detail": "运行成功后把资产写入目录，可导出到数据资产、质检台、业务平台或对象存储。",
+        "chips": [
+          "OBS/S3",
+          "Webhook",
+          "CSV/Parquet",
+          "资产目录"
+        ]
+      }
+    ],
+    "canvasVariants": [
+      {
+        "key": "stable-v3",
+        "name": "主线画布 v3",
+        "type": "多平台证据数据流",
+        "role": "A / 生产主线",
+        "status": "已发布",
+        "traffic": "80%",
+        "nodes": "9 节点",
+        "version": "TaskVersion v3.2.0",
+        "owner": "质检运营",
+        "changed": "无结构变更",
+        "guardrail": "可回滚"
+      },
+      {
+        "key": "candidate-v4",
+        "name": "候选画布 v4",
+        "type": "多平台证据数据流",
+        "role": "B / 灰度候选",
+        "status": "实验中",
+        "traffic": "20%",
+        "nodes": "11 节点",
+        "version": "TaskVersion v4.0-rc2",
+        "owner": "AI 质检",
+        "changed": "新增 Diar 串音门控 + 标签模型候选 + OBS 回写",
+        "guardrail": "需人工接受率不下降"
+      },
+      {
+        "key": "shadow-v4",
+        "name": "影子画布 v4-shadow",
+        "type": "多平台证据数据流",
+        "role": "Shadow / 不回写",
+        "status": "影子评测",
+        "traffic": "镜像 100%",
+        "nodes": "11 节点",
+        "version": "TaskVersion v4.0-shadow",
+        "owner": "AI 质检",
+        "changed": "只计算指标，不分派任务",
+        "guardrail": "不影响生产"
+      },
+      {
+        "key": "hotfix-v3",
+        "name": "热修画布 v3.2.1",
+        "type": "多平台证据数据流",
+        "role": "Hotfix / 备用",
+        "status": "待发布",
+        "traffic": "0%",
+        "nodes": "9 节点",
+        "version": "TaskVersion v3.2.1",
+        "owner": "平台工程",
+        "changed": "修复 token refresh 重试",
+        "guardrail": "仅紧急切换"
+      }
+    ],
+    "experimentArms": [
+      {
+        "arm": "A",
+        "canvas": "主线画布 v3",
+        "traffic": "80%",
+        "assignment": "tenant_id + store_id hash",
+        "writeback": "正常回写复核队列",
+        "note": "当前生产基线"
+      },
+      {
+        "arm": "B",
+        "canvas": "候选画布 v4",
+        "traffic": "20%",
+        "assignment": "同租户门店稳定分桶",
+        "writeback": "仅低风险自动回写，高风险双写对比",
+        "note": "新增串音污染门控"
+      },
+      {
+        "arm": "Holdout",
+        "canvas": "不触发新逻辑",
+        "traffic": "0%",
+        "assignment": "保留开关",
+        "writeback": "不写业务平台",
+        "note": "必要时恢复对照"
+      }
+    ],
+    "experimentMetrics": [
+      [
+        "人工接受率",
+        "82.4%",
+        "86.1%",
+        "+3.7pp",
+        "达标"
+      ],
+      [
+        "误报率",
+        "7.8%",
+        "6.1%",
+        "-1.7pp",
+        "达标"
+      ],
+      [
+        "平均处理时长",
+        "4m 18s",
+        "4m 52s",
+        "+34s",
+        "观察"
+      ],
+      [
+        "ASR 失败率",
+        "1.2%",
+        "1.4%",
+        "+0.2pp",
+        "安全"
+      ],
+      [
+        "平台回写成功率",
+        "99.2%",
+        "98.9%",
+        "-0.3pp",
+        "安全"
+      ]
+    ],
+    "experimentContext": [
+      [
+        "实验目标",
+        "候选画布 v4 提升低风险自动化，同时压低误报和串音污染"
+      ],
+      [
+        "数据资产",
+        "run logs + review_queue_asset + platform_callback_asset"
+      ],
+      [
+        "实验对象",
+        "北京区域门店 / 销售质检任务 / 7 天滚动窗口"
+      ],
+      [
+        "决策门槛",
+        "主指标达标，守护指标不退化，样本量满足再晋级"
+      ]
+    ],
+    "experimentSuggestions": [
+      {
+        "key": "human_accept_rate",
+        "name": "人工接受率提升",
+        "category": "主指标",
+        "layer": "任务成效",
+        "source": "review_decision_submitted + label_candidate_created",
+        "formula": "accepted_review_events / reviewed_events",
+        "window": "门店日分区 + 7 天滚动",
+        "owner": "AI 质检",
+        "confidence": 92,
+        "status": "推荐作为主指标",
+        "reason": "直接衡量 B 组候选标签和复核分派是否更容易被人工采纳，和本次 v4 串音门控目标一致。",
+        "events": [
+          "task_run_completed",
+          "review_decision_submitted",
+          "label_candidate_created"
+        ],
+        "guardrails": [
+          "平台回写成功率 >= 99.0%",
+          "运行失败率不得高于 A 组 0.5pp",
+          "人工复核积压不得增加 8%"
+        ],
+        "sql": "metric_human_accept_rate_v1",
+        "action": "B 组高于 A 组 2pp 且 p < 0.05，才允许进入发布审批",
+        "risk": "需排除 Holdout 和人工抽检样本，否则会高估自动化收益"
+      },
+      {
+        "key": "false_positive_rate",
+        "name": "误报率下降",
+        "category": "质量指标",
+        "layer": "标签质量",
+        "source": "human_reject_reason + evidence_diff_asset",
+        "formula": "false_positive_rejects / reviewed_events",
+        "window": "按标签层级 L5-L9 聚合",
+        "owner": "标签治理",
+        "confidence": 88,
+        "status": "建议加入观测",
+        "reason": "候选画布新增标签模型和串音门控，最容易影响误报，必须和主指标一起看。",
+        "events": [
+          "review_decision_submitted",
+          "tag_conflict_detected",
+          "evidence_packet_opened"
+        ],
+        "guardrails": [
+          "高风险标签误报不得上升",
+          "金额冲突标签需单独拆分",
+          "串音污染样本从主口径剔除"
+        ],
+        "sql": "metric_false_positive_rate_v2",
+        "action": "误报率下降 1pp 以上且高风险标签不反弹，才允许扩大灰度",
+        "risk": "如果只看总体误报，可能掩盖报价金额、成交意向等高风险标签波动"
+      },
+      {
+        "key": "writeback_success_rate",
+        "name": "平台回写成功率",
+        "category": "守护指标",
+        "layer": "平台稳定性",
+        "source": "platform_callback_asset + output_sink_logs",
+        "formula": "callback_success_events / callback_attempts",
+        "window": "按租户 × 平台 × 30 分钟窗口",
+        "owner": "平台工程",
+        "confidence": 84,
+        "status": "必须绑定闸门",
+        "reason": "B 组新增 OBS 回写和低风险自动回写，一旦下游回写退化，实验收益不能发布。",
+        "events": [
+          "platform_callback_started",
+          "platform_callback_completed",
+          "output_sink_retry_exhausted"
+        ],
+        "guardrails": [
+          "成功率低于 99.0% 自动阻断",
+          "连续 2 个窗口退化自动暂停",
+          "幂等冲突需单独报警"
+        ],
+        "sql": "metric_writeback_success_rate_v1",
+        "action": "低于阈值时暂停实验并保留 A 组主线",
+        "risk": "需要按平台拆分，否则 CRM 和 OBS 的失败会互相稀释"
+      },
+      {
+        "key": "review_backlog_pressure",
+        "name": "人工复核积压压力",
+        "category": "守护指标",
+        "layer": "运营负载",
+        "source": "review_queue_asset + assignment_events",
+        "formula": "pending_high_risk_reviews / active_reviewers",
+        "window": "工作时段 15 分钟滑窗",
+        "owner": "质检运营",
+        "confidence": 79,
+        "status": "建议观测",
+        "reason": "B 组若把更多低置信样本转人工，主指标可能提升但运营负载恶化，需要提前拦截。",
+        "events": [
+          "review_task_created",
+          "review_task_assigned",
+          "review_task_closed"
+        ],
+        "guardrails": [
+          "高优先队列积压不得超过 A 组 8%",
+          "SLA 超时率不得上升",
+          "夜间样本单独观察"
+        ],
+        "sql": "metric_review_backlog_pressure_v1",
+        "action": "积压连续 3 个窗口升高时，自动降低 B 组流量",
+        "risk": "需结合排班，否则非工作时段会误判为实验退化"
+      }
+    ],
+    "experimentObservations": [
+      {
+        "label": "主指标差异",
+        "value": "+3.7pp",
+        "compare": "B 86.1% vs A 82.4%",
+        "state": "达标",
+        "tone": "good",
+        "detail": "样本量 12,840，置信区间不跨 0，已满足发布候选条件。",
+        "trend": [
+          38,
+          42,
+          51,
+          58,
+          64,
+          69,
+          74,
+          81
+        ]
+      },
+      {
+        "label": "守护指标",
+        "value": "-0.3pp",
+        "compare": "回写成功率 98.9%",
+        "state": "观察",
+        "tone": "warn",
+        "detail": "低于 99% 守护线 0.1pp，建议先查 OBS 回写和 CRM 回调重试。",
+        "trend": [
+          88,
+          86,
+          84,
+          80,
+          76,
+          72,
+          70,
+          68
+        ]
+      },
+      {
+        "label": "样本与显著性",
+        "value": "92%",
+        "compare": "目标样本进度",
+        "state": "可决策",
+        "tone": "good",
+        "detail": "还差 1 个门店日分区即可完成完整灰度窗口。",
+        "trend": [
+          30,
+          38,
+          45,
+          54,
+          66,
+          74,
+          86,
+          92
+        ]
+      },
+      {
+        "label": "发布建议",
+        "value": "暂缓",
+        "compare": "守护指标未完全过线",
+        "state": "阻断",
+        "tone": "block",
+        "detail": "主指标有效，但回写成功率未到发布线，建议保持 20% 灰度。",
+        "trend": [
+          72,
+          74,
+          70,
+          68,
+          66,
+          64,
+          63,
+          62
+        ]
+      }
+    ],
+    "experimentLineage": [
+      [
+        "事件采集",
+        "review_decision_submitted",
+        "写入 experiment_id、arm、canvas_variant、trace_id"
+      ],
+      [
+        "资产聚合",
+        "metric_human_accept_rate_v1",
+        "按 tenant/store/date 分区聚合 A/B 指标"
+      ],
+      [
+        "观测看板",
+        "experiment_metric_snapshot",
+        "展示主指标、守护指标、显著性和样本进度"
+      ],
+      [
+        "发布闸门",
+        "release_gate_metric_check",
+        "主指标达标且守护指标安全才允许晋级"
+      ]
+    ],
+    "asrServiceProfile": {
+      "name": "音频智能服务",
+      "serviceId": "audio-intelligence-router-prod",
+      "endpoint": "POST /model-gateway/audio/intelligence",
+      "version": "chain-v3.2 / asr-v2.3.1",
+      "auth": "Service Token + tenant_id + provider_ref",
+      "timeout": "VAD 30s / Diar 120s / ASR 180s",
+      "retry": "按阶段重试 2 次 / 指数退避",
+      "owner": "模型平台组",
+      "ioManager": "audio_intelligence_io_manager",
+      "providers": [
+        [
+          "阿里",
+          "ali-nls-prod",
+          "云端 ASR + 说话人分离，热词包和回调由 provider_ref 管理"
+        ],
+        [
+          "火山",
+          "volc-bigmodel-audio",
+          "适合高并发转写，VAD/Diar 通过 pipeline 参数开启"
+        ],
+        [
+          "自研",
+          "auris-audio-stack",
+          "门店场景优化，串音、工牌和展厅麦克风特征内置"
+        ],
+        [
+          "开源",
+          "whisperx-pyannote",
+          "私有化部署，适合离线回填和成本敏感租户"
+        ]
+      ],
+      "request": [
+        [
+          "audio_asset_key",
+          "auris/sources/audio_url_index 或 processed_wav_asset"
+        ],
+        [
+          "provider",
+          "ali | volc | self_hosted | open_source"
+        ],
+        [
+          "pipeline",
+          "vad=true, diar=true, asr=true"
+        ],
+        [
+          "chunk_strategy",
+          "auto / 60s / streaming_cursor"
+        ],
+        [
+          "speaker_policy",
+          "employee_badge + device + diar_cluster"
+        ],
+        [
+          "hotword_pack_version_id",
+          "hwpv-auto-sales-v1-8"
+        ],
+        [
+          "hotwords_ref (legacy)",
+          "汽车销售热词包 v1.8 / 只读兼容"
+        ],
+        [
+          "execution_mode",
+          "production | shadow"
+        ],
+        [
+          "language",
+          "zh-CN"
+        ],
+        [
+          "return_word_timestamps",
+          "true"
+        ]
+      ],
+      "response": [
+        [
+          "voice_segments",
+          "VAD 输出，有声段 start/end/energy"
+        ],
+        [
+          "speaker_turns",
+          "Diar 输出，speaker/channel/source/confidence"
+        ],
+        [
+          "transcript_asset",
+          "完整转写文本 + 分段"
+        ],
+        [
+          "transcript_segments",
+          "start/end/text/confidence"
+        ],
+        [
+          "word_timestamps",
+          "词级时间戳"
+        ],
+        [
+          "speaker_aligned_segments",
+          "按 speaker_turns 对齐后的说话人文本"
+        ],
+        [
+          "asr_quality",
+          "空转写率、低置信片段、热词命中"
+        ]
+      ],
+      "assets": [
+        [
+          "voice_segments",
+          "音频智能服务 / VAD",
+          "有声区段资产，给 Minimap、ASR 和串音判断使用"
+        ],
+        [
+          "speaker_turns",
+          "音频智能服务 / Diar",
+          "说话人、声道、设备归因资产，支持人工复核覆盖"
+        ],
+        [
+          "transcript_asset",
+          "音频智能服务 / ASR",
+          "转写资产，保存分段、词级时间戳和置信度"
+        ],
+        [
+          "speaker_transcript_view",
+          "派生视图",
+          "说话人 + 转写对齐"
+        ]
+      ],
+      "dagster": [
+        [
+          "ModelService",
+          "audio-intelligence-router-prod",
+          "全局服务注册；provider、认证和裸 URL 不进入任务配置"
+        ],
+        [
+          "MultiAsset",
+          "voice_segments / speaker_turns / transcript_asset",
+          "同一服务调用可拆成多个可追踪资产"
+        ],
+        [
+          "Run Config",
+          "provider + pipeline + model_version + hotword_pack_version_id",
+          "新写入只绑定不可变版本 ID，不使用 legacy 名称引用"
+        ],
+        [
+          "IO Manager",
+          "audio_intelligence_io_manager",
+          "负责请求服务、落 JSON、登记 materialization"
+        ]
+      ]
+    },
+    "audioServiceParamGroups": [
+      {
+        "title": "Provider 路由",
+        "rows": [
+          [
+            "provider_ref",
+            "auris-audio-stack / ali-nls-prod / volc-bigmodel-audio"
+          ],
+          [
+            "fallback_order",
+            "self_hosted → ali → volc → open_source"
+          ],
+          [
+            "cost_guard",
+            "单租户分钟成本、队列和 SLA 联合决策"
+          ]
+        ]
+      },
+      {
+        "title": "音频预处理",
+        "rows": [
+          [
+            "sample_rate",
+            "16k / 24k auto"
+          ],
+          [
+            "denoise",
+            "store_noise_profile + mic_profile"
+          ],
+          [
+            "chunk_strategy",
+            "auto / 60s / streaming_cursor / full_day_minimap"
+          ]
+        ]
+      },
+      {
+        "title": "VAD 参数",
+        "rows": [
+          [
+            "energy_threshold",
+            "按门店噪声画像动态调整"
+          ],
+          [
+            "min_speech_ms",
+            "320ms"
+          ],
+          [
+            "merge_gap_ms",
+            "480ms，避免一句话被切碎"
+          ]
+        ]
+      },
+      {
+        "title": "Diar 参数",
+        "rows": [
+          [
+            "speaker_policy",
+            "employee_badge + device + diar_cluster"
+          ],
+          [
+            "max_speakers",
+            "销售/客户/展厅麦/串入声"
+          ],
+          [
+            "overlap_policy",
+            "串音候选保留双归因，人工确认后写回"
+          ]
+        ]
+      },
+      {
+        "title": "ASR 参数",
+        "rows": [
+          [
+            "hotword_pack_version_id",
+            "hwpv-auto-sales-v1-8"
+          ],
+          [
+            "execution_mode",
+            "production"
+          ],
+          [
+            "word_timestamps",
+            "true"
+          ],
+          [
+            "domain_normalizer",
+            "金额、车型、试驾时间结构化"
+          ]
+        ]
+      },
+      {
+        "title": "回调与资产",
+        "rows": [
+          [
+            "callback_asset",
+            "audio_intelligence_materialization"
+          ],
+          [
+            "output_policy",
+            "voice_segments / speaker_turns / transcript_asset 分开落盘"
+          ],
+          [
+            "trace_tags",
+            "tenant_id, provider, model_chain, experiment_arm"
+          ]
+        ]
+      }
+    ],
+    "audioServiceObservabilityRows": [
+      [
+        "自研",
+        "P95 4.8s",
+        "VAD漏检 1.8%",
+        "DER 9.6%",
+        "WER 7.9%",
+        "¥0.012/min",
+        "主路由"
+      ],
+      [
+        "阿里",
+        "P95 6.2s",
+        "VAD漏检 2.2%",
+        "DER 11.4%",
+        "WER 8.4%",
+        "¥0.026/min",
+        "兜底"
+      ],
+      [
+        "火山",
+        "P95 5.6s",
+        "VAD漏检 2.0%",
+        "DER 12.1%",
+        "WER 8.1%",
+        "¥0.023/min",
+        "高并发"
+      ],
+      [
+        "开源",
+        "P95 18.4s",
+        "VAD漏检 2.9%",
+        "DER 13.8%",
+        "WER 9.7%",
+        "¥0.004/min",
+        "离线回填"
+      ]
+    ],
+    "audioServiceOptimizationRows": [
+      [
+        "自动路由",
+        "SLA + 成本 + 质量",
+        "门店实时任务走自研/火山；离线回填可走开源。"
+      ],
+      [
+        "参数自调优",
+        "按门店噪声画像",
+        "根据空转写、串音误报和人工修正结果调整 VAD 阈值。"
+      ],
+      [
+        "影子评测",
+        "provider_shadow=true",
+        "同一分区可并行跑候选 provider，只写评测资产不覆盖生产。"
+      ],
+      [
+        "失败回退",
+        "stage-level fallback",
+        "ASR 失败复用 VAD/Diar；Diar 低置信转人工说话人标注。"
+      ]
+    ],
+    "audioNodeRuntimeParams": {
+      "vad": [
+        [
+          "run_config.pipeline",
+          "vad=true, diar=true, asr=true"
+        ],
+        [
+          "vad.energy_threshold",
+          "store_noise_profile:auto"
+        ],
+        [
+          "vad.min_speech_ms",
+          "320"
+        ],
+        [
+          "vad.merge_gap_ms",
+          "480"
+        ],
+        [
+          "asset_output",
+          "voice_segments"
+        ]
+      ],
+      "diar": [
+        [
+          "run_config.provider_ref",
+          "auris-audio-stack"
+        ],
+        [
+          "diar.speaker_policy",
+          "employee_badge + device + diar_cluster"
+        ],
+        [
+          "diar.max_speakers",
+          "4 + unknown"
+        ],
+        [
+          "diar.overlap_policy",
+          "keep_overlap_for_review"
+        ],
+        [
+          "asset_output",
+          "speaker_turns"
+        ]
+      ],
+      "asr": [
+        [
+          "run_config.provider_ref",
+          "auris-audio-stack"
+        ],
+        [
+          "asr.hotword_pack_version_id",
+          "hwpv-auto-sales-v1-8"
+        ],
+        [
+          "asr.execution_mode",
+          "production"
+        ],
+        [
+          "asr.word_timestamps",
+          "true"
+        ],
+        [
+          "asr.domain_normalizer",
+          "amount / model / test_drive_time"
+        ],
+        [
+          "asset_output",
+          "transcript_asset + speaker_transcript_view"
+        ]
+      ]
+    },
+    "executionStateMeta": {
+      "idle": {
+        "label": "草稿",
+        "detail": "当前任务版本尚未发布"
+      },
+      "queued": {
+        "label": "已发布",
+        "detail": "执行计划已生成，等待触发"
+      },
+      "running": {
+        "label": "运行中",
+        "detail": "当前运行实例正在执行"
+      },
+      "success": {
+        "label": "最近成功",
+        "detail": "输出已写入资产目录"
+      }
+    },
+    "baseBindings": {
+      "platformAuth": {
+        "definition": "SourceAsset",
+        "op": "login_platform_session",
+        "assetKey": "auris/sources/platform_session",
+        "ioManager": "platform_auth_io_manager",
+        "deps": []
+      },
+      "tenantApi": {
+        "definition": "SourceAsset",
+        "op": "fetch_tenant_list",
+        "assetKey": "auris/sources/tenant_list",
+        "ioManager": "platform_api_io_manager",
+        "deps": [
+          "auris/sources/platform_session"
+        ]
+      },
+      "employeeApi": {
+        "definition": "SourceAsset",
+        "op": "fetch_employee_list",
+        "assetKey": "auris/sources/employee_list",
+        "ioManager": "platform_api_io_manager",
+        "deps": [
+          "auris/sources/platform_session",
+          "auris/sources/tenant_list"
+        ]
+      },
+      "audioUrlApi": {
+        "definition": "SourceAsset",
+        "op": "fetch_audio_urls",
+        "assetKey": "auris/sources/audio_url_index",
+        "ioManager": "audio_url_io_manager",
+        "deps": [
+          "auris/sources/platform_session",
+          "auris/sources/tenant_list"
+        ]
+      },
+      "eventApi": {
+        "definition": "SourceAsset",
+        "op": "fetch_authenticated_events",
+        "assetKey": "auris/sources/authenticated_events",
+        "ioManager": "authenticated_event_io_manager",
+        "deps": [
+          "auris/sources/platform_session"
+        ]
+      },
+      "ai": {
+        "definition": "Op",
+        "op": "generate_platform_binding_suggestions",
+        "assetKey": "auris/config/mapping_suggestions",
+        "ioManager": "config_io_manager",
+        "deps": [
+          "auris/sources/tenant_list",
+          "auris/sources/employee_list",
+          "auris/sources/audio_url_index",
+          "auris/sources/authenticated_events"
+        ]
+      },
+      "entityMap": {
+        "definition": "Asset",
+        "op": "materialize_platform_identity_map",
+        "assetKey": "auris/entities/platform_identity_map",
+        "ioManager": "entity_io_manager",
+        "deps": [
+          "auris/sources/tenant_list",
+          "auris/sources/employee_list"
+        ]
+      },
+      "dagster": {
+        "definition": "Job",
+        "op": "platform_login_risk_review_graph",
+        "assetKey": "auris/jobs/platform_login_risk_review_task_v3",
+        "ioManager": "dagster_default_io_manager",
+        "deps": [
+          "auris/entities/platform_identity_map",
+          "auris/sources/authenticated_events",
+          "auris/audio/transcript_asset"
+        ]
+      },
+      "vad": {
+        "definition": "Asset",
+        "op": "build_voice_segments",
+        "assetKey": "auris/audio/voice_segments",
+        "ioManager": "audio_io_manager",
+        "deps": [
+          "auris/sources/audio_url_index"
+        ]
+      },
+      "diar": {
+        "definition": "Asset",
+        "op": "build_speaker_turns",
+        "assetKey": "auris/audio/speaker_turns",
+        "ioManager": "diarization_io_manager",
+        "deps": [
+          "auris/audio/voice_segments",
+          "auris/entities/platform_identity_map"
+        ]
+      },
+      "asr": {
+        "definition": "Asset",
+        "op": "build_transcript_asset",
+        "assetKey": "auris/audio/transcript_asset",
+        "ioManager": "asr_io_manager",
+        "deps": [
+          "auris/audio/voice_segments",
+          "auris/audio/speaker_turns"
+        ]
+      },
+      "tagger": {
+        "definition": "Asset",
+        "op": "build_label_candidates",
+        "assetKey": "auris/labels/label_candidates",
+        "ioManager": "label_candidate_io_manager",
+        "deps": [
+          "auris/audio/transcript_asset",
+          "auris/audio/speaker_turns",
+          "auris/sources/authenticated_events"
+        ]
+      }
+    }
+  },
+  "evaluationCatalog": {
+    "capabilityRows": [
+      {
+        "key": "asr",
+        "ability": "ASR 转写",
+        "baseline": "92.4",
+        "candidate": "93.1",
+        "delta": "+0.7",
+        "blocker": "否",
+        "gate": "可发布",
+        "dataset": "EVS-ASR-20250526",
+        "samples": 1680,
+        "badcases": 8,
+        "humanQueue": 3,
+        "assetKey": "auris/model/asr_transcripts",
+        "sample": "S20250526-000128 / A-1001 工牌麦",
+        "evidence": "报价金额、车型、优惠金额实体召回提升",
+        "owner": "ASR 平台组"
+      },
+      {
+        "key": "asr-hotword",
+        "ability": "ASR 热词",
+        "baseline": "86.4",
+        "candidate": "91.2",
+        "delta": "+4.8",
+        "blocker": "人工审批",
+        "gate": "影子评测通过",
+        "dataset": "EVS-ASR-Hotword-v1",
+        "samples": 1680,
+        "badcases": 12,
+        "humanQueue": 4,
+        "assetKey": "auris/model/asr_transcripts",
+        "sample": "A-4107 / 星越L → 星月L",
+        "evidence": "固定同一评测集验证热词召回、误增强、全局质量、延迟与成本",
+        "owner": "ASR 平台组"
+      },
+      {
+        "key": "boundary",
+        "ability": "边界切分",
+        "baseline": "90.7",
+        "candidate": "88.6",
+        "delta": "-2.1",
+        "blocker": "观察",
+        "gate": "发布观察",
+        "dataset": "EVS-Boundary-quote-risk",
+        "samples": 1280,
+        "badcases": 24,
+        "humanQueue": 6,
+        "assetKey": "auris/audio/voice_segments",
+        "sample": "S20250526-000128 / 完整对话 12:23-12:33",
+        "evidence": "W1:30-300s -> W2:0-300s -> W3:0-94s 的跨 WAV 边界被切碎",
+        "owner": "音频智能组"
+      },
+      {
+        "key": "diarization",
+        "ability": "串音识别",
+        "baseline": "78.2",
+        "candidate": "84.9",
+        "delta": "+6.7",
+        "blocker": "否",
+        "gate": "人审抽样",
+        "dataset": "EVS-Crosstalk-store-device",
+        "samples": 740,
+        "badcases": 15,
+        "humanQueue": 9,
+        "assetKey": "auris/audio/crosstalk_index",
+        "sample": "B-2001 / Hall-Mic 与销售B工牌重叠",
+        "evidence": "同门店多设备时间窗重叠，主声道和串入声道需要人工确认",
+        "owner": "声纹与空间组"
+      },
+      {
+        "key": "tagging",
+        "ability": "标签识别",
+        "baseline": "92.5",
+        "candidate": "93.4",
+        "delta": "+0.9",
+        "blocker": "否",
+        "gate": "可发布",
+        "dataset": "EVS-Tag-v1.9.0-rc2",
+        "samples": 2140,
+        "badcases": 17,
+        "humanQueue": 5,
+        "assetKey": "auris/label/event_tags",
+        "sample": "EVT-20250526-122718-A02",
+        "evidence": "报价承诺、金额冲突、试驾邀约候选标签命中率提升",
+        "owner": "标签治理组"
+      },
+      {
+        "key": "prompt",
+        "ability": "Prompt 优化",
+        "baseline": "90.8",
+        "candidate": "93.4",
+        "delta": "+2.6",
+        "blocker": "否",
+        "gate": "影子评测",
+        "dataset": "EVS-Prompt-quote-v3",
+        "samples": 920,
+        "badcases": 18,
+        "humanQueue": 7,
+        "assetKey": "auris/prompt/tagger_prompt_versions",
+        "sample": "prompt_quote_guard_v19_rc2 / 报价金额冲突",
+        "evidence": "badcase 自动归因后生成候选 Prompt，打标 F1 和冲突率同步改善。",
+        "owner": "Prompt 运营组"
+      }
+    ],
+    "datasets": [
+      {
+        "id": "quote-risk",
+        "name": "报价风险回归集",
+        "version": "EVS-quote-risk-v12",
+        "scope": "金额、报价承诺、单据冲突",
+        "size": 1280,
+        "positive": 724,
+        "negative": 556,
+        "source": "调听证据 + 标签冲突",
+        "coverage": "金额 94% / 报价 88%",
+        "gap": "落地价和金融方案不足",
+        "owner": "标签治理组",
+        "status": "可运行"
+      },
+      {
+        "id": "boundary-flow",
+        "name": "完整对话边界集",
+        "version": "EVS-boundary-v8",
+        "scope": "跨 WAV 拼接、切分",
+        "size": 860,
+        "positive": 418,
+        "negative": 442,
+        "source": "边界编辑 + badcase",
+        "coverage": "跨 wav 81% / 静音 76%",
+        "gap": "底噪和首尾句不足",
+        "owner": "音频智能组",
+        "status": "需补样"
+      },
+      {
+        "id": "crosstalk",
+        "name": "串音归属集",
+        "version": "EVS-crosstalk-v5",
+        "scope": "多设备、声纹、空间",
+        "size": 740,
+        "positive": 392,
+        "negative": 348,
+        "source": "串音矩阵 + 人审",
+        "coverage": "同峰 92% / 远场麦 68%",
+        "gap": "麦克风与工牌重叠需补",
+        "owner": "声纹与空间组",
+        "status": "抽样中"
+      },
+      {
+        "id": "label-golden",
+        "name": "打标黄金集",
+        "version": "EVS-label-golden-v4",
+        "scope": "报价、试驾、异议、成交",
+        "size": 1560,
+        "positive": 924,
+        "negative": 636,
+        "source": "人工标签 + 冲突样本 + 单据",
+        "coverage": "报价 96% / 试驾 91% / 异议 88%",
+        "gap": "成交和串音负样本不足",
+        "owner": "标签治理组",
+        "status": "可运行"
+      },
+      {
+        "id": "prompt-regression",
+        "name": "Prompt 回归集",
+        "version": "EVS-prompt-regression-v3",
+        "scope": "badcase、schema、冲突",
+        "size": 920,
+        "positive": 512,
+        "negative": 408,
+        "source": "badcase + 影子评测 + 人审",
+        "coverage": "金额冲突 93% / schema 98%",
+        "gap": "金融方案和串音反例不足",
+        "owner": "Prompt 运营组",
+        "status": "影子评测"
+      }
+    ],
+    "labelingMetrics": [
+      {
+        "taskKey": "quote_amount",
+        "task": "报价金额",
+        "owner": "标签治理组",
+        "onlineVersion": "v1.8.4",
+        "candidateVersion": "v1.9.0-rc2",
+        "samples": 420,
+        "precision": 94.2,
+        "recall": 91.8,
+        "f1": 93,
+        "humanAgreement": 91.4,
+        "conflictRate": 5.8,
+        "lowConfidenceRate": 7.2,
+        "badcases": 15,
+        "promptVersion": "prompt_quote_v19_rc2"
+      },
+      {
+        "taskKey": "test_drive",
+        "task": "试驾邀约",
+        "owner": "门店运营",
+        "onlineVersion": "v1.8.4",
+        "candidateVersion": "v1.9.0-rc2",
+        "samples": 336,
+        "precision": 92.7,
+        "recall": 90.6,
+        "f1": 91.6,
+        "humanAgreement": 90.2,
+        "conflictRate": 3.1,
+        "lowConfidenceRate": 6.4,
+        "badcases": 8,
+        "promptVersion": "prompt_drive_v08_rc1"
+      },
+      {
+        "taskKey": "price_objection",
+        "task": "价格异议",
+        "owner": "销售训练",
+        "onlineVersion": "v1.8.4",
+        "candidateVersion": "v1.9.0-rc2",
+        "samples": 384,
+        "precision": 93.8,
+        "recall": 92.4,
+        "f1": 93.1,
+        "humanAgreement": 92,
+        "conflictRate": 4.6,
+        "lowConfidenceRate": 5.8,
+        "badcases": 11,
+        "promptVersion": "prompt_objection_v11_rc2"
+      },
+      {
+        "taskKey": "deal_intent",
+        "task": "成交意向",
+        "owner": "业务洞察",
+        "onlineVersion": "v1.8.4",
+        "candidateVersion": "v1.9.0-rc2",
+        "samples": 278,
+        "precision": 90.4,
+        "recall": 88.2,
+        "f1": 89.3,
+        "humanAgreement": 87.9,
+        "conflictRate": 6.9,
+        "lowConfidenceRate": 9.5,
+        "badcases": 13,
+        "promptVersion": "prompt_deal_v06_rc1"
+      },
+      {
+        "taskKey": "crosstalk_suspect",
+        "task": "串音疑似",
+        "owner": "声纹空间组",
+        "onlineVersion": "v1.8.4",
+        "candidateVersion": "v1.9.0-rc2",
+        "samples": 242,
+        "precision": 88.1,
+        "recall": 84.8,
+        "f1": 86.4,
+        "humanAgreement": 83.7,
+        "conflictRate": 8.4,
+        "lowConfidenceRate": 12.6,
+        "badcases": 17,
+        "promptVersion": "prompt_crosstalk_v07_rc1"
+      }
+    ],
+    "labelingCases": [
+      {
+        "id": "LC-quote-001",
+        "taskKey": "quote_amount",
+        "label": "报价金额冲突",
+        "evidenceWindow": "12:27:18 / 报价单 #BJ-041",
+        "asr": "优惠 3.5 万，落地约 28.19 万。",
+        "expected": "报价金额 + 金额冲突",
+        "predicted": "报价金额",
+        "issue": "漏打",
+        "confidence": 82,
+        "source": "ASR + 报价单",
+        "route": "listening"
+      },
+      {
+        "id": "LC-quote-002",
+        "taskKey": "quote_amount",
+        "label": "优惠幅度",
+        "evidenceWindow": "12:26:58 / A-1001",
+        "asr": "裸车 31.69 万，保险另算。",
+        "expected": "报价金额",
+        "predicted": "优惠幅度",
+        "issue": "误打",
+        "confidence": 76,
+        "source": "候选 + 单据",
+        "route": "labels"
+      },
+      {
+        "id": "LC-drive-001",
+        "taskKey": "test_drive",
+        "label": "试驾邀约",
+        "evidenceWindow": "14:00:18 / Drive-01",
+        "asr": "下午可安排试驾，带驾照即可。",
+        "expected": "试驾邀约",
+        "predicted": "成交意向",
+        "issue": "冲突",
+        "confidence": 88,
+        "source": "试驾单 + 事件",
+        "route": "data"
+      },
+      {
+        "id": "LC-objection-001",
+        "taskKey": "price_objection",
+        "label": "价格异议",
+        "evidenceWindow": "12:28:05 / 客户声道",
+        "asr": "优惠比隔壁店少，我再考虑。",
+        "expected": "客户价格异议",
+        "predicted": "价格异议已承接",
+        "issue": "冲突",
+        "confidence": 79,
+        "source": "ASR + 人审",
+        "route": "labels"
+      },
+      {
+        "id": "LC-deal-001",
+        "taskKey": "deal_intent",
+        "label": "成交意向",
+        "evidenceWindow": "15:36:20 / 销售C",
+        "asr": "今天定下来我帮您锁车。",
+        "expected": "成交意向",
+        "predicted": "报价承诺",
+        "issue": "需人审",
+        "confidence": 69,
+        "source": "低置信候选",
+        "route": "listening"
+      },
+      {
+        "id": "LC-cross-001",
+        "taskKey": "crosstalk_suspect",
+        "label": "串音疑似",
+        "evidenceWindow": "12:27:00 / B-2001",
+        "asr": "同峰设备导致客户回应归入销售工牌。",
+        "expected": "串音疑似",
+        "predicted": "正常主录音",
+        "issue": "漏打",
+        "confidence": 66,
+        "source": "多源录音",
+        "route": "listening"
+      }
+    ],
+    "promptExperiment": {
+      "id": "PEX-quote-guard-20260702",
+      "labelTask": "报价金额",
+      "currentVersion": "prompt_quote_guard_v18",
+      "candidateVersion": "prompt_quote_guard_v19_rc2",
+      "dataset": "EVS-prompt-regression-v3",
+      "status": "待生成建议",
+      "currentF1": 90.8,
+      "candidateF1": 93.4,
+      "conflictRate": 3.6,
+      "humanAgreement": 92.1,
+      "badcaseRegression": 96
+    },
+    "promptSuggestions": [
+      {
+        "id": "PS-definition",
+        "field": "definition",
+        "title": "定义",
+        "detail": "拆分裸车价、优惠、落地价和金融方案。",
+        "example": "同句多个金额分别输出来源。",
+        "impact": "+1.4pp F1"
+      },
+      {
+        "id": "PS-positive",
+        "field": "positive",
+        "title": "正例",
+        "detail": "补充报价承诺与单据一致正例。",
+        "example": "单据与 ASR 一致时确认报价。",
+        "impact": "+0.7pp Precision"
+      },
+      {
+        "id": "PS-negative",
+        "field": "negative",
+        "title": "反例",
+        "detail": "加入客户复述、竞品价和金融话术反例。",
+        "example": "“别家便宜”不是本店报价。",
+        "impact": "-2.2pp 误打"
+      },
+      {
+        "id": "PS-conflict",
+        "field": "conflict",
+        "title": "冲突处理",
+        "detail": "ASR 与单据冲突时输出原因并进人审。",
+        "example": "优惠不一致时进入证据审查。",
+        "impact": "-3.1pp 冲突率"
+      },
+      {
+        "id": "PS-schema",
+        "field": "schema",
+        "title": "输出 schema",
+        "detail": "输出金额类型、值、来源和版本。",
+        "example": "amount_type=discount,value=35000。",
+        "impact": "+4 schema 稳定性"
+      },
+      {
+        "id": "PS-postprocess",
+        "field": "postprocess",
+        "title": "后处理",
+        "detail": "同窗口金额去重并排序来源。",
+        "example": "单据优先于低置信 ASR。",
+        "impact": "+0.9pp Recall"
+      }
+    ],
+    "manualReviewSeed": [
+      {
+        "id": "HR-EVAL-2031",
+        "capability": "boundary",
+        "queue": "边界失败",
+        "title": "完整对话被切碎",
+        "evidenceWindow": "12:23:30 - 12:34:34 / W1+W2+W3",
+        "asr": "询价、报价和试驾承接属于同一对话。",
+        "candidateLabel": "合并为完整对话",
+        "failureReason": "候选把 W2 静音当硬切点。",
+        "confidence": 72,
+        "owner": "质检运营",
+        "status": "待人工"
+      },
+      {
+        "id": "HR-EVAL-8812",
+        "capability": "tagging",
+        "queue": "标签冲突",
+        "title": "报价金额字段冲突",
+        "evidenceWindow": "12:27:18 - 12:27:50 / 报价单 #BJ-041",
+        "asr": "如果现在下单，可以优惠 3.5 万，落地大概 28.19 万左右。",
+        "candidateLabel": "报价承诺 / 金额冲突",
+        "failureReason": "ASR、单据和候选标签优先级未确认。",
+        "confidence": 82,
+        "owner": "标签运营",
+        "status": "待人工"
+      },
+      {
+        "id": "HR-EVAL-1028",
+        "capability": "diarization",
+        "queue": "串音",
+        "title": "客户声道误归属",
+        "evidenceWindow": "12:27:00 - 12:29:00 / B-2001 + Hall-Mic",
+        "asr": "同峰设备导致客户回应归入销售工牌。",
+        "candidateLabel": "转串音矩阵复核",
+        "failureReason": "空间先验不足，远场麦和工牌难区分。",
+        "confidence": 66,
+        "owner": "声纹与空间组",
+        "status": "待人工"
+      },
+      {
+        "id": "HR-EVAL-4107",
+        "capability": "asr-hotword",
+        "queue": "低置信",
+        "title": "金额实体漏召回",
+        "evidenceWindow": "10:24:18 - 10:24:50 / 销售C 低信噪",
+        "asr": "噪声覆盖优惠金额，恢复文本置信低。",
+        "candidateLabel": "加入低信噪金额回归",
+        "failureReason": "热词不足，金额和车型词下降。",
+        "confidence": 61,
+        "owner": "ASR 平台组",
+        "status": "待人工"
+      }
+    ],
+    "modelCompareRows": [
+      {
+        "key": "asr",
+        "ability": "ASR 转写",
+        "prod4": "92.4",
+        "prod5": "93.1",
+        "candidate": "93.7",
+        "diff": "+1.3",
+        "winner": "candidate",
+        "risk": "低",
+        "evidence": "低信噪金额召回提升，需抽样。"
+      },
+      {
+        "key": "asr-hotword",
+        "ability": "ASR 热词",
+        "prod4": "86.4",
+        "prod5": "86.4",
+        "candidate": "91.2",
+        "diff": "+4.8",
+        "winner": "candidate",
+        "risk": "人工发布",
+        "evidence": "固定 EVS-ASR-Hotword-v1 同集比较；全部六项门禁通过后仍需人工发布。"
+      },
+      {
+        "key": "boundary",
+        "ability": "边界切分",
+        "prod4": "90.7",
+        "prod5": "88.6",
+        "candidate": "91.4",
+        "diff": "+0.7",
+        "winner": "candidate",
+        "risk": "观察",
+        "evidence": "跨 WAV 合并恢复，底噪样本仍少。"
+      },
+      {
+        "key": "diarization",
+        "ability": "串音识别",
+        "prod4": "78.2",
+        "prod5": "84.9",
+        "candidate": "86.1",
+        "diff": "+7.9",
+        "winner": "candidate",
+        "risk": "人审抽样",
+        "evidence": "空间先验降低同峰误归属。"
+      },
+      {
+        "key": "tagging",
+        "ability": "标签识别",
+        "prod4": "92.5",
+        "prod5": "93.4",
+        "candidate": "93.0",
+        "diff": "+0.5",
+        "winner": "prod-v5",
+        "risk": "金额冲突",
+        "evidence": "候选更保守，需修订优先级。"
+      },
+      {
+        "key": "prompt",
+        "ability": "Prompt 优化",
+        "prod4": "90.1",
+        "prod5": "90.8",
+        "candidate": "93.4",
+        "diff": "+2.6",
+        "winner": "candidate",
+        "risk": "门禁中",
+        "evidence": "金额冲突、schema 和反例更稳。"
+      }
+    ],
+    "badcaseWorkflowSeed": [
+      {
+        "id": "B-2031",
+        "capability": "boundary",
+        "title": "边界过碎",
+        "severity": "高",
+        "status": "待归因",
+        "source": "W1→W2→W3",
+        "rootCause": "VAD 对底噪过敏。",
+        "fix": "加入语义连续和短静音合并。",
+        "target": "auris/audio/voice_segments",
+        "owner": "音频智能组"
+      },
+      {
+        "id": "T-8812",
+        "capability": "tagging",
+        "title": "标签冲突",
+        "severity": "中",
+        "status": "待人审",
+        "source": "EVT-122718 / 报价金额",
+        "rootCause": "ASR 与单据优先级不同。",
+        "fix": "回写规则候选并人工仲裁。",
+        "target": "标签规则 / 打标黄金集 / Prompt 优化",
+        "owner": "标签治理组"
+      },
+      {
+        "id": "P-7712",
+        "capability": "prompt",
+        "title": "Prompt 反例不足",
+        "severity": "中",
+        "status": "待回流",
+        "source": "LC-quote-002",
+        "rootCause": "未区分销售报价、客户复述和竞品价。",
+        "fix": "补反例和冲突处理后跑影子评测。",
+        "target": "Prompt 优化 / Prompt 回归集",
+        "owner": "Prompt 运营组"
+      },
+      {
+        "id": "C-1028",
+        "capability": "diarization",
+        "title": "串音误归属",
+        "severity": "高",
+        "status": "待回流",
+        "source": "B-2001 / Hall-Mic",
+        "rootCause": "空间先验不足。",
+        "fix": "写入空间样本和同峰人审规则。",
+        "target": "auris/audio/crosstalk_index",
+        "owner": "声纹与空间组"
+      },
+      {
+        "id": "A-4107",
+        "capability": "asr-hotword",
+        "title": "星越L 热词误识别",
+        "severity": "高",
+        "status": "待人审",
+        "source": "EVP-asr-131 / 09:16:08-09:16:40",
+        "rootCause": "misrecognition：领域词权重不足，低信噪片段识别为近音词。",
+        "fix": "加入显式别名和候选词包，固定评测集影子复测。",
+        "target": "汽车销售热词包 v1.9 / hwpv-auto-sales-v1-9",
+        "owner": "ASR 平台组",
+        "standardTerm": "星越L",
+        "recognizedText": "星月L",
+        "errorType": "misrecognition",
+        "expectedCount": 18,
+        "errorRate": 38.9,
+        "evidenceLevel": "人工确认 1.0",
+        "downstreamImpact": "车型实体 -8pp / 报价跟进标签 -3pp",
+        "priority": 91,
+        "resourceVersion": 3,
+        "rootTraceId": "trace-hotword-a-4107"
+      }
+    ]
+  },
+  "runtimeCatalog": {
+    "homeProjects": [
+      {
+        "name": "销售话术质检",
+        "scene": "汽车门店",
+        "status": "运行中",
+        "audio": "2,846",
+        "review": 42,
+        "score": 94
+      },
+      {
+        "name": "试驾流程分析",
+        "scene": "试驾单据",
+        "status": "评测中",
+        "audio": "1,204",
+        "review": 18,
+        "score": 88
+      },
+      {
+        "name": "交付回访质检",
+        "scene": "售后交付",
+        "status": "异常",
+        "audio": "826",
+        "review": 31,
+        "score": 76
+      },
+      {
+        "name": "金融保险陪练",
+        "scene": "合规话术",
+        "status": "运行中",
+        "audio": "612",
+        "review": 9,
+        "score": 91
+      }
+    ],
+    "homeAlerts": [
+      {
+        "title": "报价金额与单据冲突",
+        "meta": "北京 SKP 店 / 15 个样本",
+        "tone": "red"
+      },
+      {
+        "title": "边界模型 F1 下降",
+        "meta": "prod-v5 vs prod-v4 / -2.1",
+        "tone": "amber"
+      },
+      {
+        "title": "试驾单缺音频证据",
+        "meta": "14:00 后 / PBX 空窗",
+        "tone": "violet"
+      },
+      {
+        "title": "原始音频资产待回填",
+        "meta": "daily-20250526 / 2 个分区",
+        "tone": "teal"
+      }
+    ],
+    "homePipelineStages": [
+      {
+        "label": "接入",
+        "value": "8,426",
+        "meta": "PBX / 工牌 / 门店麦克风",
+        "progress": 94,
+        "tone": "teal",
+        "route": "data"
+      },
+      {
+        "label": "处理",
+        "value": "7,912",
+        "meta": "VAD · ASR · Diar · 标签",
+        "progress": 88,
+        "tone": "blue",
+        "route": "canvas"
+      },
+      {
+        "label": "人工网关",
+        "value": "317",
+        "meta": "串音 / 低置信 / 单据冲突",
+        "progress": 42,
+        "tone": "amber",
+        "route": "listening"
+      },
+      {
+        "label": "资产生成",
+        "value": "39/46",
+        "meta": "音频、事件、标签、评测资产",
+        "progress": 84,
+        "tone": "green",
+        "route": "assets"
+      },
+      {
+        "label": "洞察回流",
+        "value": "12",
+        "meta": "门店异常、销售培训、模型回流",
+        "progress": 72,
+        "tone": "violet",
+        "route": "insights"
+      }
+    ],
+    "homeRunOverview": [
+      {
+        "label": "运行中",
+        "value": "9",
+        "detail": "生产 TaskRun",
+        "tone": "blue",
+        "route": "canvas"
+      },
+      {
+        "label": "排队",
+        "value": "18",
+        "detail": "资源等待 / 人审网关",
+        "tone": "amber",
+        "route": "canvas"
+      },
+      {
+        "label": "失败分区",
+        "value": "3",
+        "detail": "ASR、标签、回填各 1",
+        "tone": "red",
+        "route": "assets"
+      },
+      {
+        "label": "SLA",
+        "value": "96.8%",
+        "detail": "15 分钟内完成",
+        "tone": "green",
+        "route": "insights"
+      }
+    ],
+    "homeRunQueues": [
+      {
+        "label": "接入同步",
+        "value": "8,426",
+        "detail": "PBX / 工牌 / 门店麦克风",
+        "percent": 94,
+        "tone": "blue",
+        "route": "data",
+        "trend": [
+          6200,
+          6740,
+          7010,
+          7260,
+          7800,
+          8210,
+          8426
+        ]
+      },
+      {
+        "label": "AI 处理中",
+        "value": "7,912",
+        "detail": "VAD → ASR → Diar → 标签",
+        "percent": 88,
+        "tone": "teal",
+        "route": "canvas",
+        "trend": [
+          5400,
+          6020,
+          6440,
+          6910,
+          7180,
+          7680,
+          7912
+        ]
+      },
+      {
+        "label": "人工网关",
+        "value": "317",
+        "detail": "串音 / 低置信 / 单据冲突",
+        "percent": 42,
+        "tone": "amber",
+        "route": "listening",
+        "trend": [
+          188,
+          214,
+          263,
+          341,
+          332,
+          318,
+          317
+        ]
+      },
+      {
+        "label": "资产物化",
+        "value": "39/46",
+        "detail": "音频、事件、标签、评测",
+        "percent": 84,
+        "tone": "green",
+        "route": "assets",
+        "trend": [
+          18,
+          22,
+          27,
+          31,
+          34,
+          37,
+          39
+        ]
+      }
+    ],
+    "homeRunTimeline": [
+      {
+        "time": "12:41:26",
+        "title": "评测指标资产",
+        "state": "排队中",
+        "runId": "run-eval-20250526-7724",
+        "route": "evaluation",
+        "tone": "amber"
+      },
+      {
+        "time": "12:38:10",
+        "title": "业务单据事件资产",
+        "state": "已生成",
+        "runId": "run-doc-20250526-4410",
+        "route": "assets",
+        "tone": "green"
+      },
+      {
+        "time": "12:33:42",
+        "title": "事件标签资产",
+        "state": "等待人工确认",
+        "runId": "run-tag-20250526-1288",
+        "route": "labels",
+        "tone": "amber"
+      },
+      {
+        "time": "12:31:08",
+        "title": "ASR 转写资产",
+        "state": "失败 3 分区",
+        "runId": "run-asr-20250526-0912",
+        "route": "canvas",
+        "tone": "red"
+      }
+    ],
+    "homeRunTrendLabels": [
+      "00:00",
+      "04:00",
+      "08:00",
+      "12:00",
+      "16:00",
+      "20:00",
+      "当前"
+    ],
+    "homeRunTrendSeries": [
+      {
+        "key": "health",
+        "label": "健康度",
+        "unit": "分",
+        "values": [
+          89,
+          91,
+          90,
+          86,
+          88,
+          90,
+          91
+        ],
+        "color": "#165dff",
+        "route": "canvas",
+        "detail": "综合 SLA、失败分区、队列压力和人工网关。",
+        "driver": "20:00 后回填任务恢复，健康度回到 91。",
+        "nextAction": "下钻运行记录，确认失败分区是否已重跑。"
+      },
+      {
+        "key": "sla",
+        "label": "SLA",
+        "unit": "%",
+        "values": [
+          97.4,
+          97.1,
+          96.2,
+          94.8,
+          95.9,
+          96.7,
+          96.8
+        ],
+        "color": "#00b42a",
+        "route": "insights",
+        "detail": "15 分钟内完成率，低于 95 会触发运行门禁。",
+        "driver": "12:00 ASR 分区失败拉低 SLA，重跑后恢复。",
+        "nextAction": "查看 SLA 受影响的门店、设备和分区。"
+      },
+      {
+        "key": "queue",
+        "label": "排队压力",
+        "unit": "个",
+        "values": [
+          8,
+          12,
+          19,
+          31,
+          25,
+          20,
+          18
+        ],
+        "color": "#ff7d00",
+        "route": "canvas",
+        "detail": "资源等待、人审网关和影子评测共同形成的队列。",
+        "driver": "中午批量入库后排队压力最高，当前已降到 18。",
+        "nextAction": "调整 Agent 批处理窗口或释放人工网关。"
+      },
+      {
+        "key": "failed",
+        "label": "失败分区",
+        "unit": "个",
+        "values": [
+          1,
+          1,
+          2,
+          5,
+          4,
+          3,
+          3
+        ],
+        "color": "#f53f3f",
+        "route": "assets",
+        "detail": "ASR、标签和回填任务失败分区数量。",
+        "driver": "12:33 ASR 转写资产失败 3 分区，是当前主要风险。",
+        "nextAction": "处理失败分区，并把 badcase 回流到评测。"
+      }
+    ],
+    "homeRunFailureHeatmap": [
+      {
+        "label": "ASR",
+        "route": "canvas",
+        "values": [
+          0,
+          1,
+          1,
+          5,
+          3,
+          2,
+          3
+        ]
+      },
+      {
+        "label": "标签",
+        "route": "labels",
+        "values": [
+          0,
+          0,
+          1,
+          2,
+          2,
+          1,
+          1
+        ]
+      },
+      {
+        "label": "回填",
+        "route": "assets",
+        "values": [
+          0,
+          0,
+          0,
+          1,
+          2,
+          2,
+          1
+        ]
+      }
+    ],
+    "homeEvidenceChains": [
+      {
+        "time": "12:27:18",
+        "title": "报价事件 · 金额冲突",
+        "detail": "销售A 给出优惠 3.5 万，落地约 28.19 万；报价单字段仍为 31.69 万。",
+        "route": "listening",
+        "links": [
+          "主录音 A-1001",
+          "ASR 片段 S2",
+          "报价单 #BJ-041",
+          "Agent 建议 82%"
+        ]
+      },
+      {
+        "time": "14:00+",
+        "title": "试驾预约事件 · 缺音频",
+        "detail": "试驾单已创建，PBX 电话录音空窗，建议补查车载设备和电话录音。",
+        "route": "data",
+        "links": [
+          "试驾单 #SJ-028",
+          "PBX 空窗",
+          "Drive-01 低置信",
+          "待回填"
+        ]
+      },
+      {
+        "time": "15:36:42",
+        "title": "售后跟进事件 · 标签可回流",
+        "detail": "售后承诺标签命中，模型与人工一致，可加入训练样本与洞察报告。",
+        "route": "assets",
+        "links": [
+          "售后工单 #SH-112",
+          "质检标签",
+          "已确认",
+          "训练候选"
+        ]
+      }
+    ],
+    "assetRows": [
+      {
+        "name": "原始音频资产",
+        "domain": "音频域",
+        "status": "已生成",
+        "version": "daily-20250526",
+        "quality": 96,
+        "assetKey": "auris/audio/raw_recordings",
+        "definition": "外部数据源 + 对象存储管理",
+        "partition": "daily/store/hour",
+        "materialization": "MAT-20250526-raw-8412",
+        "owner": "数据接入组",
+        "freshness": "15 分钟内",
+        "upstream": "PBX / S3 / 门店设备",
+        "downstream": [
+          "有效语音片段资产",
+          "多设备重叠索引"
+        ],
+        "backfill": "可按门店小时重扫",
+        "checks": [
+          "URL 可访问",
+          "租户隔离",
+          "音频时长"
+        ]
+      },
+      {
+        "name": "有效语音片段资产",
+        "domain": "音频域",
+        "status": "已生成",
+        "version": "vad-v2.4-fast",
+        "quality": 92,
+        "assetKey": "auris/audio/voice_segments",
+        "definition": "处理资产 + 动态分区",
+        "partition": "daily/store/hour/device",
+        "materialization": "MAT-20250526-vad-3170",
+        "owner": "音频算法组",
+        "freshness": "30 分钟内",
+        "upstream": "原始音频资产",
+        "downstream": [
+          "ASR 转写资产",
+          "串音证据资产"
+        ],
+        "backfill": "低能量门店需人工确认",
+        "checks": [
+          "静音跳过",
+          "SNR 阈值",
+          "片段边界"
+        ]
+      },
+      {
+        "name": "ASR 转写资产",
+        "domain": "模型输出",
+        "status": "部分失败",
+        "version": "asr-v2.3.1",
+        "quality": 89,
+        "assetKey": "auris/model/asr_transcripts",
+        "definition": "模型资产 + 重试策略 + 质量检查",
+        "partition": "daily/store/hour",
+        "materialization": "MAT-20250526-asr-9021",
+        "owner": "模型平台组",
+        "freshness": "45 分钟内",
+        "upstream": "有效语音片段资产",
+        "downstream": [
+          "事件标签资产",
+          "证据包资产"
+        ],
+        "backfill": "失败分区 3 个待重跑",
+        "checks": [
+          "空转写率",
+          "热词覆盖",
+          "模型版本"
+        ]
+      },
+      {
+        "name": "事件标签资产",
+        "domain": "标签域",
+        "status": "待回填",
+        "version": "label-v1.8.4",
+        "quality": 84,
+        "assetKey": "auris/label/event_tags",
+        "definition": "多产物资产 + 人审门禁",
+        "partition": "daily/store/event",
+        "materialization": "MAT-20250526-tag-1288",
+        "owner": "质检策略组",
+        "freshness": "待补 2 小时",
+        "upstream": "ASR 转写资产 / 业务单据资产",
+        "downstream": [
+          "评测指标资产",
+          "业务洞察资产"
+        ],
+        "backfill": "金额冲突标签影响 15 个下游",
+        "checks": [
+          "标签版本",
+          "低置信",
+          "单据一致性"
+        ]
+      },
+      {
+        "name": "业务单据事件资产",
+        "domain": "事件关联域",
+        "status": "已生成",
+        "version": "docs-v20250526",
+        "quality": 91,
+        "assetKey": "auris/events/document_links",
+        "definition": "事件资产 + 外部接口接入",
+        "partition": "daily/store/document_type",
+        "materialization": "MAT-20250526-doc-4410",
+        "owner": "业务系统组",
+        "freshness": "20 分钟内",
+        "upstream": "报价单 / 试驾单 / 订单 API",
+        "downstream": [
+          "事件标签资产",
+          "证据包资产"
+        ],
+        "backfill": "单据字段变更需重建关联",
+        "checks": [
+          "主键映射",
+          "字段差异",
+          "事件时间"
+        ]
+      },
+      {
+        "name": "评测指标资产",
+        "domain": "评测域",
+        "status": "已生成",
+        "version": "eval-20250526",
+        "quality": 93,
+        "assetKey": "auris/eval/quality_metrics",
+        "definition": "评测资产 + 质量检查 + 报告",
+        "partition": "daily/project/model_version",
+        "materialization": "MAT-20250526-eval-7724",
+        "owner": "评测组",
+        "freshness": "每日 02:30",
+        "upstream": "事件标签资产 / 人工复核资产",
+        "downstream": [
+          "模型对比报告资产",
+          "洞察趋势资产"
+        ],
+        "backfill": "模型版本切换后自动重评",
+        "checks": [
+          "覆盖率",
+          "一致性",
+          "人工接受率"
+        ]
+      }
+    ],
+    "assetDagsterCompatibilityChecks": [
+      [
+        "Key 命名",
+        "兼容",
+        "tenant/project/domain/name"
+      ],
+      [
+        "租户标签",
+        "兼容",
+        "tenant/project/user"
+      ],
+      [
+        "分区策略",
+        "兼容",
+        "daily/store/hour"
+      ],
+      [
+        "外部数据源",
+        "兼容",
+        "PBX/S3/CRM/订单"
+      ],
+      [
+        "生成记录",
+        "兼容",
+        "详情/证据链"
+      ],
+      [
+        "质量检查",
+        "兼容",
+        "完整/及时/一致"
+      ],
+      [
+        "Backfill",
+        "需人工",
+        "覆盖/重算走 Human Loop"
+      ],
+      [
+        "运行请求幂等",
+        "兼容",
+        "asset/partition/version"
+      ],
+      [
+        "IO Manager",
+        "兼容",
+        "对象存储/MySQL/Qdrant"
+      ],
+      [
+        "血缘依赖",
+        "兼容",
+        "业务化上下游"
+      ],
+      [
+        "游标分页",
+        "兼容",
+        "cursor 翻页"
+      ],
+      [
+        "筛选排序",
+        "兼容",
+        "时空/事件/人物/单据"
+      ],
+      [
+        "错误映射",
+        "兼容",
+        "409/422/503"
+      ],
+      [
+        "权限",
+        "兼容",
+        "租户/项目/角色"
+      ],
+      [
+        "新鲜度",
+        "兼容",
+        "生成与超时"
+      ],
+      [
+        "数据版本",
+        "兼容",
+        "模型/标签/资产"
+      ],
+      [
+        "人工确认",
+        "需人工",
+        "回填/覆盖/发布"
+      ],
+      [
+        "下游影响",
+        "兼容",
+        "资产/样本/耗时"
+      ],
+      [
+        "重试死信",
+        "需确认",
+        "失败分区重跑"
+      ],
+      [
+        "观测性",
+        "兼容",
+        "trace/run/mat"
+      ]
+    ],
+    "hotwordCatalog": {
+      "metrics": [
+        { "label": "热词覆盖率", "key": "coverage_rate", "suffix": "%", "detail": "热词应出现会话覆盖" },
+        { "label": "热词召回率", "key": "recall_rate", "suffix": "%", "detail": "正确命中 / 应出现次数" },
+        { "label": "易错率", "key": "error_rate", "suffix": "%", "detail": "加权错误 / 可信应出现次数" },
+        { "label": "误增强率", "key": "false_boost_rate", "suffix": "%", "detail": "错误插入 / 已识别热词" },
+        { "label": "影响会话数", "key": "impacted_sessions", "suffix": "", "detail": "存在可信热词错误的会话" }
+      ],
+      "providers": ["auris-audio-stack", "ali-nls-prod", "volc-bigmodel-audio"],
+      "models": ["audio-v2.3.1", "candidate-asr-v2.4"],
+      "versions": [{ "id": "hwpv-auto-sales-v1-8", "label": "汽车销售热词包 v1.8 · 已发布" }],
+      "threshold": "确认阈值：可信出现 ≥ 3 且易错率 ≥ 20%，或人工修正 ≥ 2；其余只标记“疑似”。"
+    },
+    "assetApiContracts": [
+      {
+        "method": "GET",
+        "endpoint": "/api/v1/data-assets",
+        "purpose": "资产目录、筛选、游标分页",
+        "dagster": "资产 Key + 分区定义",
+        "response": "items, cursor, status_counts",
+        "tone": "read"
+      },
+      {
+        "method": "GET",
+        "endpoint": "/api/v1/data-assets/:assetKey/lineage",
+        "purpose": "业务化血缘和下游影响",
+        "dagster": "资产血缘关系",
+        "response": "upstream, downstream, impact",
+        "tone": "read"
+      },
+      {
+        "method": "GET",
+        "endpoint": "/api/v1/data-assets/:assetKey/materializations",
+        "purpose": "生成记录和质量检查",
+        "dagster": "资产生成记录 + 质量检查",
+        "response": "materialization_id, run_id, checks",
+        "tone": "read"
+      },
+      {
+        "method": "POST",
+        "endpoint": "/api/v1/data-assets/:assetKey/backfills",
+        "purpose": "创建受控回填，返回审批或 run_id",
+        "dagster": "回填策略 + 运行请求",
+        "response": "approval_id / run_id",
+        "tone": "write"
+      },
+      {
+        "method": "POST",
+        "endpoint": "/api/v1/data-assets/:assetKey/checks/retry",
+        "purpose": "重跑失败质量校验",
+        "dagster": "AssetCheckExecution",
+        "response": "retry_id, trace_id",
+        "tone": "write"
+      }
+    ]
+  }
+}

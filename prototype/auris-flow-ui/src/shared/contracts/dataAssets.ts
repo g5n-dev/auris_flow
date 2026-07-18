@@ -1,0 +1,22 @@
+export type DataAssetItem = {
+  id: string;
+  space: string;
+  time: string;
+  person: string;
+  event: string;
+  tags: string[];
+  audio: string;
+  duration: string;
+  confidence: number;
+  status: "confirmed" | "pending" | "risk";
+  docs: string[];
+  assetKey: string;
+  partitionKey: string;
+  materializationId: string;
+  dagsterRunId: string;
+  freshness: string;
+  upstreamAssets: string[];
+  downstreamAssets: string[];
+  assetCheck: string;
+  bffEndpoint: string;
+};

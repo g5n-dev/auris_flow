@@ -1,0 +1,90 @@
+/* Stable tab sizing: active/hover states must never resize or reflow tab rows. */
+.module-page > .module-tabs {
+  display: flex !important;
+  align-items: center;
+  gap: 6px;
+  min-height: 42px;
+  max-height: 42px;
+  padding: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  white-space: nowrap;
+}
+
+.module-page > .module-tabs button {
+  box-sizing: border-box;
+  flex: 0 0 116px !important;
+  width: 116px !important;
+  min-width: 116px !important;
+  max-width: 116px !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 0 10px !important;
+  overflow: hidden;
+  border: 1px solid transparent !important;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 780;
+  line-height: 1 !important;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: none !important;
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+
+.module-page > .module-tabs button.active,
+.module-page > .module-tabs button:hover,
+.module-page > .module-tabs button:focus-visible {
+  width: 116px !important;
+  min-width: 116px !important;
+  max-width: 116px !important;
+  height: 32px !important;
+  min-height: 32px !important;
+  max-height: 32px !important;
+  padding: 0 10px !important;
+  border-width: 1px !important;
+  transform: none !important;
+}
+
+:is(.tabs, .panel-tabs, .drawer-tabs, .simple-lib-tabs, .label-source-tabs, .knowledge-v2-detail-tabs, .account-settings-tabs, .label-prompt-field-tabs) button {
+  box-sizing: border-box;
+  transform: none !important;
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+
+:is(.tabs, .panel-tabs, .drawer-tabs, .simple-lib-tabs, .label-source-tabs, .knowledge-v2-detail-tabs, .label-prompt-field-tabs) button,
+:is(.tabs, .panel-tabs, .drawer-tabs, .simple-lib-tabs, .label-source-tabs, .knowledge-v2-detail-tabs, .label-prompt-field-tabs) button.active,
+:is(.tabs, .panel-tabs, .drawer-tabs, .simple-lib-tabs, .label-source-tabs, .knowledge-v2-detail-tabs, .label-prompt-field-tabs) button:hover {
+  font-weight: 800;
+}
+
+.drawer-tabs button,
+.drawer-tabs button.active,
+.drawer-tabs button:hover {
+  min-height: 42px;
+  padding: 12px 8px !important;
+  border-top: 0 !important;
+  border-right: 0 !important;
+  border-bottom-width: 2px !important;
+  border-left: 0 !important;
+}
+
+.panel-tabs button,
+.panel-tabs button.active,
+.panel-tabs button:hover {
+  min-height: 42px;
+  padding: 0 10px !important;
+  border-width: 0 1px 0 0 !important;
+}
+
+.knowledge-v2-detail-tabs button,
+.knowledge-v2-detail-tabs button.active,
+.knowledge-v2-detail-tabs button:hover,
+.label-prompt-field-tabs button,
+.label-prompt-field-tabs button.active,
+.label-prompt-field-tabs button:hover {
+  min-height: 30px;
+  padding: 0 10px !important;
+  border-width: 1px !important;
+}

@@ -1,0 +1,821 @@
+/* Blind calibration is a local Evaluation/Human Review workspace. */
+.evaluation-manual-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  min-height: 68px;
+  padding: 12px 14px;
+}
+
+.evaluation-manual-mode-bar > div:first-child {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.evaluation-manual-mode-bar strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.evaluation-manual-mode-bar span {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.evaluation-manual-mode-switch,
+.calibration-actor-switch {
+  display: inline-grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(92px, auto);
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--surface-soft);
+}
+
+.evaluation-manual-mode-switch button,
+.calibration-actor-switch button {
+  min-height: 30px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--muted);
+  background: transparent;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.evaluation-manual-mode-switch button.active,
+.calibration-actor-switch button.active {
+  border-color: rgba(22, 93, 255, 0.35);
+  color: #165dff;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(29, 33, 41, 0.06);
+}
+
+.calibration-loading {
+  grid-column: 1 / -1;
+  min-height: 180px;
+  display: grid;
+  place-items: center;
+  color: var(--muted);
+}
+
+.calibration-workspace {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(280px, 0.72fr) minmax(460px, 1.28fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.calibration-workspace > .calibration-notice,
+.calibration-workspace > .calibration-control-bar,
+.calibration-workspace > .calibration-create-panel,
+.calibration-workspace > .calibration-metric-panel,
+.calibration-workspace > .calibration-reviewer-summary,
+.calibration-workspace > .calibration-observer-panel,
+.calibration-workspace > .calibration-assignment-panel {
+  grid-column: 1 / -1;
+}
+
+.calibration-workspace .module-panel {
+  min-width: 0;
+  padding: 14px;
+}
+
+.calibration-notice {
+  min-height: 44px;
+}
+
+.calibration-control-bar {
+  display: grid;
+  grid-template-columns: minmax(260px, 1fr) auto auto;
+  align-items: center;
+  gap: 14px;
+}
+
+.calibration-heading,
+.calibration-section-heading,
+.calibration-heading-actions,
+.calibration-toolbar-actions,
+.calibration-trace-line,
+.calibration-gold-receipt {
+  display: flex;
+  align-items: center;
+}
+
+.calibration-heading {
+  gap: 10px;
+  min-width: 0;
+}
+
+.calibration-heading .panel-icon {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(22, 93, 255, 0.22);
+  border-radius: 6px;
+  color: #165dff;
+  background: #f2f6ff;
+}
+
+.calibration-heading > div:last-child,
+.calibration-section-heading > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.calibration-heading strong,
+.calibration-section-heading strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.calibration-heading span,
+.calibration-section-heading span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-toolbar-actions,
+.calibration-heading-actions {
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.calibration-current-identity {
+  display: grid;
+  grid-template-columns: auto auto;
+  gap: 2px 7px;
+  min-width: 190px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+}
+
+.calibration-current-identity > svg {
+  grid-row: 1 / 3;
+  align-self: center;
+  color: #165dff;
+}
+
+.calibration-current-identity span,
+.calibration-current-identity em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.calibration-current-identity strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.calibration-current-identity em {
+  grid-column: 2;
+}
+
+.calibration-toolbar-actions button,
+.calibration-heading-actions button,
+.calibration-evidence-link,
+.calibration-conflict-evidence button,
+.calibration-decision-control button,
+.calibration-adjudicate-button,
+.calibration-release-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calibration-workspace button.primary {
+  border-color: #165dff;
+  color: #ffffff;
+  background: #165dff;
+}
+
+.calibration-workspace button:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
+.calibration-section-heading {
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.calibration-section-heading > b,
+.calibration-heading-actions > b {
+  color: #165dff;
+  font-size: 12px;
+}
+
+.calibration-create-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.calibration-create-grid label,
+.calibration-adjudication-form label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.calibration-create-grid input,
+.calibration-create-grid textarea,
+.calibration-adjudication-form textarea,
+.calibration-adjudication-form select {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  background: #ffffff;
+  font: inherit;
+  outline: none;
+}
+
+.calibration-create-grid input,
+.calibration-adjudication-form select {
+  min-height: 34px;
+  padding: 0 9px;
+}
+
+.calibration-create-grid textarea,
+.calibration-adjudication-form textarea {
+  resize: vertical;
+  padding: 8px 9px;
+  line-height: 1.5;
+}
+
+.calibration-create-grid input:focus,
+.calibration-create-grid textarea:focus,
+.calibration-adjudication-form textarea:focus,
+.calibration-adjudication-form select:focus {
+  border-color: #165dff;
+  box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.1);
+}
+
+.calibration-sample-input {
+  grid-column: 1 / -1;
+}
+
+.calibration-create-actions,
+.calibration-adjudication-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.calibration-create-actions button,
+.calibration-adjudication-actions button,
+.calibration-adjudication-options button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  background: #ffffff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calibration-reviewer-facts {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.calibration-reviewer-facts > div {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+}
+
+.calibration-reviewer-facts span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.calibration-reviewer-facts strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.calibration-round-buttons {
+  display: grid;
+  gap: 8px;
+}
+
+.calibration-round-buttons > button {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  color: var(--text);
+  background: #ffffff;
+  text-align: left;
+}
+
+.calibration-round-buttons > button.active {
+  border-color: rgba(22, 93, 255, 0.58);
+  background: #f2f6ff;
+  box-shadow: inset 3px 0 #165dff;
+}
+
+.calibration-round-buttons span {
+  color: #165dff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.calibration-round-buttons strong {
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-round-buttons em {
+  grid-column: 2;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-round-buttons b {
+  grid-column: 3;
+  grid-row: 1 / 3;
+  align-self: center;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.calibration-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calibration-metrics > div,
+.calibration-release-facts > div {
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+}
+
+.calibration-metrics span,
+.calibration-release-facts span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.calibration-metrics strong {
+  color: var(--text);
+  font-size: 20px;
+}
+
+.calibration-metrics em,
+.calibration-release-facts em {
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+}
+
+.calibration-progress {
+  height: 5px;
+  margin: 12px 0 9px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: #e8edf5;
+}
+
+.calibration-progress i {
+  display: block;
+  height: 100%;
+  background: #165dff;
+  transition: width 180ms ease;
+}
+
+.calibration-trace-line {
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.calibration-trace-line b {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: auto;
+  color: #7a4b00;
+  font-weight: 700;
+}
+
+.calibration-status {
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #165dff;
+  background: #edf3ff;
+  font-size: 11px;
+}
+
+.calibration-status.ready {
+  color: #b54708;
+  background: #fff7e8;
+}
+
+.calibration-status.published {
+  color: #087443;
+  background: #e9f8ef;
+}
+
+.calibration-assignment-list {
+  display: grid;
+  gap: 7px;
+}
+
+.calibration-assignment-list article {
+  display: grid;
+  grid-template-columns: 30px minmax(240px, 1fr) auto minmax(285px, auto);
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #ffffff;
+}
+
+.calibration-assignment-index {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  color: #165dff;
+  background: #edf3ff;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.calibration-assignment-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.calibration-assignment-copy span,
+.calibration-assignment-copy em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-assignment-copy strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.calibration-decision-control {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(72px, auto));
+  gap: 5px;
+}
+
+.calibration-decision-control button.active {
+  border-color: rgba(22, 93, 255, 0.55);
+  color: #165dff;
+  background: #edf3ff;
+}
+
+.calibration-conflict-card {
+  display: grid;
+  gap: 12px;
+}
+
+.calibration-conflict-evidence {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 10px;
+  min-width: 0;
+}
+
+.calibration-conflict-evidence span,
+.calibration-conflict-evidence em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-conflict-evidence strong {
+  color: var(--text);
+  font-size: 14px;
+}
+
+.calibration-conflict-evidence button {
+  grid-column: 2;
+  grid-row: 1 / 4;
+}
+
+.calibration-anonymous-submissions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.calibration-anonymous-submissions > div {
+  display: grid;
+  gap: 6px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+}
+
+.calibration-anonymous-submissions span,
+.calibration-anonymous-submissions em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.calibration-anonymous-submissions strong {
+  color: var(--text);
+  font-size: 16px;
+}
+
+.calibration-adjudication-form {
+  display: grid;
+  gap: 9px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--surface-soft);
+}
+
+.calibration-adjudication-form > span {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.calibration-adjudication-form label span b {
+  color: #f53f3f;
+}
+
+.calibration-adjudication-options {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.calibration-adjudication-options button.active {
+  border-color: rgba(22, 93, 255, 0.55);
+  color: #165dff;
+  background: #edf3ff;
+}
+
+.calibration-claim-status {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 9px;
+  border: 1px solid rgba(22, 93, 255, 0.22);
+  border-radius: 4px;
+  color: #315a9d;
+  background: #f2f6ff;
+  font-size: 11px;
+}
+
+.calibration-adjudicate-button,
+.calibration-release-button {
+  width: 100%;
+}
+
+.calibration-release-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  margin-bottom: 10px;
+}
+
+.calibration-release-facts strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.calibration-gold-receipt {
+  gap: 9px;
+  margin-bottom: 10px;
+  padding: 10px;
+  border: 1px solid rgba(0, 180, 42, 0.28);
+  border-radius: 5px;
+  color: #087443;
+  background: #f0fbf4;
+}
+
+.calibration-gold-receipt > div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.calibration-gold-receipt span,
+.calibration-gold-receipt em {
+  overflow: hidden;
+  color: #47745d;
+  font-size: 10px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-gold-receipt em {
+  margin-left: auto;
+}
+
+.calibration-empty {
+  display: grid;
+  place-items: center;
+  gap: 6px;
+  min-height: 150px;
+  padding: 18px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.calibration-empty.compact {
+  min-height: 120px;
+}
+
+.calibration-empty strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.calibration-empty span {
+  font-size: 11px;
+}
+
+.calibration-workspace .spin {
+  animation: calibration-spin 800ms linear infinite;
+}
+
+.calibration-gold-history {
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid #e5e6eb;
+  background: #f7f8fa;
+}
+
+.calibration-gold-history > span {
+  color: #86909c;
+  font-size: 12px;
+}
+
+.calibration-gold-history > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.calibration-gold-history strong,
+.calibration-gold-history em {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.calibration-gold-history em {
+  color: #4e5969;
+  font-size: 12px;
+  font-style: normal;
+}
+
+@keyframes calibration-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (max-width: 1180px) {
+  .calibration-control-bar {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .calibration-current-identity {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    justify-self: start;
+  }
+
+  .calibration-create-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .calibration-assignment-list article {
+    grid-template-columns: 30px minmax(0, 1fr) auto;
+  }
+
+  .calibration-decision-control {
+    grid-column: 2 / -1;
+  }
+}
+
+@media (max-width: 860px) {
+  .evaluation-manual-mode-bar,
+  .calibration-control-bar {
+    align-items: stretch;
+  }
+
+  .evaluation-manual-mode-bar {
+    flex-direction: column;
+  }
+
+  .calibration-workspace {
+    grid-template-columns: 1fr;
+  }
+
+  .calibration-workspace > .module-panel {
+    grid-column: 1;
+  }
+
+  .calibration-metrics,
+  .calibration-release-facts,
+  .calibration-reviewer-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .calibration-adjudication-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .calibration-assignment-list article {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .calibration-evidence-link,
+  .calibration-decision-control {
+    grid-column: 2;
+  }
+
+  .calibration-create-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .calibration-sample-input {
+    grid-column: 1;
+  }
+}

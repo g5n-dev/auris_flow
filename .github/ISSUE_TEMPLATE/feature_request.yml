@@ -1,0 +1,32 @@
+name: Feature request
+description: Propose an improvement to Auris Flow.
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user or developer workflow is blocked?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: Describe the behavior, API, or UX change.
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Frontend prototype
+        - FastAPI BFF
+        - Worker or outbox
+        - OpenAPI or docs
+        - Verification or CI
+        - Security or governance
+    validations:
+      required: true

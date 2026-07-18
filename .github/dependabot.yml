@@ -1,0 +1,63 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+
+  - package-ecosystem: "npm"
+    directory: "/prototype/auris-flow-ui"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:30"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    groups:
+      frontend-runtime:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "vite"
+          - "@vitejs/*"
+      frontend-tooling:
+        patterns:
+          - "typescript"
+          - "playwright"
+          - "@types/*"
+    labels:
+      - "dependencies"
+      - "frontend"
+
+  - package-ecosystem: "uv"
+    directory: "/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:00"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    groups:
+      backend-runtime:
+        patterns:
+          - "fastapi"
+          - "sqlalchemy"
+          - "pydantic*"
+          - "uvicorn*"
+          - "alembic"
+      backend-quality:
+        patterns:
+          - "pytest*"
+          - "ruff"
+          - "mypy"
+          - "pip-audit"
+    labels:
+      - "dependencies"
+      - "backend"

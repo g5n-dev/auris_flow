@@ -1,0 +1,51 @@
+{
+  "schema_version": "auris.public-audio-datasets.v1",
+  "updated_at": "2026-07-16",
+  "datasets": [
+    {
+      "dataset_id": "alimeeting-slr119",
+      "upstream_id": "SLR119",
+      "title": "AliMeeting",
+      "homepage": "https://www.openslr.org/119/",
+      "source_organization": "Alibaba Group",
+      "data_license": {
+        "spdx": "CC-BY-SA-4.0",
+        "url": "https://creativecommons.org/licenses/by-sa/4.0/"
+      },
+      "code_license": {
+        "spdx": "Apache-2.0",
+        "url": "https://github.com/yufan-aslp/AliMeeting/blob/main/LICENSE"
+      },
+      "repository_distribution": "metadata-only",
+      "contains_real_people": true,
+      "license_acceptance_required": true,
+      "domain": "general_meeting",
+      "intended_capabilities": [
+        "asr_cer",
+        "speaker_diarization_der",
+        "vad_boundary"
+      ],
+      "citation": "Yu et al., M2MeT: The ICASSP 2022 Multi-Channel Multi-Party Meeting Transcription Challenge, ICASSP 2022.",
+      "forbidden_claims": [
+        "AliMeeting proves every configured business domain's accuracy",
+        "AliMeeting audio is redistributed by Auris Flow",
+        "An unpinned upstream archive is a reproducible evaluation snapshot"
+      ],
+      "splits": [
+        {
+          "split_id": "eval",
+          "role": "evaluation",
+          "upstream_revision": "SLR119-2022-release",
+          "download_url": "https://speech-lab-share-data.oss-cn-shanghai.aliyuncs.com/AliMeeting/openlr/Eval_Ali.tar.gz",
+          "archive_format": "tar.gz",
+          "size_display": "3.42G",
+          "sha256": null,
+          "integrity_status": "pending-owner-lock",
+          "download_enabled": false,
+          "ci_enabled": false,
+          "use_for_model_fitting": false
+        }
+      ]
+    }
+  ]
+}

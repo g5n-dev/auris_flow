@@ -1,0 +1,742 @@
+/* Voiceprint page: particle playback first, quality decision second. */
+.voiceprint-data-page {
+  display: block;
+  grid-template-rows: none;
+  gap: 14px;
+  overflow: visible;
+}
+
+.voiceprint-data-page > * + * {
+  margin-top: 14px;
+}
+
+.voiceprint-enrollment-stage {
+  position: relative;
+  isolation: isolate;
+  display: grid;
+  grid-template-rows: auto;
+  gap: 0;
+  padding: 10px;
+  border-color: #e5e6eb !important;
+  border-radius: 8px;
+  background: #ffffff !important;
+  overflow: hidden;
+}
+
+.voiceprint-hero-grid {
+  display: grid;
+  grid-template-columns: minmax(620px, 1fr) 388px;
+  align-items: stretch;
+  gap: 12px;
+  min-width: 0;
+}
+
+.voiceprint-player-panel {
+  position: relative;
+  isolation: isolate;
+  min-height: 440px;
+  overflow: hidden;
+  border: 1px solid #d9e7f4;
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, #f8fbff, #eef7ff 54%, #f1fcf7),
+    #f8fbff;
+  box-shadow:
+    inset 0 0 0 1px rgba(255, 255, 255, 0.72),
+    0 8px 18px rgba(22, 46, 88, 0.055);
+}
+
+.voiceprint-player-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.voiceprint-player-overlay {
+  position: absolute;
+  inset: 30px 370px 124px 28px;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  text-align: center;
+  pointer-events: none;
+}
+
+.voiceprint-live-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border: 1px solid rgba(22, 93, 255, 0.2);
+  border-radius: 999px;
+  color: #165dff;
+  background: rgba(255, 255, 255, 0.74);
+  font-size: 12px;
+  font-weight: 900;
+  box-shadow: 0 8px 20px rgba(22, 93, 255, 0.08);
+  backdrop-filter: blur(12px);
+}
+
+.voiceprint-live-chip.review {
+  border-color: rgba(255, 125, 0, 0.28);
+  color: #d46b08;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.voiceprint-live-chip.pending {
+  border-color: rgba(245, 63, 63, 0.28);
+  color: #d92d20;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.voiceprint-player-overlay > strong {
+  margin-top: 10px;
+  color: #1d2129;
+  font-size: clamp(56px, 7vw, 96px);
+  font-weight: 950;
+  line-height: 0.88;
+  letter-spacing: 0;
+  text-shadow: 0 12px 34px rgba(22, 93, 255, 0.14);
+}
+
+.voiceprint-player-overlay p {
+  max-width: 560px;
+  margin: 12px 0 0;
+  color: rgba(29, 33, 41, 0.68);
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+.voiceprint-player-overlay div {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.voiceprint-player-overlay b {
+  padding: 6px 10px;
+  border: 1px solid rgba(22, 93, 255, 0.14);
+  border-radius: 999px;
+  color: #4e5969;
+  background: rgba(255, 255, 255, 0.76);
+  font-size: 11px;
+  font-weight: 850;
+  box-shadow: 0 8px 20px rgba(55, 74, 110, 0.08);
+  backdrop-filter: blur(10px);
+}
+
+.voiceprint-dimension-console {
+  position: absolute;
+  top: 16px;
+  right: 16px;
+  bottom: 152px;
+  z-index: 4;
+  display: grid;
+  grid-template-rows: auto 108px minmax(0, 1fr);
+  gap: 8px;
+  width: min(334px, 38%);
+  min-width: 286px;
+  padding: 10px;
+  border: 1px solid rgba(148, 191, 255, 0.48);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.86), rgba(248, 251, 255, 0.72)),
+    rgba(255, 255, 255, 0.78);
+  box-shadow: 0 14px 30px rgba(22, 93, 255, 0.1);
+  backdrop-filter: blur(16px);
+}
+
+.voiceprint-dimension-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 8px;
+  align-items: baseline;
+}
+
+.voiceprint-dimension-head span {
+  color: #64748b;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 10px;
+  font-weight: 850;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.voiceprint-dimension-head strong {
+  color: #165dff;
+  font-size: 14px;
+  font-weight: 950;
+}
+
+.voiceprint-dimension-head em {
+  grid-column: 1 / -1;
+  color: #4e5969;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.voiceprint-projection-map {
+  width: 100%;
+  height: 108px;
+  border: 1px solid rgba(216, 227, 240, 0.82);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at 50% 50%, rgba(22, 93, 255, 0.08), transparent 58%),
+    linear-gradient(135deg, rgba(232, 243, 255, 0.8), rgba(240, 253, 250, 0.65));
+}
+
+.voiceprint-dimension-bands {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+  scrollbar-width: thin;
+}
+
+.voiceprint-dimension-band {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 7px;
+  min-width: 0;
+  min-height: 42px;
+  padding: 7px;
+  border: 1px solid rgba(216, 227, 240, 0.9) !important;
+  border-radius: 9px !important;
+  background: rgba(255, 255, 255, 0.76) !important;
+  text-align: left;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.54);
+}
+
+.voiceprint-dimension-band span,
+.voiceprint-dimension-band strong,
+.voiceprint-dimension-band small {
+  min-width: 0;
+}
+
+.voiceprint-dimension-band span {
+  display: grid;
+  gap: 1px;
+}
+
+.voiceprint-dimension-band span b {
+  overflow: hidden;
+  color: #1d2129;
+  font-size: 11px;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceprint-dimension-band span em,
+.voiceprint-dimension-band small {
+  overflow: hidden;
+  color: #64748b;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 9px;
+  font-style: normal;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceprint-dimension-band strong {
+  justify-self: end;
+  color: #165dff;
+  font-size: 11px;
+  font-weight: 950;
+  white-space: nowrap;
+}
+
+.voiceprint-dimension-band i {
+  grid-column: 1 / -1;
+  height: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.92);
+}
+
+.voiceprint-dimension-band i b {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #165dff, #14b8a6);
+}
+
+.voiceprint-dimension-band small {
+  grid-column: 1 / -1;
+}
+
+.voiceprint-dimension-band.teal i b {
+  background: linear-gradient(90deg, #14b8a6, #22c55e);
+}
+
+.voiceprint-dimension-band.amber i b {
+  background: linear-gradient(90deg, #ff7d00, #fbbf24);
+}
+
+.voiceprint-dimension-band.violet i b {
+  background: linear-gradient(90deg, #722ed1, #8b5cf6);
+}
+
+.voiceprint-dimension-band.red {
+  border-color: rgba(245, 63, 63, 0.26) !important;
+  background: rgba(255, 241, 242, 0.78) !important;
+}
+
+.voiceprint-dimension-band.red i b {
+  background: linear-gradient(90deg, #f53f3f, #ff7d00);
+}
+
+.voiceprint-player-toolbar {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 88px;
+  z-index: 3;
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 8px;
+  border: 1px solid rgba(185, 205, 230, 0.62);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.76);
+  box-shadow: 0 10px 24px rgba(55, 74, 110, 0.08);
+  backdrop-filter: blur(14px);
+}
+
+.voiceprint-play-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(22, 93, 255, 0.22);
+  border-radius: 999px;
+  color: #ffffff;
+  background: linear-gradient(135deg, #14b8a6, #2d76cc);
+  box-shadow: 0 8px 20px rgba(45, 118, 204, 0.18);
+}
+
+.voiceprint-player-toolbar > div:nth-child(2) {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.voiceprint-player-toolbar > div span,
+.voiceprint-player-toolbar > div strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceprint-player-toolbar > div span {
+  color: #64748b;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
+.voiceprint-player-toolbar > div strong {
+  color: #1d2129;
+  font-size: 13px;
+}
+
+.voiceprint-player-toolbar > em {
+  justify-self: end;
+  padding: 6px 10px;
+  border: 1px solid rgba(20, 184, 166, 0.26);
+  border-radius: 999px;
+  color: #0f766e;
+  background: rgba(20, 184, 166, 0.08);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.voiceprint-wave-strip {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  height: 58px;
+  padding: 9px 12px;
+  border: 1px solid rgba(185, 205, 230, 0.48);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.62);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.62);
+  backdrop-filter: blur(12px);
+}
+
+.voiceprint-wave-strip span {
+  flex: 1;
+  min-width: 3px;
+  max-width: 14px;
+  border-radius: 999px;
+  background: linear-gradient(180deg, rgba(45, 118, 204, 0.72), rgba(20, 184, 166, 0.22));
+  box-shadow: 0 0 10px rgba(45, 118, 204, 0.1);
+}
+
+.voiceprint-wave-strip span.hot {
+  background: linear-gradient(180deg, rgba(245, 63, 63, 0.6), rgba(255, 125, 0, 0.2));
+  box-shadow: 0 0 12px rgba(245, 63, 63, 0.12);
+}
+
+.voiceprint-quality-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  min-height: 440px;
+  padding: 12px;
+  border: 1px solid #dbe6f4;
+  border-radius: 10px;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+  box-shadow: 0 8px 22px rgba(22, 46, 88, 0.04);
+}
+
+.voiceprint-quality-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: start;
+}
+
+.voiceprint-quality-head span {
+  color: var(--dm-muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.voiceprint-quality-head strong {
+  display: block;
+  margin-top: 3px;
+  color: var(--dm-text);
+  font-size: 18px;
+}
+
+.voiceprint-quality-head p {
+  display: -webkit-box;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: #4e5969;
+  font-size: 12px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.voiceprint-quality-head > b {
+  padding: 5px 8px;
+  border-radius: 999px;
+  color: #165dff;
+  background: #e8f3ff;
+  font-size: 11px;
+}
+
+.voiceprint-gate-stack-hero button {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 44px;
+  border-color: #dbeafe !important;
+  background: #f8fbff !important;
+}
+
+.voiceprint-gate-stack-hero {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.voiceprint-gate-stack-hero button em {
+  grid-column: 1;
+}
+
+.voiceprint-gate-stack-hero button i {
+  grid-column: 1 / -1;
+}
+
+.voiceprint-consistency-hero {
+  padding: 8px;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #f8fbff;
+}
+
+.voiceprint-submit-primary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  border: 1px solid #165dff !important;
+  border-radius: 7px;
+  color: #ffffff;
+  background: #165dff !important;
+  font-size: 12px;
+  font-weight: 900;
+}
+
+.voiceprint-submit-primary:disabled {
+  border-color: #d8dde6 !important;
+  color: #86909c;
+  background: #f2f3f5 !important;
+  cursor: not-allowed;
+}
+
+.voiceprint-quality-queue {
+  display: grid;
+  grid-template-columns: minmax(420px, 0.8fr) minmax(560px, 1.2fr);
+  gap: 10px;
+  min-width: 0;
+  position: relative;
+  z-index: 0;
+  margin-top: 0;
+  border: 1px solid #e5e6eb;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.voiceprint-object-strip,
+.voiceprint-trace-panel {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+}
+
+.voiceprint-object-strip {
+  border-right: 1px solid #e5e6eb;
+  background: #fbfcff;
+}
+
+.voiceprint-object-rowset {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.voiceprint-object-rowset .voiceprint-row {
+  min-height: 72px;
+}
+
+.voiceprint-trace-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.voiceprint-trace-grid div {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid #e5e6eb;
+  border-radius: 7px;
+  background: #fbfcff;
+}
+
+.voiceprint-trace-grid span {
+  color: #86909c;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.voiceprint-trace-grid strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #1d2129;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceprint-dimension-table {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid #dbeafe;
+  border-radius: 9px;
+  background: linear-gradient(180deg, #f8fbff, #ffffff);
+}
+
+.voiceprint-dimension-table > div,
+.voiceprint-dimension-table > button {
+  display: grid;
+  grid-template-columns: 1.1fr 0.9fr 92px 52px;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.voiceprint-dimension-table > div {
+  color: #86909c;
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.voiceprint-dimension-table > button {
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid #e5e6eb !important;
+  border-radius: 7px !important;
+  background: #ffffff !important;
+  text-align: left;
+}
+
+.voiceprint-dimension-table > button:hover {
+  border-color: #94bfff !important;
+  background: #f0f7ff !important;
+}
+
+.voiceprint-dimension-table strong,
+.voiceprint-dimension-table em,
+.voiceprint-dimension-table b,
+.voiceprint-dimension-table small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.voiceprint-dimension-table strong {
+  color: #1d2129;
+  font-size: 12px;
+}
+
+.voiceprint-dimension-table em,
+.voiceprint-dimension-table small {
+  color: #64748b;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.voiceprint-dimension-table b {
+  color: #165dff;
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 11px;
+}
+
+.voiceprint-dimension-table .red {
+  border-color: rgba(245, 63, 63, 0.22) !important;
+  background: #fff7f7 !important;
+}
+
+.voiceprint-dimension-table .amber {
+  border-color: rgba(255, 125, 0, 0.22) !important;
+  background: #fffaf2 !important;
+}
+
+.voiceprint-dimension-table .teal {
+  border-color: rgba(20, 184, 166, 0.22) !important;
+  background: #f0fdfa !important;
+}
+
+.voiceprint-dimension-table .violet {
+  border-color: rgba(114, 46, 209, 0.2) !important;
+  background: #fbf8ff !important;
+}
+
+.voiceprint-lineage-compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.voiceprint-lineage-compact span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 5px 8px 5px 5px;
+  border: 1px solid #d8e3f0;
+  border-radius: 999px;
+  color: #4e5969;
+  background: #f7fbff;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.voiceprint-lineage-compact b {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 999px;
+  color: #ffffff;
+  background: #165dff;
+  font-size: 10px;
+}
+
+.voiceprint-actions-inline {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+@media (max-width: 1500px) {
+  .voiceprint-hero-grid,
+  .voiceprint-quality-queue {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voiceprint-quality-panel {
+    min-height: 0;
+  }
+
+  .voiceprint-object-strip {
+    border-right: 0;
+    border-bottom: 1px solid #e5e6eb;
+  }
+}
+
+@media (max-width: 1280px) {
+  .voiceprint-object-rowset,
+  .voiceprint-trace-grid,
+  .voiceprint-actions-inline {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voiceprint-player-panel {
+    min-height: 520px;
+  }
+
+  .voiceprint-player-overlay {
+    inset: 24px 24px 320px;
+  }
+
+  .voiceprint-dimension-console {
+    top: auto;
+    left: 16px;
+    right: 16px;
+    bottom: 152px;
+    width: auto;
+    min-width: 0;
+    max-height: 154px;
+    grid-template-rows: auto 88px;
+    overflow: auto;
+  }
+
+  .voiceprint-dimension-bands {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .voiceprint-player-toolbar {
+    grid-template-columns: 38px minmax(0, 1fr);
+  }
+}

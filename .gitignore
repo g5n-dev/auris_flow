@@ -1,0 +1,76 @@
+.DS_Store
+
+# Dependencies
+node_modules/
+prototype/auris-flow-ui/node_modules/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+backend/.venv/
+
+# Build and framework output
+dist/
+build/
+.next/
+.vite/
+prototype/auris-flow-ui/dist/
+prototype/auris-flow-ui/dist-*/
+prototype/auris-flow-ui/e2e/artifacts/
+*.tsbuildinfo
+
+# Generated frontend runtime catalogs and sanitized fixture projections. They
+# are rebuilt from canonical source files by `npm run assets:build` before dev
+# and production builds.
+prototype/auris-flow-ui/src/catalogs/production/
+prototype/auris-flow-ui/src/features/*/fixtures/production/
+
+# Local visual audit screenshots
+prototype/auris-flow-ui/audit-iteration/
+prototype/auris-flow-ui/audit/*.png
+prototype/auris-flow-ui/audit/*.json
+prototype/auris-flow-ui/audit/screenshots/
+prototype/auris-flow-ui/audit/prototype-interaction-audit*/
+prototype/auris-flow-ui/audits/
+prototype/auris-flow-ui/*.png
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.coverage
+coverage.xml
+htmlcov/
+
+# Local databases
+*.sqlite
+*.sqlite3
+
+# Third-party or local evaluation media. Only metadata registries and synthetic
+# generators belong in Git; public audio is fetched into local object storage.
+*.wav
+*.wave
+*.mp3
+*.flac
+*.m4a
+*.ogg
+*.opus
+*.aac
+*.rttm
+*.stm
+*.ctm
+*.tar
+*.tar.gz
+*.tgz
+public-audio-data/
+datasets-cache/
+
+# Local env
+.env
+.env.*
+!.env.example

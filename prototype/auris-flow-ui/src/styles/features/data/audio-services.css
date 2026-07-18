@@ -1,0 +1,410 @@
+.audio-provider-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.audio-provider-grid button {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+  min-height: 92px;
+  padding: 10px;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.024) !important;
+  text-align: left;
+}
+
+.audio-provider-grid button.active {
+  border-color: rgba(22, 93, 255, 0.5) !important;
+  background: rgba(22, 93, 255, 0.08) !important;
+  box-shadow: inset 3px 0 0 #165dff;
+}
+
+.audio-provider-grid span,
+.audio-provider-grid strong,
+.audio-provider-grid em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audio-provider-grid span {
+  justify-self: start;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: #165dff;
+  background: rgba(22, 93, 255, 0.1);
+  font-size: 11px;
+  font-weight: 900;
+  white-space: nowrap;
+}
+
+.audio-provider-grid strong {
+  color: var(--text);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.audio-provider-grid em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.asr-service-grid div,
+.service-contract-row {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--line) !important;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.024);
+}
+
+.asr-service-grid div {
+  display: grid;
+  gap: 4px;
+}
+
+.asr-service-grid span,
+.service-contract-row span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asr-service-grid strong,
+.service-contract-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.asr-contract-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  min-height: 0;
+}
+
+.asr-contract-columns section,
+.service-binding-card {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.asr-contract-columns section > span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.service-contract-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.service-contract-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 0.42fr) minmax(0, 1fr);
+  gap: 4px 9px;
+}
+
+.service-contract-row em {
+  grid-column: 2;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-service-ops-grid {
+  display: grid;
+  grid-template-columns: minmax(360px, 1.15fr) minmax(420px, 1.35fr) minmax(280px, 0.9fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.audio-param-panel,
+.audio-observe-panel,
+.audio-optimization-panel,
+.audio-runtime-param-list {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.audio-ops-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.audio-ops-head span,
+.audio-ops-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-ops-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.audio-ops-head strong {
+  color: var(--text);
+  font-family: "SF Mono", Menlo, monospace;
+  font-size: 12px;
+}
+
+.audio-param-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.audio-param-card {
+  display: grid;
+  align-content: start;
+  gap: 7px;
+  min-width: 0;
+  min-height: 124px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(22, 93, 255, 0.045);
+}
+
+.audio-param-card strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.audio-param-card span {
+  display: grid;
+  grid-template-columns: minmax(96px, 0.45fr) minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+}
+
+.audio-param-card b,
+.audio-param-card em {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-param-card b {
+  color: var(--blue);
+  font-family: "SF Mono", Menlo, monospace;
+}
+
+.audio-param-card em {
+  color: var(--muted);
+}
+
+.audio-provider-metrics {
+  display: grid;
+  gap: 7px;
+}
+
+.audio-provider-metrics button {
+  display: grid;
+  grid-template-columns: 58px repeat(5, minmax(0, 1fr)) 62px;
+  align-items: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 8px 10px;
+  border: 1px solid var(--line) !important;
+  border-radius: 7px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.024) !important;
+  text-align: left;
+}
+
+.audio-provider-metrics button.active {
+  border-color: rgba(28, 228, 212, 0.44) !important;
+  background: rgba(28, 228, 212, 0.08) !important;
+}
+
+.audio-provider-metrics strong,
+.audio-provider-metrics span,
+.audio-provider-metrics em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.audio-provider-metrics strong {
+  color: var(--text);
+  font-size: 12px;
+}
+
+.audio-provider-metrics span {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.audio-provider-metrics em {
+  justify-self: end;
+  padding: 2px 7px;
+  border-radius: 999px;
+  color: var(--cyan);
+  background: rgba(28, 228, 212, 0.1);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 850;
+}
+
+.audio-optimization-list {
+  display: grid;
+  gap: 8px;
+}
+
+.audio-optimization-list button {
+  display: grid;
+  grid-template-columns: minmax(72px, 0.4fr) minmax(0, 1fr);
+  gap: 3px 8px;
+  min-width: 0;
+  min-height: 56px;
+  padding: 9px 10px;
+  border: 1px solid var(--line) !important;
+  border-radius: 7px;
+  color: var(--text);
+  background: rgba(255, 176, 46, 0.045) !important;
+  text-align: left;
+}
+
+.audio-optimization-list span,
+.audio-optimization-list strong,
+.audio-optimization-list em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.audio-optimization-list span {
+  color: var(--amber);
+  font-size: 12px;
+  font-weight: 850;
+  white-space: nowrap;
+}
+
+.audio-optimization-list strong {
+  color: var(--text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.audio-optimization-list em {
+  grid-column: 1 / -1;
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.audio-runtime-param-list {
+  margin-top: 2px;
+  padding: 10px;
+}
+
+@media (max-width: 1500px) {
+  .audio-service-ops-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+.service-binding-card p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+@media (max-width: 1380px) {
+  .module-metrics {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .module-grid.home-dashboard-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .home-flow,
+  .home-module-grid,
+  .home-entity-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .home-flow-step::after {
+    display: none;
+  }
+
+  .home-module-detail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insight-board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insight-serial-board {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .insight-chart-card {
+    min-height: 280px;
+  }
+
+  .insight-band {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    min-height: 196px;
+    height: auto;
+  }
+
+  .insight-band button {
+    min-height: 92px;
+  }
+
+  .flow-board,
+  .label-taxonomy {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

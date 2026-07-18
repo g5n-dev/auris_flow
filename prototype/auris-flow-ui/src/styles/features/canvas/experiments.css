@@ -1,0 +1,332 @@
+/* Controlled experiment design and auditable metric snapshot. */
+.experiment-config-panel {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.35fr) repeat(3, minmax(150px, 1fr));
+  gap: 10px;
+  padding: 11px 0;
+  border-top: 1px solid #e5e6eb;
+  border-bottom: 1px solid #e5e6eb;
+}
+
+.experiment-config-head {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 24px;
+}
+
+.experiment-config-head span {
+  color: #1d2129;
+  font-weight: 600;
+}
+
+.experiment-config-head b {
+  padding: 2px 7px;
+  border-radius: 3px;
+  color: #165dff;
+  background: #e8f3ff;
+  font-size: 11px;
+}
+
+.experiment-config-panel.is-locked .experiment-config-head b {
+  color: #86909c;
+  background: #f2f3f5;
+}
+
+.experiment-treatment-config {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(150px, 0.7fr) minmax(220px, 1fr) minmax(220px, 1fr) minmax(250px, 1.15fr);
+  gap: 8px;
+  align-items: stretch;
+  padding: 9px;
+  border: 1px solid #dbe4ff;
+  border-radius: 4px;
+  background: #f7faff;
+}
+
+.experiment-treatment-config label {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.experiment-treatment-config label > span {
+  color: #4e5969;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.experiment-treatment-config select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid #c9cdd4;
+  border-radius: 4px;
+  color: #1d2129;
+  background: #ffffff;
+}
+
+.experiment-treatment-config select:focus {
+  border-color: #165dff;
+  outline: 2px solid #e8f3ff;
+}
+
+.experiment-treatment-config select:disabled {
+  color: #4e5969;
+  background: #f2f3f5;
+  cursor: not-allowed;
+}
+
+.experiment-treatment-status {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 7px 9px;
+  border-left: 3px solid #f53f3f;
+  background: #fff2f0;
+}
+
+.experiment-treatment-status.is-valid {
+  border-left-color: #00b42a;
+  background: #f0fff4;
+}
+
+.experiment-treatment-status span {
+  color: #1d2129;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.experiment-treatment-status strong,
+.experiment-treatment-status small {
+  overflow: hidden;
+  color: #4e5969;
+  font-size: 11px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-config-field {
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  min-width: 0;
+}
+
+.experiment-config-field > span {
+  color: #4e5969;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.experiment-config-field > input,
+.experiment-config-field select {
+  width: 100%;
+  min-width: 0;
+  height: 34px;
+  padding: 0 9px;
+  border: 1px solid #c9cdd4;
+  border-radius: 4px;
+  color: #1d2129;
+  background: #ffffff;
+}
+
+.experiment-config-field input:focus,
+.experiment-config-field select:focus {
+  border-color: #165dff;
+  outline: 2px solid #e8f3ff;
+}
+
+.experiment-config-field input:disabled,
+.experiment-config-field select:disabled,
+.experiment-confidence-options button:disabled {
+  color: #4e5969;
+  background: #f7f8fa;
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.experiment-config-field small {
+  overflow: hidden;
+  color: #86909c;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-config-field.traffic > div {
+  display: grid;
+  grid-template-columns: minmax(80px, 1fr) 62px 14px;
+  gap: 6px;
+  align-items: center;
+}
+
+.experiment-config-field.traffic input[type="range"] {
+  width: 100%;
+  accent-color: #165dff;
+}
+
+.experiment-config-field.traffic input[type="number"] {
+  width: 62px;
+  height: 34px;
+  padding: 0 6px;
+  border: 1px solid #c9cdd4;
+  border-radius: 4px;
+  color: #1d2129;
+  background: #ffffff;
+}
+
+.experiment-config-field.traffic em {
+  color: #4e5969;
+  font-style: normal;
+}
+
+.experiment-confidence-options {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.experiment-confidence-options button {
+  min-height: 34px;
+  border: 1px solid #c9cdd4;
+  border-radius: 4px;
+  color: #4e5969;
+  background: #ffffff;
+}
+
+.experiment-confidence-options button.active {
+  border-color: #165dff;
+  color: #165dff;
+  background: #e8f3ff;
+}
+
+.experiment-analysis-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid #dbe4ff;
+  border-radius: 4px;
+  background: #f7faff;
+}
+
+.experiment-sample-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.experiment-sample-progress > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #4e5969;
+  font-size: 12px;
+}
+
+.experiment-sample-progress > span b {
+  color: #1d2129;
+}
+
+.experiment-sample-progress > span em {
+  font-style: normal;
+}
+
+.experiment-sample-progress > i {
+  display: block;
+  height: 7px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: #e5e6eb;
+}
+
+.experiment-sample-progress > i span {
+  display: block;
+  height: 100%;
+  background: #165dff;
+}
+
+.experiment-sample-progress.candidate > i span {
+  background: #00b42a;
+}
+
+.experiment-stat-facts {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border-top: 1px solid #dbe4ff;
+  border-bottom: 1px solid #dbe4ff;
+}
+
+.experiment-stat-facts span {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding: 9px;
+  border-right: 1px solid #dbe4ff;
+}
+
+.experiment-stat-facts span:last-child {
+  border-right: 0;
+}
+
+.experiment-stat-facts b {
+  color: #86909c;
+  font-size: 11px;
+}
+
+.experiment-stat-facts em {
+  overflow: hidden;
+  color: #1d2129;
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-stat-facts .is-blocked em {
+  color: #f53f3f;
+}
+
+.experiment-evidence-lock {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #4e5969;
+  font-size: 11px;
+}
+
+.experiment-evidence-lock svg {
+  color: #00b42a;
+}
+
+.experiment-evidence-lock code {
+  margin-left: auto;
+  color: #165dff;
+}
+
+@media (max-width: 1100px) {
+  .experiment-config-panel,
+  .experiment-treatment-config,
+  .experiment-analysis-summary,
+  .experiment-stat-facts {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .experiment-stat-facts span {
+    border-right: 0;
+    border-bottom: 1px solid #dbe4ff;
+  }
+
+  .experiment-stat-facts span:last-child {
+    border-bottom: 0;
+  }
+}

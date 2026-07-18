@@ -1,0 +1,739 @@
+.account-settings-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 240;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(6, 12, 15, 0.5);
+  backdrop-filter: blur(10px);
+}
+
+.account-settings-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(920px, calc(100vw - 48px));
+  max-height: min(720px, calc(100vh - 48px));
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.34);
+}
+
+.account-settings-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--surface-2) 82%, transparent), var(--surface));
+}
+
+.account-settings-user {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 12px;
+}
+
+.account-settings-user > b {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 42px;
+  height: 42px;
+  border-radius: 50%;
+  color: #ffffff;
+  background: #165dff;
+  font-size: 16px;
+  font-weight: 900;
+}
+
+.account-settings-user div {
+  min-width: 0;
+}
+
+.account-settings-user span,
+.account-settings-user strong,
+.account-settings-user em {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-settings-user span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.account-settings-user strong {
+  margin-top: 2px;
+  color: var(--text);
+  font-size: 20px;
+}
+
+.account-settings-user em {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 12px;
+  font-style: normal;
+  font-weight: 750;
+}
+
+.account-settings-close {
+  display: inline-grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.account-settings-close:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.account-settings-body {
+  display: grid;
+  grid-template-columns: 220px minmax(0, 1fr);
+  min-height: 0;
+}
+
+.account-settings-tabs {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 58%, transparent);
+}
+
+.account-settings-tabs button {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 3px 9px;
+  align-items: center;
+  min-height: 62px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+}
+
+.account-settings-tabs button svg {
+  grid-row: 1 / span 2;
+  color: var(--muted);
+}
+
+.account-settings-tabs button strong,
+.account-settings-tabs button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-settings-tabs button strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.account-settings-tabs button span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 750;
+}
+
+.account-settings-tabs button.active {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 10%, var(--surface));
+}
+
+.account-settings-tabs button.active svg,
+.account-settings-tabs button.active strong {
+  color: var(--blue);
+}
+
+.account-settings-content {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.account-settings-card,
+.account-settings-insight {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.account-settings-card-head {
+  display: grid;
+  gap: 4px;
+}
+
+.account-settings-card-head strong {
+  color: var(--text);
+  font-size: 15px;
+}
+
+.account-settings-card-head span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.5;
+}
+
+.account-settings-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.account-settings-form-grid label {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.account-settings-form-grid input,
+.account-settings-form-grid select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  outline: none;
+  color: var(--text);
+  background: var(--surface);
+  font: inherit;
+  font-weight: 800;
+}
+
+.account-settings-form-grid input:focus,
+.account-settings-form-grid select:focus {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 16%, transparent);
+}
+
+.account-settings-insight {
+  grid-template-columns: 22px minmax(0, 1fr);
+  align-items: start;
+  border-color: color-mix(in srgb, var(--teal) 52%, var(--line));
+  background: color-mix(in srgb, var(--teal) 8%, var(--surface-2));
+}
+
+.account-settings-insight svg {
+  color: var(--teal);
+}
+
+.account-settings-insight strong,
+.account-settings-insight span {
+  display: block;
+}
+
+.account-settings-insight strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.account-settings-insight span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.account-workspace-list {
+  display: grid;
+  gap: 8px;
+}
+
+.account-workspace-list button {
+  display: grid;
+  grid-template-columns: 120px minmax(0, 1fr) 140px 18px;
+  align-items: center;
+  gap: 10px;
+  min-height: 50px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+}
+
+.account-workspace-list button span,
+.account-workspace-list button strong,
+.account-workspace-list button em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-workspace-list button span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 850;
+}
+
+.account-workspace-list button strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.account-workspace-list button em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+  text-align: right;
+}
+
+.account-workspace-list button svg {
+  color: var(--blue);
+}
+
+.account-workspace-list button.active {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 10%, var(--surface));
+}
+
+.account-settings-card-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.account-settings-card-grid div,
+.account-session-row {
+  display: grid;
+  gap: 5px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+.account-settings-card-grid span,
+.account-session-row span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 850;
+}
+
+.account-settings-card-grid strong,
+.account-session-row strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-settings-card-grid em,
+.account-session-row em {
+  color: var(--muted);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.account-notification-list,
+.account-session-list {
+  display: grid;
+  gap: 9px;
+}
+
+.account-notification-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 82px;
+  align-items: center;
+  gap: 12px;
+  min-height: 66px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  text-align: left;
+}
+
+.account-notification-row strong,
+.account-notification-row span {
+  display: block;
+}
+
+.account-notification-row strong {
+  color: var(--text);
+  font-size: 13px;
+}
+
+.account-notification-row div > span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.account-toggle {
+  display: inline-grid !important;
+  grid-template-columns: 22px minmax(0, 1fr) !important;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 28px;
+  padding: 3px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: var(--surface-2);
+}
+
+.account-toggle i {
+  display: block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+
+.account-toggle b {
+  color: inherit;
+  font-size: 11px;
+  font-weight: 900;
+}
+
+.account-toggle.is-on {
+  border-color: color-mix(in srgb, var(--green) 48%, var(--line));
+  color: var(--green);
+  background: color-mix(in srgb, var(--green) 10%, var(--surface));
+}
+
+.account-toggle.is-on i {
+  background: var(--green);
+}
+
+.account-session-row {
+  grid-template-columns: 86px minmax(0, 1fr) 78px;
+  align-items: center;
+}
+
+.account-session-row em {
+  text-align: right;
+}
+
+.account-security-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.account-security-actions button,
+.account-settings-footer button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--text);
+  background: var(--surface-2);
+  font-weight: 850;
+}
+
+.account-security-actions button:hover,
+.account-settings-footer button:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 8%, var(--surface));
+}
+
+.account-settings-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 12px 18px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface-2) 72%, var(--surface));
+}
+
+.account-settings-footer > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-settings-footer > div {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.account-settings-footer button.primary {
+  border-color: #165dff;
+  color: #ffffff;
+  background: #165dff;
+}
+
+.account-settings-footer button.primary:hover {
+  border-color: #0e42d2;
+  color: #ffffff;
+  background: #0e42d2;
+}
+
+/* Account center follows the same Arco-light control density as the platform shell. */
+.account-settings-scrim {
+  padding: 32px;
+  background: rgba(29, 33, 41, 0.48);
+  backdrop-filter: blur(6px);
+}
+
+.account-settings-modal {
+  width: min(860px, calc(100vw - 64px));
+  max-height: min(680px, calc(100vh - 64px));
+  border-color: #e5e6eb;
+  border-radius: 8px;
+  color: #1d2129;
+  background: #ffffff;
+  box-shadow: 0 18px 48px rgba(29, 33, 41, 0.18);
+}
+
+.account-settings-head {
+  padding: 14px 16px;
+  border-bottom-color: #e5e6eb;
+  background: #ffffff;
+}
+
+.account-settings-user {
+  gap: 10px;
+}
+
+.account-settings-user > b {
+  width: 40px;
+  height: 40px;
+  font-size: 15px;
+}
+
+.account-settings-user span {
+  color: #86909c;
+}
+
+.account-settings-user strong {
+  margin-top: 1px;
+  color: #1d2129;
+  font-size: 18px;
+}
+
+.account-settings-user em {
+  color: #4e5969;
+}
+
+.account-settings-close {
+  width: 32px;
+  height: 32px;
+  border-color: #e5e6eb;
+  border-radius: 7px;
+  color: #4e5969;
+  background: #f7f8fa;
+}
+
+.account-settings-body {
+  grid-template-columns: 194px minmax(0, 1fr);
+  background: #f7f8fa;
+}
+
+.account-settings-tabs {
+  gap: 8px;
+  padding: 12px;
+  border-right-color: #e5e6eb;
+  background: #fbfcff;
+}
+
+.account-settings-tabs button {
+  min-height: 54px;
+  padding: 9px 10px;
+  border-color: #e5e6eb;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.account-settings-tabs button svg {
+  color: #4e5969;
+}
+
+.account-settings-tabs button strong {
+  color: #1d2129;
+  font-size: 13px;
+}
+
+.account-settings-tabs button span {
+  color: #4e5969;
+}
+
+.account-settings-tabs button.active {
+  border-color: #165dff;
+  background: #f2f7ff;
+  box-shadow: inset 3px 0 0 #165dff;
+}
+
+.account-settings-content {
+  gap: 12px;
+  padding: 14px;
+}
+
+.account-settings-card,
+.account-settings-insight {
+  gap: 12px;
+  padding: 12px;
+  border-color: #e5e6eb;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.account-settings-card-head strong {
+  color: #1d2129;
+  font-size: 14px;
+}
+
+.account-settings-card-head span {
+  color: #4e5969;
+  font-size: 12px;
+}
+
+.account-settings-form-grid {
+  gap: 10px;
+}
+
+.account-settings-form-grid label {
+  gap: 5px;
+  color: #4e5969;
+}
+
+.account-settings-form-grid input,
+.account-settings-form-grid select {
+  min-height: 36px;
+  padding: 0 10px;
+  border-color: #e5e6eb;
+  border-radius: 6px;
+  color: #1d2129;
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.account-settings-form-grid input:focus,
+.account-settings-form-grid select:focus {
+  border-color: #165dff;
+  box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.14);
+}
+
+.account-settings-insight {
+  border-color: #9de8e8;
+  background: #f0ffff;
+}
+
+.account-settings-insight svg {
+  color: #14c9c9;
+}
+
+.account-settings-insight strong {
+  color: #1d2129;
+}
+
+.account-settings-insight span {
+  color: #4e5969;
+}
+
+.account-workspace-list button,
+.account-notification-row,
+.account-session-row,
+.account-settings-card-grid div {
+  border-color: #e5e6eb;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.account-workspace-list button {
+  min-height: 46px;
+  padding: 9px 10px;
+}
+
+.account-workspace-list button.active {
+  border-color: #165dff;
+  background: #f2f7ff;
+}
+
+.account-notification-row {
+  min-height: 58px;
+  padding: 10px;
+}
+
+.account-toggle {
+  min-height: 26px;
+  border-color: #e5e6eb;
+  background: #f7f8fa;
+}
+
+.account-session-row {
+  padding: 10px;
+}
+
+.account-security-actions button,
+.account-settings-footer button {
+  min-height: 34px;
+  padding: 6px 10px;
+  border-color: #e5e6eb;
+  border-radius: 6px;
+  color: #1d2129;
+  background: #ffffff;
+  font-size: 13px;
+}
+
+.account-settings-footer {
+  padding: 10px 16px;
+  border-top-color: #e5e6eb;
+  background: #ffffff;
+}
+
+.account-settings-footer > span {
+  color: #4e5969;
+}
+
+.account-settings-footer button.primary {
+  border-color: #165dff;
+  background: #165dff;
+}

@@ -1,0 +1,21 @@
+changelog:
+  categories:
+    - title: Breaking Changes
+      labels:
+        - breaking-change
+    - title: Backend And Contracts
+      labels:
+        - backend
+        - api
+        - contracts
+    - title: Frontend Prototype
+      labels:
+        - frontend
+        - ux
+    - title: Verification And Security
+      labels:
+        - verification
+        - security
+    - title: Other Changes
+      labels:
+        - "*"

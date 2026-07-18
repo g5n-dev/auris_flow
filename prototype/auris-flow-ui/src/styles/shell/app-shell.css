@@ -1,0 +1,55 @@
+.app-shell {
+  --bg: #071011;
+  --surface: #0b171a;
+  --surface-2: #0f2024;
+  --surface-3: #142a30;
+  --line: rgba(138, 172, 180, 0.22);
+  --line-strong: rgba(165, 220, 230, 0.38);
+  --text: #edf8f9;
+  --muted: #85a6ac;
+  --faint: #547075;
+  --teal: #1ce4d4;
+  --cyan: #1ce4d4;
+  --blue: #4b8dff;
+  --green: #30d48f;
+  --amber: #ffb02e;
+  --red: #ff4f4f;
+  --violet: #a779ff;
+  --doc: #d6b65e;
+  --shadow: 0 22px 50px rgba(0, 0, 0, 0.34);
+  display: grid;
+  grid-template-columns: 92px minmax(1080px, 1fr);
+  width: 100vw;
+  height: 100vh;
+  min-width: 1180px;
+  min-height: 760px;
+  color: var(--text);
+  background:
+    radial-gradient(circle at 18% 0%, rgba(28, 228, 212, 0.08), transparent 24%),
+    radial-gradient(circle at 88% 8%, rgba(167, 121, 255, 0.09), transparent 28%),
+    var(--bg);
+}
+
+.app-shell[data-theme="dark"] {
+  --bg: #0b1014;
+  --surface: #101820;
+  --surface-2: #151f29;
+  --surface-3: #1b2a35;
+  --line: rgba(160, 180, 190, 0.18);
+  --teal: #40c8ff;
+  --cyan: #40c8ff;
+}
+
+.app-shell[data-theme="light"] {
+  --bg: #e9eef2;
+  --surface: #f8fbfc;
+  --surface-2: #edf3f5;
+  --surface-3: #dce8eb;
+  --line: rgba(49, 74, 83, 0.2);
+  --line-strong: rgba(31, 70, 80, 0.34);
+  --text: #0b1b21;
+  --muted: #4e6870;
+  --faint: #6f858a;
+  --teal: #0f766e;
+  --shadow: 0 18px 36px rgba(48, 66, 75, 0.16);
+}

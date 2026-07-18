@@ -1,0 +1,144 @@
+.topbar,
+.workspace,
+.chip-rail,
+.track-toggle-row,
+.track-select,
+.track-quick-tags,
+.bdg-bar .chips,
+.mm-emps,
+.ib-stream,
+.annotation-main,
+.tk-vscroll,
+.inline-layer-form .lf-tag-list,
+.panel-body,
+.pnb,
+.module-tabs,
+.module-table,
+.data-tree-list,
+.label-taxonomy {
+  scrollbar-width: thin;
+  scrollbar-color: var(--bd-2, var(--line-strong)) transparent;
+}
+
+.chip-rail,
+.track-toggle-row,
+.track-select,
+.track-quick-tags,
+.bdg-bar .chips,
+.ib-stream,
+.inline-layer-form .lf-tag-list,
+.module-tabs,
+.module-table,
+.data-tree-list,
+.label-taxonomy {
+  scrollbar-gutter: stable;
+}
+
+.topbar::-webkit-scrollbar,
+.workspace::-webkit-scrollbar,
+.chip-rail::-webkit-scrollbar,
+.track-toggle-row::-webkit-scrollbar,
+.track-select::-webkit-scrollbar,
+.track-quick-tags::-webkit-scrollbar,
+.bdg-bar .chips::-webkit-scrollbar,
+.mm-emps::-webkit-scrollbar,
+.ib-stream::-webkit-scrollbar,
+.annotation-main::-webkit-scrollbar,
+.tk-vscroll::-webkit-scrollbar,
+.inline-layer-form .lf-tag-list::-webkit-scrollbar,
+.panel-body::-webkit-scrollbar,
+.pnb::-webkit-scrollbar,
+.module-tabs::-webkit-scrollbar,
+.module-table::-webkit-scrollbar,
+.data-tree-list::-webkit-scrollbar,
+.label-taxonomy::-webkit-scrollbar {
+  display: block;
+  width: 7px;
+  height: 7px;
+}
+
+.topbar::-webkit-scrollbar-track,
+.workspace::-webkit-scrollbar-track,
+.chip-rail::-webkit-scrollbar-track,
+.track-toggle-row::-webkit-scrollbar-track,
+.track-select::-webkit-scrollbar-track,
+.track-quick-tags::-webkit-scrollbar-track,
+.bdg-bar .chips::-webkit-scrollbar-track,
+.mm-emps::-webkit-scrollbar-track,
+.ib-stream::-webkit-scrollbar-track,
+.annotation-main::-webkit-scrollbar-track,
+.tk-vscroll::-webkit-scrollbar-track,
+.inline-layer-form .lf-tag-list::-webkit-scrollbar-track,
+.panel-body::-webkit-scrollbar-track,
+.pnb::-webkit-scrollbar-track,
+.module-tabs::-webkit-scrollbar-track,
+.module-table::-webkit-scrollbar-track,
+.data-tree-list::-webkit-scrollbar-track,
+.label-taxonomy::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.topbar::-webkit-scrollbar-thumb,
+.workspace::-webkit-scrollbar-thumb,
+.chip-rail::-webkit-scrollbar-thumb,
+.track-toggle-row::-webkit-scrollbar-thumb,
+.track-select::-webkit-scrollbar-thumb,
+.track-quick-tags::-webkit-scrollbar-thumb,
+.bdg-bar .chips::-webkit-scrollbar-thumb,
+.mm-emps::-webkit-scrollbar-thumb,
+.ib-stream::-webkit-scrollbar-thumb,
+.annotation-main::-webkit-scrollbar-thumb,
+.tk-vscroll::-webkit-scrollbar-thumb,
+.inline-layer-form .lf-tag-list::-webkit-scrollbar-thumb,
+.panel-body::-webkit-scrollbar-thumb,
+.pnb::-webkit-scrollbar-thumb,
+.module-tabs::-webkit-scrollbar-thumb,
+.module-table::-webkit-scrollbar-thumb,
+.data-tree-list::-webkit-scrollbar-thumb,
+.label-taxonomy::-webkit-scrollbar-thumb {
+  border: 1px solid var(--bg-1, var(--surface));
+  border-radius: 999px;
+  background: var(--bd-2, var(--line-strong));
+}
+
+@media (max-width: 1280px) {
+  .evidence-grid.annotation-shell {
+    grid-template-columns: 154px minmax(720px, 1fr) 316px;
+    min-width: 0;
+  }
+
+  .annotation-main {
+    grid-template-rows: 38px 34px 172px 48px 108px 300px minmax(0, 1fr) 42px;
+  }
+
+  .sn-keys {
+    display: none;
+  }
+}
+
+@media (max-width: 1500px) {
+  .evidence-grid.annotation-shell {
+    grid-template-columns: minmax(0, 1fr) !important;
+    height: auto;
+    min-width: 0 !important;
+    min-height: calc(100vh - 152px);
+    overflow: visible;
+  }
+
+  .evidence-grid.annotation-shell > .queue-panel,
+  .evidence-grid.annotation-shell > .evidence-panel {
+    min-height: 360px;
+  }
+
+  .evidence-grid.annotation-shell > .evidence-panel {
+    overflow: visible;
+  }
+
+  .evidence-grid.annotation-shell > .evidence-panel .panel-body {
+    max-height: 520px;
+  }
+
+  .annotation-main {
+    min-height: calc(100vh - 176px);
+  }
+}

@@ -1,0 +1,858 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import fnmatch
+import json
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Literal, TypedDict
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class Check:
+    key: str
+    title: str
+    paths: tuple[str, ...] = ()
+    contains: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    rationale: str = ""
+
+
+class ReadinessResult(TypedDict):
+    key: str
+    title: str
+    status: Literal["pass", "fail"]
+    failures: list[str]
+    rationale: str
+
+
+CHECKS: tuple[Check, ...] = (
+    Check(
+        key="oss_project_surface",
+        title="开源项目基本入口",
+        paths=(
+            "README.md",
+            "CONTRIBUTING.md",
+            "CODE_OF_CONDUCT.md",
+            "SECURITY.md",
+            "CHANGELOG.md",
+            "RELEASE_CHECKLIST.md",
+            "SUPPORT.md",
+            "MAINTAINERS.md",
+            "GOVERNANCE.md",
+            ".gitignore",
+            ".github/workflows/verify.yml",
+            ".github/ISSUE_TEMPLATE/bug_report.yml",
+            ".github/ISSUE_TEMPLATE/config.yml",
+            ".github/ISSUE_TEMPLATE/feature_request.yml",
+            ".github/pull_request_template.md",
+            ".github/release.yml",
+            "doc/reports/open-source-release-readiness.md",
+            "doc/reports/repository-layout-review.md",
+            "doc/reports/change-submission-plan.md",
+        ),
+        contains={
+            "README.md": (
+                "Auris Flow",
+                "可联调的原型与后端开发基线",
+                "Apache License 2.0",
+                "bash scripts/dev_up.sh",
+                "local/sessionStorage",
+            ),
+            ".github/workflows/verify.yml": ("bash scripts/verify_release.sh",),
+            "CHANGELOG.md": ("Unreleased",),
+            "RELEASE_CHECKLIST.md": (
+                "bash scripts/verify_release.sh",
+                "Human Release Authority",
+                "repository-layout-review.md",
+                "NOTICE",
+                "secret scan ok",
+            ),
+            "SUPPORT.md": ("SECURITY.md", "trace_id"),
+            "MAINTAINERS.md": ("Release Authority",),
+            "GOVERNANCE.md": ("tenant/project", "ClickHouse"),
+            ".github/ISSUE_TEMPLATE/bug_report.yml": (
+                "trace_id",
+                "Do not include secrets",
+            ),
+            ".github/ISSUE_TEMPLATE/config.yml": (
+                "SECURITY.md",
+                "repository private advisory channel",
+            ),
+            ".github/release.yml": ("Verification And Security",),
+            ".github/pull_request_template.md": (
+                "Scope Boundary",
+                "backend-contracts-and-migrations",
+                "doc/reports/change-submission-plan.md",
+            ),
+            "doc/reports/repository-layout-review.md": (
+                "No repository-wide directory migration is required",
+                "Commit Boundary",
+                "Future Migration Triggers",
+            ),
+            "doc/reports/change-submission-plan.md": (
+                "Recommended Split",
+                "governance-release",
+                "frontend-bff-ux",
+                "Final Aggregation Gate",
+            ),
+        },
+        rationale="开源仓库必须先让贡献者知道项目是什么、如何贡献、如何验证、当前许可边界。",
+    ),
+    Check(
+        key="one_command_quality_gate",
+        title="一键质量门禁",
+        paths=(
+            "scripts/verify_all.sh",
+            "scripts/verify_fast.sh",
+            "scripts/verify_release.sh",
+            "scripts/verify_real_stack.sh",
+            "scripts/check_real_stack_artifact.sh",
+            "scripts/dev_up.sh",
+            "scripts/audit_ui.sh",
+        ),
+        contains={
+            "scripts/verify_all.sh": (
+                "validate_backend_spec.py",
+                "scripts/scan_secrets.py",
+                "uv sync --check --locked --all-extras --project backend",
+                "-m pip_audit --local --strict --skip-editable",
+                "npm audit --prefix prototype/auris-flow-ui",
+                "npm audit signatures --prefix prototype/auris-flow-ui",
+                "ruff format --check backend",
+                "ruff check backend",
+                "mypy backend/app",
+                "verify_migrations.py",
+                "pytest backend/tests/unit backend/tests/contract backend/tests/integration",
+                "smoke_backend.py",
+                "npm --prefix prototype/auris-flow-ui run build",
+                "npm --prefix prototype/auris-flow-ui run e2e:ui",
+                "AURIS_RUN_E2E",
+            ),
+            "scripts/verify_release.sh": (
+                "AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1 bash scripts/verify_all.sh",
+                "bash scripts/verify_real_stack.sh",
+            ),
+            "scripts/check_real_stack_artifact.sh": (
+                "real_qdrant",
+                "metadata_registered",
+                "registration_event_processed",
+            ),
+            "scripts/dev_up.sh": (
+                "alembic upgrade head",
+                "app.seed local_demo",
+                "uvicorn app.main:app",
+                "npm --prefix prototype/auris-flow-ui run dev",
+                "http://127.0.0.1:${AURIS_BFF_PORT:-8000}/readyz",
+                "http://127.0.0.1:5173",
+            ),
+            "scripts/audit_ui.sh": (
+                "alembic upgrade head",
+                "app.seed local_demo",
+                "npm exec vite",
+                "npm --prefix prototype/auris-flow-ui run audit:tabs",
+                "npm --prefix prototype/auris-flow-ui run audit:capture",
+            ),
+        },
+        rationale="开源平台不能依赖口头验收；必须有可重复的一键验证入口。",
+    ),
+    Check(
+        key="backend_contract_package",
+        title="后端开发契约包",
+        paths=(
+            "doc/backend-spec/README.md",
+            "doc/backend-spec/openapi-v0.1.yaml",
+            "doc/backend-spec/db-schema.md",
+            "doc/backend-spec/mock-to-api-map.md",
+            "doc/backend-spec/state-machines.md",
+            "doc/backend-spec/test-plan.md",
+            "doc/backend-spec/seed-fixture-v0.1.json",
+            "doc/backend-spec/validate_backend_spec.py",
+            "doc/backend-spec/migration-plan.md",
+        ),
+        contains={
+            "doc/backend-spec/openapi-v0.1.yaml": (
+                "/labels:",
+                "/label-versions:",
+                "/eval-datasets:",
+                "/eval-runs:",
+                "/insights/metrics:",
+                "/insights/reports:",
+                "/insights/actions:",
+            ),
+            "doc/backend-spec/mock-to-api-map.md": (
+                "标签体系、候选、版本、冲突、发布门禁、Human Loop",
+                "趋势、桑吉、漏斗、雷达、报告、证据下钻",
+                "评测集、运行、指标、badcase、回流",
+            ),
+            "doc/backend-spec/validate_backend_spec.py": (
+                "validate_runtime_openapi_drift",
+                "OpenAPI matches FastAPI runtime operations",
+            ),
+            "doc/backend-spec/migration-plan.md": (
+                "0019",
+                "calibration_hardening",
+                "当前 head",
+            ),
+        },
+        rationale="后端团队需要从产品 mock 直接落到 API、状态机、DB、seed 和测试。",
+    ),
+    Check(
+        key="backend_runtime_foundation",
+        title="后端运行底座",
+        paths=(
+            "backend/pyproject.toml",
+            "backend/app/main.py",
+            "backend/app/core/config.py",
+            "backend/app/core/logging.py",
+            "backend/app/services/idempotency_service.py",
+            "backend/app/services/audit_service.py",
+            "backend/app/services/outbox_service.py",
+            "backend/app/workers/outbox_worker.py",
+            "backend/scripts/verify_migrations.py",
+            "backend/migrations/versions/0001_core_tables.py",
+            "backend/migrations/versions/0008_storage_objects_table.py",
+            "backend/app/core/audio_playback.py",
+            "backend/app/services/adapters.py",
+            "backend/tests/unit/test_object_storage_provider_range.py",
+            "docker/local/docker-compose.yml",
+        ),
+        contains={
+            "backend/app/main.py": (
+                "request_logging_middleware",
+                "X-Trace-Id",
+                "app.include_router",
+                "TrustedHostMiddleware",
+                "apply_security_headers",
+                "cors_allowed_origins",
+            ),
+            "backend/app/core/config.py": (
+                "require_release_security_configuration",
+                "CORS_ALLOWED_ORIGINS must be explicit",
+                "TRUSTED_HOSTS must be explicit",
+                "AUTH_TOKEN_SECRET must be at least 32 characters",
+                "COMPLETION_RECEIPT_SECRET or COMPLETION_RECEIPT_KEY_BINDINGS",
+                "QDRANT_API_KEY is required",
+                "object storage real adapter missing prod/release config",
+            ),
+            "backend/app/core/logging.py": ("log_event", "trace_id", "idempotency_key"),
+            "backend/app/services/idempotency_service.py": (
+                "IDEMPOTENCY_KEY_REQUIRED",
+                "IDEMPOTENCY_KEY_CONFLICT",
+            ),
+            "docker/local/docker-compose.yml": ("mysql", "redis", "minio", "qdrant"),
+            "backend/scripts/verify_migrations.py": (
+                "command.upgrade",
+                "command.downgrade",
+                "uq_json_resources_scope_key",
+                "uq_storage_objects_scope_locator",
+            ),
+            "backend/app/core/audio_playback.py": (
+                "create_audio_playback_grant",
+                "verify_audio_playback_grant",
+                "AUDIO_PLAYBACK_GRANT_INVALID",
+            ),
+            "backend/app/services/adapters.py": (
+                "SUPPORTED_OBJECT_STORAGE_PROVIDERS",
+                "object_storage_client_for_provider",
+                "open_object",
+            ),
+            "backend/tests/unit/test_object_storage_provider_range.py": (
+                "PROVIDER_CASES",
+                "test_production_audio_storage_never_falls_back_to_synthetic_audio",
+                "test_audio_range_route_uses_registered_provider",
+            ),
+        },
+        rationale="平台操作链路必须有统一日志句柄、trace、幂等、审计、outbox 和本地真实依赖。",
+    ),
+    Check(
+        key="evaluation_labeling_insights_domains",
+        title="评测、标注、洞察三域闭环",
+        paths=(
+            "backend/app/api/routers/evaluation.py",
+            "backend/app/api/routers/labels.py",
+            "backend/app/api/routers/insights.py",
+            "prototype/auris-flow-ui/src/api/client.ts",
+            "prototype/auris-flow-ui/src/App.tsx",
+            "prototype/auris-flow-ui/e2e/platform-bff.mjs",
+            "prototype/auris-flow-ui/e2e/ui-smoke.mjs",
+            "prototype/auris-flow-ui/audit/capture-audit.mjs",
+            "prototype/auris-flow-ui/audit/tab-similarity.mjs",
+            "prototype/auris-flow-ui/scripts/check-bundle-budget.mjs",
+            "prototype/auris-flow-ui/package.json",
+            "scripts/verify_ui_bff_e2e.sh",
+        ),
+        contains={
+            "backend/app/api/routers/evaluation.py": (
+                "/eval-datasets",
+                "/eval-runs",
+                "/feedback-tasks",
+            ),
+            "backend/app/api/routers/labels.py": (
+                "/labels",
+                "/label-versions",
+                "/label-optimization-runs",
+            ),
+            "backend/app/api/routers/insights.py": (
+                "/insights/metrics",
+                "/insights/reports",
+                "/insights/actions",
+            ),
+            "prototype/auris-flow-ui/src/api/client.ts": (
+                "createPlatformMutation",
+                "/v1/label-versions",
+                "/v1/eval-runs",
+                "/v1/insights/actions",
+            ),
+            "prototype/auris-flow-ui/e2e/platform-bff.mjs": (
+                "/api/v1/label-versions",
+                "/api/v1/eval-runs",
+                "/api/v1/insights/actions",
+                "/api/v1/insights/reports",
+                "/feedback-tasks",
+            ),
+            "prototype/auris-flow-ui/e2e/ui-smoke.mjs": (
+                "createServer",
+                "runModuleCommandSmoke",
+                "知识库",
+            ),
+            "prototype/auris-flow-ui/audit/capture-audit.mjs": (
+                "exposedTerms",
+                "duplicateButtons",
+                "blockedExposedTerms",
+                "Auris Flow navigation did not render",
+            ),
+            "prototype/auris-flow-ui/audit/tab-similarity.mjs": (
+                "similarPairs",
+                "jaccard",
+                "allowedSimilarPairs",
+                "Unexpected high-similarity tabs found",
+            ),
+            "prototype/auris-flow-ui/scripts/check-bundle-budget.mjs": (
+                "totalJsRawBytes",
+                "totalJsBrotliBytes",
+                "maxJsAssetBytes",
+                "initialClosureBrotliBytes",
+            ),
+            "prototype/auris-flow-ui/package.json": ("audit:auto",),
+            "prototype/auris-flow-ui/src/features/labels/LabelsModule.tsx": (
+                "function LabelsModule",
+            ),
+            "prototype/auris-flow-ui/src/features/insights/InsightsModule.tsx": (
+                "function InsightsModule",
+            ),
+            "prototype/auris-flow-ui/src/features/evaluation/EvaluationModule.tsx": (
+                "function EvaluationModule",
+            ),
+            "prototype/auris-flow-ui/src/catalogs/module-catalog.json": (
+                "打标评测",
+                "Prompt优化",
+                "业务大盘",
+                "智能 BI 大盘",
+            ),
+        },
+        rationale="目标不是三个孤立页面，而是评测、标注、洞察互相回流的同一产品面。",
+    ),
+    Check(
+        key="contract_tests_cover_core_chain",
+        title="核心链路契约测试",
+        paths=(
+            "backend/tests/contract/test_core_contract.py",
+            "backend/tests/integration/test_outbox_worker.py",
+        ),
+        contains={
+            "backend/tests/contract/test_core_contract.py": (
+                "test_task_run_idempotency_replay_and_conflict",
+                "test_work_items_require_idempotency_and_replay",
+                "test_json_resources_are_scoped_by_tenant_and_project",
+                "test_trace_lookup_is_scoped_by_tenant_and_project",
+                "test_labeling_evaluation_insight_closed_loop_contract",
+                "test_audio_recording_object_registration_is_scoped_idempotent_and_traceable",
+                "test_audio_playback_grant_allows_native_media_range_without_custom_headers",
+            ),
+            "backend/tests/integration/test_outbox_worker.py": ("process_once",),
+        },
+        rationale="必须证明租户隔离、幂等、trace 和异步运行不是文档声明。",
+    ),
+    Check(
+        key="eval_harness_artifact",
+        title="平台级 Eval 定义",
+        paths=(".claude/evals/open-source-platform-readiness.md",),
+        contains={
+            ".claude/evals/open-source-platform-readiness.md": (
+                "Capability Evals",
+                "Regression Evals",
+                "scripts/check_platform_readiness.py",
+            ),
+        },
+        rationale="开源一体平台目标需要稳定 eval，不应只靠人工记忆和截图反馈。",
+    ),
+)
+
+LICENSE_FILES = ("LICENSE", "LICENSE.md", "COPYING", "COPYING.txt")
+RELEASE_ARTIFACT_PATTERNS = (
+    ".DS_Store",
+    "**/.DS_Store",
+    ".coverage",
+    "backend/.coverage",
+    ".next/**",
+    ".vite/**",
+    "dist/**",
+    "build/**",
+    "**/__pycache__/**",
+    "**/*.pyc",
+    ".pytest_cache/**",
+    ".ruff_cache/**",
+    ".mypy_cache/**",
+    ".venv/**",
+    "backend/.venv/**",
+    "*.sqlite",
+    "*.sqlite3",
+    "backend/*.sqlite",
+    "backend/*.sqlite3",
+    "prototype/auris-flow-ui/dist/**",
+    "prototype/auris-flow-ui/dist-*/**",
+    "prototype/auris-flow-ui/e2e/artifacts/**",
+    "prototype/auris-flow-ui/audit/*.png",
+    "prototype/auris-flow-ui/audit/*.json",
+    "prototype/auris-flow-ui/audit/screenshots/**",
+    "prototype/auris-flow-ui/audit/prototype-interaction-audit*/**",
+    "prototype/auris-flow-ui/audit-iteration/**",
+    "prototype/auris-flow-ui/audits/**",
+    "coverage.xml",
+    "htmlcov/**",
+    "**/*.wav",
+    "**/*.wave",
+    "**/*.mp3",
+    "**/*.flac",
+    "**/*.m4a",
+    "**/*.ogg",
+    "**/*.opus",
+    "**/*.aac",
+    "**/*.rttm",
+    "**/*.stm",
+    "**/*.ctm",
+    "**/*.tar",
+    "**/*.tar.gz",
+    "**/*.tgz",
+    "public-audio-data/**",
+    "datasets-cache/**",
+)
+RELEASE_REQUIRED_TRACKED_PATHS = (
+    "backend/app/api/routers/auth.py",
+    "backend/app/api/routers/calibrations.py",
+    "backend/app/api/routers/quality_appeals.py",
+    "backend/app/services/audio_playback_service.py",
+    "backend/app/services/label_policy_service.py",
+    "backend/app/services/read_policy_service.py",
+    "backend/migrations/versions/0009_outbox_delivery_leases.py",
+    "backend/migrations/versions/0010_label_policy_engine.py",
+    "backend/migrations/versions/0020_auth_sessions.py",
+    "backend/tests/contract/test_release_blocker_rbac_trace.py",
+    "backend/tests/contract/test_resource_read_policy_inventory.py",
+    "backend/tests/unit/test_read_policy_service.py",
+    "prototype/auris-flow-ui/e2e/preview-smoke.mjs",
+    "prototype/auris-flow-ui/src/modules/moduleCatalog.ts",
+    "scripts/verify_release.sh",
+    "scripts/validate_public_audio_datasets.py",
+    "doc/backend-spec/public-audio-datasets-v0.1.json",
+)
+
+
+def path_exists_any(paths: tuple[str, ...]) -> bool:
+    return any((ROOT / path).exists() for path in paths)
+
+
+def git_tracked_files() -> tuple[str, ...]:
+    completed = subprocess.run(
+        ("git", "ls-files", "-z"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=False,
+    )
+    return tuple(item.decode("utf-8") for item in completed.stdout.split(b"\0") if item)
+
+
+def git_untracked_files() -> tuple[str, ...]:
+    completed = subprocess.run(
+        ("git", "ls-files", "--others", "--exclude-standard", "-z"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=False,
+    )
+    return tuple(item.decode("utf-8") for item in completed.stdout.split(b"\0") if item)
+
+
+def git_unstaged_files() -> tuple[str, ...]:
+    completed = subprocess.run(
+        ("git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "-z"),
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=False,
+    )
+    return tuple(item.decode("utf-8") for item in completed.stdout.split(b"\0") if item)
+
+
+def is_release_artifact(path: str) -> bool:
+    return any(fnmatch.fnmatch(path, pattern) for pattern in RELEASE_ARTIFACT_PATTERNS)
+
+
+def tracked_release_artifacts() -> list[str]:
+    return [path for path in git_tracked_files() if is_release_artifact(path)]
+
+
+def run_release_checks() -> list[ReadinessResult]:
+    results = run_checks()
+    release_results: list[ReadinessResult] = []
+
+    license_failures: list[str] = []
+    if not path_exists_any(LICENSE_FILES):
+        license_failures.append(
+            "missing committed open-source license: expected one of "
+            + ", ".join(LICENSE_FILES)
+        )
+    readme_path = ROOT / "README.md"
+    if readme_path.exists() and "Apache License 2.0" not in readme_path.read_text(
+        encoding="utf-8"
+    ):
+        license_failures.append("README.md does not declare Apache License 2.0")
+    release_results.append(
+        {
+            "key": "release_license",
+            "title": "正式开源许可证",
+            "status": "pass" if not license_failures else "fail",
+            "failures": license_failures,
+            "rationale": "公开开源发布必须有明确许可证；没有 LICENSE 只能视为内部开发基线。",
+        }
+    )
+
+    hygiene_failures: list[str] = []
+    gitignore_path = ROOT / ".gitignore"
+    gitignore_text = (
+        gitignore_path.read_text(encoding="utf-8") if gitignore_path.exists() else ""
+    )
+    for pattern in (
+        ".DS_Store",
+        "node_modules/",
+        "dist/",
+        ".next/",
+        ".env",
+        "*.sqlite",
+        "__pycache__/",
+        "e2e/artifacts/",
+        ".vite/",
+        "prototype/auris-flow-ui/audit/*.json",
+        "prototype/auris-flow-ui/audit/screenshots/",
+        "prototype/auris-flow-ui/audits/",
+        "*.wav",
+        "*.rttm",
+        "*.tar.gz",
+        "public-audio-data/",
+        "datasets-cache/",
+    ):
+        if pattern not in gitignore_text:
+            hygiene_failures.append(
+                f".gitignore missing release hygiene pattern: {pattern}"
+            )
+    try:
+        tracked_artifacts = tracked_release_artifacts()
+    except (OSError, subprocess.CalledProcessError) as error:
+        hygiene_failures.append(f"unable to inspect git-tracked files: {error}")
+        tracked_artifacts = []
+    for artifact in tracked_artifacts:
+        hygiene_failures.append(
+            f"generated or local-only artifact is tracked: {artifact}"
+        )
+    release_results.append(
+        {
+            "key": "release_distribution_hygiene",
+            "title": "发布包卫生",
+            "status": "pass" if not hygiene_failures else "fail",
+            "failures": hygiene_failures,
+            "rationale": "开源发布不能把本地依赖、构建产物、缓存、临时数据库或 E2E 产物纳入源码包。",
+        }
+    )
+
+    tree_failures: list[str] = []
+    try:
+        tracked_files = set(git_tracked_files())
+        untracked_files = [
+            path for path in git_untracked_files() if not is_release_artifact(path)
+        ]
+        unstaged_files = [
+            path for path in git_unstaged_files() if not is_release_artifact(path)
+        ]
+    except (OSError, subprocess.CalledProcessError) as error:
+        tree_failures.append(f"unable to inspect Git release tree: {error}")
+        tracked_files = set()
+        untracked_files = []
+        unstaged_files = []
+
+    for path in RELEASE_REQUIRED_TRACKED_PATHS:
+        if path not in tracked_files:
+            tree_failures.append(f"required release source is not in Git index: {path}")
+    for path in sorted(untracked_files):
+        tree_failures.append(f"untracked release source would be omitted: {path}")
+    for path in sorted(unstaged_files):
+        tree_failures.append(
+            f"unstaged release change is not represented by Git index: {path}"
+        )
+    release_results.append(
+        {
+            "key": "release_git_tree_integrity",
+            "title": "发布树与验证工作区一致",
+            "status": "pass" if not tree_failures else "fail",
+            "failures": tree_failures,
+            "rationale": "严格发布门禁必须验证 Git 索引中的候选源码，不能依赖未跟踪或未暂存的本地实现。",
+        }
+    )
+
+    security_failures: list[str] = []
+    security_path = ROOT / "SECURITY.md"
+    security_text = (
+        security_path.read_text(encoding="utf-8") if security_path.exists() else ""
+    )
+    for pattern in (
+        "Reporting a Vulnerability",
+        "GitHub Security Advisory",
+        "3 个工作日内确认收到报告",
+        "Known Gaps Before Public Release",
+        "Demo Credentials",
+        "CORS origins",
+        "TrustedHost",
+        "fail-closed",
+        "local/sessionStorage",
+    ):
+        if pattern not in security_text:
+            security_failures.append(f"SECURITY.md missing release section: {pattern}")
+    dependabot_path = ROOT / ".github/dependabot.yml"
+    dependabot_text = (
+        dependabot_path.read_text(encoding="utf-8") if dependabot_path.exists() else ""
+    )
+    for pattern in (
+        'package-ecosystem: "github-actions"',
+        'package-ecosystem: "npm"',
+        'package-ecosystem: "uv"',
+    ):
+        if pattern not in dependabot_text:
+            security_failures.append(
+                f".github/dependabot.yml missing ecosystem: {pattern}"
+            )
+    codeql_path = ROOT / ".github/workflows/codeql.yml"
+    codeql_text = (
+        codeql_path.read_text(encoding="utf-8") if codeql_path.exists() else ""
+    )
+    for pattern in (
+        "github/codeql-action/init",
+        "github/codeql-action/analyze",
+        "javascript-typescript",
+        "python",
+    ):
+        if pattern not in codeql_text:
+            security_failures.append(
+                f".github/workflows/codeql.yml missing pattern: {pattern}"
+            )
+    release_results.append(
+        {
+            "key": "release_security_disclosure",
+            "title": "安全披露与已知边界",
+            "status": "pass" if not security_failures else "fail",
+            "failures": security_failures,
+            "rationale": "开源项目前必须说明漏洞报告方式、演示凭据边界和生产前安全缺口。",
+        }
+    )
+
+    verification_failures: list[str] = []
+    verify_path = ROOT / "scripts/verify_all.sh"
+    verify_text = (
+        verify_path.read_text(encoding="utf-8") if verify_path.exists() else ""
+    )
+    for pattern in (
+        "scripts/check_platform_readiness.py",
+        "scripts/scan_secrets.py",
+        "npm --prefix prototype/auris-flow-ui run e2e:ui",
+        "AURIS_RUN_E2E",
+        "bash scripts/audit_ui.sh",
+    ):
+        if pattern not in verify_text:
+            verification_failures.append(
+                f"scripts/verify_all.sh missing release gate: {pattern}"
+            )
+    real_stack_verify_path = ROOT / "scripts/verify_ui_bff_e2e.sh"
+    real_stack_verify_text = (
+        real_stack_verify_path.read_text(encoding="utf-8")
+        if real_stack_verify_path.exists()
+        else ""
+    )
+    for pattern in ("AURIS_REAL_STACK_E2E", "DEPENDENCY_CHECK_MODE=strict"):
+        if pattern not in real_stack_verify_text:
+            verification_failures.append(
+                f"scripts/verify_ui_bff_e2e.sh missing real-stack gate: {pattern}"
+            )
+    release_verify_path = ROOT / "scripts/verify_release.sh"
+    release_verify_text = (
+        release_verify_path.read_text(encoding="utf-8")
+        if release_verify_path.exists()
+        else ""
+    )
+    for pattern in (
+        "AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1",
+        "bash scripts/verify_real_stack.sh",
+        "AURIS_SKIP_REAL_STACK_E2E=1 is not allowed",
+    ):
+        if pattern not in release_verify_text:
+            verification_failures.append(
+                f"scripts/verify_release.sh missing release gate: {pattern}"
+            )
+    if (
+        "exit 0" in release_verify_text
+        and "AURIS_SKIP_REAL_STACK_E2E" in release_verify_text
+    ):
+        verification_failures.append(
+            "scripts/verify_release.sh must not allow AURIS_SKIP_REAL_STACK_E2E to exit 0"
+        )
+    workflow_path = ROOT / ".github/workflows/verify.yml"
+    workflow_text = (
+        workflow_path.read_text(encoding="utf-8") if workflow_path.exists() else ""
+    )
+    if "bash scripts/verify_release.sh" not in workflow_text:
+        verification_failures.append(
+            ".github/workflows/verify.yml does not run release verification"
+        )
+    for pattern, failure in (
+        ("fetch-depth: 0", "does not fetch full history for release secret scanning"),
+        ("persist-credentials: false", "keeps checkout credentials after checkout"),
+        ("uv sync --locked --all-extras --project backend", "does not install uv.lock"),
+        (
+            "permissions:\n  contents: read",
+            "does not declare least-privilege permissions",
+        ),
+    ):
+        if pattern not in workflow_text:
+            verification_failures.append(f".github/workflows/verify.yml {failure}")
+    if (
+        "AURIS_REAL_STACK_E2E=1" not in workflow_text
+        and "bash scripts/verify_real_stack.sh" not in release_verify_text
+    ):
+        verification_failures.append(
+            ".github/workflows/verify.yml does not run the real dependency stack E2E gate"
+        )
+    release_results.append(
+        {
+            "key": "release_verification_gate",
+            "title": "发布验证门禁",
+            "status": "pass" if not verification_failures else "fail",
+            "failures": verification_failures,
+            "rationale": "公开发布必须能在 CI 和本地通过同一个质量门禁复现验证结果。",
+        }
+    )
+
+    return results + release_results
+
+
+def read_text(path: str) -> str:
+    return (ROOT / path).read_text(encoding="utf-8")
+
+
+def run_checks() -> list[ReadinessResult]:
+    results: list[ReadinessResult] = []
+    for check in CHECKS:
+        failures: list[str] = []
+        for path in check.paths:
+            if not (ROOT / path).exists():
+                failures.append(f"missing file: {path}")
+        for path, patterns in check.contains.items():
+            file_path = ROOT / path
+            if not file_path.exists():
+                continue
+            text = read_text(path)
+            for pattern in patterns:
+                if pattern not in text:
+                    failures.append(f"{path} missing pattern: {pattern}")
+        results.append(
+            {
+                "key": check.key,
+                "title": check.title,
+                "status": "pass" if not failures else "fail",
+                "failures": failures,
+                "rationale": check.rationale,
+            }
+        )
+    return results
+
+
+def render_markdown(results: list[ReadinessResult]) -> str:
+    passed = sum(1 for item in results if item["status"] == "pass")
+    total = len(results)
+    lines = [
+        "# Auris Flow Platform Readiness",
+        "",
+        f"Status: {passed}/{total} checks passed",
+        "",
+        "This report is generated from deterministic repository checks. It verifies that the evaluation, labeling, and insights platform has an open-source project surface, backend contract package, runtime foundation, and regression gate.",
+        "",
+        "## Checks",
+        "",
+    ]
+    for item in results:
+        marker = "PASS" if item["status"] == "pass" else "FAIL"
+        lines.append(f"### {marker} - {item['title']}")
+        lines.append("")
+        lines.append(str(item["rationale"]))
+        failures = item["failures"]
+        if failures:
+            lines.append("")
+            lines.append("Failures:")
+            for failure in failures:
+                lines.append(f"- {failure}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Check Auris Flow platform readiness.")
+    parser.add_argument(
+        "--json", action="store_true", help="print machine-readable JSON"
+    )
+    parser.add_argument("--markdown", action="store_true", help="print markdown report")
+    parser.add_argument(
+        "--release",
+        action="store_true",
+        help="include strict public open-source release checks",
+    )
+    args = parser.parse_args()
+
+    results = run_release_checks() if args.release else run_checks()
+    failed = [item for item in results if item["status"] != "pass"]
+    if args.json:
+        print(
+            json.dumps(
+                {"mode": "release" if args.release else "baseline", "results": results},
+                ensure_ascii=False,
+                indent=2,
+            )
+        )
+    elif args.markdown:
+        print(render_markdown(results), end="")
+    else:
+        for item in results:
+            print(f"{item['status'].upper()} {item['key']}: {item['title']}")
+            for failure in item["failures"]:
+                print(f"  - {failure}")
+        label = (
+            "open_source_release_readiness" if args.release else "platform_readiness"
+        )
+        print(f"{label}: {len(results) - len(failed)}/{len(results)} passed")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

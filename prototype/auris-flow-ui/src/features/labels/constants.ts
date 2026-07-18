@@ -1,0 +1,7 @@
+export const LABEL_EVAL_POLL_LIMIT = 8;
+
+export const LABEL_EVAL_POLL_INTERVAL_MS = 450;
+
+export const LABEL_PUBLISH_POLL_LIMIT = 6;
+
+export const LABEL_PUBLISH_POLL_INTERVAL_MS = 650;

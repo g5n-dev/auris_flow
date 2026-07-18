@@ -1,0 +1,174 @@
+/* Stabilize the label governance screen. Historical label styles are broad; this
+   final block keeps the schema tab from collapsing into inline text. */
+.label-grid-schema {
+  align-items: start;
+  gap: 12px;
+}
+
+.label-grid-schema .label-command-panel {
+  gap: 14px;
+  padding: 14px;
+  overflow: hidden;
+}
+
+.label-grid-schema .label-command-panel .panel-title {
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.label-grid-schema .label-command-overview {
+  display: grid;
+  grid-template-columns: minmax(720px, 1fr) minmax(320px, 376px);
+  gap: 12px;
+  align-items: stretch;
+}
+
+.label-grid-schema .label-command-main,
+.label-grid-schema .label-command-actions,
+.label-grid-schema .label-scenario-workbench,
+.label-grid-schema .label-scenario-list,
+.label-grid-schema .label-scenario-data,
+.label-grid-schema .label-agent-runner,
+.label-grid-schema .label-generated-levels {
+  min-width: 0;
+}
+
+.label-grid-schema .label-production-flow {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(132px, 1fr));
+  gap: 8px;
+}
+
+.label-grid-schema .label-production-step {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  align-items: center;
+  min-width: 0;
+  min-height: 66px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #ffffff !important;
+}
+
+.label-grid-schema .label-production-step b {
+  grid-row: 1 / span 3;
+}
+
+.label-grid-schema .label-production-step span,
+.label-grid-schema .label-production-step strong,
+.label-grid-schema .label-production-step em,
+.label-grid-schema .label-candidate-summary span,
+.label-grid-schema .label-candidate-summary strong,
+.label-grid-schema .label-candidate-summary p {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.label-grid-schema .label-candidate-summary {
+  grid-template-columns: minmax(0, 1fr) repeat(3, minmax(88px, auto));
+  min-height: 60px;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #f2f7ff;
+}
+
+.label-grid-schema .label-command-actions .label-data-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  height: 100%;
+  gap: 8px;
+}
+
+.label-grid-schema .label-command-actions .label-data-actions button {
+  min-height: 64px;
+  border-radius: 7px;
+  background: #f7f8fa !important;
+}
+
+.label-grid-schema .label-command-actions .label-data-actions button.primary {
+  border-color: rgba(22, 93, 255, 0.48) !important;
+  background: #eef4ff !important;
+}
+
+.label-grid-schema .label-scenario-workbench {
+  margin-top: 0;
+  padding: 12px;
+  border-color: #dbeafe;
+  background: linear-gradient(180deg, #ffffff, #fbfdff);
+}
+
+.label-grid-schema .label-scenario-head {
+  align-items: center;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.label-grid-schema .label-scenario-layout {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.8fr) minmax(220px, 0.7fr) minmax(420px, 1.2fr) minmax(240px, 0.8fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.label-grid-schema .label-scenario-list,
+.label-grid-schema .label-scenario-data,
+.label-grid-schema .label-agent-runner,
+.label-grid-schema .label-generated-levels {
+  max-height: 268px;
+  overflow: auto;
+  border-radius: 7px;
+  background: #ffffff;
+}
+
+.label-grid-schema .label-scenario-list button,
+.label-grid-schema .label-agent-runner button,
+.label-grid-schema .label-generated-levels button {
+  border-radius: 6px;
+  background: #fbfcff !important;
+}
+
+.label-grid-schema .label-agent-runner button {
+  grid-template-columns: 24px minmax(0, 1fr);
+}
+
+.label-grid-schema .label-agent-runner strong,
+.label-grid-schema .label-agent-runner span,
+.label-grid-schema .label-scenario-list strong,
+.label-grid-schema .label-scenario-list span,
+.label-grid-schema .label-scenario-list em,
+.label-grid-schema .label-scenario-data b,
+.label-grid-schema .label-generated-levels em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.label-grid-schema .label-agent-progress {
+  height: 5px;
+}
+
+.label-grid-schema .label-generated-levels button {
+  min-height: 34px;
+}
+
+@media (max-width: 1480px) {
+  .label-grid-schema .label-command-overview,
+  .label-grid-schema .label-scenario-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .label-grid-schema .label-command-actions .label-data-actions {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+
+  .label-grid-schema .label-production-flow {
+    grid-template-columns: repeat(5, minmax(170px, 1fr));
+    overflow-x: auto;
+    padding-bottom: 2px;
+  }
+}

@@ -1,0 +1,305 @@
+/* Evidence workbench readability: keep dense tracks, but use light-console contrast. */
+.annotation-main {
+  --ann-text: #1d2129;
+  --ann-sub: #4e5969;
+  --ann-muted: #86909c;
+  --ann-blue: #165dff;
+  --ann-blue-soft: #e8f3ff;
+  --ann-blue-line: #94bfff;
+  --ann-teal: #008a8a;
+  --ann-teal-soft: #e8fffb;
+  --ann-teal-line: #7ee8df;
+  --ann-green: #008a1e;
+  --ann-green-soft: #e8ffea;
+  --ann-green-line: #95de64;
+  --ann-amber: #ad5b00;
+  --ann-amber-soft: #fff7e8;
+  --ann-amber-line: #ffcf8b;
+  --ann-red: #cb272d;
+  --ann-red-soft: #fff1f0;
+  --ann-red-line: #ffb4b4;
+  --ann-violet: #722ed1;
+  --ann-violet-soft: #f7f0ff;
+  --ann-violet-line: #d3adf7;
+  --ann-doc: #8a5b00;
+  --ann-doc-soft: #fffbe6;
+  --ann-doc-line: #ffe58f;
+}
+
+.annotation-main .track-select button,
+.annotation-main .track-quick-tags button {
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 4px;
+  color: var(--ann-text);
+  background: #ffffff !important;
+  font-family: Inter, "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0;
+  box-shadow: 0 1px 2px rgba(29, 33, 41, 0.04);
+}
+
+.annotation-main .track-select button {
+  border-color: #c9cdd4 !important;
+}
+
+.annotation-main .track-select button.active {
+  border-color: var(--ann-blue) !important;
+  color: var(--ann-blue);
+  background: var(--ann-blue-soft) !important;
+  box-shadow: inset 0 0 0 1px rgba(22, 93, 255, 0.12);
+}
+
+.annotation-main .track-select button.active.entity,
+.annotation-main .track-select .entity {
+  color: var(--ann-red);
+  border-color: var(--ann-red-line) !important;
+  background: var(--ann-red-soft) !important;
+}
+
+.annotation-main .track-select button.active.intent,
+.annotation-main .track-select .intent {
+  color: var(--ann-green);
+  border-color: var(--ann-green-line) !important;
+  background: var(--ann-green-soft) !important;
+}
+
+.annotation-main .track-select button.active.qa,
+.annotation-main .track-select button.active.cross,
+.annotation-main .track-select .qa,
+.annotation-main .track-select .cross {
+  color: var(--ann-red);
+  border-color: var(--ann-red-line) !important;
+  background: var(--ann-red-soft) !important;
+}
+
+.annotation-main .track-select button.active.doc,
+.annotation-main .track-select .doc {
+  color: var(--ann-doc);
+  border-color: var(--ann-doc-line) !important;
+  background: var(--ann-doc-soft) !important;
+}
+
+.annotation-main .track-quick-tags {
+  background: #f7f8fa;
+}
+
+.annotation-main .track-quick-tags button {
+  color: var(--ann-amber);
+  border-color: var(--ann-amber-line) !important;
+  background: var(--ann-amber-soft) !important;
+}
+
+.annotation-main .track-quick-tags button:hover,
+.annotation-main .track-select button:hover {
+  border-color: var(--ann-blue) !important;
+  color: var(--ann-blue);
+  background: var(--ann-blue-soft) !important;
+}
+
+.annotation-main .tl {
+  color: var(--ann-sub);
+  font-size: 11px;
+  font-weight: 700;
+  background: #f7f8fa;
+}
+
+.annotation-main .tl .nm {
+  color: var(--ann-text);
+}
+
+.annotation-main .tl .ic {
+  color: var(--ann-muted);
+  font-weight: 700;
+}
+
+.annotation-main .tr .gd {
+  background: repeating-linear-gradient(90deg, transparent 0 49px, rgba(29, 33, 41, 0.06) 49px 50px);
+}
+
+.annotation-main .rg {
+  min-width: 72px;
+  border-color: var(--ann-teal-line) !important;
+  border-radius: 4px;
+  color: var(--ann-teal);
+  background: var(--ann-teal-soft) !important;
+  font-family: Inter, "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0;
+  box-shadow: 0 1px 2px rgba(29, 33, 41, 0.05);
+}
+
+.annotation-main .rg.stk {
+  min-width: 76px;
+  font-size: 10.5px;
+}
+
+.annotation-main .rg:hover {
+  box-shadow: 0 6px 16px rgba(29, 33, 41, 0.12);
+}
+
+.annotation-main .rg.sl {
+  outline: 2px solid var(--ann-blue);
+  outline-offset: 1px;
+  box-shadow: 0 0 0 4px rgba(22, 93, 255, 0.12);
+}
+
+.annotation-main .rg .gp {
+  width: 4px;
+  background: currentColor;
+  opacity: 0.9;
+}
+
+.annotation-main .rg .lb {
+  color: currentColor;
+  font-weight: 850;
+}
+
+.annotation-main .rg-time {
+  color: var(--ann-sub);
+  font-weight: 700;
+  opacity: 1;
+}
+
+.annotation-main .rg-x {
+  color: currentColor;
+  background: rgba(255, 255, 255, 0.72);
+  opacity: 0.9;
+}
+
+.annotation-main .rg.asr {
+  color: var(--ann-blue);
+  border-color: var(--ann-blue-line) !important;
+  background: var(--ann-blue-soft) !important;
+}
+
+.annotation-main .rg.er,
+.annotation-main .rg.asr.er,
+.annotation-main .rg.doc-node.er {
+  color: var(--ann-red);
+  border-color: var(--ann-red-line) !important;
+  background: var(--ann-red-soft) !important;
+}
+
+.annotation-main .rg.s0 {
+  color: var(--ann-violet);
+  border-color: var(--ann-violet-line) !important;
+  background: var(--ann-violet-soft) !important;
+}
+
+.annotation-main .rg.s1 {
+  color: var(--ann-blue);
+  border-color: var(--ann-blue-line) !important;
+  background: var(--ann-blue-soft) !important;
+}
+
+.annotation-main .rg.bz {
+  color: var(--ann-green);
+  border-color: var(--ann-green-line) !important;
+  background: var(--ann-green-soft) !important;
+}
+
+.annotation-main .rg.tg {
+  color: var(--ann-amber);
+  border-color: var(--ann-amber-line) !important;
+  background: var(--ann-amber-soft) !important;
+}
+
+.annotation-main .rg.cp {
+  color: var(--ann-green);
+  border-color: var(--ann-green-line) !important;
+  background: var(--ann-green-soft) !important;
+}
+
+.annotation-main .rg.manual {
+  color: #ffffff;
+  border-color: var(--ann-blue) !important;
+  background: var(--ann-blue) !important;
+}
+
+.annotation-main .rg.doc-node,
+.annotation-main .rg.doc-node.amber {
+  color: var(--ann-doc);
+  border-color: var(--ann-doc-line) !important;
+  background: var(--ann-doc-soft) !important;
+}
+
+.annotation-main .rg.doc-node.violet {
+  color: var(--ann-violet);
+  border-color: var(--ann-violet-line) !important;
+  background: var(--ann-violet-soft) !important;
+}
+
+.annotation-main .rg.doc-node.cp {
+  color: var(--ann-green);
+  border-color: var(--ann-green-line) !important;
+  background: var(--ann-green-soft) !important;
+}
+
+.annotation-main .rg.er,
+.annotation-main .rg.tg.er,
+.annotation-main .rg.asr.er,
+.annotation-main .rg.doc-node.er {
+  color: var(--ann-red);
+  border-color: var(--ann-red-line) !important;
+  background: var(--ann-red-soft) !important;
+}
+
+.connector-drawer .drawer-actions {
+  position: relative;
+  z-index: 12;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 14px 18px 16px;
+  border-top: 1px solid #c9d2e3 !important;
+  border-bottom: 0 !important;
+  background: #ffffff !important;
+  box-shadow: 0 -10px 24px rgba(29, 33, 41, 0.12) !important;
+}
+
+.connector-drawer .drawer-actions::before {
+  position: absolute;
+  top: -13px;
+  right: 0;
+  left: 0;
+  height: 12px;
+  pointer-events: none;
+  background: linear-gradient(to top, rgba(255, 255, 255, 0.96), rgba(255, 255, 255, 0));
+  content: "";
+}
+
+.connector-drawer .drawer-actions button {
+  width: 100%;
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid #c9d2e3 !important;
+  border-radius: 6px !important;
+  color: #1d2129 !important;
+  background: #ffffff !important;
+  font-size: 14px;
+  font-weight: 850;
+  line-height: 1;
+  box-shadow: 0 1px 0 rgba(29, 33, 41, 0.04) !important;
+}
+
+.connector-drawer .drawer-actions button:hover {
+  border-color: #165dff !important;
+  color: #165dff !important;
+  background: #f2f7ff !important;
+}
+
+.connector-drawer .drawer-actions button:last-child {
+  border-color: #165dff !important;
+  color: #ffffff !important;
+  background: #165dff !important;
+  box-shadow: 0 8px 18px rgba(22, 93, 255, 0.22) !important;
+}
+
+.connector-drawer .drawer-actions button:last-child:hover {
+  border-color: #0e42d2 !important;
+  color: #ffffff !important;
+  background: #0e42d2 !important;
+}

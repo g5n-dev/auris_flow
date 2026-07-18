@@ -1,0 +1,105 @@
+/* Segmented controls across modules: active state may change color only, not geometry. */
+:is(
+  .mode-switch,
+  .task-schedule-switch,
+  .intent-switcher,
+  .canvas-level-switch,
+  .flow-template-pills,
+  .listening-mode-switch,
+  .listening-queue-strip,
+  .auth-mode-switch,
+  .segmented-row,
+  .mode-toggle-group,
+  .groupbar,
+  .insight-time-switch,
+  .insight-bi-filters,
+  .insight-view-switch,
+  .label-changeset-filters,
+  .label-run-toolbar,
+  .label-conflict-decision-bar,
+  .asset-lineage-modebar,
+  .asset-compat-toolbar,
+  .event-ledger-toolbar,
+  .event-data-toolbar,
+  .evaluation-context-bar,
+  .priority-filter-menu
+) button {
+  box-sizing: border-box;
+  border-width: 1px !important;
+  font-weight: 800;
+  transform: none !important;
+  transition: border-color 0.14s ease, background-color 0.14s ease, color 0.14s ease, box-shadow 0.14s ease;
+}
+
+:is(
+  .mode-switch,
+  .task-schedule-switch,
+  .intent-switcher,
+  .canvas-level-switch,
+  .flow-template-pills,
+  .listening-mode-switch,
+  .listening-queue-strip,
+  .auth-mode-switch,
+  .segmented-row,
+  .mode-toggle-group,
+  .groupbar,
+  .insight-time-switch,
+  .insight-bi-filters,
+  .insight-view-switch,
+  .label-changeset-filters,
+  .label-run-toolbar,
+  .label-conflict-decision-bar,
+  .asset-lineage-modebar,
+  .asset-compat-toolbar,
+  .event-ledger-toolbar,
+  .event-data-toolbar,
+  .evaluation-context-bar,
+  .priority-filter-menu
+) button:is(.active, .selected, :hover, :focus-visible) {
+  border-width: 1px !important;
+  font-weight: 800;
+  transform: none !important;
+}
+
+.drawer-tabs button,
+.drawer-tabs button.active,
+.drawer-tabs button:hover {
+  font-weight: 800;
+}
+
+.account-settings-tabs button,
+.account-settings-tabs button.active,
+.account-settings-tabs button:hover {
+  min-height: 54px;
+  padding: 9px 10px !important;
+  border-width: 1px !important;
+  font-weight: 800;
+  transform: none !important;
+}
+
+.account-settings-tabs button.active {
+  box-shadow: inset 3px 0 0 #165dff;
+}
+
+.insight-bi-filters button,
+.insight-bi-filters button:is(.active, .selected, :hover, :focus-visible) {
+  flex: 0 0 112px !important;
+  width: 112px !important;
+  min-width: 112px !important;
+  max-width: 112px !important;
+  height: 34px !important;
+  min-height: 34px !important;
+  max-height: 34px !important;
+  padding: 0 8px !important;
+}
+
+@media (max-width: 1180px) {
+  .workspace {
+    --module-tabs-sticky-top: 118px;
+    scroll-padding-top: 178px;
+  }
+
+  .module-page:has(.workspace-head.module-head.listening-head) > .module-tabs {
+    top: 132px;
+  }
+}

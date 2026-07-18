@@ -1,0 +1,1063 @@
+{
+  "fixture_version": "0.1.0",
+  "environment": ["local", "dev", "staging-demo"],
+  "generated_for": "Auris Flow phase 0/1 backend contract",
+  "context": {
+    "tenant": {
+      "tenant_id": "aurora_auto",
+      "tenant_code": "aurora_auto",
+      "name": "极光汽车",
+      "status": "active",
+      "quota_policy": {
+        "audio_hours_per_month": 5000
+      }
+    },
+    "project": {
+      "project_id": "sales_qa",
+      "tenant_id": "aurora_auto",
+      "name": "销售话术质检",
+      "scene": "auto_sales_quality",
+      "status": "active",
+      "label_version": "label_v1_8_4"
+    },
+    "stores": [
+      {
+        "store_id": "BJ-AURORA-001",
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "name": "北京区域 / 极光中心店",
+        "status": "active"
+      },
+      {
+        "store_id": "SH-JA-002",
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "name": "上海嘉安门店",
+        "status": "active"
+      }
+    ],
+    "users": [
+      {
+        "user_id": "u_admin_001",
+        "name": "项目管理员",
+        "email": "admin@auris.local",
+        "roles": ["project_admin", "asset_manager"]
+      },
+      {
+        "user_id": "u_release_admin_001",
+        "name": "发布复核管理员",
+        "email": "release.approver@auris.local",
+        "roles": ["project_admin"]
+      },
+      {
+        "user_id": "u_annotator_001",
+        "name": "质检运营",
+        "email": "annotator@auris.local",
+        "roles": ["annotator", "review_arbitrator"]
+      },
+      {
+        "user_id": "u_annotator_002",
+        "name": "质检运营 B",
+        "email": "annotator.b@auris.local",
+        "roles": ["annotator"]
+      },
+      {
+        "user_id": "u_model_001",
+        "name": "模型工程师",
+        "email": "model@auris.local",
+        "roles": ["model_engineer"]
+      },
+      {
+        "user_id": "u_sales_a",
+        "name": "销售A",
+        "email": "sales.a@auris.local",
+        "roles": ["business_operator"]
+      }
+    ],
+    "service_accounts": [
+      {
+        "service_account_id": "svc_agent",
+        "name": "Agent 服务账号",
+        "roles": ["agent_service"]
+      },
+      {
+        "service_account_id": "svc_worker",
+        "name": "Worker 服务账号",
+        "roles": ["agent_service"]
+      }
+    ]
+  },
+  "scene_profiles": {
+    "profiles": [
+      {
+        "scene_profile_id": "scene_auto_sales_quality",
+        "scene_key": "auto-sales-quality",
+        "name": "汽车门店销售质检",
+        "description": "本地演示场景；汽车销售只是一份可替换的 SceneProfile，不是平台内核。",
+        "status": "published",
+        "current_published_version_id": "scenev_auto_sales_quality_v1",
+        "created_by": "u_admin_001",
+        "trace_id": "trace_scene_auto_sales_quality"
+      }
+    ],
+    "versions": [
+      {
+        "scene_profile_version_id": "scenev_auto_sales_quality_v1",
+        "scene_profile_id": "scene_auto_sales_quality",
+        "version": "v1.0.0",
+        "status": "published",
+        "source_type": "human",
+        "requested_by": "u_admin_001",
+        "reviewed_by": "u_release_admin_001",
+        "published_by": "u_release_admin_001",
+        "resource_version": 1,
+        "trace_id": "trace_scene_auto_sales_quality",
+        "manifest": {
+          "schema_version": "scene-profile/1",
+          "scene_key": "auto-sales-quality",
+          "display_name": "汽车门店销售质检",
+          "description": "关联门店音频、销售角色、报价与试驾事件，生成标签、证据和业务指标。",
+          "locales": ["zh-CN"],
+          "capabilities": ["audio-intelligence", "entity-resolution", "event-alignment", "labeling", "insight"],
+          "roles": [
+            {"role_key": "sales-agent", "display_name": "销售", "description": "门店销售服务人员"},
+            {"role_key": "customer", "display_name": "客户", "description": "接受接待和咨询的客户"}
+          ],
+          "entities": [
+            {"object_key": "store", "display_name": "门店", "schema_ref": "schema:store/v1", "required": true},
+            {"object_key": "employee", "display_name": "员工", "schema_ref": "schema:employee/v1", "required": true}
+          ],
+          "events": [
+            {"object_key": "quote-event", "display_name": "报价事件", "schema_ref": "schema:quote-event/v1", "required": false},
+            {"object_key": "test-drive-event", "display_name": "试驾事件", "schema_ref": "schema:test-drive-event/v1", "required": false}
+          ],
+          "document_types": [
+            {"object_key": "quote-document", "display_name": "报价单", "schema_ref": "schema:quote-document/v1", "required": false}
+          ],
+          "data_contract_refs": ["contract:audio-session/v1", "contract:business-event/v1"],
+          "task_type_refs": ["task_sales_quality", "evidence-dataflow"],
+          "label_version_refs": ["label_v1_8_4"],
+          "prompt_version_refs": ["prompt_quote_v3"],
+          "knowledge_index_refs": ["ki_sales_policy_v1"],
+          "eval_dataset_version_refs": ["evalset_quote_risk_v12"],
+          "metrics": [
+            {"metric_key": "audio-transcript-quality", "display_name": "音频转写质量", "unit": "ratio", "calculator_ref": "metric:audio-transcript-quality/v1", "evidence_refs": ["audio", "transcript"]},
+            {"metric_key": "labeling-f1", "display_name": "标签 F1", "unit": "ratio", "calculator_ref": "metric:labeling-f1/v1", "evidence_refs": ["label", "gold"]},
+            {"metric_key": "quote-consistency", "display_name": "报价一致率", "unit": "ratio", "calculator_ref": "metric:quote-consistency/v1", "evidence_refs": ["quote-event", "quote-document"], "risk_level": "high", "human_review_required": true},
+            {"metric_key": "metric_reception_quality", "display_name": "接待转化质量指数", "unit": "score", "calculator_ref": "metric:reception-quality/v1", "evidence_refs": ["audio", "label"], "formula": "有效接待率 30% + 成交推进率 30% + 报价一致率 20% + 风险反向分 20%", "owner": "业务运营"},
+            {"metric_key": "reception_conversion_quality", "display_name": "接待转化质量指数", "unit": "score", "calculator_ref": "metric:reception-quality/v1", "evidence_refs": ["audio", "label"], "formula": "有效接待率 30% + 成交推进率 30% + 报价一致率 20% + 风险反向分 20%", "owner": "业务运营"},
+            {"metric_key": "effectiveReceptionRate", "display_name": "有效接待率", "unit": "percent", "calculator_ref": "metric:effective-reception/v1", "evidence_refs": ["audio", "event"], "formula": "有效接待会话 / 全部接待会话", "owner": "质检运营"},
+            {"metric_key": "conversionProgress", "display_name": "成交推进率", "unit": "percent", "calculator_ref": "metric:conversion-progress/v1", "evidence_refs": ["event", "document"], "formula": "产生可验证成交动作的接待 / 有效接待", "owner": "销售运营"},
+            {"metric_key": "objectionResolution", "display_name": "价格异议化解率", "unit": "percent", "calculator_ref": "metric:objection-resolution/v1", "evidence_refs": ["label", "audio"], "formula": "已承接并闭环的价格异议 / 价格异议样本", "owner": "销售训练"},
+            {"metric_key": "quoteConsistency", "display_name": "报价一致率", "unit": "percent", "calculator_ref": "metric:quote-consistency/v1", "evidence_refs": ["quote-event", "quote-document"], "formula": "报价承诺与单据字段一致样本 / 报价样本", "owner": "价格策略组", "risk_level": "high", "human_review_required": true},
+            {"metric_key": "quote_consistency", "display_name": "报价一致率", "unit": "percent", "calculator_ref": "metric:quote-consistency/v1", "evidence_refs": ["quote-event", "quote-document"], "formula": "报价承诺与单据字段一致样本 / 报价样本", "owner": "价格策略组", "risk_level": "high", "human_review_required": true},
+            {"metric_key": "riskReverseScore", "display_name": "风险反向分", "unit": "score", "calculator_ref": "metric:risk-reverse-score/v1", "evidence_refs": ["label", "human-review"], "formula": "100 - 高风险样本率标准化得分", "owner": "质检运营"},
+            {"metric_key": "testDriveIntent", "display_name": "试驾转化意向", "unit": "percent", "calculator_ref": "metric:test-drive-intent/v1", "evidence_refs": ["test-drive-event", "audio"], "formula": "命中试驾承接或预约确认的接待 / 有效接待", "owner": "门店运营"},
+            {"metric_key": "crosstalkRisk", "display_name": "串音风险率", "unit": "percent", "calculator_ref": "metric:crosstalk-risk/v1", "evidence_refs": ["audio", "speaker-turns"], "formula": "串音候选会话 / 有效接待会话", "owner": "音频质量", "risk_level": "high", "human_review_required": true},
+            {"metric_key": "tagAssetQuality", "display_name": "标签资产质量", "unit": "score", "calculator_ref": "metric:tag-asset-quality/v1", "evidence_refs": ["label", "human-review"], "formula": "标签完整性、证据可追溯性和人审一致性加权分", "owner": "标签运营"},
+            {"metric_key": "modelQuality", "display_name": "模型质量", "unit": "score", "calculator_ref": "metric:model-quality/v1", "evidence_refs": ["eval", "audio"], "formula": "ASR、边界、说话人和标签评测加权分", "owner": "模型工程"}
+          ],
+          "release_requirements": [
+            {"requirement_key": "core-audio-gate", "gate_kind": "core_capability", "metric_key": "audio-transcript-quality", "operator": "gte", "threshold_ppm": 850000},
+            {"requirement_key": "scene-label-gate", "gate_kind": "scene_eval", "metric_key": "labeling-f1", "operator": "gte", "threshold_ppm": 880000},
+            {"requirement_key": "project-holdout-gate", "gate_kind": "project_holdout", "metric_key": "quote-consistency", "operator": "gte", "threshold_ppm": 900000}
+          ],
+          "governance": {
+            "human_review_required": true,
+            "model_may_publish": false,
+            "retention_policy_ref": "policy:retention/default-v1",
+            "privacy_policy_ref": "policy:privacy/audio-v1"
+          }
+        }
+      }
+    ],
+    "bindings": [
+      {
+        "binding_id": "sceneb_sales_qa_production",
+        "environment": "production",
+        "scene_profile_id": "scene_auto_sales_quality",
+        "scene_profile_version_id": "scenev_auto_sales_quality_v1",
+        "status": "active",
+        "bound_by": "u_release_admin_001",
+        "resource_version": 1,
+        "trace_id": "trace_scene_auto_sales_quality"
+      }
+    ]
+  },
+  "connectors": [
+    {
+      "connector_id": "conn_platform_auth",
+      "type": "platform_auth",
+      "name": "平台登录适配器",
+      "status": "success",
+      "auth_mode": "session_token",
+      "secret_ref": "secret_ref_platform_auth_local"
+    },
+    {
+      "connector_id": "conn_audio_url",
+      "type": "audio_url",
+      "name": "音频 URL 同步接口",
+      "status": "success",
+      "auth_mode": "signed_url",
+      "secret_ref": "secret_ref_audio_url_local"
+    }
+  ],
+  "tasking": {
+    "task_types": [
+      {
+        "task_type_id": "task_sales_quality",
+        "name": "销售话术质检任务类型",
+        "category": "audio_quality",
+        "input_schema": "SourceAsset + PlatformSyncBinding",
+        "output_schema": "EvidencePack + LabelCandidate + InsightFact"
+      }
+    ],
+    "task_versions": [
+      {
+        "task_version_id": "task_version_v3_2_1",
+        "task_type_id": "task_sales_quality",
+        "version": "v3.2.1",
+        "status": "published",
+        "canvas_variant": "stable-v3",
+        "label_version": "label_v1_8_4",
+        "model_version": "asr_v2.3.1",
+        "hotwords_ref": "汽车销售热词包 v1.8",
+        "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
+        "hotword_binding_mode": "legacy-read-through"
+      },
+      {
+        "task_version_id": "task_version_v4_0_rc2",
+        "task_type_id": "task_sales_quality",
+        "version": "v4.0.0-rc2",
+        "status": "experiment_ready",
+        "canvas_variant": "candidate-v4",
+        "label_version": "label_v1_8_4",
+        "model_version": "asr_v2.3.1",
+        "hotwords_ref": "汽车销售热词包 v1.8",
+        "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
+        "hotword_binding_mode": "legacy-read-through"
+      }
+    ],
+    "task_runs": [
+      {
+        "task_run_id": "task_run_20250526_122300",
+        "task_version_id": "task_version_v3_2_1",
+        "status": "success",
+        "trigger": "manual",
+        "run_key": "sales_qa:task_version_v3_2_1:2025-05-26:BJ-AURORA-001",
+        "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
+        "trace_id": "trace_20250526_122300"
+      },
+      {
+        "task_run_id": "task_run_20250526_123100_retry",
+        "task_version_id": "task_version_v3_2_1",
+        "status": "blocked",
+        "trigger": "retry",
+        "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
+        "trace_id": "trace_20250526_123100"
+      }
+    ]
+  },
+  "audio_evidence": {
+    "audio_sessions": [
+      {
+        "audio_session_id": "S20250526-000128",
+        "recording_id": "rec_A_1001_20250526_122300",
+        "store_id": "BJ-AURORA-001",
+        "primary_employee_id": "u_sales_a",
+        "started_at": "2025-05-26T12:23:30+08:00",
+        "ended_at": "2025-05-26T12:34:34+08:00",
+        "status": "success",
+        "confidence": 0.86,
+        "trace_id": "trace_20250526_122718"
+      },
+      {
+        "audio_session_id": "S20250526-000131",
+        "recording_id": "rec_SH_A012_20250526_091500",
+        "store_id": "SH-JINGAN-001",
+        "primary_employee_id": "u_sales_a",
+        "started_at": "2025-05-26T09:15:00+08:00",
+        "ended_at": "2025-05-26T09:18:00+08:00",
+        "status": "pending_review",
+        "confidence": 0.64,
+        "trace_id": "trace_20250526_091608"
+      }
+    ],
+    "recordings": [
+      {
+        "recording_id": "rec_A_1001_20250526_122300",
+        "file_name": "A-1001_20250526_122300.wav",
+        "audio_url_ref": "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/A-1001_20250526_122300.wav",
+        "duration_ms": 664000,
+        "device_id": "device_ble_A_1001"
+      },
+      {
+        "recording_id": "rec_B_2001_20250526_122812",
+        "file_name": "B-2001_20250526_122812.wav",
+        "audio_url_ref": "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/B-2001_20250526_122812.wav",
+        "duration_ms": 196000,
+        "device_id": "device_ble_B_2001"
+      },
+      {
+        "recording_id": "rec_GZ_U882_20250525_164020",
+        "file_name": "GZ-U882_20250525_164020.wav",
+        "audio_url_ref": "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-25/GZ-U882_20250525_164020.wav",
+        "duration_ms": 92000,
+        "device_id": "device_unknown_U882"
+      },
+      {
+        "recording_id": "rec_SH_A012_20250526_091500",
+        "file_name": "SH-A012_20250526_091500.wav",
+        "audio_url_ref": "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/SH-A012_20250526_091500.wav",
+        "duration_ms": 180000,
+        "device_id": "device_ble_SH_A012"
+      }
+    ],
+    "boundaries": [
+      {
+        "boundary_id": "boundary_s128_v1",
+        "audio_session_id": "S20250526-000128",
+        "start_ms": 30000,
+        "end_ms": 694000,
+        "version": 1,
+        "status": "success"
+      }
+    ],
+    "evidence_packs": [
+      {
+        "evidence_pack_id": "AF-128",
+        "audio_session_id": "S20250526-000128",
+        "title": "金额冲突证据",
+        "window_start_ms": 227000,
+        "window_end_ms": 270000,
+        "status": "pending",
+        "trace_id": "trace_20250526_122718"
+      },
+      {
+        "evidence_pack_id": "AF-129",
+        "audio_session_id": "S20250526-000128",
+        "title": "串音候选证据",
+        "window_start_ms": 282000,
+        "window_end_ms": 310000,
+        "status": "pending",
+        "trace_id": "trace_20250526_122812"
+      },
+      {
+        "evidence_pack_id": "AF-130",
+        "audio_session_id": "S20250526-000128",
+        "title": "产品咨询证据",
+        "window_start_ms": 418000,
+        "window_end_ms": 450000,
+        "status": "success",
+        "trace_id": "trace_20250526_123418"
+      },
+      {
+        "evidence_pack_id": "AF-131",
+        "audio_session_id": "S20250526-000131",
+        "title": "低置信 ASR 证据",
+        "window_start_ms": 68000,
+        "window_end_ms": 100000,
+        "status": "pending",
+        "trace_id": "trace_20250526_091608"
+      }
+    ],
+    "asr_segments": [
+      {
+        "segment_id": "asr_s128_001",
+        "audio_session_id": "S20250526-000128",
+        "speaker": "销售A",
+        "start_ms": 206000,
+        "end_ms": 258000,
+        "text": "这台 325Li 指导价 31.69 万，可以给到 3.5 万优惠。",
+        "confidence": 0.92
+      },
+      {
+        "segment_id": "asr_s128_002",
+        "audio_session_id": "S20250526-000128",
+        "speaker": "客户",
+        "start_ms": 258000,
+        "end_ms": 286000,
+        "text": "那落地是不是二十八万多一点？",
+        "confidence": 0.82
+      }
+    ]
+  },
+  "business_events": {
+    "documents": [
+      {
+        "document_id": "BJ-041",
+        "document_type": "quote",
+        "title": "报价单 #BJ-041",
+        "amount": 316900,
+        "discount": 35000,
+        "occurred_at": "2025-05-26T12:31:08+08:00"
+      },
+      {
+        "document_id": "SJ-028",
+        "document_type": "test_drive",
+        "title": "试驾单 #SJ-028",
+        "occurred_at": "2025-05-26T14:00:00+08:00"
+      }
+    ],
+    "event_links": [
+      {
+        "id": "event_quote_122718",
+        "audio_session_id": "S20250526-000128",
+        "event_ref": "quote:BJ-041",
+        "document_ref": "BJ-041",
+        "relation_type": "quote",
+        "join_keys": ["employee_id", "store_id", "time_window"],
+        "diffs": [
+          {
+            "field": "amount",
+            "audio_value": "落地 28.19 万",
+            "document_value": "指导价 31.69 万，优惠 3.5 万"
+          }
+        ],
+        "match_score": 0.92,
+        "status": "pending",
+        "evidence_refs": [
+          {
+            "evidence_pack_id": "AF-128",
+            "audio_session_id": "S20250526-000128",
+            "window_start_ms": 227000,
+            "window_end_ms": 270000,
+            "trace_id": "trace_20250526_122718"
+          }
+        ],
+        "trace_id": "trace_20250526_122718"
+      }
+    ]
+  },
+  "labeling": {
+    "taxonomies": [
+      {
+        "taxonomy_id": "taxonomy_sales_qa",
+        "name": "汽车销售质检标签体系",
+        "status": "active"
+      }
+    ],
+    "label_versions": [
+      {
+        "label_version_id": "label_v1_8_4",
+        "version": "v1.8.4",
+        "status": "published",
+        "enabled_label_count": 96
+      },
+      {
+        "label_version_id": "label_v1_9_0_rc2",
+        "version": "v1.9.0-rc2",
+        "status": "shadow",
+        "candidate_count": 5
+      }
+    ],
+    "prompt_versions": [
+      {
+        "prompt_version_id": "prompt_quote_v3",
+        "target": "quote_amount",
+        "status": "published"
+      },
+      {
+        "prompt_version_id": "prompt_quote_v4_rc1",
+        "target": "quote_amount",
+        "status": "draft"
+      }
+    ],
+    "label_candidates": [
+      {
+        "candidate_id": "cand_af128_amount_conflict",
+        "label_version_id": "label_v1_9_0_rc2",
+        "label": "报价金额",
+        "value_or_action": "金额冲突",
+        "evidence_pack_id": "AF-128",
+        "confidence": 0.82,
+        "human_state": "pending",
+        "prompt_version": "prompt_quote_v4_rc1",
+        "trace_id": "trace_20250526_122718"
+      },
+      {
+        "candidate_id": "cand_af129_crosstalk",
+        "label_version_id": "label_v1_9_0_rc2",
+        "label": "串音疑似",
+        "value_or_action": "需排除",
+        "evidence_pack_id": "AF-129",
+        "confidence": 0.71,
+        "human_state": "pending",
+        "prompt_version": "prompt_quote_v4_rc1",
+        "trace_id": "trace_20250526_122812"
+      }
+    ],
+    "label_optimization_runs": [
+      {
+        "optimization_run_id": "lor_prompt_quote_001",
+        "status": "success",
+        "target": "prompt",
+        "candidate_version": "prompt_quote_v4_rc1",
+        "sample_set": "evalset_prompt_regression_v3",
+        "trace_id": "trace_lor_prompt_quote_001"
+      }
+    ]
+  },
+  "review_and_feedback": {
+    "human_review_tasks": [
+      {
+        "id": "hrt_amount_001",
+        "queue": "amount_conflict",
+        "title": "金额冲突待复核",
+        "priority": "high",
+        "status": "pending",
+        "evidence_pack_id": "AF-128",
+        "asset_key": "auris/label/event_tags",
+        "trace_id": "trace_20250526_122718"
+      },
+      {
+        "id": "hrt_crosstalk_001",
+        "queue": "crosstalk_candidate",
+        "title": "串音候选待确认",
+        "priority": "medium",
+        "status": "pending",
+        "evidence_pack_id": "AF-129",
+        "asset_key": "auris/audio/raw_recordings",
+        "trace_id": "trace_20250526_122812"
+      },
+      {
+        "id": "hrt_low_confidence_draft",
+        "queue": "low_confidence",
+        "title": "低置信转写待确认",
+        "priority": "medium",
+        "status": "pending",
+        "evidence_pack_id": "AF-131",
+        "asset_key": "auris/model/asr_transcripts",
+        "trace_id": "trace_20250526_091608"
+      }
+    ],
+    "badcases": [
+      {
+        "badcase_id": "badcase_quote_001",
+        "target": "label_rule",
+        "status": "open",
+        "source_evidence_pack_id": "AF-128"
+      },
+      {
+        "badcase_id": "badcase_prompt_001",
+        "target": "prompt",
+        "status": "open",
+        "source_evidence_pack_id": "AF-129"
+      },
+      {
+        "badcase_id": "A-4107",
+        "target": "hotword_pack",
+        "status": "pending-backflow",
+        "source_evidence_pack_id": "AF-131",
+        "capability": "asr-hotword",
+        "standard_term": "星越L",
+        "recognized_text": "星月L",
+        "error_type": "misrecognition",
+        "evidence_storage_object_id": "storage_badcase_a_4107_evidence",
+        "evidence_ref": "storage-object:storage_badcase_a_4107_evidence",
+        "evidence_level": "human-confirmed",
+        "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
+        "expected_count": 10,
+        "correct_count": 6,
+        "weighted_error_count": 4.0,
+        "manual_correction_count": 2,
+        "priority_score": 78.0,
+        "candidate_state": "confirmed",
+        "root_cause": "alias_gap",
+        "fix_suggestion": "增加显式别名并在影子评测中验证权重",
+        "downstream_impact": {
+          "entity_f1_delta": -0.08,
+          "impacted_session_count": 7
+        },
+        "resource_version": 3,
+        "root_trace_id": "trace_hotword_pack_auto_sales",
+        "current_trace_id": "trace_hotword_badcase_decision_4107"
+      }
+    ]
+  },
+  "hotword_governance": {
+    "hotword_packs": [
+      {
+        "pack_id": "hotword_pack_auto_sales",
+        "name": "汽车销售热词包",
+        "language": "zh-CN",
+        "domain": "auto-sales",
+        "current_version_id": "hwpv-auto-sales-v1-8",
+        "production_version_id": "hwpv-auto-sales-v1-8",
+        "status": "active",
+        "resource_version": 1,
+        "root_trace_id": "trace_hotword_pack_auto_sales",
+        "current_trace_id": "trace_hotword_pack_auto_sales_publish_v1_8"
+      }
+    ],
+    "hotword_pack_versions": [
+      {
+        "version_id": "hwpv-auto-sales-v1-8",
+        "pack_id": "hotword_pack_auto_sales",
+        "version": "v1.8",
+        "baseline_version_id": null,
+        "status": "published",
+        "content_sha256": "c6b4994cfc086702027f8255f99c23d5d0b55167f7381b460e12329c713fb2f7",
+        "manifest_storage_object_id": "storage_hwpv_auto_sales_v1_8_manifest",
+        "provider_artifact_ref": "storage_hwpv_auto_sales_v1_8_provider_artifact",
+        "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "task_version_id": "task_version_v3_2_1",
+        "production_active": true,
+        "compiled_provider": "auris-audio-stack",
+        "eval_run_id": "evalrun_hotword_v18_seed",
+        "eval_locked": true,
+        "model_approved_by": "u_model_001",
+        "project_admin_confirmed_by": "u_admin_001",
+        "resource_version": 9,
+        "published_at": "2025-05-25T16:00:00+08:00",
+        "root_trace_id": "trace_hotword_pack_auto_sales",
+        "current_trace_id": "trace_hotword_pack_auto_sales_publish_v1_8"
+      }
+    ],
+    "storage_objects": [
+      {
+        "storage_object_id": "storage_badcase_a_4107_evidence",
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": "tenants/aurora_auto/projects/sales_qa/evidence/AF-131/hotword-diff.json",
+        "source_type": "asr_hotword_evidence",
+        "source_id": "A-4107",
+        "content_type": "application/json",
+        "size_bytes": 256,
+        "content_sha256": "7057e9c5abb31af71cbf6c0c82581e80e02c7db8f7197fd5885dcff80f3682f9",
+        "status": "verified",
+        "trace_id": "trace_hotword_pack_auto_sales"
+      },
+      {
+        "storage_object_id": "storage_hwpv_auto_sales_v1_8_manifest",
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": "tenants/aurora_auto/projects/sales_qa/hotwords/hotword_pack_auto_sales/v1.8/manifest.json",
+        "source_type": "hotword_manifest",
+        "source_id": "hwpv-auto-sales-v1-8",
+        "content_type": "application/json",
+        "size_bytes": 768,
+        "content_sha256": "c6b4994cfc086702027f8255f99c23d5d0b55167f7381b460e12329c713fb2f7",
+        "status": "verified",
+        "trace_id": "trace_hotword_pack_auto_sales"
+      },
+      {
+        "storage_object_id": "storage_hwpv_auto_sales_v1_8_provider_artifact",
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": "tenants/aurora_auto/projects/sales_qa/hotwords/hotword_pack_auto_sales/v1.8/provider/auris-audio-stack.json",
+        "source_type": "hotword_provider_artifact",
+        "source_id": "hwpv-auto-sales-v1-8",
+        "content_type": "application/json",
+        "size_bytes": 1024,
+        "content_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "status": "verified",
+        "trace_id": "trace_hotword_pack_auto_sales"
+      },
+      {
+        "storage_object_id": "storage_evalrun_hotword_v18_seed_result",
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": "tenants/aurora_auto/projects/sales_qa/evals/evalrun_hotword_v18_seed/result.json",
+        "source_type": "hotword_eval_result",
+        "source_id": "evalrun_hotword_v18_seed",
+        "content_type": "application/json",
+        "size_bytes": 2048,
+        "content_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "status": "verified",
+        "trace_id": "trace_hotword_pack_auto_sales"
+      },
+      {
+        "storage_object_id": "storage_evalset_asr_hotword_v1_manifest",
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": "tenants/aurora_auto/projects/sales_qa/eval-datasets/evalset-asr-hotword-v1/manifest.jsonl",
+        "source_type": "eval_dataset_manifest",
+        "source_id": "evalset-asr-hotword-v1",
+        "content_type": "application/x-ndjson",
+        "size_bytes": 5360,
+        "content_sha256": "092a0fb14b0372e529d92bf05513b6391a9d4b1df49e3bdb702c01a3d6b3f78a",
+        "etag": "d106f2843f8efcb5a4cf5842c8d8f40d",
+        "status": "verified",
+        "trace_id": "trace_evalset_asr_hotword_v1"
+      }
+    ],
+    "hotword_version_items": [
+      {
+        "item_id": "hotword_item_xingyue_l",
+        "version_id": "hwpv-auto-sales-v1-8",
+        "canonical_term": "星越L",
+        "normalized_term": "星越l",
+        "aliases": ["星越 L"],
+        "category": "vehicle-model",
+        "weight": 80,
+        "source_badcase_id": "A-4107",
+        "source_type": "badcase",
+        "resource_version": 1,
+        "root_trace_id": "trace_hotword_pack_auto_sales"
+      },
+      {
+        "item_id": "hotword_item_yinhe_e8",
+        "version_id": "hwpv-auto-sales-v1-8",
+        "canonical_term": "银河E8",
+        "normalized_term": "银河e8",
+        "aliases": ["银河 E8"],
+        "category": "vehicle-model",
+        "weight": 75,
+        "source_badcase_id": null,
+        "source_type": "manual",
+        "resource_version": 1,
+        "root_trace_id": "trace_hotword_pack_auto_sales"
+      },
+      {
+        "item_id": "hotword_item_lynk_08",
+        "version_id": "hwpv-auto-sales-v1-8",
+        "canonical_term": "领克08",
+        "normalized_term": "领克08",
+        "aliases": ["领克 08"],
+        "category": "vehicle-model",
+        "weight": 72,
+        "source_badcase_id": null,
+        "source_type": "manual",
+        "resource_version": 1,
+        "root_trace_id": "trace_hotword_pack_auto_sales"
+      }
+    ],
+    "hotword_metric_snapshots": [
+      {
+        "snapshot_id": "hotword_metric_20250526_xingyue_l",
+        "bucket_start": "2025-05-26T00:00:00+08:00",
+        "bucket_end": "2025-05-27T00:00:00+08:00",
+        "store_id": "BJ-AURORA-001",
+        "provider": "auris-audio-stack",
+        "model_version": "audio-v2.3.1",
+        "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
+        "standard_term": "星越L",
+        "expected_count": 10,
+        "correct_count": 6,
+        "weighted_error_count": 4.0,
+        "false_insert_count": 0,
+        "recognized_hotword_count": 6,
+        "impacted_session_count": 7,
+        "evidence_confidence": 1.0,
+        "priority_score": 78.0,
+        "suspected": false,
+        "source_run_id": "hotword_analysis_seed_20250526",
+        "root_trace_id": "trace_hotword_pack_auto_sales"
+      }
+    ],
+    "analysis_runs": [
+      {
+        "run_id": "hotword_analysis_seed_20250526",
+        "run_type": "hotword_analysis",
+        "status": "success",
+        "event_type": "hotword_metrics.materialized",
+        "root_trace_id": "trace_hotword_pack_auto_sales"
+      }
+    ]
+  },
+  "evaluation": {
+    "eval_datasets": [
+      {
+        "dataset_id": "evalset_quote_risk_v12",
+        "name": "报价风险回归集",
+        "type": "labeling_gold",
+        "dataset_version": "v12",
+        "status": "locked",
+        "locked": true,
+        "sample_count": 1500,
+        "label_version": "label_v1_8_4"
+      },
+      {
+        "dataset_id": "evalset_boundary_v8",
+        "name": "完整对话边界集",
+        "type": "model_capability",
+        "sample_count": 740,
+        "label_version": "label_v1_8_4"
+      },
+      {
+        "dataset_id": "evalset_prompt_regression_v3",
+        "name": "Prompt 回归集",
+        "type": "prompt_regression",
+        "sample_count": 392,
+        "label_version": "label_v1_9_0_rc2"
+      },
+      {
+        "dataset_id": "evalset-asr-hotword-v1",
+        "name": "ASR 热词锁定回归集",
+        "type": "asr_hotword",
+        "capability": "asr_hotword",
+        "dataset_version": "v1",
+        "status": "locked",
+        "locked": true,
+        "sample_count": 40,
+        "model_version": "audio-v2.3.1",
+        "manifest_storage_object_id": "storage_evalset_asr_hotword_v1_manifest",
+        "manifest_sha256": "092a0fb14b0372e529d92bf05513b6391a9d4b1df49e3bdb702c01a3d6b3f78a",
+        "root_trace_id": "trace_evalset_asr_hotword_v1"
+      }
+    ],
+    "eval_runs": [
+      {
+        "eval_run_id": "evalrun_label_v190_shadow",
+        "dataset_id": "evalset_quote_risk_v12",
+        "status": "success",
+        "current_version": "label_v1_8_4",
+        "candidate_version": "label_v1_9_0_rc2",
+        "metrics": {
+          "overall_score": 91.2,
+          "labeling_f1": 88.6,
+          "prompt_gain": 3.8,
+          "badcase_backfill": 64
+        }
+      },
+      {
+        "eval_run_id": "evalrun_hotword_v18_seed",
+        "run_type": "hotword_eval",
+        "dataset_id": "evalset-asr-hotword-v1",
+        "eval_dataset_id": "evalset-asr-hotword-v1",
+        "status": "success",
+        "locked": true,
+        "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
+        "baseline_version_id": null,
+        "prior_current_version_id": null,
+        "baseline_version": "hotword_pack_auto_sales_v1_7",
+        "candidate_version": "hwpv-auto-sales-v1-8",
+        "content_sha256": "c6b4994cfc086702027f8255f99c23d5d0b55167f7381b460e12329c713fb2f7",
+        "manifest_storage_object_id": "storage_hwpv_auto_sales_v1_8_manifest",
+        "provider": "auris-audio-stack",
+        "compiled_provider": "auris-audio-stack",
+        "provider_artifact_ref": "storage_hwpv_auto_sales_v1_8_provider_artifact",
+        "artifact_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "result_storage_object_ids": ["storage_evalrun_hotword_v18_seed_result"],
+        "legacy_import": true,
+        "metrics": {
+          "trusted_occurrences": 40,
+          "unique_terms": 3,
+          "error_rate_relative_reduction": 0.25,
+          "recall_gain_pp": 4.0,
+          "false_boost_rate_delta_pp": 0.4,
+          "cer_delta_pp": 0.1,
+          "wer_delta_pp": 0.1,
+          "downstream_f1_delta_pp": -0.2,
+          "p95_latency_relative_increase": 0.04,
+          "cost_per_minute_relative_increase": 0.04
+        },
+        "gate": {
+          "passed": true,
+          "blocked_reasons": []
+        },
+        "root_trace_id": "trace_hotword_pack_auto_sales"
+      }
+    ]
+  },
+  "data_assets": [
+    {
+      "asset_key": "auris/audio/raw_recordings",
+      "display_name": "原始音频资产",
+      "domain": "audio",
+      "status": "success",
+      "quality_score": 92,
+      "freshness": "15 分钟内",
+      "owner": "asset_manager"
+    },
+    {
+      "asset_key": "auris/model/asr_transcripts",
+      "display_name": "ASR 转写资产",
+      "domain": "audio",
+      "status": "warning",
+      "quality_score": 88,
+      "freshness": "20 分钟内",
+      "owner": "model_engineer",
+      "latest_materialization_id": "mat_asr_20250526_122300",
+      "latest_run_id": "task_run_20250526_122300",
+      "latest_materialization_status": "success",
+      "upstream": ["auris/audio/raw_recordings"],
+      "downstream": ["auris/label/event_tags", "auris/eval/quality_metrics"]
+    },
+    {
+      "asset_key": "auris/label/event_tags",
+      "display_name": "事件标签资产",
+      "domain": "label",
+      "status": "risk",
+      "quality_score": 86,
+      "freshness": "45 分钟内",
+      "owner": "label_governor",
+      "latest_materialization_id": "mat_label_20250526_122300",
+      "latest_run_id": "task_run_20250526_122300",
+      "upstream": ["auris/audio/raw_recordings", "auris/events/document_links"],
+      "downstream": ["auris/eval/quality_metrics", "auris/insights/reception_quality"]
+    },
+    {
+      "asset_key": "auris/events/document_links",
+      "display_name": "业务单据事件资产",
+      "domain": "event",
+      "status": "warning",
+      "quality_score": 78,
+      "freshness": "1 小时内",
+      "owner": "data_integration_engineer"
+    },
+    {
+      "asset_key": "auris/eval/quality_metrics",
+      "display_name": "评测质量指标资产",
+      "domain": "evaluation",
+      "status": "success",
+      "quality_score": 91,
+      "freshness": "2 小时内",
+      "owner": "model_engineer",
+      "latest_run_id": "task_run_20250526_122300",
+      "upstream": ["auris/label/event_tags"],
+      "downstream": ["auris/insights/reception_quality"]
+    }
+  ],
+  "knowledge": {
+    "sources": [
+      {
+        "knowledge_source_id": "ks_sales_policy",
+        "name": "销售政策知识源",
+        "source_type": "sop_faq_product_docs",
+        "status": "success",
+        "connector_id": "conn_platform_auth",
+        "object_count": 12846,
+        "chunk_count": 5620,
+        "freshness": "30 分钟内",
+        "trace_id": "trace_knowledge_source_sales_policy"
+      },
+      {
+        "knowledge_source_id": "ks_evidence_samples",
+        "name": "质检证据样本库",
+        "source_type": "evidence_pack_label_samples",
+        "status": "warning",
+        "connector_id": "conn_audio_url",
+        "object_count": 317,
+        "chunk_count": 912,
+        "freshness": "2 小时内",
+        "trace_id": "trace_knowledge_source_evidence_samples"
+      }
+    ],
+    "indexes": [
+      {
+        "knowledge_index_id": "ki_sales_policy_v1",
+        "source_id": "ks_sales_policy",
+        "name": "销售政策混合召回索引",
+        "status": "active",
+        "version": "kb-index-v3.2",
+        "vector_collection": "knowledge_chunks",
+        "vector_dimension": 1024,
+        "recall_strategy": "dense + sparse + rerank",
+        "quality_gate": "6/8",
+        "trace_id": "trace_knowledge_index_sales_policy_v1"
+      }
+    ],
+    "quality_gates": [
+      {
+        "gate_id": "kg_freshness",
+        "knowledge_index_id": "ki_sales_policy_v1",
+        "name": "新鲜度",
+        "status": "success",
+        "score": 96,
+        "threshold": 90
+      },
+      {
+        "gate_id": "kg_conflict",
+        "knowledge_index_id": "ki_sales_policy_v1",
+        "name": "冲突率",
+        "status": "warning",
+        "score": 83,
+        "threshold": 85,
+        "blocked_reason": "报价政策与旧 FAQ 存在 2 处冲突"
+      },
+      {
+        "gate_id": "kg_recall",
+        "knowledge_index_id": "ki_sales_policy_v1",
+        "name": "召回质量",
+        "status": "success",
+        "score": 91,
+        "threshold": 88
+      }
+    ],
+    "effects": [
+      {
+        "effect_id": "ke_sales_policy_v1",
+        "knowledge_index_id": "ki_sales_policy_v1",
+        "recall_score": 0.91,
+        "hit_rate": 0.846,
+        "human_acceptance": 0.78,
+        "hallucination_block_rate": 0.12,
+        "consumer_paths": ["agent_suggestion", "label_prompt", "insight_report"],
+        "funnel": [
+          { "stage": "query", "label": "检索请求", "value": 8426 },
+          { "stage": "recall", "label": "有效召回", "value": 7912 },
+          { "stage": "hit", "label": "业务命中", "value": 3184 },
+          { "stage": "review", "label": "人审接受", "value": 2484 },
+          { "stage": "writeback", "label": "动作回写", "value": 37 }
+        ],
+        "trace_id": "trace_knowledge_effect_sales_policy_v1"
+      }
+    ]
+  },
+  "settings": [
+    {
+      "setting_id": "model-chain",
+      "label": "模型链路",
+      "status": "active",
+      "provider": "self_hosted_asr",
+      "scope": "VAD / Diar / ASR / Tagger",
+      "trace_id": "trace_setting_model_chain"
+    },
+    {
+      "setting_id": "policy-guard",
+      "label": "发布门禁",
+      "status": "active",
+      "threshold": "2 高风险",
+      "scope": "标签发布 / 模型发布 / 配置发布",
+      "trace_id": "trace_setting_policy_guard"
+    }
+  ],
+  "insights": {
+    "north_star": {
+      "metric_key": "metric_reception_quality",
+      "label": "接待转化质量指数",
+      "value": 82.4,
+      "compare_value": 3.6,
+      "formula": "有效接待率 30% + 成交推进率 30% + 报价一致率 20% + 风险反向分 20%",
+      "evidence_count": 128,
+      "drilldown_route": "insights?metric=metric_reception_quality"
+    },
+    "reports": [
+      {
+        "report_id": "report_daily_20250526",
+        "title": "经营日报",
+        "status": "generated",
+        "range": "2025-05-26",
+        "asset_ref": "tenants/aurora_auto/projects/sales_qa/reports/report_daily_20250526.pdf",
+        "metric_refs": ["metric_reception_quality"]
+      }
+    ]
+  },
+  "storage_refs": {
+    "object_storage": [
+      "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/A-1001_20250526_122300.wav",
+      "tenants/aurora_auto/projects/sales_qa/evidence/AF-128/evidence_pack.json",
+      "tenants/aurora_auto/projects/sales_qa/reports/report_daily_20250526.pdf"
+    ],
+    "qdrant_payload_examples": [
+      {
+        "collection": "evidence_segments",
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "asset_key": "auris/label/event_tags",
+        "source_type": "evidence_pack",
+        "source_id": "AF-128",
+        "version": "evidence-index-v1.8.4",
+        "trace_id": "trace_20250526_122718",
+        "evidence_id": "AF-128",
+        "label_version": "v1.8.4",
+        "label_version_id": "label_v1_8_4",
+        "audio_session_id": "S20250526-000128",
+        "start_ms": 277000,
+        "end_ms": 292000
+      }
+    ]
+  }
+}

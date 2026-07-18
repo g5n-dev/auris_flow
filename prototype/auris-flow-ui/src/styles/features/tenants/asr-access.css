@@ -1,0 +1,226 @@
+/* Tenant-level ASR data access: tenant owns authorization, tasks consume the scoped assets. */
+.tenant-asr-panel {
+  min-width: 0;
+}
+
+.tenant-asr-hero {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.tenant-asr-hero > div,
+.tenant-asr-endpoint,
+.tenant-asr-row,
+.tenant-asr-guardrails div {
+  border: 1px solid #e5e6eb !important;
+  border-radius: 4px;
+  background: #f7f8fa !important;
+  box-shadow: none !important;
+}
+
+.tenant-asr-hero > div {
+  display: grid;
+  gap: 4px;
+  min-height: 86px;
+  padding: 10px;
+}
+
+.tenant-asr-hero span,
+.tenant-asr-endpoint span,
+.tenant-asr-columns > section > span,
+.tenant-asr-row em,
+.tenant-asr-mini span,
+.tenant-asr-mini em {
+  color: #86909c;
+  font-size: 12px;
+}
+
+.tenant-asr-hero strong,
+.tenant-asr-endpoint strong,
+.tenant-asr-row strong,
+.tenant-asr-mini strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #1d2129;
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenant-asr-hero em,
+.tenant-asr-endpoint em {
+  min-width: 0;
+  overflow: hidden;
+  color: #4e5969;
+  font-size: 12px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenant-asr-endpoint {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) minmax(220px, auto);
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  margin-bottom: 10px;
+  padding: 9px 10px;
+}
+
+.tenant-asr-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.tenant-asr-columns > section {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tenant-asr-columns > section > span {
+  font-weight: 700;
+}
+
+.tenant-asr-list,
+.tenant-asr-guardrails {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.tenant-asr-row {
+  display: grid;
+  grid-template-columns: 16px minmax(112px, 0.7fr) minmax(140px, 0.9fr) minmax(0, 1.2fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 8px 9px;
+  color: #1d2129;
+  text-align: left;
+}
+
+button.tenant-asr-row {
+  cursor: pointer;
+}
+
+button.tenant-asr-row:hover {
+  border-color: #165dff !important;
+  background: #f2f7ff !important;
+}
+
+.tenant-asr-row svg,
+.tenant-asr-guardrails svg {
+  color: #165dff;
+}
+
+.tenant-asr-row code {
+  min-width: 0;
+  overflow: hidden;
+  color: #4e5969;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenant-asr-row em {
+  min-width: 0;
+  overflow: hidden;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenant-asr-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.tenant-asr-actions button,
+.tenant-asr-mini button {
+  min-height: 32px;
+  border: 1px solid #e5e6eb !important;
+  border-radius: 4px;
+  color: #4e5969;
+  background: #ffffff !important;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tenant-asr-actions button:hover,
+.tenant-asr-mini button:hover {
+  border-color: #165dff !important;
+  color: #165dff;
+  background: #f2f7ff !important;
+}
+
+.tenant-asr-guardrails div {
+  display: grid;
+  grid-template-columns: 16px minmax(72px, 0.45fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 8px 9px;
+}
+
+.tenant-asr-guardrails span {
+  color: #165dff;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.tenant-asr-guardrails strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #4e5969;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tenant-asr-mini {
+  display: grid;
+  gap: 7px;
+}
+
+.tenant-asr-mini button {
+  justify-self: start;
+  padding: 0 12px;
+}
+
+@media (max-width: 1280px) {
+  .tenant-asr-hero {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tenant-asr-endpoint {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .tenant-asr-row {
+    grid-template-columns: 16px minmax(0, 1fr);
+  }
+
+  .tenant-asr-endpoint span,
+  .tenant-asr-endpoint strong,
+  .tenant-asr-endpoint em {
+    grid-column: 1 / -1;
+  }
+
+  .tenant-asr-row strong,
+  .tenant-asr-row code,
+  .tenant-asr-row em {
+    grid-column: 2;
+  }
+
+  .tenant-asr-columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

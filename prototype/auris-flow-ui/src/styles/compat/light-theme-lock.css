@@ -1,0 +1,318 @@
+/* Final Arco light skin lock: dark and contrast themes intentionally render as the same light console. */
+:root {
+  color: #1d2129;
+  background: #f7f8fa;
+}
+
+html,
+body {
+  background: #f7f8fa !important;
+}
+
+.app-shell,
+.app-shell[data-theme="contrast"],
+.app-shell[data-theme="dark"],
+.app-shell[data-theme="light"] {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f7f8fa;
+  --surface-3: #f2f3f5;
+  --line: #e5e6eb;
+  --line-strong: #c9cdd4;
+  --text: #1d2129;
+  --muted: #4e5969;
+  --faint: #86909c;
+  --teal: #14c9c9;
+  --cyan: #165dff;
+  --blue: #165dff;
+  --green: #00b42a;
+  --amber: #ff7d00;
+  --red: #f53f3f;
+  --violet: #722ed1;
+  --doc: #c9a227;
+  --shadow: 0 6px 18px rgba(29, 33, 41, 0.06);
+  color: #1d2129 !important;
+  background: #f7f8fa !important;
+}
+
+.sidebar,
+.app-shell[data-theme="contrast"] .sidebar,
+.app-shell[data-theme="dark"] .sidebar,
+.topbar,
+.app-shell[data-theme="contrast"] .topbar,
+.app-shell[data-theme="dark"] .topbar {
+  border-color: #e5e6eb !important;
+  color: #1d2129 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+}
+
+.workspace,
+.app-shell[data-theme="contrast"] .workspace,
+.app-shell[data-theme="dark"] .workspace {
+  color: #1d2129 !important;
+  background: #f7f8fa !important;
+}
+
+.brand-mark {
+  border-color: #165dff !important;
+  border-radius: 4px !important;
+  color: #ffffff !important;
+  background: #165dff !important;
+  box-shadow: none !important;
+}
+
+.brand strong,
+.app-shell[data-theme="contrast"] .brand strong,
+.app-shell[data-theme="dark"] .brand strong,
+.app-shell[data-theme="contrast"] h1,
+.app-shell[data-theme="dark"] h1 {
+  color: #1d2129 !important;
+}
+
+.brand span,
+.eyebrow,
+.app-shell[data-theme="contrast"] .brand span,
+.app-shell[data-theme="dark"] .brand span,
+.app-shell[data-theme="contrast"] .eyebrow,
+.app-shell[data-theme="dark"] .eyebrow {
+  color: #86909c !important;
+}
+
+.context-select,
+.icon-pill,
+.bell,
+.avatar,
+.quick-actions button,
+.canvas-toolbar-actions button,
+.drawer-actions button,
+.drawer-head button,
+.task-tab-card button,
+.task-tab-card-head button,
+.section-head button,
+.wave-toolbar button,
+.groupbar button,
+.tabs button {
+  border-color: #e5e6eb !important;
+  border-radius: 4px !important;
+  color: #4e5969 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+.context-select:hover,
+.context-select.active,
+.icon-pill:hover,
+.icon-pill.active,
+.bell:hover,
+.bell.active,
+.avatar:hover,
+.avatar.active,
+.quick-actions button:hover,
+.quick-actions button.active,
+.canvas-toolbar-actions button:hover,
+.canvas-toolbar-actions button.active,
+.drawer-actions button:hover,
+.drawer-head button:hover,
+.task-tab-card button:hover,
+.task-tab-card-head button:hover {
+  border-color: #165dff !important;
+  color: #165dff !important;
+  background: #f2f7ff !important;
+}
+
+.arco-theme-pill {
+  border-color: #bedaff !important;
+  color: #165dff !important;
+  background: #f2f7ff !important;
+}
+
+.module-panel,
+.module-metric,
+.module-tabs,
+.module-command-panel,
+.queue-panel,
+.main-review,
+.evidence-panel,
+.simple-listen,
+.matrix-main,
+.matrix-side,
+.connector-canvas,
+.canvas-toolbar,
+.connector-stage,
+.task-tab-page,
+.task-tab-card,
+.connector-drawer,
+.drawer-body,
+.drawer-form,
+.drawer-actions,
+.node-library-panel,
+.node-config-panel,
+.tenant-search-box,
+.entity-modal-panel,
+.session-boundary-panel,
+.conversation-boundary-main,
+.voiceprint-workbench,
+.label-human-workbench,
+.label-scenario-workbench,
+.flow-abstraction-canvas,
+.flow-story-panel,
+.flow-story-pipeline,
+.flow-landing-panel,
+.asset-leaf,
+.detail-dagster-card,
+.asr-service-hero,
+.quota-panel,
+.insight-chart-card {
+  border-color: #e5e6eb !important;
+  color: #1d2129 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+.module-table,
+.module-table-head,
+.module-table-row,
+.task-binding-row,
+.task-version-row,
+.task-run-row,
+.task-runtime-row,
+.task-contract-row,
+.dagster-object-row,
+.connector-node,
+.mapping-agent-node,
+.entity-map-node,
+	.dagster-node,
+	.node-template-group button,
+	.intent-checks button,
+	.run-log-card button,
+	.home-evidence-item,
+	.route-card,
+	.task-template-flow-card,
+	.task-template-flow-arrow,
+	.flow-stage-arrow,
+	.flow-story-step,
+	.flow-story-link,
+	.flow-landing-row {
+	  border-color: #e5e6eb !important;
+	  color: #1d2129 !important;
+  background: #f7f8fa !important;
+  box-shadow: none !important;
+}
+
+.module-table-row:hover,
+.task-binding-row:hover,
+.task-version-row:hover,
+.task-contract-row:hover,
+.connector-node:hover,
+.connector-node.selected,
+.mapping-agent-node.selected,
+.entity-map-node.selected,
+	.dagster-node.selected,
+	.task-template-flow-card:hover,
+	.task-template-flow-card:focus-visible,
+	.task-template-flow-card.active,
+	.task-template-flow-arrow:hover,
+	.task-template-flow-arrow:focus-visible,
+	.flow-stage-arrow:hover,
+	.flow-stage-arrow:focus-visible,
+	.flow-stage-arrow.active,
+	.flow-story-step:hover,
+	.flow-story-step.active,
+	.flow-story-link:hover,
+	.flow-story-link:focus-visible,
+	.flow-story-link.active,
+	.flow-landing-row:hover {
+	  border-color: #165dff !important;
+	  background: #f2f7ff !important;
+}
+
+.sidebar nav button,
+.sidebar-foot button {
+  border-radius: 4px !important;
+  color: #4e5969 !important;
+  background: transparent !important;
+}
+
+.sidebar nav button.active,
+.sidebar nav button:hover,
+.sidebar-foot button:hover {
+  color: #165dff !important;
+  background: #e8f3ff !important;
+}
+
+.topbar-popover,
+.app-shell[data-theme="contrast"] .topbar-popover,
+.app-shell[data-theme="dark"] .topbar-popover {
+  border-color: #e5e6eb !important;
+  color: #1d2129 !important;
+  background: #ffffff !important;
+  box-shadow: 0 8px 24px rgba(29, 33, 41, 0.12) !important;
+}
+
+.topbar-popover button,
+.topbar-qa-row {
+  border-color: #e5e6eb !important;
+  color: #1d2129 !important;
+  background: #f7f8fa !important;
+}
+
+.topbar-popover button:hover,
+.topbar-popover button.selected {
+  border-color: #165dff !important;
+  background: #f2f7ff !important;
+}
+
+.topbar-popover button span,
+.topbar-qa-row span,
+.module-metric span,
+.module-metric em,
+.module-panel p,
+.task-tab-card p,
+.task-tab-card em,
+	.connector-node em,
+	.task-template-flow-card span,
+	.task-template-flow-arrow span,
+		.dagster-node em,
+	.flow-stage-arrow span,
+	.flow-story-step span,
+	.flow-story-step em,
+	.flow-story-link span,
+	.asset-leaf div > span,
+	.asset-leaf small {
+  color: #4e5969 !important;
+}
+
+.module-metric strong,
+.module-panel strong,
+.task-tab-card strong,
+.connector-node strong,
+.dagster-node strong,
+.flow-story-step strong,
+.asset-leaf strong,
+.asset-leaf b {
+  color: #1d2129 !important;
+}
+
+.canvas-level-switch,
+.canvas-level-switch button,
+.listening-case-summary,
+.listening-mode-switch,
+.listening-queue-strip,
+.listening-action-strip,
+.listening-tool-panel {
+  border-color: #e5e6eb !important;
+  color: #1d2129 !important;
+  background: #ffffff !important;
+  box-shadow: none !important;
+}
+
+.listening-mode-switch button.active,
+.canvas-level-switch button.active,
+.module-tabs button.active,
+.tabs button.active {
+  border-color: #165dff !important;
+  color: #165dff !important;
+  background: #f2f7ff !important;
+}

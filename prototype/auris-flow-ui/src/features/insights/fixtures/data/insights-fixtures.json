@@ -1,0 +1,1095 @@
+{
+  "metricDescriptors": [
+    {
+      "key": "effectiveReceptionRate",
+      "label": "有效接待率",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": "green",
+      "meaning": "衡量当前范围内有足够时长、置信度和可复核证据的真实接待占比，是经营漏斗的入口质量。",
+      "formula": "有效接待事实 / 全部接待事实",
+      "tags": ["接待关联", "音频片段", "证据包"],
+      "source": "InsightFact.durationSec + confidence + evidenceRefs",
+      "owner": "运营质检组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "优先补齐低时长和低置信接待，避免把无效片段带入销售转化分析。",
+      "drilldownRoute": "listening",
+      "insight": "有效接待率决定后续转化指标的样本底座，低置信和短片段会直接压低 BI 可信度。",
+      "action": "定位无效接待片段",
+      "route": "listening",
+      "evidenceIds": null
+    },
+    {
+      "key": "conversionProgress",
+      "label": "成交推进率",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": "teal",
+      "meaning": "衡量销售是否把报价、异议和试驾引导推进成明确下一步动作。",
+      "formula": "(试驾承接 + 异议已承接) / 全部接待事实",
+      "tags": ["价格异议已承接", "试驾预约承接", "成交意向"],
+      "source": "标签轨道 + 接待单事件 + Agent 动作",
+      "owner": "销售运营",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "把高置信成交推进片段沉淀为销售训练包，并为低推进门店创建跟进动作。",
+      "drilldownRoute": "data",
+      "insight": "成交推进率把话术结果落到试驾、跟进和单据，不再只统计标签命中。",
+      "action": "创建销售跟进行动",
+      "route": "data",
+      "evidenceIds": null
+    },
+    {
+      "key": "objectionResolution",
+      "label": "异议化解率",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": "green",
+      "meaning": "衡量客户价格异议是否被销售用试驾、优惠或方案解释承接。",
+      "formula": "已承接异议 / 客户价格异议",
+      "tags": ["客户价格异议", "价格异议已承接", "优惠幅度"],
+      "source": "simpleTurns + label/event_tags",
+      "owner": "标签运营组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "把高接受率片段沉淀为异议处理正例，低接受率片段进入 Prompt/badcase 优化。",
+      "drilldownRoute": "labels",
+      "insight": "价格异议承接主要发生在试驾引导后，适合沉淀训练样本。",
+      "action": "生成异议承接样本包",
+      "route": "labels",
+      "evidenceIds": null
+    },
+    {
+      "key": "quoteConsistency",
+      "label": "报价一致率",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": null,
+      "meaning": "衡量 ASR 口播金额、优惠承诺和报价单字段是否一致。",
+      "formula": "无金额冲突报价 / 报价标签",
+      "tags": ["报价金额", "优惠幅度", "报价金额冲突"],
+      "source": "报价单 #BJ-041 + ASR 金额实体",
+      "owner": "价格策略组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "金额冲突样本先送证据审查，再回流为报价 Prompt 的负例和冲突规则。",
+      "drilldownRoute": "listening",
+      "insight": "口播优惠和报价单字段存在差异，需要从证据审查页核对报价版本。",
+      "action": "下钻金额冲突证据",
+      "route": "listening",
+      "evidenceIds": null
+    },
+    {
+      "key": "riskReverseScore",
+      "label": "风险反向分",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": null,
+      "meaning": "把金额冲突、串音、低置信等风险反向折算成可比较得分，越高说明接待证据越稳定。",
+      "formula": "100 - 风险事实 / 全部事实",
+      "tags": ["报价金额冲突", "串音疑似", "低置信片段"],
+      "source": "复核队列 + 音频质量 + 标签规则",
+      "owner": "风控与质检",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "对风险样本做证据定位和人工仲裁，生成改绑候选或补单草稿。",
+      "drilldownRoute": "evaluation",
+      "insight": "风险反向分把风险从单点告警转换为经营指标，方便和门店、销售、标签版本联动。",
+      "action": "生成风险复核队列",
+      "route": "evaluation",
+      "evidenceIds": null
+    },
+    {
+      "key": "testDriveIntent",
+      "label": "试驾意向转化",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": "teal",
+      "meaning": "衡量试驾意向、预约承接和单据回填的业务闭环程度。",
+      "formula": "试驾/成交意向事件 / 全量事实",
+      "tags": ["试驾时间", "成交意向", "试驾预约承接"],
+      "source": "试驾单 #SJ-028 + 试驾事件",
+      "owner": "门店运营组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "把同一客户组的试驾意图与试驾单回填任务绑定，避免只看语音标签。",
+      "drilldownRoute": "data",
+      "insight": "试驾承接与价格异议出现在同一会话窗口，可生成 CRM 跟进待办。",
+      "action": "创建试驾跟进动作",
+      "route": "data",
+      "evidenceIds": null
+    },
+    {
+      "key": "crosstalkRisk",
+      "label": "串音影响率",
+      "value": null,
+      "valueNumber": null,
+      "delta": "+2.1pp",
+      "tone": "red",
+      "meaning": "衡量串音、低置信和设备重叠对报价与成交判断的污染程度。",
+      "formula": "串音候选 / 报价事实",
+      "tags": ["串音疑似", "低置信片段", "报价金额"],
+      "source": "多源录音 Minimap + 音频质量标签",
+      "owner": "音频质检组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "串音高峰先在调听矩阵确认主录音，再决定是否回流标签评测集。",
+      "drilldownRoute": "listening",
+      "insight": "串音候选集中在报价和试驾承接窗口，会影响金额和成交意向判断。",
+      "action": "进入串音矩阵",
+      "route": "listening",
+      "evidenceIds": null
+    },
+    {
+      "key": "tagAssetQuality",
+      "label": "证据链完整度",
+      "value": null,
+      "valueNumber": null,
+      "delta": null,
+      "tone": "blue",
+      "meaning": "衡量业务洞察是否能回到音频、ASR、标签、单据和资产血缘。",
+      "formula": "可追溯事实 / 全量事实",
+      "tags": ["标签资产", "证据包", "Human Loop"],
+      "source": "资产 Key + 证据引用 + 单据引用",
+      "owner": "数据治理组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "对缺少证据引用的标签禁止进入报告，只允许补资产或回填。",
+      "drilldownRoute": "assets",
+      "insight": "大部分洞察能回到音频、ASR、单据和标签资产，少量补单草稿仍待回填。",
+      "action": "查看资产血缘",
+      "route": "assets",
+      "evidenceIds": null
+    },
+    {
+      "key": "modelQuality",
+      "label": "模型综合质量",
+      "value": null,
+      "valueNumber": null,
+      "delta": "边界 -2.1",
+      "tone": "violet",
+      "meaning": "衡量 ASR、边界、串音与标签模型的综合可用性。",
+      "formula": "ASR / 边界 / 串音 / 标签候选评测均值",
+      "tags": ["ASR 转写", "边界切分", "串音识别", "标签识别"],
+      "source": "EvaluationCapabilityRows",
+      "owner": "模型平台组",
+      "rangeValues": null,
+      "evidenceCount": null,
+      "suggestion": "模型质量下降时阻断报告发布，并把失败样本送评测中心和 Prompt 优化。",
+      "drilldownRoute": "evaluation",
+      "insight": "ASR 与标签识别提升，但边界切分下降会影响完整对话和报告口径。",
+      "action": "查看评测样本",
+      "route": "evaluation",
+      "evidenceIds": null
+    }
+  ],
+  "northStarDescriptor": {
+    "label": "接待转化质量指数",
+    "value": null,
+    "delta": null,
+    "meaning": "综合衡量接待是否有效、是否推进成交、报价是否一致以及风险是否可控。",
+    "formula": "有效接待率 30% + 成交推进率 30% + 报价一致率 20% + 风险反向分 20%",
+    "lift": null,
+    "drag": null,
+    "components": [
+      {
+        "key": "effective",
+        "metricKey": "effectiveReceptionRate",
+        "label": "有效接待率",
+        "weight": 30,
+        "value": null,
+        "contribution": null,
+        "meaning": "入口样本质量",
+        "route": "listening",
+        "tone": "green"
+      },
+      {
+        "key": "conversion",
+        "metricKey": "conversionProgress",
+        "label": "成交推进率",
+        "weight": 30,
+        "value": null,
+        "contribution": null,
+        "meaning": "从话术到下一步动作",
+        "route": "data",
+        "tone": "teal"
+      },
+      {
+        "key": "quote",
+        "metricKey": "quoteConsistency",
+        "label": "报价一致率",
+        "weight": 20,
+        "value": null,
+        "contribution": null,
+        "meaning": "金额口径可信度",
+        "route": "listening",
+        "tone": null
+      },
+      {
+        "key": "risk",
+        "metricKey": "riskReverseScore",
+        "label": "风险反向分",
+        "weight": 20,
+        "value": null,
+        "contribution": null,
+        "meaning": "低风险越高越好",
+        "route": "evaluation",
+        "tone": null
+      }
+    ]
+  },
+  "views": {
+    "business": {
+      "title": "智能 BI 大盘",
+      "subtitle": "先看北极星经营结论，再下钻标签、音频、单据和复核证据",
+      "dimension": "业务大盘",
+      "metricKeys": ["effectiveReceptionRate", "conversionProgress", "quoteConsistency", "riskReverseScore"],
+      "chartIds": ["business-trend", "business-sankey", "business-radar", "business-table"],
+      "reportTitle": "经营风险日报",
+      "agentGoal": "解释业务指标变化，并把结论落到可复核证据。"
+    },
+    "store": {
+      "title": "门店归因",
+      "subtitle": "按门店、时间窗和异常类型定位波动来源",
+      "dimension": "门店 / 时间窗",
+      "metricKeys": ["quoteConsistency", "crosstalkRisk", "tagAssetQuality"],
+      "chartIds": ["store-heatmap", "store-risk-bar", "store-table"],
+      "reportTitle": "门店归因报告",
+      "agentGoal": "找出门店风险热区和需要补数、复核、改绑的动作。"
+    },
+    "sales": {
+      "title": "销售绩效",
+      "subtitle": "把销售话术、客户响应和事件回填串成可训练样本",
+      "dimension": "销售 / 客户组",
+      "metricKeys": ["objectionResolution", "testDriveIntent", "quoteConsistency"],
+      "chartIds": ["sales-bar", "sales-radar", "sales-table"],
+      "reportTitle": "销售训练样本包",
+      "agentGoal": "筛出销售可复用话术、风险承诺和需要人工确认的片段。"
+    },
+    "tags": {
+      "title": "标签资产",
+      "subtitle": "检查标签命中、标签血缘和证据资产覆盖",
+      "dimension": "标签 / 证据资产",
+      "metricKeys": ["tagAssetQuality", "quoteConsistency", "crosstalkRisk"],
+      "chartIds": ["tag-bar", "tag-sankey", "tag-table"],
+      "reportTitle": "标签资产报告",
+      "agentGoal": "指出哪些标签支撑业务洞察，哪些需要补规则或送 Human Loop。"
+    },
+    "quality": {
+      "title": "模型质量",
+      "subtitle": "从评测结果解释图表、标签和报告可信度",
+      "dimension": "模型 / 评测集",
+      "metricKeys": ["modelQuality", "tagAssetQuality", "crosstalkRisk"],
+      "chartIds": ["quality-line", "quality-radar", "quality-heatmap", "quality-table"],
+      "reportTitle": "模型质量观察报告",
+      "agentGoal": "定位模型能力下降对业务指标和报告发布的影响。"
+    },
+    "reports": {
+      "title": "报告中心",
+      "subtitle": "基于当前数据范围生成、预览、删除和导出报告",
+      "dimension": "报告资产",
+      "metricKeys": ["effectiveReceptionRate", "conversionProgress", "quoteConsistency", "riskReverseScore"],
+      "chartIds": ["report-coverage", "report-table"],
+      "reportTitle": "管理层摘要",
+      "agentGoal": "把当前图表和证据组织成可交付报告草稿。"
+    }
+  },
+  "chartDescriptors": {
+    "business-trend": {
+      "id": "business-trend",
+      "type": "line",
+      "title": "北极星与业务趋势",
+      "subtitle": null,
+      "source": null,
+      "xLabels": null,
+      "yDomain": [
+        40,
+        95
+      ],
+      "yTicks": [
+        40,
+        50,
+        60,
+        70,
+        80,
+        90
+      ],
+      "targetLine": {
+        "label": "目标线 80",
+        "value": 80,
+        "tone": "blue"
+      },
+      "eventMarkers": [
+        {
+          "index": null,
+          "label": "标签版本",
+          "detail": null,
+          "factId": null,
+          "seriesKey": "north",
+          "tone": "blue"
+        },
+        {
+          "index": null,
+          "label": "报价冲突",
+          "detail": "报价一致率出现拖累，金额字段需要进入复核",
+          "factId": null,
+          "seriesKey": "quote",
+          "tone": "red"
+        },
+        {
+          "index": null,
+          "label": "Agent 回流",
+          "detail": "Agent 建议把成交推进和异议化解样本写入报告资产",
+          "factId": null,
+          "seriesKey": "objection",
+          "tone": "green"
+        }
+      ],
+      "summaryCards": [
+        {
+          "title": "主要拉升",
+          "value": null,
+          "detail": "价格异议被接住，成交推进样本可沉淀",
+          "tone": "green",
+          "factId": null,
+          "route": "listening",
+          "seriesKey": "objection",
+          "metricKey": "objectionResolution",
+          "pointIndex": null
+        },
+        {
+          "title": "主要拖累",
+          "value": null,
+          "detail": "ASR 报价与报价单金额不一致，需要复核",
+          "tone": null,
+          "factId": null,
+          "route": "listening",
+          "seriesKey": "quote",
+          "metricKey": "quoteConsistency",
+          "pointIndex": null
+        },
+        {
+          "title": "下一步动作",
+          "value": "下钻证据链",
+          "detail": "进入调听、标签和资产血缘确认影响范围",
+          "tone": "blue",
+          "factId": null,
+          "route": "assets",
+          "seriesKey": "north",
+          "metricKey": "effectiveReceptionRate",
+          "pointIndex": null
+        }
+      ],
+      "series": [
+        {
+          "key": "north",
+          "metricKey": "effectiveReceptionRate",
+          "label": "北极星",
+          "tone": "blue",
+          "values": null,
+          "unit": "",
+          "unitLabel": "指数",
+          "factIds": null,
+          "emphasis": true,
+          "delta": null,
+          "direction": "up"
+        },
+        {
+          "key": "objection",
+          "metricKey": "objectionResolution",
+          "label": "异议化解",
+          "tone": "green",
+          "values": null,
+          "unit": "%",
+          "unitLabel": "化解率",
+          "factIds": null,
+          "delta": "+2.3",
+          "direction": "up"
+        },
+        {
+          "key": "quote",
+          "metricKey": "quoteConsistency",
+          "label": "报价一致",
+          "tone": null,
+          "values": null,
+          "unit": "%",
+          "unitLabel": "一致率",
+          "factIds": null,
+          "delta": "-0.6",
+          "direction": null
+        },
+        {
+          "key": "drive",
+          "metricKey": "conversionProgress",
+          "label": "成交推进",
+          "tone": "teal",
+          "values": null,
+          "unit": "%",
+          "unitLabel": "推进率",
+          "factIds": null,
+          "delta": "+1.1",
+          "direction": "up"
+        }
+      ]
+    },
+    "business-sankey": {
+      "id": "business-sankey",
+      "type": "sankey",
+      "title": "问题流向",
+      "subtitle": "门店 → 标签 → 动作，点击节点查看证据",
+      "source": "storeRows + tagCounts + reviewQueue",
+      "nodes": null,
+      "links": null
+    },
+    "business-radar": {
+      "id": "business-radar",
+      "type": "radar",
+      "title": "业务健康画像",
+      "subtitle": "指标值对比同城均线",
+      "source": "metricByKey",
+      "axes": [
+        {
+          "label": "有效",
+          "value": null,
+          "compare": 86,
+          "factId": null,
+          "route": "listening"
+        },
+        {
+          "label": "推进",
+          "value": null,
+          "compare": 58,
+          "factId": null,
+          "route": "data"
+        },
+        {
+          "label": "报价",
+          "value": null,
+          "compare": 91,
+          "factId": null,
+          "route": "listening"
+        },
+        {
+          "label": "证据",
+          "value": null,
+          "compare": 84,
+          "factId": null,
+          "route": "assets"
+        },
+        {
+          "label": "低风险",
+          "value": null,
+          "compare": 86,
+          "factId": null,
+          "route": "evaluation"
+        }
+      ]
+    },
+    "business-table": {
+      "id": "business-table",
+      "type": "table",
+      "title": "证据样本",
+      "subtitle": "每条业务结论都能回到音频、事件和资产",
+      "source": "InsightFact",
+      "columns": [
+        "时间",
+        "事件",
+        "标签",
+        "资产",
+        "状态"
+      ],
+      "rows": null
+    },
+    "store-heatmap": {
+      "id": "store-heatmap",
+      "type": "heatmap",
+      "title": "门店时空热区",
+      "subtitle": "按门店和小时聚合风险强度",
+      "source": "storeRows + riskFacts",
+      "heatmap": {
+        "columns": [
+          "09",
+          "10",
+          "11",
+          "12",
+          "13",
+          "14",
+          "15",
+          "18"
+        ],
+        "rows": null
+      }
+    },
+    "store-risk-bar": {
+      "id": "store-risk-bar",
+      "type": "bar",
+      "title": "门店风险排序",
+      "subtitle": "风险样本、报价和试驾事件合并排序",
+      "source": "storeRows",
+      "bars": null
+    },
+    "store-table": {
+      "id": "store-table",
+      "type": "table",
+      "title": "门店证据列表",
+      "subtitle": "点击门店行定位关联事件和资产",
+      "source": "storeRows",
+      "columns": [
+        "门店",
+        "事实",
+        "风险",
+        "报价",
+        "试驾"
+      ],
+      "rows": null
+    },
+    "sales-bar": {
+      "id": "sales-bar",
+      "type": "bar",
+      "title": "销售样本贡献",
+      "subtitle": "报价、异议承接和风险样本的结构",
+      "source": "salesRows",
+      "bars": null
+    },
+    "sales-radar": {
+      "id": "sales-radar",
+      "type": "radar",
+      "title": "销售话术能力",
+      "subtitle": "当前销售与项目均线对比",
+      "source": "salesRows + metrics",
+      "axes": [
+        {
+          "label": "报价清晰",
+          "value": null,
+          "compare": 84,
+          "factId": null,
+          "route": "listening"
+        },
+        {
+          "label": "异议承接",
+          "value": null,
+          "compare": 61,
+          "factId": null,
+          "route": "labels"
+        },
+        {
+          "label": "试驾推进",
+          "value": null,
+          "compare": 30,
+          "factId": null,
+          "route": "data"
+        },
+        {
+          "label": "证据完整",
+          "value": null,
+          "compare": 86,
+          "factId": null,
+          "route": "assets"
+        },
+        {
+          "label": "低风险",
+          "value": null,
+          "compare": 76,
+          "factId": null,
+          "route": "listening"
+        }
+      ]
+    },
+    "sales-table": {
+      "id": "sales-table",
+      "type": "table",
+      "title": "销售动作候选",
+      "subtitle": "从证据片段生成训练、复核和待办动作",
+      "source": "facts + agent actions",
+      "columns": [
+        "对象",
+        "动作",
+        "证据",
+        "下一步"
+      ],
+      "rows": null
+    },
+    "tag-bar": {
+      "id": "tag-bar",
+      "type": "bar",
+      "title": "标签命中分布",
+      "subtitle": "实际事实中的标签热度，不再是静态卡片",
+      "source": "tagCounts",
+      "bars": null
+    },
+    "tag-sankey": {
+      "id": "tag-sankey",
+      "type": "sankey",
+      "title": "标签到资产血缘",
+      "subtitle": "标签 → 证据资产 → 报告/复核",
+      "source": "tagCounts + assetKey",
+      "nodes": null,
+      "links": null
+    },
+    "tag-table": {
+      "id": "tag-table",
+      "type": "table",
+      "title": "标签资产明细",
+      "subtitle": "标签、命中、置信和资产 Key",
+      "source": "tagCounts",
+      "columns": [
+        "标签",
+        "命中",
+        "置信",
+        "资产 Key",
+        "下游"
+      ],
+      "rows": null
+    },
+    "quality-line": {
+      "id": "quality-line",
+      "type": "line",
+      "title": "模型能力趋势",
+      "subtitle": "候选模型对 ASR、边界、串音和标签识别的影响",
+      "source": "EvaluationCapabilityRows",
+      "xLabels": [
+        "v4-1",
+        "v4-2",
+        "v4-3",
+        "v5-灰度",
+        "v5"
+      ],
+      "series": null
+    },
+    "quality-radar": {
+      "id": "quality-radar",
+      "type": "radar",
+      "title": "模型质量雷达",
+      "subtitle": "当前模型与基线模型能力对比",
+      "source": "EvaluationCapabilityRows",
+      "axes": null
+    },
+    "quality-heatmap": {
+      "id": "quality-heatmap",
+      "type": "heatmap",
+      "title": "badcase 影响热区",
+      "subtitle": "模型能力下降如何影响门店和标签",
+      "source": "qualityRows + riskFacts",
+      "heatmap": {
+        "columns": [
+          "ASR",
+          "边界",
+          "串音",
+          "标签"
+        ],
+        "rows": null
+      }
+    },
+    "quality-table": {
+      "id": "quality-table",
+      "type": "table",
+      "title": "模型评测数据",
+      "subtitle": "展示发布门禁所需的评测口径",
+      "source": "evaluationCapabilityRows",
+      "columns": [
+        "能力",
+        "基线",
+        "候选",
+        "变化",
+        "阻断"
+      ],
+      "rows": null
+    },
+    "report-coverage": {
+      "id": "report-coverage",
+      "type": "bar",
+      "title": "报告覆盖度",
+      "subtitle": "报告章节引用的指标、图表和证据数量",
+      "source": "reportDrafts",
+      "bars": [
+        {
+          "label": "业务指标",
+          "value": null,
+          "detail": "可引用指标",
+          "tone": "blue",
+          "factId": null,
+          "route": "insights"
+        },
+        {
+          "label": "证据样本",
+          "value": null,
+          "detail": "可追溯样本",
+          "tone": "teal",
+          "factId": null,
+          "route": "assets"
+        },
+        {
+          "label": "风险样本",
+          "value": null,
+          "detail": "进入 Human Loop",
+          "tone": "amber",
+          "factId": null,
+          "route": "listening"
+        },
+        {
+          "label": "图表组件",
+          "value": null,
+          "detail": "当前报告范围",
+          "tone": "violet",
+          "factId": null,
+          "route": "insights"
+        }
+      ]
+    },
+    "report-table": {
+      "id": "report-table",
+      "type": "table",
+      "title": "报告输入明细",
+      "subtitle": "报告草稿使用的数据源和证据",
+      "source": "metrics + facts",
+      "columns": [
+        "输入",
+        "来源",
+        "数量",
+        "状态"
+      ],
+      "rows": [
+        {
+          "id": "metrics",
+          "cells": [
+            "业务指标",
+            "InsightMetric",
+            null,
+            "已计算"
+          ],
+          "route": "insights"
+        },
+        {
+          "id": "facts",
+          "factId": null,
+          "cells": [
+            "事实表",
+            "InsightFact",
+            null,
+            "已加载"
+          ],
+          "route": "data"
+        },
+        {
+          "id": "evidence",
+          "factId": null,
+          "cells": [
+            "证据链",
+            "assetKey + doc",
+            null,
+            "可下钻"
+          ],
+          "route": "assets"
+        },
+        {
+          "id": "risk",
+          "factId": null,
+          "cells": [
+            "风险样本",
+            "review queue",
+            null,
+            "待复核"
+          ],
+          "route": "listening"
+        }
+      ]
+    }
+  },
+  "emptyProjectionViews": {
+    "business": {
+      "label": "业务大盘",
+      "title": "经营总览待聚合",
+      "subtitle": "当前 BFF 范围没有经营指标，保留真实空态且不回落本地 fixture",
+      "icon": "LayoutDashboard",
+      "metrics": [
+        {
+          "label": "接待质量指数",
+          "state": "待计算",
+          "detail": "有效会话与接待完整度",
+          "tone": "blue"
+        },
+        {
+          "label": "成交推进漏斗",
+          "state": "待汇总",
+          "detail": "异议、试驾与跟进事件",
+          "tone": "green"
+        },
+        {
+          "label": "报价一致监控",
+          "state": "待核验",
+          "detail": "口播金额与报价单字段",
+          "tone": "amber"
+        },
+        {
+          "label": "经营风险反向分",
+          "state": "待评分",
+          "detail": "串音、低置信与金额冲突",
+          "tone": "red"
+        }
+      ],
+      "canvasTitle": "经营指标等待事实聚合",
+      "canvasDetail": "接待事实、业务事件和报价单完成同范围聚合后，这里将展示北极星趋势、转化漏斗与风险解释。",
+      "checks": [
+        "接待事实与有效会话",
+        "试驾、异议与跟进事件",
+        "报价口径与风险证据"
+      ],
+      "sideTitle": "经营口径准备",
+      "nextTitle": "先完成业务事实聚合",
+      "nextDetail": "指标必须能回到音频、ASR、标签和单据，空集合不会伪造经营结论。",
+      "lineage": [
+        "接待事实",
+        "业务事件",
+        "经营指标",
+        "管理摘要"
+      ]
+    },
+    "store": {
+      "label": "门店归因",
+      "title": "门店归因待形成样本",
+      "subtitle": "当前范围没有可比较门店样本，归因结论保持为空",
+      "icon": "Building2",
+      "metrics": [
+        {
+          "label": "门店风险热区",
+          "state": "无样本",
+          "detail": "异常门店与风险密度",
+          "tone": "red"
+        },
+        {
+          "label": "跨店基线差",
+          "state": "待对齐",
+          "detail": "同城门店与上周期基线",
+          "tone": "blue"
+        },
+        {
+          "label": "异常接待时段",
+          "state": "待定位",
+          "detail": "高风险时间窗与会话",
+          "tone": "amber"
+        },
+        {
+          "label": "归因处置任务",
+          "state": "未生成",
+          "detail": "补数、复核与设备改绑",
+          "tone": "green"
+        }
+      ],
+      "canvasTitle": "门店热力与波动来源待计算",
+      "canvasDetail": "至少两个同口径门店完成时段聚合后，这里将展示门店热力、同城偏差和风险贡献路径。",
+      "checks": [
+        "门店样本达到比较条件",
+        "时段与同城基线对齐",
+        "异常会话可下钻复核"
+      ],
+      "sideTitle": "归因条件检查",
+      "nextTitle": "补齐门店比较窗口",
+      "nextDetail": "门店归因只使用同租户、同项目、同版本数据，避免把范围差异误判为经营波动。",
+      "lineage": [
+        "门店事实",
+        "时段聚合",
+        "同城基线",
+        "归因任务"
+      ]
+    },
+    "sales": {
+      "label": "销售绩效",
+      "title": "销售绩效待积累接待事实",
+      "subtitle": "当前范围没有可评价销售会话，不生成排名或训练结论",
+      "icon": "UserCheck",
+      "metrics": [
+        {
+          "label": "异议承接表现",
+          "state": "待识别",
+          "detail": "客户异议与销售回应",
+          "tone": "green"
+        },
+        {
+          "label": "试驾跟进转化",
+          "state": "待回填",
+          "detail": "意向、预约与后续动作",
+          "tone": "blue"
+        },
+        {
+          "label": "承诺风险片段",
+          "state": "待复核",
+          "detail": "优惠、价格与范围承诺",
+          "tone": "red"
+        },
+        {
+          "label": "优秀话术样本",
+          "state": "未沉淀",
+          "detail": "高置信正例与训练素材",
+          "tone": "violet"
+        }
+      ],
+      "canvasTitle": "销售能力画像等待会话证据",
+      "canvasDetail": "销售、客户组和业务事件建立关联后，这里将展示绩效排行、能力雷达与可复用话术样本。",
+      "checks": [
+        "销售身份与会话绑定",
+        "客户响应事件已回填",
+        "绩效片段通过证据复核"
+      ],
+      "sideTitle": "绩效证据要求",
+      "nextTitle": "关联销售与客户组",
+      "nextDetail": "排名必须基于可核验接待结果，不用标签命中次数替代真实绩效。",
+      "lineage": [
+        "销售会话",
+        "客户响应",
+        "绩效画像",
+        "训练样本"
+      ]
+    },
+    "tags": {
+      "label": "标签资产",
+      "title": "标签资产待生成覆盖快照",
+      "subtitle": "当前范围没有标签聚合结果，资产血缘与证据覆盖保持可审计空态",
+      "icon": "Tags",
+      "metrics": [
+        {
+          "label": "业务标签命中",
+          "state": "待聚合",
+          "detail": "事件标签与业务语义",
+          "tone": "blue"
+        },
+        {
+          "label": "证据覆盖比例",
+          "state": "待计算",
+          "detail": "音频、ASR 与单据引用",
+          "tone": "green"
+        },
+        {
+          "label": "资产血缘断点",
+          "state": "待扫描",
+          "detail": "上游版本与下游报告",
+          "tone": "red"
+        },
+        {
+          "label": "人审回流队列",
+          "state": "无候选",
+          "detail": "冲突标签与低置信样本",
+          "tone": "amber"
+        }
+      ],
+      "canvasTitle": "标签分布与资产流向待物化",
+      "canvasDetail": "标签观察、版本和证据引用完成物化后，这里将展示命中分布、资产流向和治理断点。",
+      "checks": [
+        "标签观察完成版本绑定",
+        "每个结论携带证据引用",
+        "下游资产记录来源版本"
+      ],
+      "sideTitle": "资产治理检查",
+      "nextTitle": "先物化标签覆盖快照",
+      "nextDetail": "无证据引用的标签不会进入洞察报告，缺失血缘的资产需要先补链。",
+      "lineage": [
+        "标签观察",
+        "版本资产",
+        "证据覆盖",
+        "人审回流"
+      ]
+    },
+    "quality": {
+      "label": "模型质量",
+      "title": "模型质量待同步评测结果",
+      "subtitle": "当前范围没有候选模型评测快照，不推断发布质量",
+      "icon": "Gauge",
+      "metrics": [
+        {
+          "label": "ASR 热词效果",
+          "state": "待评测",
+          "detail": "召回、错词与误增强",
+          "tone": "blue"
+        },
+        {
+          "label": "边界切分能力",
+          "state": "待对比",
+          "detail": "完整对话与片段边界",
+          "tone": "amber"
+        },
+        {
+          "label": "串音识别质量",
+          "state": "待标注",
+          "detail": "主录音与同空间污染",
+          "tone": "red"
+        },
+        {
+          "label": "标签候选准确度",
+          "state": "待验证",
+          "detail": "基线、候选与发布门禁",
+          "tone": "violet"
+        }
+      ],
+      "canvasTitle": "能力趋势与发布门禁待评测",
+      "canvasDetail": "基线和候选版本在同一评测集完成运行后，这里将展示能力趋势、质量雷达和失败样本热区。",
+      "checks": [
+        "评测集版本已冻结",
+        "基线与候选使用同口径",
+        "失败样本可回到人工标注"
+      ],
+      "sideTitle": "评测前置条件",
+      "nextTitle": "运行同版本评测集",
+      "nextDetail": "没有评测快照时保持发布门禁未知，不用业务标签分布代替模型质量。",
+      "lineage": [
+        "评测集",
+        "候选运行",
+        "质量门禁",
+        "Badcase 回流"
+      ]
+    },
+    "reports": {
+      "label": "报告中心",
+      "title": "报告中心暂无可交付资产",
+      "subtitle": "当前范围没有已生成报告，不复用其他租户、项目或版本草稿",
+      "icon": "FileText",
+      "metrics": [
+        {
+          "label": "经营报告草稿",
+          "state": "未生成",
+          "detail": "北极星与风险摘要",
+          "tone": "blue"
+        },
+        {
+          "label": "门店归因报告",
+          "state": "未生成",
+          "detail": "热区、原因与处置建议",
+          "tone": "red"
+        },
+        {
+          "label": "销售训练样本包",
+          "state": "未生成",
+          "detail": "正例、风险与证据片段",
+          "tone": "green"
+        },
+        {
+          "label": "模型质量观察",
+          "state": "未生成",
+          "detail": "评测变化与发布影响",
+          "tone": "violet"
+        }
+      ],
+      "canvasTitle": "报告库等待受治理指标",
+      "canvasDetail": "指标快照、图表和证据包准备完成后，这里将提供报告预览、重生成、导出和删除状态。",
+      "checks": [
+        "指标快照属于当前范围",
+        "图表引用保持版本一致",
+        "报告结论携带证据包"
+      ],
+      "sideTitle": "报告生成条件",
+      "nextTitle": "先生成受治理指标快照",
+      "nextDetail": "报告只引用当前上下文的指标结果与证据包，跨范围草稿不会被静默复用。",
+      "lineage": [
+        "指标快照",
+        "图表引用",
+        "证据包",
+        "报告资产"
+      ]
+    }
+  }
+}

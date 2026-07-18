@@ -1,0 +1,66 @@
+/* Matrix dimension switcher: keep it visually consistent with compact Arco segmented controls. */
+.matrix-main .groupbar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: fit-content;
+  max-width: 100%;
+  min-height: 34px;
+  gap: 2px;
+  padding: 3px;
+  border: 1px solid #d8dde6;
+  border-radius: 7px;
+  background: #f7f8fa;
+}
+
+.matrix-main .groupbar button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 52px;
+  min-height: 26px;
+  padding: 0 12px;
+  border: 1px solid transparent !important;
+  border-radius: 5px !important;
+  color: #4e5969 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  font-size: 13px !important;
+  font-weight: 850;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.matrix-main .groupbar button:hover {
+  border-color: #bedaff !important;
+  color: #165dff !important;
+  background: #ffffff !important;
+}
+
+.matrix-main .groupbar button.active {
+  border-color: #94bfff !important;
+  color: #165dff !important;
+  background: #e8f3ff !important;
+  box-shadow: 0 0 0 2px rgba(22, 93, 255, 0.08) !important;
+}
+
+.app-shell[data-theme="dark"] .matrix-main .groupbar,
+.app-shell[data-theme="contrast"] .matrix-main .groupbar {
+  border-color: var(--line) !important;
+  background: rgba(255, 255, 255, 0.035) !important;
+}
+
+.app-shell[data-theme="dark"] .matrix-main .groupbar button,
+.app-shell[data-theme="contrast"] .matrix-main .groupbar button {
+  color: var(--muted) !important;
+  background: transparent !important;
+}
+
+.app-shell[data-theme="dark"] .matrix-main .groupbar button:hover,
+.app-shell[data-theme="dark"] .matrix-main .groupbar button.active,
+.app-shell[data-theme="contrast"] .matrix-main .groupbar button:hover,
+.app-shell[data-theme="contrast"] .matrix-main .groupbar button.active {
+  border-color: var(--cyan) !important;
+  color: var(--cyan) !important;
+  background: rgba(37, 247, 231, 0.12) !important;
+}

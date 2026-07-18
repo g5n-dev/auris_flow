@@ -1,0 +1,122 @@
+/* Align listening workbench controls with the Arco module-page pattern. */
+.workspace-head.module-head.listening-head {
+  grid-template-columns: minmax(260px, 1fr) minmax(360px, 560px) auto;
+  align-items: center;
+  gap: 16px;
+  margin-bottom: 10px;
+}
+
+.workspace-head.module-head.listening-head .listening-case-summary,
+.workspace-head.module-head.listening-head .listening-action-strip {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.workspace-head.module-head.listening-head .listening-case-summary {
+  padding: 0 !important;
+}
+
+.workspace-head.module-head.listening-head .listening-case-summary h1 {
+  font-size: 22px;
+}
+
+.workspace-head.module-head.listening-head .listening-action-strip {
+  justify-content: flex-end;
+  padding: 0 !important;
+}
+
+.listening-control-row {
+  display: grid;
+  grid-template-columns: max-content minmax(480px, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 42px;
+  margin-bottom: 10px;
+  padding: 4px;
+  border: 1px solid #e5e6eb;
+  border-radius: 4px;
+  background: #ffffff;
+  box-shadow: none;
+}
+
+.listening-mode-switch.module-tabs,
+.listening-queue-strip {
+  min-height: 0;
+  padding: 0;
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.listening-mode-switch.module-tabs {
+  display: inline-flex;
+  width: auto;
+  overflow: visible;
+}
+
+.listening-mode-switch.module-tabs button {
+  flex: 0 0 auto;
+  min-height: 32px;
+  height: 32px;
+  padding: 5px 14px;
+  border-radius: 4px !important;
+}
+
+.listening-mode-switch.module-tabs button small {
+  display: none;
+}
+
+.listening-queue-strip {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 8px;
+}
+
+.listening-queue-strip button {
+  display: inline-grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  gap: 0 8px;
+  min-height: 32px;
+  padding: 5px 10px;
+  border-radius: 4px !important;
+  background: #f7f8fa !important;
+}
+
+.listening-queue-strip button span,
+.listening-queue-strip button b {
+  line-height: 1.2;
+}
+
+.listening-queue-strip button b {
+  font-size: 14px;
+}
+
+.listening-queue-strip button small {
+  display: none;
+}
+
+.queue-strip-label {
+  color: #86909c;
+}
+
+@media (max-width: 1250px) {
+  .workspace-head.module-head.listening-head {
+    grid-template-columns: minmax(210px, 1fr) auto;
+  }
+
+  .listening-control-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .listening-mode-switch.module-tabs,
+  .listening-queue-strip {
+    overflow-x: auto;
+  }
+
+  .listening-queue-strip {
+    justify-content: flex-start;
+  }
+}

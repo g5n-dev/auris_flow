@@ -1,0 +1,140 @@
+/* Global sticky title governance */
+.workspace {
+  --module-head-sticky-top: 0px;
+  --module-tabs-sticky-top: 74px;
+  --panel-head-sticky-top: 0px;
+  --card-head-sticky-top: 0px;
+  scroll-padding-top: 132px;
+}
+
+.workspace-head.module-head {
+  position: sticky;
+  top: var(--module-head-sticky-top);
+  z-index: 76;
+  min-height: 58px;
+  padding: 10px 0;
+  border-bottom: 1px solid #e5e6eb;
+  background: #f7f8fa;
+  box-shadow: 0 8px 18px rgba(29, 33, 41, 0.05);
+}
+
+.workspace-head.module-head::before {
+  position: absolute;
+  inset: -16px -16px 0;
+  z-index: -1;
+  background: #f7f8fa;
+  content: "";
+}
+
+.module-page > .module-tabs {
+  position: sticky;
+  top: var(--module-tabs-sticky-top);
+  z-index: 68;
+  background: #ffffff !important;
+  box-shadow: 0 8px 16px rgba(29, 33, 41, 0.05);
+}
+
+.module-page:has(.workspace-head.module-head.listening-head) > .module-tabs {
+  top: 92px;
+}
+
+.sticky-panel-head {
+  position: sticky;
+  top: var(--panel-head-sticky-top);
+  z-index: 42;
+  align-items: center;
+  margin: -12px -12px 12px;
+  padding: 12px;
+  border-bottom: 1px solid #e5e6eb;
+  background: #ffffff;
+  box-shadow: 0 8px 16px rgba(29, 33, 41, 0.05);
+}
+
+.module-panel.wide > .sticky-panel-head {
+  margin: -14px -14px 12px;
+  padding: 12px 14px;
+}
+
+.sticky-card-head {
+  position: sticky;
+  top: var(--card-head-sticky-top);
+  z-index: 28;
+  padding: 8px 0;
+  border-bottom: 1px solid #edf0f5;
+  background: color-mix(in srgb, #ffffff 92%, #f7f8fa);
+  box-shadow: 0 6px 12px rgba(29, 33, 41, 0.04);
+}
+
+.module-sticky-title-safe {
+  scroll-margin-top: 140px;
+}
+
+.insight-command-shell {
+  scroll-padding-top: 12px;
+}
+
+.insight-command-shell .insight-scope-panel,
+.insight-command-shell .insight-side-panel {
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.insight-content-stack .insight-dashboard-panel {
+  overflow: visible;
+}
+
+.insight-dashboard-head {
+  position: sticky;
+  top: 0;
+  z-index: 44;
+  margin: -14px -14px 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid #e5e6eb;
+  background: #ffffff;
+  box-shadow: 0 8px 18px rgba(29, 33, 41, 0.05);
+}
+
+.insight-dashboard-head .sticky-panel-head {
+  position: static;
+  z-index: auto;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.insight-spec-card,
+.asset-chart-card {
+  scroll-padding-top: 54px;
+}
+
+.insight-spec-card .sticky-card-head {
+  margin: -12px -12px 8px;
+  padding: 12px;
+}
+
+.asset-chart-card .sticky-card-head {
+  margin: -12px -12px 10px;
+  padding: 10px 12px;
+}
+
+.asset-grid.asset-view-catalog,
+.asset-grid.asset-dagster-grid {
+  scroll-padding-top: 68px;
+}
+
+.drawer-body {
+  scroll-padding-top: 54px;
+}
+
+.drawer-body .intent-detail-head {
+  position: sticky;
+  top: 0;
+  z-index: 34;
+  margin: -12px -12px 12px;
+  padding: 12px;
+  border-bottom: 1px solid #e5e6eb;
+  background: #ffffff;
+  box-shadow: 0 8px 16px rgba(29, 33, 41, 0.05);
+}
