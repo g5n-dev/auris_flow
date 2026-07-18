@@ -17,6 +17,7 @@ import type { InsightReportExecution } from "./buildInsightReportExecution";
 import type { InsightReportActions } from "./buildInsightReportActions";
 import { createInsightExperimentRun, createPlatformMutation, getInsightReportResource } from "../../../api/client";
 import { backendRunFailed, operationStatusFromBackendRun } from "../../../shared/runtime/backendRunStatus";
+import { snapshotValuePresentation } from "../model/authoritativeSnapshots";
 
 export function buildInsightAgentAction(scope: InsightsModuleProps & HotwordInsightsState & InsightDatasetState & InsightTimeRangeState & InsightComparisonState & InsightMetrics & InsightView & InsightSelectionState & InsightEvidenceActions & InsightChartSpecs & InsightChartSelection & InsightContext & InsightReportDraftBuilder & InsightReportState & InsightReportGuards & InsightReportExecution & InsightReportActions) {
   const { activeReport, handleCreateReportFromDashboard, insightContextKey, insightTaskActionPending, reportReadyForAction, selectedFact, selectedMetric, setAgentOutput, setInsightActionNotice, setInsightTaskActionPending, setReportDrafts, setReportFlowState } = scope;
@@ -80,9 +81,18 @@ export function buildInsightAgentAction(scope: InsightsModuleProps & HotwordInsi
             if (!metricResultId) {
               throw new Error(`指标 ${selectedMetric.label} 缺少不可变快照，禁止创建下游动作。`);
             }
-            if (selectedMetric.valueNumber === null) {
+            const reportSnapshot = governedReport.metricSnapshots?.[metricIndex];
+            if (
+              !reportSnapshot ||
+              reportSnapshot.metric_result_id !== metricResultId ||
+              reportSnapshot.metric_key !== selectedMetric.key
+            ) {
+              throw new Error(`报告冻结指标 ${selectedMetric.label} 的快照绑定不一致，禁止创建下游动作。`);
+            }
+            const targetMetricValue = snapshotValuePresentation(reportSnapshot).value;
+            if (targetMetricValue === null) {
               throw new Error(
-                `指标 ${selectedMetric.label} 当前为 N/A 或未物化，缺少可验证数值，禁止创建数值目标。`
+                `指标 ${selectedMetric.label} 的报告冻结快照为 N/A 或未物化，缺少可验证数值，禁止创建数值目标。`
               );
             }
             const riskLevel = ["quoteConsistency", "crosstalkRisk"].includes(selectedMetric.key) ? "high" : "medium";
@@ -96,7 +106,7 @@ export function buildInsightAgentAction(scope: InsightsModuleProps & HotwordInsi
               branch: "auto",
               risk_level: riskLevel,
               hypothesis: selectedMetric.action,
-              target_value: selectedMetric.valueNumber + 2,
+              target_value: targetMetricValue + 2,
               source: "ui"
             });
             const actionRaw = actionReceipt.data.raw;

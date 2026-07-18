@@ -9,7 +9,7 @@ export type AuthUser = {
   roles: string[];
   tenantId: string;
   projectId: string;
-  /** Short-lived development compatibility bearer kept in React memory only. */
+  /** Legacy shape retained for fixture compatibility; browser sessions always keep this empty. */
   authToken: string;
   expiresAt: string;
   provider?: string;

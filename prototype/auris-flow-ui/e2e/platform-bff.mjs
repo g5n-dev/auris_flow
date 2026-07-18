@@ -1189,7 +1189,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
 
   const modelContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   const modelPage = await modelContext.newPage();
-  attachSecondaryPageDiagnostics(modelPage, "hotword-model-engineer", {
+  const assertModelStartupProbeConsumed = attachSecondaryPageDiagnostics(modelPage, "hotword-model-engineer", {
     expectedHttpFailures: [
       {
         method: "GET",
@@ -1205,6 +1205,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
   try {
     await modelPage.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
     const modelSession = await loginThroughUi(modelPage, "model@auris.local", 403);
+    assertModelStartupProbeConsumed();
     assert(modelSession.user.user_id === "u_model_001", "hotword approval actor must be the model engineer", modelSession);
     await clickNav(modelPage, "评测", "评测中心");
     await clickModuleTab(modelPage, "模型对比");
@@ -1964,11 +1965,11 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
   const submitReviewer = async ({ email, label, vector }) => {
     const reviewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
     const reviewerPage = await reviewerContext.newPage();
-    attachSecondaryPageDiagnostics(reviewerPage, label);
+    const assertReviewerStartupProbeConsumed = attachSecondaryPageDiagnostics(reviewerPage, label);
     await installE2eRequestIsolation(reviewerPage);
     await reviewerPage.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
-    const reviewerSession = await loginThroughUi(reviewerPage, email);
-    const token = reviewerSession.access_token;
+    await loginThroughUi(reviewerPage, email);
+    assertReviewerStartupProbeConsumed();
     await clickNav(reviewerPage, "评测", "评测中心");
     await clickModuleTab(reviewerPage, "人工评测");
     await reviewerPage.locator(".evaluation-manual-mode-switch button").filter({ hasText: "盲审校准" }).click();
@@ -2011,10 +2012,15 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
       const response = await responsePromise;
       const json = await response.json().catch(() => ({}));
       assert(response.status() === 201, `${label} submission should be sealed`, json);
+      const submissionHeaders = response.request().headers();
       assert(
-        response.request().headers().authorization === `Bearer ${token}`,
-        `${label} submission should use only its authenticated session`,
-        response.request().headers()
+        !submissionHeaders.authorization &&
+          submissionHeaders.cookie?.includes("auris_session=") &&
+          submissionHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
+          submissionHeaders["x-project-id"] === defaultHeaders["X-Project-Id"] &&
+          submissionHeaders["x-request-id"],
+        `${label} submission should use only its HttpOnly cookie session and scoped context`,
+        submissionHeaders
       );
       assert(
         json?.data?.item_status === undefined && json?.data?.round_status === undefined,
@@ -3863,7 +3869,13 @@ async function runInsightActionUiClosedLoopSmoke(page) {
       new URL(response.url()).pathname.endsWith("/api/v1/insights/actions") &&
       response.request().method() === "POST",
     { timeout: 10000 }
-  );
+  ).catch(async (error) => {
+    const notice = await page.locator(".insight-action-notice").first().innerText().catch(() => "");
+    assert(false, "insight action UI did not emit a governed action request", {
+      notice,
+      error: error instanceof Error ? error.message : String(error)
+    });
+  });
   const experimentResponsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname.endsWith("/experiments") &&
@@ -3885,10 +3897,11 @@ async function runInsightActionUiClosedLoopSmoke(page) {
     requestHeaders
   );
   assert(
-    requestHeaders.authorization &&
+    !requestHeaders.authorization &&
+      requestHeaders.cookie?.includes("auris_session=") &&
       requestHeaders["x-store-key"] &&
       requestHeaders["x-request-id"],
-    "insight action UI should carry auth/store/request headers",
+    "insight action UI should carry cookie session plus store/request headers without browser bearer",
     requestHeaders
   );
   const requestBody = JSON.parse(response.request().postData() || "{}");
@@ -4352,7 +4365,10 @@ async function runListeningClosedLoopSmoke(page) {
   );
   releaseGrantRoute();
 
-  const grantResponse = await grantResponsePromise;
+  const [grantResponse, playbackResponse] = await Promise.all([
+    grantResponsePromise,
+    playbackResponsePromise
+  ]);
   await page.unroute(grantRoutePattern);
   const grantJson = await grantResponse.json().catch(() => ({}));
   const grantRequestHeaders = grantResponse.request().headers();
@@ -4362,10 +4378,11 @@ async function runListeningClosedLoopSmoke(page) {
     grantJson
   );
   assert(
-    grantRequestHeaders.authorization === `Bearer ${adminSessionToken}` &&
+    !grantRequestHeaders.authorization &&
+      grantRequestHeaders.cookie?.includes("auris_session=") &&
       grantRequestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
       grantRequestHeaders["x-project-id"] === defaultHeaders["X-Project-Id"],
-    "playback grant UI request should carry auth and tenant/project context",
+    "playback grant UI request should use the browser cookie session and carry tenant/project context",
     grantRequestHeaders
   );
   assert(
@@ -4380,7 +4397,6 @@ async function runListeningClosedLoopSmoke(page) {
   );
   assert(grantJson?.meta?.trace_id, "playback grant response should include a trace id", grantJson);
 
-  const playbackResponse = await playbackResponsePromise;
   page.off("request", observeAudioRequest);
   const playbackHeaders = playbackResponse.headers();
   const playbackRequest = playbackResponse.request();
@@ -4475,6 +4491,21 @@ async function runListeningClosedLoopSmoke(page) {
   await annotationRegion.click({ force: true });
   const annotationModal = page.locator(".track-region-panel").first();
   await annotationModal.waitFor({ state: "visible", timeout: 10000 });
+  const manualLabelWorkflow = annotationModal.getByTestId("manual-label-version-workflow");
+  const authoritativeLabelSelect = manualLabelWorkflow.locator("select");
+  await authoritativeLabelSelect.waitFor({ state: "visible", timeout: 10000 });
+  assert(
+    (await authoritativeLabelSelect.inputValue()) === "",
+    "manual label workflow must not guess a non-matching authoritative label",
+    { selectedLabelId: await authoritativeLabelSelect.inputValue() }
+  );
+  const explicitLabelId = await authoritativeLabelSelect
+    .locator('option:not([value=""])')
+    .first()
+    .getAttribute("value");
+  assert(explicitLabelId, "manual label workflow should expose an active authoritative label option");
+  await authoritativeLabelSelect.selectOption(explicitLabelId);
+  await annotationModal.getByLabel("标签值 / 归一化值").fill("true");
   const annotationResponsePromise = page.waitForResponse(
     (response) =>
       response.url().includes("/api/v1/audio-sessions/S20250526-000128/annotations") &&
@@ -4485,11 +4516,18 @@ async function runListeningClosedLoopSmoke(page) {
   const annotationResponse = await annotationResponsePromise;
   const annotationJson = await annotationResponse.json().catch(() => ({}));
   assert(annotationResponse.status() === 201, `annotation save expected 201, got ${annotationResponse.status()}`, annotationJson);
-  assert(annotationJson?.data?.id === "qa-1", "annotation save should target the selected qa region", annotationJson);
+  const annotationId = annotationJson?.data?.annotation_id;
+  assert(annotationId === "qa-1", "annotation save should target the selected qa region", annotationJson);
   assert(annotationJson?.data?.audio_session_id === "S20250526-000128", "annotation save should keep audio session", annotationJson);
-  assert(annotationJson?.data?.track === "qa", "annotation save should keep track key", annotationJson);
+  assert(annotationJson?.data?.event_or_segment_id === "qa-1", "annotation save should freeze the selected segment", annotationJson);
+  assert(annotationJson?.data?.label_id === explicitLabelId, "annotation save should keep the explicitly selected authoritative label", annotationJson);
+  assert(
+    annotationJson?.data?.status === "draft" && annotationJson?.data?.draft_sha256?.length === 64,
+    "annotation save should return a frozen manual-label draft",
+    annotationJson
+  );
   assert(annotationJson?.meta?.trace_id, "annotation save missing trace id", annotationJson);
-  await assertBodyText(page, annotationJson.data.id, "annotation save should show backend annotation id");
+  await assertBodyText(page, annotationId, "annotation save should show backend annotation id");
   await assertBodyText(page, shortTrace(annotationJson.meta.trace_id), "annotation save should show backend trace");
   const annotationList = expectEnvelope(
     await browserApi(page, "/api/v1/audio-sessions/S20250526-000128/annotations"),
@@ -4497,7 +4535,13 @@ async function runListeningClosedLoopSmoke(page) {
     200
   );
   assert(
-    annotationList.data.items.some((item) => item.id === annotationJson.data.id),
+    annotationList.data.items.some(
+      (item) =>
+        item.annotation_id === annotationId &&
+        item.draft_document?.label_id === explicitLabelId &&
+        item.draft_document?.value === true &&
+        item.draft_sha256 === annotationJson.data.draft_sha256
+    ),
     "saved annotation should be readable from the audio session",
     annotationList
   );
@@ -4507,10 +4551,51 @@ async function runListeningClosedLoopSmoke(page) {
     200
   );
   assert(
-    annotationTrace.data.spans.some((span) => span.kind === "outbox" && span.event_type === "listening_annotations.upserted"),
+    annotationTrace.data.spans.some(
+      (span) => span.kind === "outbox" && span.event_type === "manual_label_draft.created"
+    ),
     "saved annotation trace should include outbox span",
     annotationTrace
   );
+
+  const annotationSubmissionResponsePromise = page.waitForResponse(
+    (response) =>
+      response.url().includes(
+        `/api/v1/audio-sessions/S20250526-000128/annotations/${annotationId}/submissions`
+      ) && response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  await annotationModal.getByRole("button", { name: "提交冻结草稿" }).click();
+  const annotationSubmissionResponse = await annotationSubmissionResponsePromise;
+  const annotationSubmissionJson = await annotationSubmissionResponse.json().catch(() => ({}));
+  assert(
+    annotationSubmissionResponse.status() === 201,
+    `manual label draft submission expected 201, got ${annotationSubmissionResponse.status()}`,
+    annotationSubmissionJson
+  );
+  assert(
+    annotationSubmissionJson?.data?.annotation_id === annotationId &&
+      annotationSubmissionJson?.data?.status === "submitted" &&
+      annotationSubmissionJson?.data?.draft_sha256 === annotationJson.data.draft_sha256 &&
+      annotationSubmissionJson?.data?.fact_id &&
+      annotationSubmissionJson?.data?.decision_id,
+    "manual label submission should materialize a human-confirmed fact and decision",
+    annotationSubmissionJson
+  );
+  const annotationSubmissionTrace = expectEnvelope(
+    await browserApi(page, `/api/v1/traces/${annotationSubmissionJson.meta.trace_id}`),
+    "fetch submitted manual label trace",
+    200
+  );
+  assert(
+    annotationSubmissionTrace.data.spans.some(
+      (span) => span.kind === "outbox" && span.event_type === "manual_label_draft.submitted"
+    ),
+    "submitted manual label trace should include outbox span",
+    annotationSubmissionTrace
+  );
+  await assertBodyText(page, annotationSubmissionJson.data.fact_id, "manual label submission should show the fact id");
+  await annotationModal.getByRole("button", { name: "关闭标签轨道编辑" }).click();
 
   const decisionResponsePromise = page.waitForResponse(
     (response) =>
@@ -4601,8 +4686,10 @@ async function runListeningClosedLoopSmoke(page) {
       traceId: eventLinkJson.meta?.trace_id
     },
     annotation: {
-      id: annotationJson.data?.id,
-      traceId: annotationJson.meta?.trace_id
+      id: annotationId,
+      traceId: annotationJson.meta?.trace_id,
+      factId: annotationSubmissionJson.data?.fact_id,
+      submissionTraceId: annotationSubmissionJson.meta?.trace_id
     },
     decision: {
       id: decisionJson.data?.id,
@@ -5787,9 +5874,26 @@ const pageErrors = [];
 const requestFailures = [];
 const failedResponses = [];
 const expectedFailedResponses = [];
+const anonymousSessionProbeFailure = () => ({
+  method: "GET",
+  status: 401,
+  path: "/api/v1/auth/session",
+  consoleText: "401 (Unauthorized)",
+  reason: "anonymous shell probes the cookie session exactly once before login"
+});
+const pendingMainExpectedResponses = [anonymousSessionProbeFailure()];
+const pendingMainExpectedConsoleErrors = [anonymousSessionProbeFailure()];
 
 page.on("console", (message) => {
   if (message.type() !== "error") return;
+  const expectedIndex = pendingMainExpectedConsoleErrors.findIndex((failure) =>
+    message.text().includes(failure.consoleText)
+  );
+  if (expectedIndex >= 0) {
+    pendingMainExpectedConsoleErrors.splice(expectedIndex, 1);
+    expectedConsoleErrors.push(message.text());
+    return;
+  }
   if (expectedConsoleFailureBudget > 0 && message.text().includes("503 (Service Unavailable)")) {
     expectedConsoleFailureBudget -= 1;
     expectedConsoleErrors.push(message.text());
@@ -5810,11 +5914,28 @@ page.on("requestfailed", (request) => {
 page.on("response", (response) => {
   if (response.status() < 400) return;
   const request = response.request();
+  const path = new URL(response.url()).pathname;
+  const expectedIndex = pendingMainExpectedResponses.findIndex(
+    (failure) =>
+      failure.method === request.method() &&
+      failure.status === response.status() &&
+      failure.path === path
+  );
+  if (expectedIndex >= 0) {
+    const [failure] = pendingMainExpectedResponses.splice(expectedIndex, 1);
+    expectedFailedResponses.push({
+      method: request.method(),
+      status: response.status(),
+      path,
+      reason: failure.reason
+    });
+    return;
+  }
   if (response.headers()["x-auris-e2e-expected-failure"]) {
     expectedFailedResponses.push({
       method: request.method(),
       status: response.status(),
-      path: new URL(response.url()).pathname,
+      path,
       reason: response.headers()["x-auris-e2e-expected-failure"]
     });
     return;
@@ -5822,7 +5943,7 @@ page.on("response", (response) => {
   failedResponses.push({
     method: request.method(),
     status: response.status(),
-    path: new URL(response.url()).pathname
+    path
   });
 });
 
@@ -5831,8 +5952,9 @@ function attachSecondaryPageDiagnostics(
   label,
   { expectedHttpFailures = [] } = {}
 ) {
-  const pendingExpectedResponses = expectedHttpFailures.map((failure) => ({ ...failure }));
-  const pendingExpectedConsoleErrors = expectedHttpFailures
+  const governedExpectedHttpFailures = [anonymousSessionProbeFailure(), ...expectedHttpFailures];
+  const pendingExpectedResponses = governedExpectedHttpFailures.map((failure) => ({ ...failure }));
+  const pendingExpectedConsoleErrors = governedExpectedHttpFailures
     .filter((failure) => failure.consoleText)
     .map((failure) => ({ ...failure }));
   secondaryPage.on("console", (message) => {
@@ -5886,12 +6008,24 @@ function attachSecondaryPageDiagnostics(
       path
     });
   });
+  return () => {
+    assert(
+      pendingExpectedResponses.every((failure) => failure.path !== "/api/v1/auth/session"),
+      `${label} did not consume the single anonymous cookie-session startup probe`,
+      pendingExpectedResponses
+    );
+  };
 }
 
 try {
   enterArtifactStage("main:authentication");
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
   const adminSession = await loginThroughUi(page, "demo.operator@auris.local");
+  assert(
+    pendingMainExpectedResponses.length === 0,
+    "main page did not consume the single anonymous cookie-session startup probe",
+    pendingMainExpectedResponses
+  );
   const authRestore = await verifyAuthSessionRestore(page, adminSession);
   adminSessionToken = adminSession.access_token;
   annotatorSessionToken = (await serverLogin("annotator@auris.local")).access_token;

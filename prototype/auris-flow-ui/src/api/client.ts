@@ -28,7 +28,7 @@ const EMPTY_API_CONTEXT: typeof DEMO_API_CONTEXT = {
   label: ""
 };
 const DEFAULT_API_CONTEXT = DEMO_MODE ? DEMO_API_CONTEXT : EMPTY_API_CONTEXT;
-let apiContext = { ...DEFAULT_API_CONTEXT, authToken: "" };
+let apiContext = { ...DEFAULT_API_CONTEXT };
 
 const requestId = () => `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const safeHeaderValue = (value: string) => (/^[\x00-\xff]*$/.test(value) ? value : encodeURIComponent(value));
@@ -78,7 +78,7 @@ const writeIdempotencyKey = (scope: string, options?: WriteRequestOptions) => {
 };
 
 export type ApiRuntimeContext = Partial<typeof DEFAULT_API_CONTEXT>;
-type ResolvedApiContext = typeof DEFAULT_API_CONTEXT & { authToken: string };
+type ResolvedApiContext = typeof DEFAULT_API_CONTEXT;
 
 function resolveApiContext(contextOverride?: ApiRuntimeContext): ResolvedApiContext {
   return {
@@ -99,7 +99,7 @@ export function setApiContext(nextContext: ApiRuntimeContext) {
 }
 
 export function clearApiAuthContext() {
-  apiContext = { ...DEFAULT_API_CONTEXT, authToken: "" };
+  apiContext = { ...DEFAULT_API_CONTEXT };
   clearBrowserSessionSecurityContext();
 }
 
@@ -107,8 +107,7 @@ export function establishApiSession(session: AuthSession) {
   apiContext = {
     ...DEFAULT_API_CONTEXT,
     tenantId: session.user.tenant_id,
-    projectId: session.user.project_id,
-    authToken: session.access_token ?? ""
+    projectId: session.user.project_id
   };
   setBrowserSessionCsrfToken(session.csrf_token ?? session.user.csrf_token);
 }
@@ -589,11 +588,9 @@ export async function apiRequest<T>(
     if (value) headers.set(header, safeHeaderValue(value));
     else headers.delete(header);
   });
-  if (requestContext.authToken) {
-    headers.set("Authorization", `Bearer ${safeHeaderValue(requestContext.authToken)}`);
-  } else {
-    headers.delete("Authorization");
-  }
+  // Browser requests authenticate only with the HttpOnly session cookie. Strip a
+  // caller-provided bearer as a fail-closed guard against legacy UI code paths.
+  headers.delete("Authorization");
   const requestMethod = (options.method ?? "GET").toUpperCase();
   const csrfToken = getBrowserSessionCsrfToken();
   if (!["GET", "HEAD", "OPTIONS"].includes(requestMethod) && csrfToken && !headers.has("X-CSRF-Token")) {

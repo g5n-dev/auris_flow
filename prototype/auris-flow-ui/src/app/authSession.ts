@@ -13,7 +13,7 @@ export const authSessionToUser = (session: AuthSession): AuthUser => ({
   roles: session.user.roles,
   tenantId: session.user.tenant_id,
   projectId: session.user.project_id,
-  authToken: session.access_token ?? "",
+  authToken: "",
   expiresAt: session.expires_at ?? "",
   provider: session.provider ?? session.user.provider
 });

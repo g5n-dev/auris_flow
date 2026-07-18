@@ -78,9 +78,16 @@ export async function createDevAuthSession(email: string, password: string): Pro
     method: "POST",
     body: JSON.stringify({ email, password })
   });
-  // The compatibility token is kept in memory only. The HttpOnly cookie is the
-  // durable browser session and no bearer material is written to web storage.
-  return response.data;
+  // The backend keeps a compatibility bearer for non-browser development clients.
+  // The browser deliberately discards it and uses only the HttpOnly cookie + CSRF token.
+  const {
+    access_token: _discardedCompatibilityToken,
+    token_type: _discardedTokenType,
+    ...cookieSession
+  } = response.data;
+  void _discardedCompatibilityToken;
+  void _discardedTokenType;
+  return cookieSession;
 }
 
 export async function restoreBrowserAuthSession(): Promise<AuthSession> {
