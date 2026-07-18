@@ -12,8 +12,13 @@ from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.core.auth import AuthActor, authenticate_bearer
+from app.core.browser_session import (
+    authenticate_browser_session,
+    browser_session_default_scope,
+    resolve_oidc_bearer_actor,
+)
 from app.core.completion_signature import verify_completion_signature
-from app.core.config import get_settings, is_production_environment
+from app.core.config import _csv_items, get_settings, is_production_environment
 from app.core.database import get_session
 from app.core.errors import ApiError
 from app.models import AuthSession, IdempotencyRecord, Project, Tenant, TraceRef, User
@@ -383,14 +388,56 @@ async def request_context(
     x_label_version: str | None = Header(default=None, alias="X-Label-Version"),
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     authorization: str | None = Header(default=None, alias="Authorization"),
+    x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
 ) -> RequestContext:
     trace = initialize_server_trace(request)
+    settings = get_settings()
+    raw_browser_session = request.cookies.get(settings.browser_session_cookie_name)
+    is_session_restore = request.url.path == f"{settings.api_prefix}/auth/session"
+    if is_session_restore and not raw_browser_session and not authorization:
+        raise ApiError("AUTH_REQUIRED", "需要有效的登录会话", 401)
+    if is_session_restore and raw_browser_session and (not x_tenant_id or not x_project_id):
+        if raw_browser_session.startswith("auris.v1.") and settings.allow_dev_auth:
+            dev_actor = resolve_actor(f"Bearer {raw_browser_session}")
+            x_tenant_id = x_tenant_id or next(iter(dev_actor.tenant_ids), "aurora_auto")
+            x_project_id = x_project_id or next(
+                (item for item in dev_actor.project_ids if item != "*"),
+                "sales_qa",
+            )
+        else:
+            default_scope = browser_session_default_scope(session, raw_token=raw_browser_session)
+            x_tenant_id = x_tenant_id or default_scope.tenant_id
+            x_project_id = x_project_id or default_scope.project_id
     if request.url.path.startswith("/api/v1") and not x_tenant_id:
         raise ApiError("CONTEXT_MISSING_TENANT", "缺少 X-Tenant-Id", 400)
     if request.url.path.startswith("/api/v1") and not x_project_id:
         raise ApiError("CONTEXT_MISSING_PROJECT", "缺少 X-Project-Id", 400)
 
-    actor = resolve_actor(authorization)
+    if authorization:
+        actor = resolve_actor(authorization)
+    elif raw_browser_session:
+        if raw_browser_session.startswith("auris.v1.") and settings.allow_dev_auth:
+            actor = resolve_actor(f"Bearer {raw_browser_session}")
+        else:
+            actor = authenticate_browser_session(
+                session,
+                raw_token=raw_browser_session,
+                tenant_id=x_tenant_id or "aurora_auto",
+                project_id=x_project_id or "sales_qa",
+                method=request.method,
+                csrf_token=x_csrf_token,
+                origin=request.headers.get("Origin"),
+                allowed_origins=_csv_items(settings.cors_allowed_origins),
+            )
+    else:
+        actor = resolve_actor(None)
+    if actor.provider == "oidc_bearer":
+        actor = resolve_oidc_bearer_actor(
+            session,
+            actor,
+            tenant_id=x_tenant_id or "aurora_auto",
+            project_id=x_project_id or "sales_qa",
+        )
     require_active_dev_session(session, actor)
     if not actor_allows_scope(actor, x_tenant_id or "aurora_auto", x_project_id or "sales_qa"):
         raise ApiError("TOKEN_SCOPE_MISMATCH", "token 不允许访问当前租户或项目", 403)

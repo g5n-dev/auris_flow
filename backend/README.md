@@ -21,6 +21,30 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --no-access-log
 python -m app.workers.outbox_worker
 ```
 
+### Generic OIDC / browser session baseline
+
+OIDC 使用标准 discovery、authorization、token 和 JWKS 能力。下面只列字段形状，不是可直接复制的生产凭据：
+
+```dotenv
+AUTH_PROVIDER=oidc
+OIDC_ISSUER=https://identity.example.com/realms/auris
+OIDC_CLIENT_ID=auris-flow-browser
+OIDC_AUDIENCE=auris-flow-api
+OIDC_REDIRECT_URI=https://flow.example.com/api/v1/auth/oidc/callback
+OIDC_SCOPES=openid profile email
+OIDC_DISCOVERY_URL=https://identity.example.com/realms/auris/.well-known/openid-configuration
+OIDC_JWKS_CACHE_TTL_SECONDS=300
+OIDC_CLOCK_SKEW_SECONDS=30
+BROWSER_SESSION_COOKIE_NAME=__Host-auris_session
+CORS_ALLOWED_ORIGINS=https://flow.example.com
+```
+
+机密客户端如需 `OIDC_CLIENT_SECRET`，生产应使用 `OIDC_CLIENT_SECRET_FILE=/run/secrets/...`
+或等价外部 secret reference，不能写入仓库或镜像。`prod/release` 会拒绝非 HTTPS issuer/redirect、
+缺失 issuer/client ID/audience/redirect、错误 cookie 名以及开发认证。OIDC identity 当前必须通过受控
+运维流程预配置到内部 user/tenant/project；没有自注册或从 IdP role claim 自动授权。前端从
+`GET /api/v1/auth/session` 取得当前用户与轮换 CSRF token，并只在内存保存后者。
+
 标签自动优化 scheduler 默认关闭。项目管理员先通过
 `POST /api/v1/label-optimization-schedules` 锁定 label/Prompt/model/policy/eval dataset
 与预算，再以独立进程运行：
@@ -48,11 +72,11 @@ mutex；due 时钟、RunRecord、OptimizationRound、审计和 Outbox 同事务�
 
 ## Runtime Flow
 
-1. 前端只访问 FastAPI BFF：`/api/v1/*`，统一携带 `Authorization`、`X-Tenant-Id`、`X-Project-Id`、`X-Request-Id`、写操作 `Idempotency-Key`。
+1. 前端只访问 FastAPI BFF：`/api/v1/*`。生产浏览器路径使用 BFF OIDC 不透明 HttpOnly cookie，会话绑定默认 tenant/project，显式 scope Header 必须与其匹配；兼容 bearer 调用携带 `Authorization`、`X-Tenant-Id`、`X-Project-Id`。所有请求携带或由服务端生成 `X-Request-Id`，业务写操作另带 `Idempotency-Key`；OIDC cookie 认证的写操作还必须带内存中的 `X-CSRF-Token` 并通过 Origin allowlist。
 2. `request_logging_middleware` 生成或继承 `trace_id/request_id`，所有日志输出为同一 JSON 行格式。
 3. 写操作先过幂等检查，冲突返回 `409 IDEMPOTENCY_KEY_CONFLICT`，重复请求直接 replay 首次响应。
 4. service 写入业务投影、`audit_logs`、`outbox_events`，再提交事务。
-5. `outbox_worker` 拉取 pending 事件，按事件类型 dispatch 到 Dagster、Qdrant、对象存储或外部回写 adapter；默认 local adapter 只写可审计回执，失败会重试或进入 dead letter。真实栈专项可通过 `AURIS_DAGSTER_ADAPTER=real` 向 Dagster-compatible GraphQL endpoint 提交运行请求并回读协议 receipt，通过 `AURIS_QDRANT_ADAPTER=real` 对 Qdrant 执行 collection / point upsert，通过 `AURIS_OBJECT_STORAGE_ADAPTER=real` 对 MinIO/S3-compatible endpoint 写入并回读对象 manifest，通过 `AURIS_EXTERNAL_CALLBACK_ADAPTER=real` 发送 HMAC 签名的平台回调并回读接收端 receipt。
+5. `outbox_worker` 拉取 pending 事件，按事件类型 dispatch 到 Dagster、Qdrant、对象存储或外部回写 adapter；默认 local adapter 只写可审计回执，失败会重试或进入 dead letter。真实栈专项可通过 `AURIS_DAGSTER_ADAPTER=real` 向 Dagster-compatible GraphQL endpoint 提交运行请求并回读协议 receipt，通过 `AURIS_QDRANT_ADAPTER=real` 对 Qdrant 执行 collection / point upsert，通过 `AURIS_OBJECT_STORAGE_ADAPTER=real` 对 MinIO/S3-compatible endpoint 写入并回读对象 manifest，通过 `AURIS_EXTERNAL_CALLBACK_ADAPTER=real` 发送带 key-id、时间窗、nonce 与全请求绑定的 HMAC v2 平台回调并回读接收端 receipt。
 6. 运行状态区分协议分发和业务完成：Dagster run request、对象存储 reservation/manifest、外部 callback receipt 派发成功后，`RunRecord.status=submitted` 且 `payload.business_status=awaiting_completion`；只有后续 materialization、真实对象可用或远端业务确认后才能迁移到 `success`。
 7. 业务完成回执通过 `POST /api/v1/task-runs/{id}/completion-receipts`、`POST /api/v1/exports/{id}/completion-receipts`、`POST /api/v1/output-sinks/platform-callbacks/{id}/completion-receipts` 或通用 `POST /api/v1/runs/{id}/completion-receipts` 写入。BFF 会校验租户、项目、幂等键、adapter 和外部 ID，再把 `submitted` 运行迁移到 `success` 或 `failed`。`result_ref` 中的 `ref/resource/aggregate/object/subject` 类型化引用必须提交完整、非空的 `type + id` 对；字段键先执行 NFKC，再按大小写、camelCase 和连字符无关的语义指纹规范化，任何规范化碰撞都会被拒绝。
 8. 前端通过响应 envelope 中的 `meta.trace_id` 或 `/api/v1/traces/{trace_id}` 追踪完整链路。
@@ -62,10 +86,12 @@ mutex；due 时钟、RunRecord、OptimizationRound、审计和 Outbox 同事务�
 当前后端是开源开发基线，不是生产 SaaS 后端：
 
 - `json_resources` 仍承担 UI Projection 和兼容层；强表已建表，业务写入会逐步迁移到 repository/service。
-- 本地 UI 通过 `/api/v1/auth/dev-login` 获取服务端签发、租户/项目范围受限的短期会话。令牌强制包含并校验 `iss/aud/iat/exp/jti`，对应 `auth_sessions` 强表；每次业务请求会检查会话是否存在、未过期、未撤销且主体一致，`last_seen_at` 通过默认 60 秒窗口的条件更新持久化，正常并发读取不加行锁也不提交事务。`POST /api/v1/auth/logout` 必须携带 `X-Tenant-Id` 与 `X-Project-Id`，校验 token scope 后按 `jti` 幂等撤销当前会话。兼容测试 token 不写会话表，仅供后端脚本和契约测试使用，并且两类开发认证都只在 `local/test/ci` 且 `ALLOW_DEV_AUTH=true` 时可用。`prod/release` 的开发登录、开发注销和兼容 token 均 fail closed；正式产品仍需接入 JWT/OIDC/SSO，并复用或替换该会话撤销层。
-- 默认 adapter 不会真的调用 Dagster、MinIO 或外部平台，只生成可审计的 dispatch 回执；Dagster 已提供 `AURIS_DAGSTER_ADAPTER=real` 协议路径，用于真实栈 E2E 验证 GraphQL run request 可提交并回读 receipt，但这只证明提交到执行引擎，不代表 Dagster job 已完成；Qdrant 已提供 `AURIS_QDRANT_ADAPTER=real` 专项路径，用于真实栈 E2E 验证知识索引 point 可回读；对象存储已提供 `AURIS_OBJECT_STORAGE_ADAPTER=real` 专项路径，用于真实栈 E2E 验证 export/audio/report manifest 可写入 MinIO 并按 sha256 回读；外部回写已提供 `AURIS_EXTERNAL_CALLBACK_ADAPTER=real` 协议路径，用于真实栈 E2E 验证 HMAC 签名请求、幂等键、trace/run header 和接收端 receipt，不代表真实 CRM/工单平台已接入。
+- 本地 UI 通过 `/api/v1/auth/dev-login` 获取服务端签发、租户/项目范围受限的短期兼容会话；响应仍保留 bearer 字段供脚本兼容，同时设置 HttpOnly cookie，React 只在运行内存持有 bearer，不写入 localStorage/sessionStorage。令牌强制包含并校验 `iss/aud/iat/exp/jti`，对应 `auth_sessions` 强表；每次业务请求会检查会话存在、时效、撤销和主体一致性。兼容测试 token 不写会话表，仅供后端脚本和契约测试使用；两类开发认证都只在 `local/test/ci` 且 `ALLOW_DEV_AUTH=true` 时可用，`prod/release` fail closed。
+- 正式认证边界已提供通用 OIDC Authorization Code + PKCE 技术基线：`/auth/oidc/login` 冻结一次性 state/nonce/verifier，`/auth/oidc/callback` 验证 issuer、audience、RS256、exp/iat、nonce 和 JWKS key rotation，只把明确 provision 的 `(issuer, subject)` 映射到内部 user/tenant/project。IdP access/ID/refresh token 不返回前端；BFF 只设置不透明 HttpOnly cookie，`browser_auth_sessions` 仅保存 token/CSRF SHA-256。每次请求动态读取 `user_security_states`、identity、租户/项目状态和项目成员角色，因此禁用与降权不依赖会话过期。未知主体和跨 scope 默认拒绝且不泄漏对象存在性。
+- 这组 OIDC/browser session 能力仍是生产认证基线，不等于整套生产部署已经验收：启用前必须完成真实 IdP 集成、用户 provision/禁用流程、受信 Origin/CORS、HTTPS 与运维轮换演练。Keycloak 只可作为 Docker Compose 参考 IdP；实现保持标准 OIDC 兼容，不读取 Keycloak 私有 role claim 或管理 API。
+- 默认 adapter 不会真的调用 Dagster、MinIO 或外部平台，只生成可审计的 dispatch 回执；Dagster 已提供 `AURIS_DAGSTER_ADAPTER=real` 协议路径，用于真实栈 E2E 验证 GraphQL run request 可提交并回读 receipt，但这只证明提交到执行引擎，不代表 Dagster job 已完成；Qdrant 已提供 `AURIS_QDRANT_ADAPTER=real` 专项路径，用于真实栈 E2E 验证知识索引 point 可回读；对象存储已提供 `AURIS_OBJECT_STORAGE_ADAPTER=real` 专项路径，用于真实栈 E2E 验证 export/audio/report manifest 可写入 MinIO 并按 sha256 回读；外部回写已提供 `AURIS_EXTERNAL_CALLBACK_ADAPTER=real` 协议路径，用于真实栈 E2E 验证 HMAC v2 全请求绑定、active/overlap/retired key 轮换、时间窗、原子 nonce 防重放、幂等 body 冲突和接收端 receipt，不代表真实 CRM/工单平台已接入。
 - 录音对象已支持 `storage_objects` 强表登记、租户/项目路径约束、SHA-256/ETag/大小元数据、短时签名播放授权，以及通过 BFF 按登记的 `provider` 向 MinIO、S3、OBS 或 OSS 流式转发 HTTP Range。MinIO 使用 path-style S3 SigV4，S3 使用 SigV4，OBS 使用原生 OBS 签名，OSS 使用原生 OSS V4 (`OSS4-HMAC-SHA256`) 并强制 virtual-host style；浏览器统一接收严格的 `206`、`Accept-Ranges`、`Content-Range`、`Content-Length` 和 `ETag` 版本校验语义，客户端取消请求时 BFF 会关闭上游对象流。只有本地 MinIO 会自动创建缺失 bucket，S3/OBS/OSS bucket 必须由基础设施预先创建并授权。各 Provider 使用独立的 `OBJECT_STORAGE_<PROVIDER>_*` 配置；缺少配置时 fail closed，不会借用其他 Provider 的 AK/SK。真实栈会验证 MySQL 元数据与 MinIO WAV 对象一致；OBS/OSS 当前为协议级契约测试，接入生产账号前仍需运行真实云端集成测试。通用大文件上传会话、分块上传、证据包二进制生命周期和对象清理策略仍未完成，不能据此宣称完整对象存储生产链路。
-- 外部回写的生产 endpoint allowlist、密钥托管/轮换、重放窗口、回调 receipt 强表登记和完整权限矩阵仍是生产前必须补齐的工程项。
+- 外部回写已具备生产 endpoint allowlist、显式 keyring 轮换状态、时间窗、nonce 防重放和回调 receipt 强表登记；生产仍需把 keyring 接入外部 Secret/KMS、把接收端 nonce/idempotency 原子存储替换为共享持久服务，并完成真实 CRM/工单平台的权限矩阵与联调。
 
 ## Promptfoo 评测适配边界
 
@@ -122,6 +148,20 @@ Eval 或 Release 的事实来源。
 - `get_logger("component")` 获取组件日志句柄。
 - `log_event(logger, "event.name", ctx=ctx, **fields)` 输出结构化 JSON。
 - 请求、幂等、运行、审计、outbox、seed 都必须带 `trace_id/request_id` 或等价上下文字段。
+
+## Observability
+
+`OTEL_ENABLED=false` 时不会构造 exporter、启动批处理线程或发起网络连接。生产 Compose 通过
+OTLP/HTTP 把 BFF 与 worker 的 FastAPI、SQLAlchemy、Redis、HTTP client span 发往 Collector；
+业务 `trace_id/request_id` 写入 span attributes，结构化日志同时注入 W3C
+`otel_trace_id/otel_span_id`。最终导出边界会删除 Authorization、Cookie、查询串、SQL 和秘密值；
+Collector 不可用只会丢失遥测，不改变业务响应或 outbox 状态。
+
+Prometheus 端点固定为根路径 `/metrics`，不属于 `/api/v1`。默认关闭；启用后只信任真实 socket
+peer 的内部地址或 `METRICS_TRUSTED_CIDRS` 显式网段，忽略 `X-Forwarded-For`，边缘代理也不公开
+转发该路径。指标 label 只使用 method、路由模板、状态类别、固定依赖名和有限 outcome，不使用
+tenant/project/user/resource ID。端点包含 HTTP、认证失败、依赖 readiness、outbox backlog/死信/
+重试/最老事件、callback、worker 和数据库连接池指标。
 
 ## Verify
 

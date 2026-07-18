@@ -14,6 +14,13 @@ from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
 from app.core.errors import ApiError
+from app.core.oidc import (
+    OIDCConfigurationError,
+    OIDCProviderConfig,
+    OIDCProviderUnavailableError,
+    OIDCTokenValidationError,
+    OIDCTokenValidator,
+)
 from app.models import AuthSession
 
 
@@ -28,6 +35,8 @@ class AuthActor:
     session_id: str | None = None
     issued_at: int | None = None
     expires_at: int | None = None
+    oidc_issuer: str | None = None
+    oidc_subject: str | None = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +224,56 @@ class SignedTokenAuthProvider:
         )
 
 
+class OIDCAuthProvider:
+    """Validate a standard OIDC bearer before DB-backed identity mapping."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        *,
+        validator: OIDCTokenValidator | None = None,
+    ) -> None:
+        self.settings = settings
+        try:
+            self.validator = validator or OIDCTokenValidator(
+                OIDCProviderConfig(
+                    issuer=settings.oidc_issuer,
+                    audience=settings.oidc_audience,
+                    discovery_url=settings.oidc_discovery_url or None,
+                    jwks_cache_ttl_seconds=settings.oidc_jwks_cache_ttl_seconds,
+                    clock_skew_seconds=settings.oidc_clock_skew_seconds,
+                    http_timeout_seconds=settings.oidc_http_timeout_seconds,
+                )
+            )
+        except OIDCConfigurationError:
+            raise ApiError("OIDC_CONFIGURATION_INVALID", "OIDC 配置无效", 500) from None
+
+    def authenticate(self, token: str, *, now: float | None = None) -> AuthActor:
+        try:
+            claims = self.validator.validate(token, now=now)
+        except OIDCProviderUnavailableError:
+            raise ApiError(
+                "OIDC_PROVIDER_UNAVAILABLE",
+                "OIDC 身份提供方暂不可用",
+                503,
+                retryable=True,
+            ) from None
+        except OIDCConfigurationError:
+            raise ApiError("OIDC_CONFIGURATION_INVALID", "OIDC 配置无效", 500) from None
+        except OIDCTokenValidationError:
+            raise ApiError("UNAUTHORIZED", "无效或过期 token", 401) from None
+        return AuthActor(
+            user_id=claims.subject,
+            roles=(),
+            provider="oidc_bearer",
+            actor_kind="human",
+            issued_at=int(claims.issued_at) if claims.issued_at is not None else None,
+            expires_at=int(claims.expires_at),
+            oidc_issuer=claims.issuer,
+            oidc_subject=claims.subject,
+        )
+
+
 def dev_auth_enabled(settings: Settings) -> bool:
     return settings.app_env.strip().lower() in {"local", "test", "ci"} and settings.allow_dev_auth
 
@@ -399,6 +458,8 @@ def get_auth_provider() -> AuthProvider:
         return StaticDevAuthProvider(settings)
     if provider in {"signed", "hmac", "hmac_sha256"}:
         return SignedTokenAuthProvider(settings)
+    if provider == "oidc":
+        return OIDCAuthProvider(settings)
     raise ApiError("AUTH_PROVIDER_INVALID", f"未知认证提供方：{settings.auth_provider}", 500)
 
 

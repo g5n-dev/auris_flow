@@ -2,22 +2,50 @@ from __future__ import annotations
 
 import ipaddress
 from functools import lru_cache
-from urllib.parse import urlparse
+from typing import Any, Literal
+from urllib.parse import unquote, urlparse
 
 from pydantic import model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    DotEnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
-PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production", "release"})
+from app.core.callback_signature import CallbackSignatureError, parse_callback_keyring
+from app.core.secrets import (
+    SecretFileSettingsSource,
+    is_production_environment,
+)
 
-
-def is_production_environment(value: str) -> bool:
-    return value.strip().lower() in PRODUCTION_ENVIRONMENTS
+AdapterMode = Literal["local", "real"]
+EmbeddingProviderMode = Literal["deterministic_test", "http"]
+_INSECURE_SECRET_MARKERS = (
+    "auris-demo",
+    "auris-dev",
+    "auris-local",
+    "changeme",
+    "change-me",
+    "example",
+    "minioadmin",
+    "placeholder",
+    "replace-with",
+)
 
 
 class Settings(BaseSettings):
     app_env: str = "local"
     app_name: str = "auris-flow-bff"
     log_level: str = "INFO"
+    otel_enabled: bool = False
+    otel_exporter_otlp_endpoint: str = ""
+    otel_exporter_otlp_headers: str = ""
+    otel_service_name: str = "auris-flow-bff"
+    otel_trace_sample_ratio: float = 0.1
+    otel_export_timeout_seconds: float = 5.0
+    metrics_enabled: bool = False
+    metrics_trusted_cidrs: str = ""
     api_prefix: str = "/api/v1"
     cors_allowed_origins: str = "http://127.0.0.1:5173,http://localhost:5173"
     trusted_hosts: str = "127.0.0.1,localhost,testserver"
@@ -34,14 +62,25 @@ class Settings(BaseSettings):
     object_storage_signature_mode: str = ""
     object_storage_session_token: str = ""
     object_storage_allowed_buckets: str = ""
-    auris_object_storage_adapter: str = "local"
+    auris_object_storage_adapter: AdapterMode = "local"
     qdrant_url: str = "http://127.0.0.1:6333"
     qdrant_api_key: str = ""
-    auris_qdrant_adapter: str = "local"
+    auris_qdrant_adapter: AdapterMode = "local"
+    auris_embedding_provider: EmbeddingProviderMode = "deterministic_test"
+    embedding_endpoint: str = ""
+    embedding_model: str = ""
+    embedding_dimension: int = 8
+    embedding_api_key: str = ""
+    embedding_http_timeout_seconds: float = 10.0
     dagster_graphql_url: str = "http://127.0.0.1:3000/graphql"
-    auris_external_callback_adapter: str = "local"
+    auris_dagster_adapter: AdapterMode = "local"
+    auris_external_callback_adapter: AdapterMode = "local"
     external_callback_url: str = "http://127.0.0.1:8089/callbacks/platform"
     external_callback_secret: str = "auris-dev-callback-secret"
+    external_callback_key_bindings: str = ""
+    external_callback_active_key_id: str = ""
+    external_callback_legacy_hmac_enabled: bool = False
+    external_callback_signature_tolerance_seconds: int = 300
     external_callback_allowed_hosts: str = ""
     dependency_check_mode: str = "local"
     required_dependency_checks: str = "auto"
@@ -51,6 +90,19 @@ class Settings(BaseSettings):
     auth_token_audience: str = "auris-flow-api"
     auth_token_clock_skew_seconds: int = 30
     auth_session_last_seen_interval_seconds: int = 60
+    oidc_issuer: str = ""
+    oidc_client_id: str = ""
+    oidc_client_secret: str = ""
+    oidc_audience: str = ""
+    oidc_redirect_uri: str = ""
+    oidc_scopes: str = "openid profile email"
+    oidc_discovery_url: str = ""
+    oidc_jwks_cache_ttl_seconds: int = 300
+    oidc_clock_skew_seconds: int = 30
+    oidc_http_timeout_seconds: float = 5.0
+    oidc_authorization_state_ttl_seconds: int = 600
+    oidc_session_ttl_seconds: int = 28800
+    browser_session_cookie_name: str = "auris_session"
     dev_auth_password: str = "auris-demo"
     dev_auth_session_ttl_seconds: int = 28800
     audio_playback_grant_secret: str = ""
@@ -78,7 +130,35 @@ class Settings(BaseSettings):
     label_optimization_scheduler_claim_lease_seconds: int = 120
     label_optimization_scheduler_worker_id: str = "label-opt-scheduler-local"
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        dotenv_values: dict[str, Any] = {}
+        if isinstance(dotenv_settings, DotEnvSettingsSource):
+            dotenv_values = dict(dotenv_settings.env_vars)
+        secret_file_settings = SecretFileSettingsSource(
+            settings_cls,
+            dotenv_values=dotenv_values,
+        )
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            secret_file_settings,
+            file_secret_settings,
+        )
 
     @model_validator(mode="after")
     def require_release_security_configuration(self) -> Settings:
@@ -90,6 +170,40 @@ class Settings(BaseSettings):
             raise ValueError("AUTH_TOKEN_CLOCK_SKEW_SECONDS must be between 0 and 300")
         if not 60 <= self.auth_session_last_seen_interval_seconds <= 3600:
             raise ValueError("AUTH_SESSION_LAST_SEEN_INTERVAL_SECONDS must be between 60 and 3600")
+        if not 1 <= self.external_callback_signature_tolerance_seconds <= 900:
+            raise ValueError(
+                "EXTERNAL_CALLBACK_SIGNATURE_TOLERANCE_SECONDS must be between 1 and 900"
+            )
+        if self.external_callback_key_bindings.strip():
+            try:
+                parse_callback_keyring(
+                    self.external_callback_key_bindings,
+                    active_key_id=self.external_callback_active_key_id.strip(),
+                )
+            except CallbackSignatureError:
+                raise ValueError(
+                    "EXTERNAL_CALLBACK_KEY_BINDINGS or EXTERNAL_CALLBACK_ACTIVE_KEY_ID is invalid"
+                ) from None
+        elif self.external_callback_active_key_id.strip():
+            raise ValueError(
+                "EXTERNAL_CALLBACK_KEY_BINDINGS is required when "
+                "EXTERNAL_CALLBACK_ACTIVE_KEY_ID is configured"
+            )
+        if not 1 <= self.oidc_jwks_cache_ttl_seconds <= 86400:
+            raise ValueError("OIDC_JWKS_CACHE_TTL_SECONDS must be between 1 and 86400")
+        if not 0 <= self.oidc_clock_skew_seconds <= 300:
+            raise ValueError("OIDC_CLOCK_SKEW_SECONDS must be between 0 and 300")
+        if not 0 < self.oidc_http_timeout_seconds <= 30:
+            raise ValueError("OIDC_HTTP_TIMEOUT_SECONDS must be greater than 0 and at most 30")
+        if not 60 <= self.oidc_authorization_state_ttl_seconds <= 900:
+            raise ValueError("OIDC_AUTHORIZATION_STATE_TTL_SECONDS must be between 60 and 900")
+        if not 300 <= self.oidc_session_ttl_seconds <= 2592000:
+            raise ValueError("OIDC_SESSION_TTL_SECONDS must be between 300 and 2592000")
+        scopes = set(_space_items(self.oidc_scopes))
+        if self.auth_provider.strip().lower() == "oidc" and "openid" not in scopes:
+            raise ValueError("OIDC_SCOPES must include openid")
+        if "offline_access" in scopes:
+            raise ValueError("OIDC_SCOPES must not request offline_access")
         if not 5 <= self.label_optimization_scheduler_poll_seconds <= 3600:
             raise ValueError("LABEL_OPTIMIZATION_SCHEDULER_POLL_SECONDS must be between 5 and 3600")
         if not 1 <= self.label_optimization_scheduler_batch_size <= 100:
@@ -98,68 +212,158 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LABEL_OPTIMIZATION_SCHEDULER_CLAIM_LEASE_SECONDS must be between 30 and 3600"
             )
+        if not 0.0 <= self.otel_trace_sample_ratio <= 1.0:
+            raise ValueError("OTEL_TRACE_SAMPLE_RATIO must be between 0 and 1")
+        if not 0.1 <= self.otel_export_timeout_seconds <= 30.0:
+            raise ValueError("OTEL_EXPORT_TIMEOUT_SECONDS must be between 0.1 and 30")
+        if self.otel_enabled:
+            endpoint = urlparse(self.otel_exporter_otlp_endpoint.strip())
+            if (
+                endpoint.scheme not in {"http", "https"}
+                or not endpoint.hostname
+                or endpoint.username
+                or endpoint.password
+                or endpoint.query
+                or endpoint.fragment
+            ):
+                raise ValueError(
+                    "OTEL_EXPORTER_OTLP_ENDPOINT must be an HTTP(S) URL without credentials, "
+                    "query, or fragment"
+                )
+            if not self.otel_service_name.strip():
+                raise ValueError("OTEL_SERVICE_NAME must not be empty when OTEL is enabled")
+        for item in _csv_items(self.metrics_trusted_cidrs):
+            try:
+                network = ipaddress.ip_network(item, strict=False)
+            except ValueError:
+                raise ValueError("METRICS_TRUSTED_CIDRS entries must be valid CIDRs") from None
+            if network.prefixlen == 0:
+                raise ValueError("METRICS_TRUSTED_CIDRS must not trust the entire internet")
 
-        if not is_production_environment(self.app_env):
+        production = is_production_environment(self.app_env)
+        _validate_embedding_settings(self, production=production)
+
+        if not production:
             return self
+
+        if not self.otel_enabled:
+            raise ValueError("OTEL_ENABLED must be true in prod/release")
+        if not self.metrics_enabled:
+            raise ValueError("METRICS_ENABLED must be true in prod/release")
 
         auth_provider = self.auth_provider.strip().lower()
         if self.allow_dev_auth or auth_provider == "dev":
             raise ValueError("ALLOW_DEV_AUTH and AUTH_PROVIDER=dev are forbidden in prod/release")
-        if (
-            auth_provider in {"auto", "signed", "hmac", "hmac_sha256"}
-            and len(self.auth_token_secret.strip()) < 32
+        if auth_provider != "oidc":
+            raise ValueError("AUTH_PROVIDER must be oidc in prod/release")
+        _validate_production_oidc_settings(self)
+        for setting_name in (
+            "auris_object_storage_adapter",
+            "auris_qdrant_adapter",
+            "auris_dagster_adapter",
+            "auris_external_callback_adapter",
         ):
-            raise ValueError("AUTH_TOKEN_SECRET must be at least 32 characters in prod/release")
-        if len(self.audio_playback_grant_secret.strip()) < 32:
-            raise ValueError(
-                "AUDIO_PLAYBACK_GRANT_SECRET must be at least 32 characters in prod/release"
-            )
+            if getattr(self, setting_name) != "real":
+                raise ValueError(f"{setting_name.upper()} must be real in prod/release")
+        if self.dependency_check_mode.strip().lower() != "strict":
+            raise ValueError("DEPENDENCY_CHECK_MODE must be strict in prod/release")
+
+        _require_strong_url_password("DATABASE_URL", self.database_url)
+        _require_strong_url_password("REDIS_URL", self.redis_url)
+        _require_strong_secret(
+            "AUDIO_PLAYBACK_GRANT_SECRET",
+            self.audio_playback_grant_secret,
+        )
         if (
-            len(self.completion_receipt_secret.strip()) < 32
+            not self.completion_receipt_secret.strip()
             and not self.completion_receipt_key_bindings.strip()
         ):
             raise ValueError(
                 "COMPLETION_RECEIPT_SECRET or COMPLETION_RECEIPT_KEY_BINDINGS "
                 "is required in prod/release"
             )
-        if len(self.experiment_assignment_secret.strip()) < 32:
-            raise ValueError(
-                "EXPERIMENT_ASSIGNMENT_SECRET must be at least 32 characters in prod/release"
+        if self.completion_receipt_secret.strip():
+            _require_strong_secret(
+                "COMPLETION_RECEIPT_SECRET",
+                self.completion_receipt_secret,
             )
+        _require_strong_secret(
+            "EXPERIMENT_ASSIGNMENT_SECRET",
+            self.experiment_assignment_secret,
+        )
         if not _csv_items(self.cors_allowed_origins) or "*" in _csv_items(
             self.cors_allowed_origins
         ):
             raise ValueError("CORS_ALLOWED_ORIGINS must be explicit in prod/release")
         if not _csv_items(self.trusted_hosts) or "*" in _csv_items(self.trusted_hosts):
             raise ValueError("TRUSTED_HOSTS must be explicit in prod/release")
-        if self.auris_qdrant_adapter.strip().lower() == "real" and not self.qdrant_api_key.strip():
+        _require_strong_secret("QDRANT_API_KEY", self.qdrant_api_key)
+        _validate_production_callback_settings(self)
+        missing = [
+            key
+            for key, value in {
+                "OBJECT_STORAGE_ENDPOINT": self.object_storage_endpoint,
+                "OBJECT_STORAGE_BUCKET": self.object_storage_bucket,
+                "OBJECT_STORAGE_ACCESS_KEY": self.object_storage_access_key,
+                "OBJECT_STORAGE_SECRET_KEY": self.object_storage_secret_key,
+                "OBJECT_STORAGE_REGION": self.object_storage_region,
+                "OBJECT_STORAGE_PROVIDER": self.object_storage_provider,
+            }.items()
+            if not value.strip()
+        ]
+        if missing:
             raise ValueError(
-                "QDRANT_API_KEY is required when AURIS_QDRANT_ADAPTER=real in prod/release"
+                "object storage real adapter missing prod/release config: " + ", ".join(missing)
             )
-        if self.auris_external_callback_adapter.strip().lower() == "real":
-            _validate_production_callback_settings(self)
-        if self.auris_object_storage_adapter.strip().lower() == "real":
-            missing = [
-                key
-                for key, value in {
-                    "OBJECT_STORAGE_ENDPOINT": self.object_storage_endpoint,
-                    "OBJECT_STORAGE_BUCKET": self.object_storage_bucket,
-                    "OBJECT_STORAGE_ACCESS_KEY": self.object_storage_access_key,
-                    "OBJECT_STORAGE_SECRET_KEY": self.object_storage_secret_key,
-                    "OBJECT_STORAGE_REGION": self.object_storage_region,
-                    "OBJECT_STORAGE_PROVIDER": self.object_storage_provider,
-                }.items()
-                if not value.strip()
-            ]
-            if missing:
-                raise ValueError(
-                    "object storage real adapter missing prod/release config: " + ", ".join(missing)
-                )
+        if _is_insecure_value(self.object_storage_access_key):
+            raise ValueError(
+                "OBJECT_STORAGE_ACCESS_KEY must not use demo credentials in prod/release"
+            )
+        _require_strong_secret(
+            "OBJECT_STORAGE_SECRET_KEY",
+            self.object_storage_secret_key,
+        )
+        if self.object_storage_session_token.strip():
+            _require_strong_secret(
+                "OBJECT_STORAGE_SESSION_TOKEN",
+                self.object_storage_session_token,
+            )
         return self
 
 
 def _csv_items(value: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.replace("\n", ",").split(",") if item.strip())
+
+
+def _space_items(value: str) -> tuple[str, ...]:
+    return tuple(item for item in value.split() if item)
+
+
+def _is_insecure_value(value: str) -> bool:
+    normalized = value.strip().casefold()
+    return not normalized or any(marker in normalized for marker in _INSECURE_SECRET_MARKERS)
+
+
+def _require_strong_secret(setting_name: str, value: str, *, minimum_length: int = 32) -> None:
+    if len(value.strip()) < minimum_length or _is_insecure_value(value):
+        raise ValueError(
+            f"{setting_name} must be at least {minimum_length} characters and must not use "
+            "demo or placeholder values in prod/release"
+        )
+
+
+def _require_strong_url_password(setting_name: str, value: str) -> None:
+    try:
+        parsed = urlparse(value.strip())
+        password = unquote(parsed.password or "")
+    except (TypeError, ValueError):
+        password = ""
+    try:
+        _require_strong_secret(f"{setting_name}_PASSWORD", password)
+    except ValueError:
+        raise ValueError(
+            f"{setting_name} must contain a strong non-demo password in prod/release"
+        ) from None
 
 
 def _normalize_callback_host(value: str) -> str:
@@ -213,8 +417,89 @@ def _validate_production_callback_settings(settings: Settings) -> None:
         )
     if _is_non_public_address(host):
         raise ValueError("EXTERNAL_CALLBACK_URL must not target a non-public IP in prod/release")
-    if len(settings.external_callback_secret.strip()) < 32:
-        raise ValueError("EXTERNAL_CALLBACK_SECRET must be at least 32 characters in prod/release")
+    if settings.external_callback_legacy_hmac_enabled:
+        raise ValueError("EXTERNAL_CALLBACK_LEGACY_HMAC_ENABLED is forbidden in prod/release")
+    if not settings.external_callback_key_bindings.strip():
+        raise ValueError("EXTERNAL_CALLBACK_KEY_BINDINGS is required in prod/release")
+    if not settings.external_callback_active_key_id.strip():
+        raise ValueError("EXTERNAL_CALLBACK_ACTIVE_KEY_ID is required in prod/release")
+
+
+def _validate_production_oidc_settings(settings: Settings) -> None:
+    missing = [
+        name
+        for name, value in {
+            "OIDC_ISSUER": settings.oidc_issuer,
+            "OIDC_CLIENT_ID": settings.oidc_client_id,
+            "OIDC_AUDIENCE": settings.oidc_audience,
+            "OIDC_REDIRECT_URI": settings.oidc_redirect_uri,
+        }.items()
+        if not value.strip()
+    ]
+    if missing:
+        raise ValueError("OIDC production configuration missing: " + ", ".join(missing))
+    for name, value in (
+        ("OIDC_ISSUER", settings.oidc_issuer),
+        ("OIDC_REDIRECT_URI", settings.oidc_redirect_uri),
+        ("OIDC_DISCOVERY_URL", settings.oidc_discovery_url),
+    ):
+        if not value:
+            continue
+        try:
+            parsed = urlparse(value)
+            _port = parsed.port
+        except ValueError:
+            raise ValueError(f"{name} must be a valid absolute HTTPS URL") from None
+        if (
+            parsed.scheme.lower() != "https"
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.fragment
+        ):
+            raise ValueError(f"{name} must be a valid absolute HTTPS URL")
+        if name != "OIDC_REDIRECT_URI" and (parsed.query or parsed.params):
+            raise ValueError(f"{name} must not contain query parameters")
+    if settings.oidc_client_secret.strip():
+        _require_strong_secret("OIDC_CLIENT_SECRET", settings.oidc_client_secret)
+    if settings.browser_session_cookie_name != "__Host-auris_session":
+        raise ValueError("BROWSER_SESSION_COOKIE_NAME must be __Host-auris_session in prod/release")
+
+
+def _validate_embedding_settings(settings: Settings, *, production: bool) -> None:
+    if not 1 <= settings.embedding_dimension <= 65536:
+        raise ValueError("EMBEDDING_DIMENSION must be between 1 and 65536")
+    if not 0 < settings.embedding_http_timeout_seconds <= 60:
+        raise ValueError("EMBEDDING_HTTP_TIMEOUT_SECONDS must be greater than 0 and at most 60")
+    if settings.auris_embedding_provider == "deterministic_test":
+        if production:
+            raise ValueError(
+                "AURIS_EMBEDDING_PROVIDER must be http in prod/release; "
+                "deterministic_test is test-only"
+            )
+        return
+    if not settings.embedding_endpoint.strip():
+        raise ValueError("EMBEDDING_ENDPOINT is required when the HTTP provider is enabled")
+    try:
+        endpoint = urlparse(settings.embedding_endpoint.strip())
+        _port = endpoint.port
+    except ValueError:
+        raise ValueError("EMBEDDING_ENDPOINT must be a valid absolute HTTP(S) URL") from None
+    if (
+        endpoint.scheme not in {"http", "https"}
+        or not endpoint.hostname
+        or endpoint.username is not None
+        or endpoint.password is not None
+        or endpoint.query
+        or endpoint.fragment
+    ):
+        raise ValueError("EMBEDDING_ENDPOINT must be a valid absolute HTTP(S) URL")
+    if production and endpoint.scheme != "https":
+        raise ValueError("EMBEDDING_ENDPOINT must use HTTPS in prod/release")
+    if not settings.embedding_model.strip() or len(settings.embedding_model.strip()) > 256:
+        raise ValueError("EMBEDDING_MODEL is required and must not exceed 256 characters")
+    if production:
+        _require_strong_secret("EMBEDDING_API_KEY", settings.embedding_api_key)
 
 
 @lru_cache
