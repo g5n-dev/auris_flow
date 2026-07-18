@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any
+from datetime import UTC, datetime
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
+from pydantic import AfterValidator, StringConstraints
 from sqlalchemy import select
 
 from app.api.deps import ContextDep, PaginationDep, SessionDep
@@ -35,6 +37,22 @@ from app.services.resource_service import list_resource_data
 
 router = APIRouter(tags=["insights"])
 
+QueryIdentifier = Annotated[
+    str,
+    StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+]
+LabelVersionApplicabilityQuery = Literal["required", "none"]
+LabelTaxonomyModeQuery = Literal["native", "normalized", "recomputed"]
+
+
+def _normalize_query_timestamp(value: datetime) -> datetime:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("fact_as_of must include a timezone")
+    return value.astimezone(UTC)
+
+
+QueryTimestamp = Annotated[datetime, AfterValidator(_normalize_query_timestamp)]
+
 
 @router.post("/insights/metric-runs", status_code=202)
 async def post_insight_metric_run(
@@ -57,6 +75,13 @@ def get_insights_metrics(
     time_range: str = "30d",
     store_id: str | None = None,
     label_version: str | None = None,
+    label_version_applicability: LabelVersionApplicabilityQuery | None = None,
+    taxonomy_mode: LabelTaxonomyModeQuery | None = None,
+    source_label_version_id: Annotated[set[QueryIdentifier] | None, Query()] = None,
+    target_label_version_id: QueryIdentifier | None = None,
+    mapping_bundle_id: QueryIdentifier | None = None,
+    fact_set_generation: Annotated[int | None, Query(ge=1)] = None,
+    fact_as_of: QueryTimestamp | None = None,
     model_version: str | None = None,
 ) -> dict[str, Any]:
     all_items = current_metric_payloads(
@@ -65,6 +90,15 @@ def get_insights_metrics(
         time_range=time_range,
         store_id=store_id,
         label_version=label_version,
+        label_version_applicability=label_version_applicability,
+        taxonomy_mode=taxonomy_mode,
+        source_label_version_ids=(
+            sorted(source_label_version_id) if source_label_version_id is not None else None
+        ),
+        target_label_version_id=target_label_version_id,
+        mapping_bundle_id=mapping_bundle_id,
+        fact_set_generation=fact_set_generation,
+        fact_as_of=fact_as_of,
         model_version=model_version,
     )
     raw_cursor = str(page.get("cursor") or "0")

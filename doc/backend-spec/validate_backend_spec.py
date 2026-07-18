@@ -2046,6 +2046,48 @@ def validate_runtime_openapi_drift(openapi: dict[str, Any]) -> None:
                 ],
             },
         )
+
+    def documented_query_parameter_names(operation: dict[str, Any]) -> set[str]:
+        names: set[str] = set()
+        reusable = openapi.get("components", {}).get("parameters", {})
+        for raw_parameter in operation.get("parameters", []):
+            parameter = raw_parameter
+            if isinstance(raw_parameter, dict) and raw_parameter.get("$ref"):
+                parameter = reusable.get(
+                    str(raw_parameter["$ref"]).rsplit("/", 1)[-1],
+                    {},
+                )
+            if isinstance(parameter, dict) and parameter.get("in") == "query":
+                name = parameter.get("name")
+                if isinstance(name, str):
+                    names.add(name)
+        return names
+
+    documented_metric_queries = documented_query_parameter_names(
+        openapi.get("paths", {}).get("/insights/metrics", {}).get("get", {})
+    )
+    runtime_metric_queries = {
+        str(parameter["name"])
+        for parameter in runtime_openapi.get("paths", {})
+        .get(f"{API_PREFIX}/insights/metrics", {})
+        .get("get", {})
+        .get("parameters", [])
+        if isinstance(parameter, dict)
+        and parameter.get("in") == "query"
+        and isinstance(parameter.get("name"), str)
+    }
+    if documented_metric_queries != runtime_metric_queries:
+        fail(
+            "insight metric query parameters drifted from FastAPI runtime",
+            {
+                "documented_not_runtime": sorted(
+                    documented_metric_queries - runtime_metric_queries
+                ),
+                "runtime_not_documented": sorted(
+                    runtime_metric_queries - documented_metric_queries
+                ),
+            },
+        )
     ok(f"OpenAPI matches FastAPI runtime operations: {len(runtime)}/{len(documented)}")
 
 

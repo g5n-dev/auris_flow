@@ -22,6 +22,7 @@ from app.models import (
     InsightReport,
     JsonResource,
     MetricResult,
+    MetricResultLabelScope,
     ProjectSceneProfileBinding,
     RunRecord,
     SceneProfileVersion,
@@ -206,13 +207,100 @@ def _scoped(
     return item
 
 
-def metric_payload(metric: MetricResult) -> dict[str, Any]:
+def _datetime_iso(value: datetime) -> str:
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalized.isoformat().replace("+00:00", "Z")
+
+
+def _label_scope_payload(scope: MetricResultLabelScope) -> dict[str, Any]:
     return {
+        "taxonomy_mode": scope.taxonomy_mode,
+        "source_label_version_ids": list(scope.source_label_version_ids),
+        "target_label_version_id": scope.target_label_version_id,
+        "mapping_bundle_id": scope.mapping_bundle_id,
+        "fact_set_generation": scope.fact_set_generation,
+        "fact_as_of": _datetime_iso(scope.fact_as_of),
+        "metric_definition_versions": dict(scope.metric_definition_versions),
+        "timezone": scope.timezone,
+        "period_boundary": scope.period_boundary,
+        "denominator_definition": scope.denominator_definition,
+    }
+
+
+def _metric_label_scopes(
+    session: Session,
+    ctx: RequestContext,
+    metric_result_ids: list[str],
+) -> dict[str, MetricResultLabelScope]:
+    if not metric_result_ids:
+        return {}
+    scopes = session.scalars(
+        select(MetricResultLabelScope).where(
+            MetricResultLabelScope.tenant_id == ctx.tenant_id,
+            MetricResultLabelScope.project_id == ctx.project_id,
+            MetricResultLabelScope.metric_result_id.in_(metric_result_ids),
+        )
+    ).all()
+    return {scope.metric_result_id: scope for scope in scopes}
+
+
+def metric_payload(
+    metric: MetricResult,
+    label_scope: MetricResultLabelScope | None = None,
+) -> dict[str, Any]:
+    payload = {
         **metric.payload,
         "id": metric.metric_result_id,
         "metric_result_id": metric.metric_result_id,
         "status": metric.status,
         "trace_id": metric.trace_id,
+    }
+    label_required = metric.payload.get("label_version_applicability") == "required"
+    if label_required and label_scope is None:
+        raise ApiError(
+            "INSIGHT_METRIC_LABEL_SCOPE_MISSING",
+            "标签派生 MetricResult 缺少强 LabelScope，禁止返回不完整统计口径",
+            409,
+            details=[{"metric_result_id": metric.metric_result_id}],
+        )
+    if label_scope is None:
+        return payload
+    expected_hashes = (
+        label_scope.content_sha256,
+        label_scope.scope_sha256,
+        label_scope.source_manifest_sha256,
+    )
+    actual_hashes = (
+        metric.content_sha256,
+        metric.scope_sha256,
+        metric.source_manifest_sha256,
+    )
+    if actual_hashes != expected_hashes:
+        raise ApiError(
+            "INSIGHT_METRIC_LABEL_SCOPE_DRIFT",
+            "MetricResult 与强 LabelScope 哈希不一致，禁止返回漂移口径",
+            409,
+            details=[{"metric_result_id": metric.metric_result_id}],
+        )
+    scope_payload = _label_scope_payload(label_scope)
+    raw_scope = payload.get("scope")
+    metric_scope = dict(raw_scope) if isinstance(raw_scope, dict) else {}
+    metric_scope.update(
+        {
+            "label_version_applicability": "required",
+            "label_scope": scope_payload,
+        }
+    )
+    return {
+        **payload,
+        "scope": metric_scope,
+        "label_version_applicability": "required",
+        "label_scope": scope_payload,
+        "comparability_status": label_scope.comparability_status,
+        "comparability_reason_codes": list(label_scope.comparability_reason_codes),
+        "scope_sha256": label_scope.scope_sha256,
+        "source_manifest_sha256": label_scope.source_manifest_sha256,
+        "content_sha256": label_scope.content_sha256,
     }
 
 
@@ -249,6 +337,7 @@ def report_detail_payload(
             details=[{"report_id": report.report_id, "metric_result_ids": missing}],
         )
     ordered = [by_id[item] for item in metric_result_ids]
+    label_scopes = _metric_label_scopes(session, ctx, metric_result_ids)
     from app.services.insight_report_metric_binding_service import (
         verify_insight_report_metric_binding,
     )
@@ -256,7 +345,9 @@ def report_detail_payload(
     metric_binding = verify_insight_report_metric_binding(session, report, ordered)
     return {
         **report_payload(report),
-        "metric_results": [metric_payload(item) for item in ordered],
+        "metric_results": [
+            metric_payload(item, label_scopes.get(item.metric_result_id)) for item in ordered
+        ],
         "metric_scope_sha256": metric_binding["metric_scope_sha256"],
         "report_metric_binding_content_sha256": metric_binding["content_sha256"],
         "report_metric_binding_id": metric_binding["report_metric_binding_id"],
@@ -312,6 +403,62 @@ def effect_payload(effect: InsightEffect) -> dict[str, Any]:
     }
 
 
+def _label_scope_matches_filters(
+    payload: dict[str, Any],
+    label_scope: MetricResultLabelScope | None,
+    *,
+    label_version_applicability: str | None,
+    taxonomy_mode: str | None,
+    source_label_version_ids: list[str] | None,
+    target_label_version_id: str | None,
+    mapping_bundle_id: str | None,
+    fact_set_generation: int | None,
+    fact_as_of: datetime | None,
+) -> bool:
+    actual_applicability = (
+        "required"
+        if label_scope is not None
+        else str(payload.get("label_version_applicability") or "none")
+    )
+    if (
+        label_version_applicability is not None
+        and actual_applicability != label_version_applicability
+    ):
+        return False
+
+    strong_scope_filter_requested = any(
+        value is not None
+        for value in (
+            taxonomy_mode,
+            source_label_version_ids,
+            target_label_version_id,
+            mapping_bundle_id,
+            fact_set_generation,
+            fact_as_of,
+        )
+    )
+    if label_scope is None:
+        return not strong_scope_filter_requested
+    if taxonomy_mode is not None and label_scope.taxonomy_mode != taxonomy_mode:
+        return False
+    if source_label_version_ids is not None:
+        expected_sources = sorted(
+            {value.strip() for value in source_label_version_ids if value.strip()}
+        )
+        if sorted(set(label_scope.source_label_version_ids)) != expected_sources:
+            return False
+    if (
+        target_label_version_id is not None
+        and label_scope.target_label_version_id != target_label_version_id.strip()
+    ):
+        return False
+    if mapping_bundle_id is not None and label_scope.mapping_bundle_id != mapping_bundle_id.strip():
+        return False
+    if fact_set_generation is not None and label_scope.fact_set_generation != fact_set_generation:
+        return False
+    return fact_as_of is None or _datetime_iso(label_scope.fact_as_of) == _datetime_iso(fact_as_of)
+
+
 def current_metric_payloads(
     session: Session,
     ctx: RequestContext,
@@ -319,6 +466,13 @@ def current_metric_payloads(
     time_range: str = "30d",
     store_id: str | None = None,
     label_version: str | None = None,
+    label_version_applicability: str | None = None,
+    taxonomy_mode: str | None = None,
+    source_label_version_ids: list[str] | None = None,
+    target_label_version_id: str | None = None,
+    mapping_bundle_id: str | None = None,
+    fact_set_generation: int | None = None,
+    fact_as_of: datetime | None = None,
     model_version: str | None = None,
 ) -> list[dict[str, Any]]:
     materialized = session.scalars(
@@ -330,6 +484,11 @@ def current_metric_payloads(
         )
         .order_by(MetricResult.created_at.desc())
     ).all()
+    label_scopes = _metric_label_scopes(
+        session,
+        ctx,
+        [item.metric_result_id for item in materialized],
+    )
     items: list[dict[str, Any]] = []
     for result in materialized:
         payload = result.payload
@@ -341,11 +500,31 @@ def current_metric_payloads(
             continue
         if store_id and store_id not in stores:
             continue
-        if label_version and scope["label_version"] != label_version:
+        label_scope = label_scopes.get(result.metric_result_id)
+        if not _label_scope_matches_filters(
+            payload,
+            label_scope,
+            label_version_applicability=label_version_applicability,
+            taxonomy_mode=taxonomy_mode,
+            source_label_version_ids=source_label_version_ids,
+            target_label_version_id=target_label_version_id,
+            mapping_bundle_id=mapping_bundle_id,
+            fact_set_generation=fact_set_generation,
+            fact_as_of=fact_as_of,
+        ):
             continue
+        if label_version:
+            if label_scope is not None:
+                scoped_versions = set(label_scope.source_label_version_ids)
+                if label_scope.target_label_version_id:
+                    scoped_versions.add(label_scope.target_label_version_id)
+                if label_version not in scoped_versions:
+                    continue
+            elif scope["label_version"] != label_version:
+                continue
         if model_version and scope["model_version"] != model_version:
             continue
-        items.append(metric_payload(result))
+        items.append(metric_payload(result, label_scope))
     return items
 
 

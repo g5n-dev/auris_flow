@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import func, select
@@ -10,6 +10,7 @@ from app.core.database import SessionLocal
 from app.core.errors import ApiError
 from app.models import (
     AuditLog,
+    InsightReport,
     LabelFactSet,
     LabelFactSetHead,
     LabelMappingBundle,
@@ -26,6 +27,11 @@ from app.schemas.label_metric_scopes import (
     LabelMetricResultMaterializeRequest,
     LabelMetricRunScopeRequest,
 )
+from app.services.insight_closure_service import (
+    current_metric_payloads,
+    report_detail_payload,
+)
+from app.services.insight_report_metric_binding_service import bind_insight_report_metrics
 from app.services.label_metric_scope_service import (
     lock_label_metric_run_scope,
     materialize_label_metric_result,
@@ -236,6 +242,7 @@ def _request(
     metric_result_id: str = "metric-label-scope-v1",
     taxonomy_mode: str = "native",
     expected_generation: int = 1,
+    legacy_label_version: str = SOURCE_VERSION_ID,
 ) -> LabelMetricResultMaterializeRequest:
     normalized = taxonomy_mode == "normalized"
     return LabelMetricResultMaterializeRequest.model_validate(
@@ -259,7 +266,18 @@ def _request(
             "timezone": "Asia/Shanghai",
             "period_boundary": "calendar-month:[start,end)",
             "denominator_definition": "eligible business events in locked FactSet",
-            "result_payload": {"source_external_id": "dagster-metric-001"},
+            "result_payload": {
+                "label": "购买意向率",
+                "source_external_id": "dagster-metric-001",
+                "time_range": "30d",
+                "dimensions": {"store_ids": []},
+                "scope": {
+                    "time_range": "30d",
+                    "store_ids": [],
+                    "model_version": "model-metric-v1",
+                    "label_version": legacy_label_version,
+                },
+            },
         }
     )
 
@@ -329,6 +347,216 @@ def test_native_snapshot_freezes_scope_audit_outbox_and_idempotent_replay() -> N
             )
             == 1
         )
+
+
+def test_metric_read_projection_joins_the_authoritative_label_scope() -> None:
+    _seed_scope()
+    request = _request()
+    with SessionLocal.begin() as session:
+        materialize_label_metric_result(
+            session,
+            _ctx("materialize-readable-label-metric"),
+            request,
+        )
+
+    with SessionLocal() as session:
+        items = current_metric_payloads(
+            session,
+            _ctx("read-label-metric"),
+            time_range="30d",
+            label_version=SOURCE_VERSION_ID,
+            label_version_applicability="required",
+            taxonomy_mode="native",
+            source_label_version_ids=[SOURCE_VERSION_ID],
+            fact_set_generation=1,
+            fact_as_of=FACT_AS_OF,
+            model_version="model-metric-v1",
+        )
+
+    assert len(items) == 1
+    item = items[0]
+    assert item["metric_result_id"] == request.metric_result_id
+    assert item["label_scope"] == {
+        "taxonomy_mode": "native",
+        "source_label_version_ids": [SOURCE_VERSION_ID],
+        "target_label_version_id": None,
+        "mapping_bundle_id": None,
+        "fact_set_generation": 1,
+        "fact_as_of": "2026-07-18T10:00:00Z",
+        "metric_definition_versions": {"purchase_intent_rate": "metric-catalog/3"},
+        "timezone": "Asia/Shanghai",
+        "period_boundary": "calendar-month:[start,end)",
+        "denominator_definition": "eligible business events in locked FactSet",
+    }
+    assert item["scope"]["label_scope"] == item["label_scope"]
+    assert item["comparability_status"] == "comparable"
+    assert item["comparability_reason_codes"] == ["NATIVE_VERSION_PARTITIONED"]
+    assert item["scope_sha256"]
+    assert item["source_manifest_sha256"]
+    assert item["content_sha256"]
+
+
+def test_metric_read_projection_never_uses_legacy_label_version_when_strong_scope_exists() -> None:
+    _seed_scope()
+    request = _request(legacy_label_version="legacy-payload-version")
+    with SessionLocal.begin() as session:
+        materialize_label_metric_result(
+            session,
+            _ctx("materialize-strong-over-legacy"),
+            request,
+        )
+
+    with SessionLocal() as session:
+        authoritative = current_metric_payloads(
+            session,
+            _ctx("read-authoritative-version"),
+            label_version=SOURCE_VERSION_ID,
+        )
+        legacy_mismatch = current_metric_payloads(
+            session,
+            _ctx("read-legacy-version"),
+            label_version="legacy-payload-version",
+        )
+
+    assert [item["metric_result_id"] for item in authoritative] == [request.metric_result_id]
+    assert legacy_mismatch == []
+
+
+def test_normalized_metric_read_projection_filters_every_authoritative_scope_field() -> None:
+    _seed_scope(normalized=True)
+    request = _request(taxonomy_mode="normalized")
+    with SessionLocal.begin() as session:
+        materialize_label_metric_result(
+            session,
+            _ctx("materialize-normalized-readable"),
+            request,
+        )
+
+    filters = {
+        "time_range": "30d",
+        "model_version": "model-metric-v1",
+        "label_version_applicability": "required",
+        "taxonomy_mode": "normalized",
+        "source_label_version_ids": [SOURCE_VERSION_ID],
+        "target_label_version_id": TARGET_VERSION_ID,
+        "mapping_bundle_id": "mapping-bundle-metric",
+        "fact_set_generation": 1,
+        "fact_as_of": FACT_AS_OF,
+    }
+    mismatches = [
+        {"label_version_applicability": "none"},
+        {"taxonomy_mode": "native"},
+        {"source_label_version_ids": [SOURCE_VERSION_ID, TARGET_VERSION_ID]},
+        {"target_label_version_id": SOURCE_VERSION_ID},
+        {"mapping_bundle_id": "mapping-bundle-other"},
+        {"fact_set_generation": 2},
+        {"fact_as_of": FACT_AS_OF + timedelta(seconds=1)},
+    ]
+    with SessionLocal() as session:
+        matched = current_metric_payloads(
+            session,
+            _ctx("read-normalized-exact"),
+            **filters,
+        )
+        rejected = [
+            current_metric_payloads(
+                session,
+                _ctx(f"read-normalized-mismatch-{index}"),
+                **{**filters, **mismatch},
+            )
+            for index, mismatch in enumerate(mismatches)
+        ]
+
+    assert [item["metric_result_id"] for item in matched] == [request.metric_result_id]
+    assert matched[0]["label_scope"]["taxonomy_mode"] == "normalized"
+    assert matched[0]["label_scope"]["target_label_version_id"] == TARGET_VERSION_ID
+    assert matched[0]["label_scope"]["mapping_bundle_id"] == "mapping-bundle-metric"
+    assert rejected == [[] for _item in mismatches]
+
+
+def test_metric_read_projection_fails_closed_when_required_scope_is_missing() -> None:
+    with SessionLocal.begin() as session:
+        session.add(
+            MetricResult(
+                metric_result_id="metric-required-without-scope",
+                tenant_id=TENANT_ID,
+                project_id=PROJECT_ID,
+                status="materialized",
+                trace_id="root-missing-label-scope",
+                payload={
+                    "immutable": True,
+                    "label_version_applicability": "required",
+                    "metric_key": "purchase_intent_rate",
+                    "snapshot_role": "aggregation",
+                    "scope": {
+                        "time_range": "30d",
+                        "store_ids": [],
+                        "model_version": "model-metric-v1",
+                        "label_version": SOURCE_VERSION_ID,
+                    },
+                },
+            )
+        )
+
+    with SessionLocal() as session, pytest.raises(ApiError) as missing:
+        current_metric_payloads(session, _ctx("read-missing-label-scope"))
+
+    assert missing.value.code == "INSIGHT_METRIC_LABEL_SCOPE_MISSING"
+
+
+def test_report_detail_projects_the_same_authoritative_label_scope() -> None:
+    _seed_scope()
+    request = _request()
+    with SessionLocal.begin() as session:
+        materialize_label_metric_result(
+            session,
+            _ctx("materialize-report-label-metric"),
+            request,
+        )
+        session.add(
+            RunRecord(
+                run_id="run-label-metric-report",
+                tenant_id=TENANT_ID,
+                project_id=PROJECT_ID,
+                run_type="insight_report",
+                status="pending",
+                run_key="label-metric-report",
+                partition_key=f"{TENANT_ID}/{PROJECT_ID}",
+                trace_id="root-label-metric-report",
+                payload={},
+            )
+        )
+        session.flush()
+        report = InsightReport(
+            report_id="report-label-metric-scope",
+            tenant_id=TENANT_ID,
+            project_id=PROJECT_ID,
+            run_id="run-label-metric-report",
+            status="generating",
+            report_type="management_summary",
+            trace_id="root-label-metric-report",
+            payload={"metric_result_ids": [request.metric_result_id]},
+        )
+        session.add(report)
+        session.flush()
+        metric = session.get(MetricResult, request.metric_result_id)
+        assert metric is not None
+        bind_insight_report_metrics(session, _ctx("bind-report-label-metric"), report, [metric])
+
+    with SessionLocal() as session:
+        report = session.get(InsightReport, "report-label-metric-scope")
+        assert report is not None
+        detail = report_detail_payload(session, _ctx("read-report-label-metric"), report)
+
+    assert detail["metric_result_ids"] == [request.metric_result_id]
+    assert detail["metric_results"][0]["label_scope"]["source_label_version_ids"] == [
+        SOURCE_VERSION_ID
+    ]
+    assert (
+        detail["metric_results"][0]["scope"]["label_scope"]
+        == detail["metric_results"][0]["label_scope"]
+    )
+    assert detail["metric_scope_sha256"]
 
 
 def test_head_advancement_does_not_mutate_old_snapshot_and_stale_anchor_has_no_partial() -> None:

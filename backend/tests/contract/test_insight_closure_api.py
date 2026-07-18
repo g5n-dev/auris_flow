@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
 
+from app.api.routers import insights as insights_router
 from app.core.database import SessionLocal
 from app.models import InsightReport, MetricResult, OutboxEvent, RunRecord
 from app.workers.outbox_worker import process_once
@@ -455,6 +457,72 @@ def test_metrics_endpoint_never_fabricates_unmaterialized_catalog_values(client,
     assert all(item["status"] == "materialized" for item in items)
     assert all(item["source_run_id"] for item in items)
     assert all(item["sample_size"] >= 1 for item in items)
+
+
+def test_metrics_endpoint_normalizes_and_forwards_every_label_scope_filter(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    captured: dict[str, Any] = {}
+
+    def capture_filters(_session, _ctx, **filters):
+        captured.update(filters)
+        return []
+
+    monkeypatch.setattr(insights_router, "current_metric_payloads", capture_filters)
+    response = client.get(
+        "/api/v1/insights/metrics",
+        params=[
+            ("time_range", "30d"),
+            ("label_version_applicability", "required"),
+            ("taxonomy_mode", "normalized"),
+            ("source_label_version_id", "source-v2"),
+            ("source_label_version_id", "source-v1"),
+            ("target_label_version_id", "target-v3"),
+            ("mapping_bundle_id", "mapping-bundle-v3"),
+            ("fact_set_generation", "42"),
+            ("fact_as_of", "2026-07-18T18:00:00+08:00"),
+        ],
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured["label_version_applicability"] == "required"
+    assert captured["taxonomy_mode"] == "normalized"
+    assert captured["source_label_version_ids"] == ["source-v1", "source-v2"]
+    assert captured["target_label_version_id"] == "target-v3"
+    assert captured["mapping_bundle_id"] == "mapping-bundle-v3"
+    assert captured["fact_set_generation"] == 42
+    assert captured["fact_as_of"] == datetime(2026, 7, 18, 10, 0, tzinfo=UTC)
+    assert captured["fact_as_of"].utcoffset() == timedelta(0)
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"label_version_applicability": "client-guessed"},
+        {"taxonomy_mode": "latest"},
+        {"source_label_version_id": " "},
+        {"target_label_version_id": " "},
+        {"mapping_bundle_id": " "},
+        {"fact_set_generation": "0"},
+        {"fact_as_of": "not-a-date"},
+        {"fact_as_of": "2026-07-18T10:00:00"},
+    ],
+)
+def test_metrics_endpoint_rejects_invalid_label_scope_filters(
+    client,
+    auth_headers,
+    params,
+):
+    response = client.get(
+        "/api/v1/insights/metrics",
+        params=params,
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 422, response.text
 
 
 def test_report_requires_materialized_metric_ids_and_matching_scope(client, auth_headers):
