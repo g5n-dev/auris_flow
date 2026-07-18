@@ -12,9 +12,12 @@ groups:
 
       - alert: AurisApiHighErrorRate
         expr: |
-          sum(rate(auris_http_requests_total{status_class="5xx"}[5m]))
+          sum(rate(auris_http_requests_total{route=~"/api/v1/.*",status_class="5xx"}[5m]))
           /
-          clamp_min(sum(rate(auris_http_requests_total[5m])), 0.001)
+          clamp_min(
+            sum(rate(auris_http_requests_total{route=~"/api/v1/.*"}[5m])),
+            0.001
+          )
           > 0.05
         for: 10m
         labels:
@@ -22,6 +25,23 @@ groups:
         annotations:
           summary: "Auris Flow API 5xx ratio exceeds 5%"
           runbook: "operations.md#api-error-rate"
+
+      - alert: AurisApiP95Latency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(
+                auris_http_request_duration_seconds_bucket{route=~"/api/v1/.*"}[5m]
+              )
+            )
+          ) > 0.75
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Auris Flow API P95 latency exceeds the 750 ms candidate SLO"
+          runbook: "operations.md#api-latency"
 
       - alert: AurisAuthenticationFailureSpike
         expr: sum(rate(auris_auth_failures_total[5m])) > 0.5
@@ -31,6 +51,18 @@ groups:
         annotations:
           summary: "Authentication failures are increasing"
           runbook: "operations.md#authentication-failures"
+
+      - alert: AurisRateLimitBackendUnavailable
+        expr: |
+          increase(
+            auris_rate_limit_decisions_total{outcome="backend_unavailable"}[5m]
+          ) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "The production Redis rate-limit backend is unavailable"
+          runbook: "operations.md#rate-limit-backend-unavailable"
 
   - name: auris-flow-async-delivery
     rules:
@@ -43,17 +75,31 @@ groups:
           summary: "Outbox backlog exceeds 100 events"
           runbook: "operations.md#outbox-backlog"
 
+      - alert: AurisOutboxDeliveryDelayed
+        expr: auris_outbox_oldest_pending_age_seconds > 300
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Oldest pending Outbox event exceeds the 300 second candidate SLO"
+          runbook: "operations.md#outbox-delivery-delay"
+
       - alert: AurisOutboxDeadLetters
-        expr: auris_outbox_dead_letter > 0
+        expr: increase(auris_worker_processing_total{outcome="dead_letter"}[5m]) > 0
         for: 1m
         labels:
           severity: critical
         annotations:
-          summary: "New dead-letter events detected"
+          summary: "New Outbox dead-letter events detected in the last five minutes"
           runbook: "operations.md#dead-letters"
 
       - alert: AurisCallbackFailureRate
-        expr: sum(rate(auris_callback_outcomes_total{outcome=~"failure|dead_letter"}[10m])) > 0.1
+        expr: |
+          sum(
+            rate(
+              auris_callback_outcomes_total{outcome=~"failure|retry|dead_letter"}[10m]
+            )
+          ) > 0.1
         for: 10m
         labels:
           severity: warning
@@ -61,15 +107,81 @@ groups:
           summary: "External callback failure rate is elevated"
           runbook: "operations.md#callback-failures"
 
+      - alert: AurisMetricsCollectionFailed
+        expr: auris_metrics_collection_success == 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Auris Flow operational metric collection is failing"
+          runbook: "operations.md#metrics-collection-failed"
+
+      - alert: AurisTaskRunP95Duration
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (auris_task_run_duration_window_seconds_bucket)
+          ) > 900
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Trailing 24 hour TaskRun P95 completion time exceeds 15 minutes"
+          runbook: "operations.md#task-run-duration"
+
+      - alert: AurisTaskRunFailureRatio
+        expr: |
+          (
+            sum(
+              clamp_min(
+                delta(auris_task_run_terminal{outcome="failed"}[15m]),
+                0
+              )
+            )
+            /
+            clamp_min(
+              sum(clamp_min(delta(auris_task_run_terminal[15m]), 0)),
+              1
+            )
+          ) > 0.20
+          and
+          sum(clamp_min(delta(auris_task_run_terminal[15m]), 0)) >= 5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TaskRun failure ratio exceeds 20% with at least five terminal runs"
+          runbook: "operations.md#task-run-success-rate"
+
+      - alert: AurisTaskRunDeadlineOverdue
+        expr: auris_task_run_deadline_overdue > 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "TaskRuns remain active after their server-side deadline"
+          runbook: "operations.md#task-run-deadline-and-reconciliation"
+
+      - alert: AurisTaskRunStatusSyncOverdue
+        expr: auris_task_run_status_sync_overdue > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "TaskRun engine status reconciliation is overdue"
+          runbook: "operations.md#task-run-deadline-and-reconciliation"
+
   - name: auris-flow-capacity-and-recovery
     rules:
       - alert: AurisHostDiskWillFill
         expr: |
           (
-            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"}
             /
-            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"}
           ) < 0.15
+          and on (instance, device, mountpoint)
+          node_filesystem_readonly{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"} == 0
         for: 15m
         labels:
           severity: warning
@@ -80,15 +192,32 @@ groups:
       - alert: AurisHostDiskCritical
         expr: |
           (
-            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"}
             /
-            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"}
           ) < 0.08
+          and on (instance, device, mountpoint)
+          node_filesystem_readonly{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"} == 0
         for: 5m
         labels:
           severity: critical
         annotations:
           summary: "Host filesystem has less than 8% free space"
+          runbook: "operations.md#disk-capacity"
+
+      - alert: AurisHostDiskWillFillIn24Hours
+        expr: |
+          predict_linear(
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"}[6h],
+            24 * 3600
+          ) < 0
+          and on (instance, device, mountpoint)
+          node_filesystem_readonly{fstype!~"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?"} == 0
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "A writable host filesystem is projected to fill within 24 hours"
           runbook: "operations.md#disk-capacity"
 
       - alert: AurisBackupStale

@@ -30,7 +30,8 @@ MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的�
 - `minio/versions.json` 与 `minio/objects/**`：`auris-flow` bucket 的全部内容版本及 delete marker，并记录可安全重放的 user metadata、tags 和 storage class；恢复后比较每代的 key、顺序、大小、ETag 与这些属性。目标 MinIO 会生成新的 version ID，因此业务不能把 provider version ID 当唯一事实。
 - `qdrant/snapshots.json` 与 `qdrant/snapshots/**`：单节点 collection snapshots 和 aliases，仅用于加速派生索引恢复。Qdrant 官方要求源/目标使用相同 major/minor 版本，脚本会 fail closed。
 - 可选 `redis/cache.rdb`：只用于故障诊断，不参与自动恢复，也不计入业务一致性。
-- `manifest.json`、`manifest.sha256`：commit、release、UTC 时间、每个文件的 SHA-256/大小、Compose 镜像与工具版本、deployment-wide counts、权威边界和固定恢复顺序。
+- `metadata/release-metadata.json`、`metadata/release-metadata.sigstore.json`、`metadata/running-images.json`：签名部署包的 tag/commit、Compose、image-lock 与恢复兼容策略哈希，以及备份时全部正在运行的 release service 实际容器/RepoDigest 校验证据；MySQL、MinIO、Qdrant、Redis 始终为必选。
+- `manifest.json`、`manifest.sha256`：v2 schema 强绑定上述 release metadata/运行镜像证据、UTC 时间、每个文件的 SHA-256/大小、工具版本、deployment-wide counts、权威边界和固定恢复顺序。
 
 MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历史，因此本实现不使用 mirror，而是逐代读取并重放版本。Qdrant collection snapshot 是派生数据恢复加速器，不得替代 MySQL/MinIO 重建能力。
 
@@ -43,9 +44,14 @@ MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历�
 进入维护窗口，停止所有写端；依赖层保持运行：
 
 ```bash
-cd /opt/auris-flow/production
-docker compose stop edge worker bff dagster-daemon dagster-webserver dagster-code keycloak
-docker compose ps
+cd /opt/auris-flow
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml \
+  stop edge worker bff dagster-daemon dagster-webserver dagster-code keycloak
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml ps
 ```
 
 脚本会再次检查写端状态，任一写端仍运行就拒绝备份。这使 MySQL 行数、对象版本和 Qdrant snapshot 对应同一停写恢复点；`--single-transaction` 同时保证 InnoDB 逻辑转储自身一致。
@@ -56,8 +62,7 @@ docker compose ps
 cd /opt/auris-flow
 production/scripts/backup.sh \
   --output-root /mnt/encrypted-backups/auris-flow \
-  --storage-boundary encrypted-external \
-  --release-version v1.0.0
+  --storage-boundary encrypted-external
 
 production/scripts/verify-backup.sh \
   --backup /mnt/encrypted-backups/auris-flow/auris-flow-YYYYMMDDTHHMMSSZ-COMMIT
@@ -67,17 +72,30 @@ production/scripts/verify-backup.sh \
 
 如果备份失败，脚本保留唯一的 `.auris-flow-backup.*` staging 目录并打印路径，便于诊断；确认不再需要后，由操作员只删除该确切目录，不使用未解析变量或通配符。
 
+`backup.sh` 不读取 Git，也不接受 `AURIS_SOURCE_COMMIT`。它先用包内 Sigstore bundle 重新验证
+release metadata，再核对当前 Compose project 中全部 running service 的配置引用与本地镜像
+RepoDigest 均等于已签名 image lock；任何未知 service、可变 tag、stale container 或 metadata
+漂移都会在写备份前失败。脚本固定 `default` Docker context 与 `auris-flow` project，拒绝环境变量
+重定向。
+
 ## 恢复到空环境
 
 ### 1. 固定同一 Release
 
-在替代宿主机检出 manifest 中的 commit，加载相同 tag/digest 的镜像，恢复 Compose `.env`、TLS 和外部 secret files。`restore.sh` 会拒绝当前 checkout 与备份 commit 不一致。
+在替代宿主机安装 manifest 所指向的同一签名 deployment bundle，恢复 Compose `.env`、TLS 和
+外部 secret files。部署包不含 `.git`；`restore.sh` 比较已安装
+`production/release-metadata.json` 与备份 manifest，并验证权威服务的实际运行镜像 digest。
 
 只启动空的强依赖层，不先启动迁移、Keycloak、Dagster、BFF 或 Worker：
 
 ```bash
-cd /opt/auris-flow/production
-docker compose up -d mysql db-bootstrap redis minio minio-bootstrap qdrant
+cd /opt/auris-flow
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml pull mysql db-bootstrap redis minio minio-bootstrap qdrant bff
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml up -d mysql db-bootstrap redis minio minio-bootstrap qdrant
 ```
 
 恢复脚本要求：MySQL 所有目标表总行数为零、MinIO bucket 没有任何版本、Qdrant 没有 collection、应用写端全部停止。不存在“强制覆盖非空目标”参数；如目标非空，应创建另一个全新 Compose project/卷，而不是清库后重试。
@@ -96,9 +114,15 @@ production/scripts/restore.sh \
   --qdrant-mode snapshot
 ```
 
+只有目标 release 的已签 restore policy 精确列出旧 backup 的 tag、完整 commit 和 metadata SHA-256
+三元组时，才允许跨 release 恢复；操作员还必须显式重复 manifest 中的完整旧 commit，例如
+`--allow-release-migration-from <40-or-64-hex-commit>`。首发 policy 为空，因此所有跨 commit 恢复均
+被拒绝。未来开放兼容窗口后，恢复成功必须立即执行目标 release 前向 migration。自由文本、短 SHA、
+仅凭 commit 的确认或任意“忽略版本”开关都不被接受。
+
 固定恢复顺序是：
 
-1. 再验 manifest 与所有 SHA-256；
+1. 以 `O_NOFOLLOW` 将备份复制到权限收紧的私有 staging，二次验证 snapshot manifest 与所有 SHA-256，后续只消费该 snapshot；
 2. 恢复 MySQL 三个 schema；
 3. 重放 MinIO 的内容版本与 delete marker；
 4. 在权威数据成功后恢复兼容的 Qdrant 派生 snapshot/alias；
@@ -123,9 +147,14 @@ production/scripts/restore.sh \
 ### 4. 启动与业务校验
 
 ```bash
-cd /opt/auris-flow/production
-docker compose run --rm migrate
-docker compose up -d keycloak dagster-code dagster-webserver dagster-daemon bff worker edge
+cd /opt/auris-flow
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm migrate
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml \
+  up -d keycloak dagster-code dagster-webserver dagster-daemon bff worker edge
 ```
 
 确认：
@@ -137,7 +166,8 @@ docker compose up -d keycloak dagster-code dagster-webserver dagster-daemon bff 
 
 ## 空环境恢复演练
 
-季度执行一次，并在每个 release candidate 上执行。命令使用全新且带 PID 的 Compose project/volume，不触碰生产 project：
+季度执行一次，并在每个 release candidate 上执行。命令使用全新随机 Compose project/volume，
+先 `pull` 固定 digest 并验证实际镜像，不进行本地 `build`，也不触碰生产 project：
 
 ```bash
 production/scripts/verify-backup.sh \

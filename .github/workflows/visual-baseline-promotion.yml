@@ -1,0 +1,99 @@
+name: Promote visual baseline pointer
+
+permissions:
+  contents: read
+  packages: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_ref:
+        description: Immutable GHCR reference (ghcr.io/...@sha256:...)
+        required: true
+        type: string
+      source_commit:
+        description: Exact clean commit used to generate the Linux baseline
+        required: true
+        type: string
+      approval_reference:
+        description: Human approval or change-control reference
+        required: true
+        type: string
+
+jobs:
+  verify-pointer:
+    runs-on: ubuntu-24.04
+    # Repository admins must configure required reviewers. Merely naming this
+    # environment is not evidence that hosted protection is enabled.
+    environment: visual-baseline-production
+    timeout-minutes: 15
+
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      # actions/setup-python v5.6.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      # oras-project/setup-oras v1.2.3
+      - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
+        with:
+          version: "1.2.3"
+
+      # docker/login-action v3.4.0
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sigstore/cosign-installer v3.9.2
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+        with:
+          cosign-release: "v2.5.3"
+
+      - name: Verify immutable artifact and render the only allowed source change
+        env:
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROMOTION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "Visual promotion must be dispatched from the default branch." >&2
+            exit 2
+          fi
+          if ! [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_commit must be an exact 40-character Git object id." >&2
+            exit 2
+          fi
+          default_tip="$(git rev-parse --verify "refs/remotes/origin/${DEFAULT_BRANCH}")"
+          if [ "${SOURCE_COMMIT}" != "${default_tip}" ]; then
+            echo "Visual promotion source must equal the reviewed default-branch tip." >&2
+            exit 2
+          fi
+          if [ "${PROMOTION_WORKFLOW_SHA}" != "${SOURCE_COMMIT}" ]; then
+            echo "the executing promotion workflow must come from source_commit." >&2
+            exit 2
+          fi
+          signature_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/visual-baseline-build.yml@refs/heads/${DEFAULT_BRANCH}"
+          bash scripts/promote_visual_baseline.sh \
+            "${ARTIFACT_REF}" "${SOURCE_COMMIT}" "${APPROVAL_REFERENCE}" \
+            "${signature_identity}" "${SIGNATURE_ISSUER}"
+
+      - name: Upload reviewed lock pointer for a dedicated commit
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: visual-baseline-lock-${{ inputs.source_commit }}
+          path: production/visual/visual-baseline.lock.json
+          if-no-files-found: error
+          retention-days: 7

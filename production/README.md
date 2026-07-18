@@ -9,8 +9,8 @@
 ## 支持边界
 
 首个支持目标是 **一台 64 位 Linux 宿主机上的 Docker Compose**。MySQL 是权威业务存储，
-MinIO 保存权威对象；Redis 是缓存/运行辅助状态，Qdrant 是可重建派生索引。Dagster 是内部执行
-引擎，不作为产品 API 或前端画布暴露。
+MinIO 保存权威对象；Redis 当前承担固定窗口限流和运行辅助状态，尚未实现结果缓存读写，Qdrant
+是可重建派生索引。Dagster 是内部执行引擎，不作为产品 API 或前端画布暴露。
 
 该形态没有节点级高可用、自动故障转移或宿主机故障自动容灾。维护、升级、部分密钥轮换和完整
 备份需要停写窗口。默认恢复目标及前提见
@@ -29,8 +29,9 @@ MinIO 保存权威对象；Redis 是缓存/运行辅助状态，Qdrant 是可重
 - DNS 的 `AURIS_PUBLIC_HOST` 必须解析到该宿主机。出站网络至少允许企业 IdP、语义 embedding
   endpoint、外部回调目标、镜像仓库和时间同步服务。
 
-容量必须按真实音频保留期、对象版本、MySQL 增长、Qdrant 向量维度和 Tempo/Prometheus 30 天
-保留重新测算。上述硬件只是小规模候选基线，不是容量承诺。
+容量必须按真实音频保留期、对象版本、MySQL 增长、Qdrant 向量维度，以及当前 Tempo 7 天、
+Prometheus 30 天的配置保留期重新测算；修改保留期后必须重新做容量与磁盘告警演练。上述硬件只是
+小规模候选基线，不是容量承诺。
 
 ## 发行制品规则
 
@@ -39,8 +40,12 @@ MinIO 保存权威对象；Redis 是缓存/运行辅助状态，Qdrant 是可重
 当作正式镜像。
 
 在正式 `v1.0.0-rc.1` 制品出现前，可以从当前 checkout 构建**验收环境**，但必须明确标记为
-candidate evaluation。正式 release 应把发布方提供的 `production/images.lock.env` 与 `.env`
-合并使用，并在启动前验证签名和 digest；如果该文件或正式签名不存在，停止生产安装。
+candidate evaluation。正式 release 的部署 tar 以根目录 `README.md` 为唯一安装入口，其中
+`production/compose.yaml` 已把全部镜像固定到 digest，并由
+`production/release-metadata.json`、其独立 `production/release-metadata.sigstore.json`、外层
+`SHA256SUMS` 与 checksum Sigstore bundle 共同绑定；不存在额外的镜像环境覆盖文件。metadata
+Sigstore bundle 作为单独 Release asset 下载、经外层 checksum 校验后按根 README 安装。缺少任一
+正式签名、checksum 或 metadata 时停止生产安装。
 
 ## 安装前准备
 
@@ -93,8 +98,12 @@ docker compose \
   --project-directory production \
   --env-file production/.env \
   -f production/compose.yaml config --quiet
-python3 scripts/scan_secrets.py
 ```
+
+源码 checkout 的 secret scan 由仓库根验证入口执行；部署 tar 不携带源码扫描器。部署 tar 必须改用
+`python3 scripts/release_bundle.py verify --bundle-root . --verify-signature` 先按固定官方 tag workflow
+identity 验证 metadata，再校验包内 schema、commit、Compose、image lock 与恢复兼容策略哈希；不能
+把源码扫描命令误当成发布包完整性校验。
 
 生产配置会 fail closed：开发认证、demo/弱密码、通配 CORS/TrustedHost、local/fake adapter、
 非严格依赖检查、缺失 OIDC/真实存储/回调配置和生产确定性 embedding 均不被接受。
@@ -137,7 +146,9 @@ client）必须通过 secret file/reference 注入；当前参考 public PKCE cl
 
 ## 候选环境启动与验收
 
-在当前尚无正式签名镜像时，只能进行源码候选验收：
+以下 `build` 命令**仅适用于包含 `.git` 与 Dockerfile 的源码 checkout**。若目录中存在
+`production/release-metadata.json`，说明当前是正式部署包，必须回到包根目录按 `README.md` 执行
+`pull` 与 `up`，不得运行本节：
 
 ```bash
 docker compose \
@@ -164,15 +175,32 @@ curl --fail --silent --show-error https://auris.example.com/readyz
 
 公开 `/healthz` 只证明 edge 进程存活，不证明依赖可用。公开 `/readyz` 精确反代 BFF 的严格
 readiness，在生产检查 auth、MySQL、Redis、MinIO、Qdrant 和真实 Dagster，任一强依赖失败返回
-503；不要在负载均衡器上用 `/healthz` 代替它。OIDC discovery/JWKS 的真实登录另行验收。
+503；MinIO 必须以配置凭据签名访问目标 bucket，Qdrant 必须返回 2xx。不要在负载均衡器上用
+`/healthz` 代替它。OIDC discovery/JWKS 的真实登录另行验收。
+若把对象存储切换为 AWS S3，运行身份除实际业务所需的对象级读写权限外，还必须对目标 bucket
+拥有 `s3:ListBucket`，因为严格 readiness 使用签名 `HeadBucket`；缺少该权限会得到 403 并按未就绪
+处理。此要求不需要、也不得通过公开 bucket 或匿名访问来满足；其他 S3-compatible provider 应授予
+对应的最小 bucket-HEAD 权限。
 `/metrics` 不经 edge 暴露（外部返回 404），只由内部 Prometheus 抓取；Grafana 通过本机
-`127.0.0.1:13000` 或 SSH 隧道访问。
+`127.0.0.1:13000` 或 SSH 隧道访问。仪表盘使用 MySQL 权威记录展示 TaskRun 终态、24 小时滚动
+完成时长、deadline/status-sync 监控动作，使用 attempt ledger 展示 callback retry/failure，并展示
+真实限流结果。容量告警来自 node-exporter 所见的可写宿主文件系统，不冒充 MinIO bucket quota 或
+单个 Docker volume 的独占容量；详细口径见[运维 Runbook](../doc/runbooks/operations.md)。
 
 BFF、Worker 与 `dagster-code` 分别使用固定 OTel service name，并仅向内部
 `otel-collector:4318` 发送 OTLP/HTTP。BFF 提交真实 Dagster run 时会通过内部 run config 传递完整
 W3C parent context，code server 据此延续同一 trace；Tempo 中的执行跨度仍使用业务 `trace_id`
-关联领域链路。Collector 在转发 Tempo 前删除认证头、cookie、SQL statement 与 URL query；run
-config 和 span attribute 禁止承载凭据、原始音频或转写。
+关联领域链路。固定 DNS/IP 的签名外部回调使用显式 HTTP CLIENT 子 span，并向对端注入 W3C
+`traceparent`；该 span 只记录 method、scheme、已校验 host、port 和数字状态码，不记录路径、query、
+请求头、HMAC、body 或异常消息。Collector 在转发 Tempo 前删除认证头、cookie、SQL statement 与
+URL query；run config 和 span attribute 禁止承载凭据、原始音频或转写。
+
+Worker 同时执行 TaskRun deadline 与漏回调核对。`AURIS_TASK_RUN_DEFAULT_DEADLINE_SECONDS`、
+`AURIS_TASK_RUN_STATUS_SYNC_INTERVAL_SECONDS`、`AURIS_TASK_RUN_MONITOR_POLL_SECONDS` 和
+`AURIS_TASK_RUN_MONITOR_BATCH_SIZE` 通过 Compose 映射为服务端配置；请求方不能逐运行覆盖。生产固定
+启用 monitor，禁用会使 BFF/Worker 配置校验 fail closed。扩 Worker 时无需外部分布式锁：候选 RunRecord
+使用数据库 `SKIP LOCKED`，控制代次、审计与 Outbox 在同一事务提交，远端副作用继续由 Outbox lease
+generation/fencing token 保护。
 
 上线前至少完成：
 

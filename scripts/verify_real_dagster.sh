@@ -21,6 +21,10 @@ INITIAL_ARTIFACT="${TEMP_ROOT}/initial.json"
 RESULT_ARTIFACT="${AURIS_REAL_DAGSTER_RESULT:-${ROOT}/build/release-evidence/real-dagster-gate.json}"
 WAIT_TIMEOUT="${AURIS_REAL_DAGSTER_WAIT_TIMEOUT:-240}"
 RUN_TIMEOUT="${AURIS_REAL_DAGSTER_RUN_TIMEOUT:-90}"
+BUILD_TIMEOUT="${AURIS_REAL_DAGSTER_BUILD_TIMEOUT:-900}"
+CLEANUP_TIMEOUT="${AURIS_REAL_DAGSTER_CLEANUP_TIMEOUT:-60}"
+COMPOSE_DEADLINE_GRACE="${AURIS_REAL_DAGSTER_DEADLINE_GRACE:-15}"
+DEADLINE_RUNNER="${ROOT}/scripts/run_with_deadline.py"
 SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse --verify HEAD^{commit})"
 
 free_port() {
@@ -55,15 +59,27 @@ COMPOSE=(
   --file "${GATE_COMPOSE}"
 )
 
+compose_with_deadline() {
+  local timeout_seconds="$1"
+  local label="$2"
+  shift 2
+  "${PYTHON_BIN}" "${DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --label "${label}" -- \
+    "${COMPOSE[@]}" "$@"
+}
+
 cleanup() {
   local status="$?"
   trap - EXIT INT TERM
   if [ "${status}" -ne 0 ]; then
-    "${COMPOSE[@]}" logs --tail 120 \
+    compose_with_deadline "${CLEANUP_TIMEOUT}" "collect real Dagster logs" \
+      logs --tail 120 \
       dagster-gate-callback dagster-code dagster-webserver dagster-daemon >&2 || true
   fi
   if [[ "${PROJECT_NAME}" =~ ^auris-dagster-gate-[0-9]+-[0-9]+$ ]]; then
-    if ! "${COMPOSE[@]}" down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
+    if ! compose_with_deadline "${CLEANUP_TIMEOUT}" "clean real Dagster project" \
+      down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
       echo "Could not clean isolated real Dagster project ${PROJECT_NAME}." >&2
       if [ "${status}" -eq 0 ]; then
         status=1
@@ -93,22 +109,28 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "Docker Engine is required for real Dagster verification." >&2
   exit 2
 fi
-if ! [[ "${WAIT_TIMEOUT}" =~ ^[1-9][0-9]*$ && "${RUN_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+if ! [[ "${WAIT_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${RUN_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${BUILD_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${CLEANUP_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${COMPOSE_DEADLINE_GRACE}" =~ ^[1-9][0-9]*$ ]]; then
   echo "Real Dagster timeout values must be positive integers." >&2
   exit 2
 fi
+COMPOSE_WAIT_DEADLINE=$((WAIT_TIMEOUT + COMPOSE_DEADLINE_GRACE))
+RUN_COMMAND_DEADLINE=$((RUN_TIMEOUT + COMPOSE_DEADLINE_GRACE))
 
 AURIS_SECRETS_DIR="${AURIS_SECRETS_DIR}" \
   AURIS_RUNTIME_METRICS_DIR="${AURIS_RUNTIME_METRICS_DIR}" \
   bash "${ROOT}/production/scripts/init-secrets.sh" >/dev/null
 
-"${COMPOSE[@]}" config --quiet
+compose_with_deadline "${CLEANUP_TIMEOUT}" "validate real Dagster Compose" config --quiet
 mkdir -p "$(dirname "${RESULT_ARTIFACT}")"
 rm -f "${RESULT_ARTIFACT}"
 
 echo "Starting isolated production Dagster services (${PROJECT_NAME})..."
-"${COMPOSE[@]}" build dagster-code
-"${COMPOSE[@]}" build dagster-gate-callback
+compose_with_deadline "${BUILD_TIMEOUT}" "build real Dagster gate images" \
+  build dagster-code dagster-gate-callback
 START_ORDER=(
   dagster-gate-secrets-init
   mysql
@@ -119,7 +141,8 @@ START_ORDER=(
   dagster-daemon
 )
 for service in "${START_ORDER[@]}"; do
-  "${COMPOSE[@]}" up --detach --no-build --wait \
+  compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}" \
+    up --detach --no-build --wait \
     --wait-timeout "${WAIT_TIMEOUT}" "${service}"
 done
 
@@ -127,7 +150,10 @@ GRAPHQL_URL="http://127.0.0.1:${AURIS_DAGSTER_GATE_PORT}/graphql"
 CALLBACK_URL="http://127.0.0.1:${AURIS_DAGSTER_GATE_CALLBACK_PORT}"
 
 echo "Verifying real Dagster workspace, submission, terminal status and SAFE_TERMINATE..."
-"${PYTHON_BIN}" "${ROOT}/scripts/verify_real_dagster.py" \
+"${PYTHON_BIN}" "${DEADLINE_RUNNER}" \
+  --timeout-seconds "${RUN_COMMAND_DEADLINE}" \
+  --label "verify real Dagster initial phase" -- \
+  "${PYTHON_BIN}" "${ROOT}/scripts/verify_real_dagster.py" \
   --phase initial \
   --graphql-url "${GRAPHQL_URL}" \
   --callback-url "${CALLBACK_URL}" \
@@ -139,13 +165,18 @@ echo "Verifying real Dagster workspace, submission, terminal status and SAFE_TER
 
 echo "Restarting real Dagster code, webserver and daemon processes..."
 for service in dagster-code dagster-webserver dagster-daemon; do
-  "${COMPOSE[@]}" restart "${service}" >/dev/null
-  "${COMPOSE[@]}" up --detach --no-build --wait \
+  compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "restart ${service}" \
+    restart "${service}" >/dev/null
+  compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "wait for ${service}" \
+    up --detach --no-build --wait \
     --wait-timeout "${WAIT_TIMEOUT}" "${service}" >/dev/null
 done
 
 echo "Verifying MySQL-backed terminal persistence and post-restart recovery..."
-"${PYTHON_BIN}" "${ROOT}/scripts/verify_real_dagster.py" \
+"${PYTHON_BIN}" "${DEADLINE_RUNNER}" \
+  --timeout-seconds "${RUN_COMMAND_DEADLINE}" \
+  --label "verify real Dagster recovery phase" -- \
+  "${PYTHON_BIN}" "${ROOT}/scripts/verify_real_dagster.py" \
   --phase recovery \
   --prior-artifact "${INITIAL_ARTIFACT}" \
   --graphql-url "${GRAPHQL_URL}" \

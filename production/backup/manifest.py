@@ -13,21 +13,32 @@ import hmac
 import json
 import os
 import re
+import shutil
 import stat
 import sys
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SCHEMA_VERSION = "auris-flow.backup-manifest/v1"
+SCHEMA_VERSION = "auris-flow.backup-manifest/v2"
+RELEASE_METADATA_SCHEMA = "auris.release-deployment-metadata.v2"
+IMAGE_LOCK_SCHEMA = "auris.release-image-lock.v1"
 REQUIRED_AUTHORITIES = ("mysql", "minio")
 MANIFEST_NAME = "manifest.json"
 CHECKSUM_NAME = "manifest.sha256"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+RELEASE_TAG_RE = re.compile(
+    r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-rc\.[1-9]\d*)?$"
+)
 BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+IMAGE_REFERENCE_RE = re.compile(r"^[^\s@$]+(?::[^\s@]+)?@sha256:[0-9a-f]{64}$")
+SNAPSHOT_MARKER = ".auris-flow-restore-snapshot"
+SNAPSHOT_MARKER_VALUE = "auris-flow.restore-snapshot.v1\n"
 
 
 class ManifestError(ValueError):
@@ -35,9 +46,9 @@ class ManifestError(ValueError):
 
 
 def _canonical_json(value: Any) -> bytes:
-    return (json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode(
-        "utf-8"
-    )
+    return (
+        json.dumps(value, sort_keys=True, indent=2, ensure_ascii=False) + "\n"
+    ).encode("utf-8")
 
 
 def _sha256_file(path: Path) -> str:
@@ -104,7 +115,9 @@ def _walk_artifacts(root: Path) -> dict[str, dict[str, Any]]:
         for name in directory_names:
             candidate = base / name
             if candidate.is_symlink():
-                raise ManifestError(f"symlink is forbidden in backup: {candidate.relative_to(root)}")
+                raise ManifestError(
+                    f"symlink is forbidden in backup: {candidate.relative_to(root)}"
+                )
         for name in file_names:
             candidate = base / name
             relative = candidate.relative_to(root).as_posix()
@@ -118,6 +131,132 @@ def _walk_artifacts(root: Path) -> dict[str, dict[str, Any]]:
                 "size_bytes": candidate.stat().st_size,
             }
     return dict(sorted(artifacts.items()))
+
+
+def _copy_regular_file_no_follow(
+    *, source_dir_fd: int, name: str, destination: Path
+) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(name, flags, dir_fd=source_dir_fd)
+    try:
+        before = os.fstat(source_fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise ManifestError(f"snapshot source is not a regular file: {name}")
+        destination_fd = os.open(
+            destination,
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+            0o400,
+        )
+        try:
+            while True:
+                chunk = os.read(source_fd, 1024 * 1024)
+                if not chunk:
+                    break
+                view = memoryview(chunk)
+                while view:
+                    written = os.write(destination_fd, view)
+                    if written <= 0:
+                        raise ManifestError(
+                            "snapshot destination write made no progress"
+                        )
+                    view = view[written:]
+            os.fsync(destination_fd)
+        finally:
+            os.close(destination_fd)
+        after = os.fstat(source_fd)
+        stable_fields = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        if stable_fields != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
+            raise ManifestError(f"snapshot source changed while being copied: {name}")
+    finally:
+        os.close(source_fd)
+
+
+def snapshot_backup(args: argparse.Namespace) -> int:
+    source = _safe_root(args.source)
+    snapshot_root = _safe_root(args.snapshot_root)
+    if (
+        source == snapshot_root
+        or source.is_relative_to(snapshot_root)
+        or snapshot_root.is_relative_to(source)
+    ):
+        raise ManifestError("snapshot root must not overlap the backup source")
+    if any(snapshot_root.iterdir()):
+        raise ManifestError("snapshot root must start empty")
+    os.chmod(snapshot_root, 0o700)
+    marker = snapshot_root / SNAPSHOT_MARKER
+    marker.write_text(SNAPSHOT_MARKER_VALUE, encoding="ascii")
+    os.chmod(marker, 0o400)
+    destination_root = snapshot_root / "backup"
+    destination_root.mkdir(mode=0o700)
+
+    destination_directories: list[Path] = [destination_root]
+    for directory, directory_names, file_names, directory_fd in os.fwalk(
+        source, topdown=True, follow_symlinks=False
+    ):
+        relative = Path(directory).relative_to(source)
+        destination_directory = destination_root / relative
+        for name in sorted(directory_names):
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISDIR(metadata.st_mode):
+                raise ManifestError(f"symlink or special directory in backup: {name}")
+            child = destination_directory / name
+            child.mkdir(mode=0o700)
+            destination_directories.append(child)
+        for name in sorted(file_names):
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if not stat.S_ISREG(metadata.st_mode):
+                raise ManifestError(f"symlink or special file in backup: {name}")
+            _copy_regular_file_no_follow(
+                source_dir_fd=directory_fd,
+                name=name,
+                destination=destination_directory / name,
+            )
+    for destination_directory_path in reversed(destination_directories):
+        destination_directory_path.chmod(0o500)
+    print(json.dumps({"snapshot": str(destination_root), "status": "created"}))
+    return 0
+
+
+def destroy_snapshot(args: argparse.Namespace) -> int:
+    snapshot_root = _safe_root(args.snapshot_root)
+    marker = snapshot_root / SNAPSHOT_MARKER
+    _regular_file(marker, label="restore snapshot marker")
+    if marker.read_text(encoding="ascii") != SNAPSHOT_MARKER_VALUE:
+        raise ManifestError("restore snapshot marker is invalid")
+    if {entry.name for entry in snapshot_root.iterdir()} != {SNAPSHOT_MARKER, "backup"}:
+        raise ManifestError("restore snapshot root contains unexpected entries")
+    backup = snapshot_root / "backup"
+    if backup.is_symlink() or not backup.is_dir():
+        raise ManifestError("restore snapshot backup directory is unsafe")
+    for directory, directory_names, file_names in os.walk(
+        backup, topdown=True, followlinks=False
+    ):
+        base = Path(directory)
+        if base.is_symlink():
+            raise ManifestError("symlink is forbidden in restore snapshot")
+        base.chmod(0o700)
+        for name in (*directory_names, *file_names):
+            if (base / name).is_symlink():
+                raise ManifestError("symlink is forbidden in restore snapshot")
+    shutil.rmtree(snapshot_root)
+    print(json.dumps({"status": "destroyed"}))
+    return 0
 
 
 def _validate_counts(value: Any) -> dict[str, Any]:
@@ -138,19 +277,149 @@ def _validate_counts(value: Any) -> dict[str, Any]:
 
     serialized_keys = " ".join(nested_keys(value))
     if any(fragment in serialized_keys for fragment in forbidden_fragments):
-        raise ManifestError("counts must be deployment-wide and must not be grouped by tenant/project")
+        raise ManifestError(
+            "counts must be deployment-wide and must not be grouped by tenant/project"
+        )
     return value
 
 
+def _validate_release_metadata(value: Any) -> dict[str, Any]:
+    required = {
+        "schema_version",
+        "release_tag",
+        "source_commit",
+        "compose",
+        "image_lock",
+        "restore_policy",
+        "images",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ManifestError("release metadata has missing or unexpected fields")
+    if value.get("schema_version") != RELEASE_METADATA_SCHEMA:
+        raise ManifestError("release metadata schema is not supported")
+    release_tag = value.get("release_tag")
+    source_commit = value.get("source_commit")
+    if not isinstance(release_tag, str) or not RELEASE_TAG_RE.fullmatch(release_tag):
+        raise ManifestError("release metadata tag is invalid")
+    if not isinstance(source_commit, str) or not COMMIT_RE.fullmatch(source_commit):
+        raise ManifestError("release metadata source commit is invalid")
+    bindings: dict[str, dict[str, str]] = {}
+    for key, expected_path in (
+        ("compose", "production/compose.yaml"),
+        ("image_lock", "production/images.lock.json"),
+        ("restore_policy", "production/restore-compatibility.json"),
+    ):
+        binding = value.get(key)
+        if not isinstance(binding, dict) or set(binding) != {"path", "sha256"}:
+            raise ManifestError(f"release metadata {key} binding is invalid")
+        digest = binding.get("sha256")
+        if (
+            binding.get("path") != expected_path
+            or not isinstance(digest, str)
+            or not SHA256_RE.fullmatch(digest)
+        ):
+            raise ManifestError(f"release metadata {key} binding is invalid")
+        bindings[key] = {"path": expected_path, "sha256": digest}
+    raw_images = value.get("images")
+    if not isinstance(raw_images, dict) or not raw_images:
+        raise ManifestError("release metadata images must be a non-empty map")
+    images: dict[str, str] = {}
+    for service, reference in sorted(raw_images.items()):
+        if not isinstance(service, str) or not re.fullmatch(
+            r"[a-z0-9][a-z0-9_-]*", service
+        ):
+            raise ManifestError("release metadata service name is invalid")
+        if not isinstance(reference, str) or not IMAGE_REFERENCE_RE.fullmatch(
+            reference
+        ):
+            raise ManifestError("release metadata image is not digest-pinned")
+        tagged = reference.split("@", 1)[0].rsplit("/", 1)[-1]
+        if ":" not in tagged or tagged.rsplit(":", 1)[1].casefold() == "latest":
+            raise ManifestError("release metadata image tag is missing or mutable")
+        images[service] = reference
+    return {
+        "schema_version": RELEASE_METADATA_SCHEMA,
+        "release_tag": release_tag,
+        "source_commit": source_commit,
+        "compose": bindings["compose"],
+        "image_lock": bindings["image_lock"],
+        "restore_policy": bindings["restore_policy"],
+        "images": images,
+    }
+
+
+def _validate_running_images(
+    value: Any, release_metadata: Mapping[str, Any]
+) -> dict[str, Any]:
+    required = {
+        "schema_version",
+        "release_tag",
+        "source_commit",
+        "verification_scope",
+        "images",
+    }
+    if not isinstance(value, dict) or set(value) != required:
+        raise ManifestError("running image evidence has missing or unexpected fields")
+    if value.get("schema_version") != "auris.release-running-images.v1":
+        raise ManifestError("running image evidence schema is not supported")
+    if value.get("release_tag") != release_metadata["release_tag"]:
+        raise ManifestError(
+            "running image evidence release tag does not match metadata"
+        )
+    if value.get("source_commit") != release_metadata["source_commit"]:
+        raise ManifestError("running image evidence commit does not match metadata")
+    if value.get("verification_scope") != "all-running-release-services":
+        raise ManifestError(
+            "running image evidence must cover all running release services"
+        )
+    raw_images = value.get("images")
+    required_services = {"mysql", "minio", "qdrant", "redis"}
+    if not isinstance(raw_images, dict) or not required_services.issubset(raw_images):
+        raise ManifestError(
+            "running image evidence must contain mysql, minio, qdrant and redis"
+        )
+    images: dict[str, str] = {}
+    metadata_images = release_metadata["images"]
+    unknown_services = sorted(set(raw_images) - set(metadata_images))
+    if unknown_services:
+        raise ManifestError(
+            "running image evidence contains an unknown release service"
+        )
+    for service in sorted(raw_images):
+        reference = raw_images.get(service)
+        if reference != metadata_images.get(service):
+            raise ManifestError(
+                f"running image evidence does not match release metadata: {service}"
+            )
+        images[service] = str(reference)
+    return {
+        "schema_version": "auris.release-running-images.v1",
+        "release_tag": release_metadata["release_tag"],
+        "source_commit": release_metadata["source_commit"],
+        "verification_scope": "all-running-release-services",
+        "images": images,
+    }
+
+
 def _validate_document(document: Any) -> dict[str, Any]:
-    if not isinstance(document, dict) or document.get("schema_version") != SCHEMA_VERSION:
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != SCHEMA_VERSION
+    ):
         raise ManifestError(f"manifest schema_version must be {SCHEMA_VERSION}")
     backup_id = document.get("backup_id")
     if not isinstance(backup_id, str) or not BACKUP_ID_RE.fullmatch(backup_id):
         raise ManifestError("invalid backup_id")
     _validate_timestamp(document.get("created_at_utc"))
     source = document.get("source")
-    if not isinstance(source, dict):
+    if not isinstance(source, dict) or set(source) != {
+        "git_commit",
+        "release_version",
+        "release_metadata",
+        "release_metadata_sha256",
+        "running_images",
+        "running_images_sha256",
+    }:
         raise ManifestError("manifest source is required")
     commit = source.get("git_commit")
     version = source.get("release_version")
@@ -158,6 +427,22 @@ def _validate_document(document: Any) -> dict[str, Any]:
         raise ManifestError("source.git_commit must be a hexadecimal commit id")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise ManifestError("source.release_version is invalid")
+    release_metadata = _validate_release_metadata(source.get("release_metadata"))
+    release_metadata_sha256 = source.get("release_metadata_sha256")
+    if not isinstance(release_metadata_sha256, str) or not SHA256_RE.fullmatch(
+        release_metadata_sha256
+    ):
+        raise ManifestError("source.release_metadata_sha256 is invalid")
+    if release_metadata["source_commit"] != commit:
+        raise ManifestError("backup commit does not match release metadata")
+    if release_metadata["release_tag"] != version:
+        raise ManifestError("backup release version does not match release metadata")
+    _validate_running_images(source.get("running_images"), release_metadata)
+    running_images_sha256 = source.get("running_images_sha256")
+    if not isinstance(running_images_sha256, str) or not SHA256_RE.fullmatch(
+        running_images_sha256
+    ):
+        raise ManifestError("source.running_images_sha256 is invalid")
     boundary = document.get("storage_boundary")
     if not isinstance(boundary, dict) or boundary.get("operator_assertion") != (
         "encrypted-at-rest-and-copied-off-host"
@@ -166,9 +451,9 @@ def _validate_document(document: Any) -> dict[str, Any]:
     if boundary.get("contains_sensitive_data") is not True:
         raise ManifestError("backup must be classified as containing sensitive data")
     authority = document.get("data_authority")
-    if not isinstance(authority, dict) or tuple(authority.get("authoritative") or ()) != (
-        REQUIRED_AUTHORITIES
-    ):
+    if not isinstance(authority, dict) or tuple(
+        authority.get("authoritative") or ()
+    ) != (REQUIRED_AUTHORITIES):
         raise ManifestError("MySQL and MinIO must be the ordered authoritative sources")
     if set(authority.get("derived_or_optional") or ()) != {"qdrant", "redis"}:
         raise ManifestError("Qdrant and Redis must be classified as derived/optional")
@@ -182,12 +467,18 @@ def _validate_document(document: Any) -> dict[str, Any]:
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             raise ManifestError("artifact entry must be an object")
-        relative = _safe_relative(artifact.get("path"))
+        artifact_path = artifact.get("path")
+        if not isinstance(artifact_path, str):
+            raise ManifestError("artifact path must be a string")
+        relative = _safe_relative(artifact_path)
         path_text = relative.as_posix()
         if path_text in seen:
             raise ManifestError(f"duplicate artifact: {path_text}")
         seen.add(path_text)
-        if not isinstance(artifact.get("size_bytes"), int) or artifact["size_bytes"] < 0:
+        if (
+            not isinstance(artifact.get("size_bytes"), int)
+            or artifact["size_bytes"] < 0
+        ):
             raise ManifestError(f"invalid artifact size: {path_text}")
         if not isinstance(artifact.get("sha256"), str) or not SHA256_RE.fullmatch(
             artifact["sha256"]
@@ -206,11 +497,33 @@ def create_manifest(args: argparse.Namespace) -> int:
     tool_versions = _load_json(Path(args.tool_versions), label="tool versions")
     if not isinstance(tool_versions, dict):
         raise ManifestError("tool versions must be a JSON object")
+    release_metadata_path = Path(args.release_metadata)
+    release_metadata = _validate_release_metadata(
+        _load_json(release_metadata_path, label="release metadata")
+    )
+    running_images_path = Path(args.running_images)
+    running_images = _validate_running_images(
+        _load_json(running_images_path, label="running image evidence"),
+        release_metadata,
+    )
+    if release_metadata["source_commit"] != args.git_commit:
+        raise ManifestError("--git-commit does not match release metadata")
+    if release_metadata["release_tag"] != args.release_version:
+        raise ManifestError("--release-version does not match release metadata")
     artifacts = list(_walk_artifacts(root).values())
-    required_paths = {"mysql/all-databases.sql.gz", "mysql/table-counts.tsv", "minio/versions.json"}
+    required_paths = {
+        "metadata/release-metadata.json",
+        "metadata/release-metadata.sigstore.json",
+        "metadata/running-images.json",
+        "mysql/all-databases.sql.gz",
+        "mysql/table-counts.tsv",
+        "minio/versions.json",
+    }
     missing = sorted(required_paths.difference(item["path"] for item in artifacts))
     if missing:
-        raise ManifestError(f"required backup artifact(s) missing: {', '.join(missing)}")
+        raise ManifestError(
+            f"required backup artifact(s) missing: {', '.join(missing)}"
+        )
     document = {
         "schema_version": SCHEMA_VERSION,
         "backup_id": args.backup_id,
@@ -218,6 +531,10 @@ def create_manifest(args: argparse.Namespace) -> int:
         "source": {
             "git_commit": args.git_commit,
             "release_version": args.release_version,
+            "release_metadata": release_metadata,
+            "release_metadata_sha256": _sha256_file(release_metadata_path),
+            "running_images": running_images,
+            "running_images_sha256": _sha256_file(running_images_path),
         },
         "storage_boundary": {
             "contains_sensitive_data": True,
@@ -227,7 +544,12 @@ def create_manifest(args: argparse.Namespace) -> int:
         "data_authority": {
             "authoritative": list(REQUIRED_AUTHORITIES),
             "derived_or_optional": ["qdrant", "redis"],
-            "restore_order": ["mysql", "minio", "qdrant-derived", "redis-cache-optional"],
+            "restore_order": [
+                "mysql",
+                "minio",
+                "qdrant-derived",
+                "redis-cache-optional",
+            ],
         },
         "tenant_independent_counts": counts,
         "tool_versions": tool_versions,
@@ -272,14 +594,42 @@ def verify_manifest(args: argparse.Namespace) -> int:
         actual_artifact = actual[relative]
         if actual_artifact["size_bytes"] != expected_artifact["size_bytes"]:
             raise ManifestError(f"artifact size mismatch: {relative}")
-        if not hmac.compare_digest(actual_artifact["sha256"], expected_artifact["sha256"]):
+        if not hmac.compare_digest(
+            actual_artifact["sha256"], expected_artifact["sha256"]
+        ):
             raise ManifestError(f"artifact checksum mismatch: {relative}")
+    release_metadata_path = root / "metadata/release-metadata.json"
+    release_metadata = _validate_release_metadata(
+        _load_json(release_metadata_path, label="release metadata artifact")
+    )
+    source = document["source"]
+    if release_metadata != source["release_metadata"]:
+        raise ManifestError("release metadata artifact does not match backup source")
+    if not hmac.compare_digest(
+        _sha256_file(release_metadata_path), source["release_metadata_sha256"]
+    ):
+        raise ManifestError("release metadata artifact checksum does not match source")
+    running_images_path = root / "metadata/running-images.json"
+    running_images = _validate_running_images(
+        _load_json(running_images_path, label="running image evidence artifact"),
+        release_metadata,
+    )
+    if running_images != source["running_images"]:
+        raise ManifestError(
+            "running image evidence artifact does not match backup source"
+        )
+    if not hmac.compare_digest(
+        _sha256_file(running_images_path), source["running_images_sha256"]
+    ):
+        raise ManifestError("running image evidence checksum does not match source")
     summary = {
         "status": "verified",
         "backup_id": document["backup_id"],
         "artifact_count": len(expected),
         "git_commit": document["source"]["git_commit"],
         "release_version": document["source"]["release_version"],
+        "release_metadata_sha256": document["source"]["release_metadata_sha256"],
+        "running_images_sha256": document["source"]["running_images_sha256"],
     }
     print(json.dumps(summary, sort_keys=True))
     return 0
@@ -295,6 +645,12 @@ def inspect_manifest(args: argparse.Namespace) -> int:
                 "created_at_utc": document["created_at_utc"],
                 "git_commit": document["source"]["git_commit"],
                 "release_version": document["source"]["release_version"],
+                "release_metadata": document["source"]["release_metadata"],
+                "release_metadata_sha256": document["source"][
+                    "release_metadata_sha256"
+                ],
+                "running_images": document["source"]["running_images"],
+                "running_images_sha256": document["source"]["running_images_sha256"],
             },
             sort_keys=True,
         )
@@ -322,7 +678,9 @@ def build_counts(args: argparse.Namespace) -> int:
     qdrant: dict[str, Any] = {"included": False, "collections": {}, "points_total": 0}
     if args.qdrant_metadata:
         raw_qdrant = _load_json(Path(args.qdrant_metadata), label="Qdrant metadata")
-        collections = raw_qdrant.get("collections") if isinstance(raw_qdrant, dict) else None
+        collections = (
+            raw_qdrant.get("collections") if isinstance(raw_qdrant, dict) else None
+        )
         if not isinstance(collections, list):
             raise ManifestError("invalid Qdrant metadata")
         qdrant_counts: dict[str, int] = {}
@@ -380,12 +738,16 @@ def build_tool_versions(args: argparse.Namespace) -> int:
             try:
                 image = json.loads(raw_line)
             except json.JSONDecodeError as exc:
-                raise ManifestError(f"invalid Compose image JSON at line {line_number}") from exc
+                raise ManifestError(
+                    f"invalid Compose image JSON at line {line_number}"
+                ) from exc
             if not isinstance(image, dict):
                 raise ManifestError("Compose image entry must be an object")
             images.append(image)
     Path(args.output).write_bytes(
-        _canonical_json({"commands": dict(sorted(versions.items())), "compose_images": images})
+        _canonical_json(
+            {"commands": dict(sorted(versions.items())), "compose_images": images}
+        )
     )
     return 0
 
@@ -402,6 +764,8 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--release-version", required=True)
     create.add_argument("--counts", required=True)
     create.add_argument("--tool-versions", required=True)
+    create.add_argument("--release-metadata", required=True)
+    create.add_argument("--running-images", required=True)
     create.set_defaults(handler=create_manifest)
 
     verify = subparsers.add_parser("verify")
@@ -425,6 +789,15 @@ def parser() -> argparse.ArgumentParser:
     versions.add_argument("--images-jsonl", required=True)
     versions.add_argument("--output", required=True)
     versions.set_defaults(handler=build_tool_versions)
+
+    snapshot = subparsers.add_parser("snapshot")
+    snapshot.add_argument("--source", required=True)
+    snapshot.add_argument("--snapshot-root", required=True)
+    snapshot.set_defaults(handler=snapshot_backup)
+
+    destroy = subparsers.add_parser("destroy-snapshot")
+    destroy.add_argument("--snapshot-root", required=True)
+    destroy.set_defaults(handler=destroy_snapshot)
     return root
 
 

@@ -21,6 +21,10 @@
 prototype/auris-flow-ui/audit-iteration
 prototype/auris-flow-ui/audits
 prototype/auris-flow-ui/e2e/artifacts
+prototype/auris-flow-ui/e2e/screenshots
+prototype/auris-flow-ui/test-results
+prototype/auris-flow-ui/playwright-report
+prototype/auris-flow-ui/test-baselines
 production/secrets
 public-audio-data
 datasets-cache

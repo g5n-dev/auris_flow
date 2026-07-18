@@ -66,6 +66,13 @@ docker compose \
 按 [备份恢复 Runbook](backup-restore.md)创建并离线验证 quiesced backup。备份脚本会拒绝写端仍在
 运行的环境。只有外部副本验包成功后才能继续。
 
+若目标 head 包含 `0042_task_run_control_plane`，停写前还必须只读盘点所有非终态 TaskRun、原始
+Outbox 状态和可信 Dagster external ID，并优先排空或经 cancellation API 取消。无法排空的运行登记为
+RC grandfather：升级会逐值保留 NULL `deadline_at/next_status_sync_at`，绝不批量推导 deadline。
+NULL deadline 继续免自动超时；NULL next-status 的已绑定活跃运行超过一个核对周期后，由新 Worker
+通过 `monitor_generation` 和 Outbox fencing 调度一次 status-sync。维护者必须为每个 grandfather 行
+记录负责人，并选择等待自然终态、公开 API 取消或终止后创建 retry，禁止直接 UPDATE 终态/deadline。
+
 ### 2. 固定并验证目标制品
 
 将目标 release 的 `.env`/镜像锁定文件放到受控路径，复核所有引用为预期 digest，再按 release
@@ -119,6 +126,9 @@ docker compose \
   `trace_id` 可与 OTel trace 关联；
 - MinIO Range、语义 embedding/Qdrant 查询、死信/积压指标和 Grafana dashboard 正常；
 - 没有 5xx/auth failure/callback failure 激增，数据库连接池、磁盘和 Outbox 延迟在基线内。
+- 若经过 0042，grandfather NULL deadline 未产生 deadline cancellation，旧绑定运行只产生一个
+  generation 的 fallback status-sync，Worker health 显示 `monitor_status=healthy`；`degraded` 时即使
+  Outbox 仍在消费也不得开放外部流量。
 
 观察期达到变更单要求后再开放 edge 流量。发现数据语义不一致、跨租户可见性、无法追踪写入、
 大量重试或安全边界退化时立即停止流量并进入回滚决策。

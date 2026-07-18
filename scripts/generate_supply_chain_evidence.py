@@ -27,6 +27,7 @@ EXCEPTION_SCHEMA = "auris.license-review-exceptions.v1"
 INVENTORY_SCHEMA = "auris.dependency-license-inventory.v1"
 MANIFEST_SCHEMA = "auris.release-evidence-manifest.v1"
 GENERATOR_VERSION = "2"
+COMMIT_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
 PYTHON_ECOSYSTEMS = frozenset({"backend-python", "dagster-python"})
 
@@ -42,15 +43,61 @@ _UNKNOWN_LICENSES = {
     "unknown",
 }
 _LICENSE_ALIASES = {
+    "0bsd": "0BSD",
     "apache 2": "Apache-2.0",
     "apache 2.0": "Apache-2.0",
+    "apache-2.0": "Apache-2.0",
     "apache license 2.0": "Apache-2.0",
+    "apache license version 2.0": "Apache-2.0",
     "apache software license": "Apache-2.0",
+    "bsd 2-clause license": "BSD-2-Clause",
+    "bsd 3-clause license": "BSD-3-Clause",
+    "bsd-2-clause": "BSD-2-Clause",
+    "bsd-3-clause": "BSD-3-Clause",
+    "2-clause bsd license": "BSD-2-Clause",
+    "3-clause bsd license": "BSD-3-Clause",
+    "isc": "ISC",
+    "isc license": "ISC",
+    "mit": "MIT",
     "mit license": "MIT",
+    "mit-0": "MIT-0",
+    "mozilla public license 2.0": "MPL-2.0",
     "mozilla public license 2.0 (mpl 2.0)": "MPL-2.0",
+    "mpl-2.0": "MPL-2.0",
+    "psf-2.0": "PSF-2.0",
     "psfl": "PSF-2.0",
     "python software foundation license": "PSF-2.0",
 }
+_APPROVED_LICENSE_IDENTIFIERS = frozenset(
+    {
+        "0BSD",
+        "Apache-2.0",
+        "BSD-2-Clause",
+        "BSD-3-Clause",
+        "ISC",
+        "MIT",
+        "MIT-0",
+        "MPL-2.0",
+        "PSF-2.0",
+    }
+)
+_BASE_LICENSE_OBLIGATION = "retain-upstream-license-and-copyright-notices"
+_LICENSE_OBLIGATIONS = {
+    "Apache-2.0": frozenset({"preserve-apache-notice-and-state-changes"}),
+    "MPL-2.0": frozenset({"publish-modified-mpl-covered-file-source"}),
+    "PSF-2.0": frozenset({"include-psf-license-and-change-summary"}),
+}
+_REVIEW_EXCEPTION_OBLIGATIONS = frozenset(
+    {
+        "comply-with-reviewed-exception-and-upstream-license-terms",
+        _BASE_LICENSE_OBLIGATION,
+    }
+)
+_SPDX_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*|[()]")
+_PSF_LICENSE_TEXT_PREFIX = (
+    "1. This LICENSE AGREEMENT is between the Python Software Foundation "
+    '("PSF"), and the Individual or Organization'
+)
 _CLASSIFIER_LICENSES = {
     "License :: OSI Approved :: Apache Software License": "Apache-2.0",
     "License :: OSI Approved :: MIT License": "MIT",
@@ -190,7 +237,85 @@ def _normalize_license(value: object) -> str | None:
     normalized = " ".join(value.strip().split())
     if normalized.lower() in _UNKNOWN_LICENSES:
         return None
+    if normalized.startswith(_PSF_LICENSE_TEXT_PREFIX):
+        return "PSF-2.0"
     return _LICENSE_ALIASES.get(normalized.lower(), normalized)
+
+
+def _tokenize_spdx_expression(expression: str) -> list[str]:
+    tokens: list[str] = []
+    position = 0
+    while position < len(expression):
+        if expression[position].isspace():
+            position += 1
+            continue
+        match = _SPDX_TOKEN_PATTERN.match(expression, position)
+        if match is None:
+            raise ValueError("invalid SPDX token")
+        tokens.append(match.group(0))
+        position = match.end()
+    if not tokens:
+        raise ValueError("empty SPDX expression")
+    return tokens
+
+
+def _spdx_license_identifiers(expression: str) -> frozenset[str]:
+    tokens = _tokenize_spdx_expression(expression)
+    position = 0
+    identifiers: set[str] = set()
+
+    def parse_factor() -> None:
+        nonlocal position
+        if position >= len(tokens):
+            raise ValueError("incomplete SPDX expression")
+        token = tokens[position]
+        if token == "(":
+            position += 1
+            parse_or_expression()
+            if position >= len(tokens) or tokens[position] != ")":
+                raise ValueError("unbalanced SPDX expression")
+            position += 1
+            return
+        if token in {"AND", "OR", "WITH", ")"}:
+            raise ValueError("invalid SPDX expression operand")
+        identifiers.add(token)
+        position += 1
+
+    def parse_and_expression() -> None:
+        nonlocal position
+        parse_factor()
+        while position < len(tokens) and tokens[position] == "AND":
+            position += 1
+            parse_factor()
+
+    def parse_or_expression() -> None:
+        nonlocal position
+        parse_and_expression()
+        while position < len(tokens) and tokens[position] == "OR":
+            position += 1
+            parse_and_expression()
+
+    parse_or_expression()
+    if position != len(tokens):
+        raise ValueError("unsupported or invalid SPDX expression")
+    return frozenset(identifiers)
+
+
+def _approved_license_expression(expression: str) -> frozenset[str] | None:
+    try:
+        identifiers = _spdx_license_identifiers(expression)
+    except ValueError:
+        return None
+    if not identifiers or not identifiers.issubset(_APPROVED_LICENSE_IDENTIFIERS):
+        return None
+    return identifiers
+
+
+def _license_obligations(identifiers: frozenset[str]) -> list[str]:
+    obligations = {_BASE_LICENSE_OBLIGATION}
+    for identifier in identifiers:
+        obligations.update(_LICENSE_OBLIGATIONS.get(identifier, ()))
+    return sorted(obligations)
 
 
 def _python_license(metadata: Mapping[str, Any]) -> str | None:
@@ -752,14 +877,20 @@ def apply_license_policy(
             "version": version,
             "license": conclusion,
         }
-        if conclusion is None:
+        approved_identifiers = (
+            _approved_license_expression(conclusion) if conclusion is not None else None
+        )
+        if approved_identifiers is None:
             exception = exceptions.get(key)
             if exception is None:
                 raise EvidenceError(
-                    f"dependency license is missing or UNKNOWN: {ecosystem}:{name}"
+                    "dependency license is not an approved SPDX expression and has "
+                    "no exact reviewed exception: "
+                    f"{ecosystem}:{name}@{version}"
                 )
             consumed.add(key)
             record["license_status"] = "reviewed-exception"
+            record["obligations"] = sorted(_REVIEW_EXCEPTION_OBLIGATIONS)
             record["review_exception"] = {
                 field: exception[field]
                 for field in (
@@ -771,7 +902,8 @@ def apply_license_policy(
                 )
             }
         else:
-            record["license_status"] = "declared"
+            record["license_status"] = "approved-compatible"
+            record["obligations"] = _license_obligations(approved_identifiers)
         result.append(record)
     unused = set(exceptions) - consumed
     if unused:
@@ -810,7 +942,11 @@ def generate_evidence(
     npm_executable: str,
     runner: Runner = default_runner,
     today: date | None = None,
+    source_commit: str,
 ) -> dict[str, Any]:
+    normalized_source_commit = source_commit.strip().lower()
+    if COMMIT_PATTERN.fullmatch(normalized_source_commit) is None:
+        raise EvidenceError("source commit must be an exact Git object id")
     effective_today = today or date.today()
     for path, description in (
         (backend_uv_lock_path, "backend uv lock file"),
@@ -854,7 +990,15 @@ def generate_evidence(
         "schema_version": INVENTORY_SCHEMA,
         "dependencies": dependencies,
         "policy": {
-            "missing_or_unknown_license": "deny-unless-unexpired-reviewed-exception",
+            "allowed_expression_operators": ["AND", "OR"],
+            "allowed_license_identifiers": sorted(_APPROVED_LICENSE_IDENTIFIERS),
+            "denied_without_exact_review_exception": [
+                "license-outside-allowlist",
+                "missing-or-unknown-license",
+                "non-spdx-or-ambiguous-license",
+                "spdx-license-exception",
+            ],
+            "review_exception_scope": "exact-ecosystem-name-version",
             "review_exception_schema": EXCEPTION_SCHEMA,
         },
     }
@@ -883,6 +1027,7 @@ def generate_evidence(
     }
     manifest = {
         "schema_version": MANIFEST_SCHEMA,
+        "source_commit": normalized_source_commit,
         "generator": {
             "name": "auris-supply-chain-evidence",
             "version": GENERATOR_VERSION,
@@ -930,6 +1075,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--npm", default="npm")
     parser.add_argument(
+        "--source-commit",
+        help="Exact source commit; defaults to the current repository HEAD.",
+    )
+    parser.add_argument(
         "--exceptions",
         type=Path,
         default=DEFAULT_EXCEPTIONS,
@@ -941,6 +1090,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     try:
+        source_commit = args.source_commit
+        if source_commit is None:
+            source_commit = subprocess.run(
+                ("git", "rev-parse", "--verify", "HEAD^{commit}"),
+                cwd=ROOT,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
         manifest = generate_evidence(
             root=ROOT,
             backend_uv_lock_path=args.backend_uv_lock,
@@ -952,8 +1110,9 @@ def main() -> int:
             dagster_python_executable=args.dagster_python,
             uv_executable=args.uv,
             npm_executable=args.npm,
+            source_commit=source_commit,
         )
-    except EvidenceError as exc:
+    except (EvidenceError, OSError, subprocess.CalledProcessError) as exc:
         print(f"Supply-chain evidence failed closed: {exc}", file=sys.stderr)
         return 1
     counts = manifest["component_counts"]

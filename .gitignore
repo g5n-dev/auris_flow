@@ -20,6 +20,10 @@ build/
 prototype/auris-flow-ui/dist/
 prototype/auris-flow-ui/dist-*/
 prototype/auris-flow-ui/e2e/artifacts/
+prototype/auris-flow-ui/e2e/screenshots/
+prototype/auris-flow-ui/test-baselines/
+prototype/auris-flow-ui/test-results/
+prototype/auris-flow-ui/playwright-report/
 *.tsbuildinfo
 
 # Generated frontend runtime catalogs and sanitized fixture projections. They

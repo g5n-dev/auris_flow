@@ -345,9 +345,16 @@ def test_product_gate_shell_is_clean_tree_commit_bound_and_fail_closed() -> None
     assert "build/release-evidence/product-dagster-gate.json" in source
     assert "down --volumes --remove-orphans" in source
     assert "AURIS_SKIP_PRODUCT_DAGSTER_GATE" in source
+    assert 'DEADLINE_RUNNER="${ROOT}/scripts/run_with_deadline.py"' in source
+    assert 'compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}"' in source
+    assert 'compose_with_deadline "${BUILD_TIMEOUT}"' in source
+    assert 'compose_with_deadline "${RUN_COMMAND_DEADLINE}"' in source
+    assert '"${COMPOSE[@]}" up --detach --no-build --wait' not in source
 
 
-def test_product_gate_shell_rejects_skip_and_dirty_source_before_docker() -> None:
+def test_product_gate_shell_rejects_skip_and_dirty_source_before_docker(
+    tmp_path: Path,
+) -> None:
     skipped = subprocess.run(
         ["bash", "scripts/verify_product_dagster_path.sh"],
         cwd=ROOT,
@@ -359,20 +366,33 @@ def test_product_gate_shell_rejects_skip_and_dirty_source_before_docker() -> Non
     assert skipped.returncode == 2
     assert "not allowed" in skipped.stderr
 
-    dirty = subprocess.run(
-        ["bash", "scripts/verify_product_dagster_path.sh"],
-        cwd=ROOT,
-        env={
-            key: value
-            for key, value in os.environ.items()
-            if key != "AURIS_SKIP_PRODUCT_DAGSTER_GATE"
-        },
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    marker = ROOT / "backend" / "tests" / f"product-gate-dirty-{tmp_path.name}.fixture"
+    marker.write_text("force an isolated untracked-source rejection\n", encoding="utf-8")
+    try:
+        dirty = subprocess.run(
+            ["bash", "scripts/verify_product_dagster_path.sh"],
+            cwd=ROOT,
+            env={
+                key: value
+                for key, value in os.environ.items()
+                if key != "AURIS_SKIP_PRODUCT_DAGSTER_GATE"
+            },
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    finally:
+        marker.unlink(missing_ok=True)
     assert dirty.returncode == 2
-    assert "clean worktree" in dirty.stderr or "empty Git index" in dirty.stderr
+    assert any(
+        message in dirty.stderr
+        for message in (
+            "clean worktree",
+            "empty Git index",
+            "refuses untracked release inputs",
+        )
+    )
     assert "Docker Engine is required" not in dirty.stderr
 
 

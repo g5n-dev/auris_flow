@@ -5,14 +5,18 @@ umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PRODUCTION_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REPOSITORY_ROOT="$(cd "${PRODUCTION_ROOT}/.." && pwd)"
 COMPOSE_FILE="${PRODUCTION_ROOT}/compose.yaml"
+DOCKER_CONTEXT_NAME="default"
 BACKUP_TOOLS="${PRODUCTION_ROOT}/backup"
+RELEASE_BUNDLE_TOOL="${REPOSITORY_ROOT}/scripts/release_bundle.py"
 PYTHON="${PYTHON:-python3}"
 ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
 BACKUP_ROOT=""
 RUN_DRILL=false
 CLEANUP_ON_SUCCESS=false
 DRILL_PROJECT=""
+ALLOW_RELEASE_MIGRATION_FROM=""
 
 usage() {
   cat <<'USAGE'
@@ -22,6 +26,9 @@ Options:
   --drill                 Restore into a newly named Compose project and verify counts
   --cleanup-on-success    Destroy only the generated drill project/volumes after success
   --env-file FILE         Compose environment file required by --drill
+  --allow-release-migration-from COMMIT
+                          Drill an exact predecessor only when the installed signed
+                          compatibility policy lists its tag, commit and metadata hash
   -h, --help              Show this help
 
 Without --drill this command is offline: it verifies the canonical manifest,
@@ -39,6 +46,11 @@ fail() {
 
 has_control_character() {
   [[ "$1" == *$'\n'* || "$1" == *$'\r'* || "$1" == *$'\t'* ]]
+}
+
+paths_overlap() {
+  local first="${1%/}/" second="${2%/}/"
+  [[ "${first}" == "${second}"* || "${second}" == "${first}"* ]]
 }
 
 while (($#)); do
@@ -61,6 +73,11 @@ while (($#)); do
       ENV_FILE="$2"
       shift 2
       ;;
+    --allow-release-migration-from)
+      (($# >= 2)) || fail "--allow-release-migration-from requires a value"
+      ALLOW_RELEASE_MIGRATION_FROM="$2"
+      shift 2
+      ;;
     -h|--help)
       usage
       exit 0
@@ -72,11 +89,18 @@ done
 command -v "${PYTHON}" >/dev/null 2>&1 || fail "Python is required"
 has_control_character "${BACKUP_ROOT}" && fail "backup path contains a control character"
 has_control_character "${ENV_FILE}" && fail "Compose env path contains a control character"
+if [[ -n "${ALLOW_RELEASE_MIGRATION_FROM}" && \
+  ! "${ALLOW_RELEASE_MIGRATION_FROM}" =~ ^[0-9a-f]{40}$ && \
+  ! "${ALLOW_RELEASE_MIGRATION_FROM}" =~ ^[0-9a-f]{64}$ ]]; then
+  fail "--allow-release-migration-from must be a complete lowercase Git id"
+fi
 [[ "${BACKUP_ROOT}" == /* ]] || fail "--backup must be an absolute path"
 [[ -d "${BACKUP_ROOT}" && ! -L "${BACKUP_ROOT}" ]] || fail \
   "backup root must be a real directory, not a symlink"
 BACKUP_ROOT="$(cd "${BACKUP_ROOT}" && pwd -P)"
 [[ "${BACKUP_ROOT}" != "/" ]] || fail "backup root is too broad"
+paths_overlap "${BACKUP_ROOT}" "${REPOSITORY_ROOT}" && fail \
+  "backup path must not be an ancestor or descendant of the release bundle"
 
 "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify --root "${BACKUP_ROOT}"
 "${PYTHON}" "${BACKUP_TOOLS}/mysql_dump.py" verify \
@@ -96,6 +120,18 @@ if [[ "${RUN_DRILL}" != true ]]; then
 fi
 
 command -v docker >/dev/null 2>&1 || fail "Docker is required for --drill"
+command -v cosign >/dev/null 2>&1 || fail "Cosign is required for --drill"
+[[ -z "${DOCKER_HOST:-}" && -z "${DOCKER_CONTEXT:-}" && \
+  -z "${COMPOSE_PROJECT_NAME:-}" ]] || fail \
+  "DOCKER_HOST, DOCKER_CONTEXT and COMPOSE_PROJECT_NAME overrides are forbidden"
+docker --context "${DOCKER_CONTEXT_NAME}" info >/dev/null 2>&1 || fail \
+  "the bound Docker context is unavailable: ${DOCKER_CONTEXT_NAME}"
+[[ -f "${RELEASE_BUNDLE_TOOL}" && ! -L "${RELEASE_BUNDLE_TOOL}" ]] || fail \
+  "release bundle verifier is missing or unsafe"
+"${PYTHON}" "${RELEASE_BUNDLE_TOOL}" verify \
+  --bundle-root "${REPOSITORY_ROOT}" \
+  --verify-signature >/dev/null || fail \
+  "signed release metadata verification failed"
 [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] || fail \
   "Compose env file is missing or unsafe: ${ENV_FILE}"
 inspect_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" inspect --root "${BACKUP_ROOT}")"
@@ -107,7 +143,8 @@ DRILL_PROJECT="auris-flow-restore-drill-${drill_suffix}"
   "unsafe drill project name"
 
 compose_drill() {
-  COMPOSE_PROJECT_NAME="${DRILL_PROJECT}" docker compose \
+  COMPOSE_PROJECT_NAME="${DRILL_PROJECT}" \
+    docker --context "${DOCKER_CONTEXT_NAME}" compose \
     --project-name "${DRILL_PROJECT}" \
     --project-directory "${PRODUCTION_ROOT}" \
     --env-file "${ENV_FILE}" \
@@ -115,18 +152,39 @@ compose_drill() {
 }
 
 compose_drill config --quiet || fail "Compose configuration is invalid"
-printf 'Building the recovery-side application image for isolated drill %s...\n' "${DRILL_PROJECT}"
-compose_drill build bff || fail "could not build the recovery-side image"
+printf 'Pulling digest-pinned recovery images for isolated drill %s...\n' "${DRILL_PROJECT}"
+compose_drill pull mysql db-bootstrap redis minio minio-bootstrap qdrant bff || fail \
+  "could not pull the signed recovery-side images"
 compose_drill up -d --wait mysql db-bootstrap redis minio minio-bootstrap qdrant || fail \
   "could not start an empty dependency stack"
+"${PYTHON}" "${RELEASE_BUNDLE_TOOL}" verify-running-images \
+  --bundle-root "${REPOSITORY_ROOT}" \
+  --project-directory "${PRODUCTION_ROOT}" \
+  --env-file "${ENV_FILE}" \
+  --project-name "${DRILL_PROJECT}" \
+  --docker-context "${DOCKER_CONTEXT_NAME}" \
+  --service mysql \
+  --service minio \
+  --service qdrant \
+  --service redis \
+  --all-running-release-services \
+  --verify-signature \
+  >/dev/null || fail "drill authority-service images do not match release digests"
 
-COMPOSE_PROJECT_NAME="${DRILL_PROJECT}" \
-  AURIS_RESTORE_REPORT_ROOT="${TMPDIR:-/tmp}/auris-flow-restore-reports-${DRILL_PROJECT}" \
-  "${SCRIPT_DIR}/restore.sh" \
-    --backup "${BACKUP_ROOT}" \
-    --confirm "${backup_id}" \
-    --env-file "${ENV_FILE}" \
-    --qdrant-mode snapshot || fail "isolated restore drill failed"
+restore_arguments=(
+  --backup "${BACKUP_ROOT}"
+  --confirm "${backup_id}"
+  --env-file "${ENV_FILE}"
+  --qdrant-mode snapshot
+  --project-name "${DRILL_PROJECT}"
+  --docker-context "${DOCKER_CONTEXT_NAME}"
+)
+if [[ -n "${ALLOW_RELEASE_MIGRATION_FROM}" ]]; then
+  restore_arguments+=(--allow-release-migration-from "${ALLOW_RELEASE_MIGRATION_FROM}")
+fi
+AURIS_RESTORE_REPORT_ROOT="${TMPDIR:-/tmp}/auris-flow-restore-reports-${DRILL_PROJECT}" \
+  "${SCRIPT_DIR}/restore.sh" "${restore_arguments[@]}" || fail \
+  "isolated restore drill failed"
 
 printf 'Isolated restore drill passed for project %s.\n' "${DRILL_PROJECT}"
 if [[ "${CLEANUP_ON_SUCCESS}" == true ]]; then
@@ -136,6 +194,6 @@ if [[ "${CLEANUP_ON_SUCCESS}" == true ]]; then
   DRILL_PROJECT=""
 else
   printf 'Drill project retained for inspection; remove it explicitly with:\n'
-  printf '  COMPOSE_PROJECT_NAME=%q docker compose --project-name %q --project-directory %q --env-file %q -f %q down --volumes --remove-orphans\n' \
-    "${DRILL_PROJECT}" "${DRILL_PROJECT}" "${PRODUCTION_ROOT}" "${ENV_FILE}" "${COMPOSE_FILE}"
+  printf '  docker --context %q compose --project-name %q --project-directory %q --env-file %q -f %q down --volumes --remove-orphans\n' \
+    "${DOCKER_CONTEXT_NAME}" "${DRILL_PROJECT}" "${PRODUCTION_ROOT}" "${ENV_FILE}" "${COMPOSE_FILE}"
 fi

@@ -56,8 +56,10 @@
 - `.github/workflows/release-images.yml` 从精确 commit 构建 amd64/arm64 BFF、Dagster、edge 镜像，
   生成 provenance/CycloneDX SBOM，阻断 HIGH/CRITICAL 漏洞并对通过的 digest 做 keyless Cosign
   签名与验证。
-- 后端、生产 Dagster、npm 三个锁图分别生成依赖/许可证据并执行漏洞审计；未知许可证只允许精确
-  包版本、具名审阅者、引用和到期日的受控记录，漏洞不以许可证例外豁免。
+- 后端、生产 Dagster、npm 三个锁图分别生成依赖/许可证据并执行漏洞审计；自动许可门禁仅接受
+  明确白名单中的 SPDX 表达式，未知、模糊、`WITH` 或白名单外结论只允许精确生态、包名、版本、
+  具名审阅者、引用和到期日的受控记录，漏洞不以许可证例外豁免。当前 Dagster 锁图仍有三项待
+  人工审阅，详见 `THIRD_PARTY_NOTICES.md`，因此供应链正式发行证据会按设计 fail closed。
 - release renderer 把每个 Compose service image 固定到 `tag@sha256:digest`，删除所有 `build`，
   并产出 image lock、manifest 与 `SHA256SUMS`；源码、镜像和元数据必须绑定同一 tag/commit。
 

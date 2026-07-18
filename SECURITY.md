@@ -27,7 +27,8 @@
   签名、过期时间和 JWKS。缺失/不安全 OIDC 配置 fail closed，不能回退到开发 token。
 - 浏览器使用 `Secure`、`HttpOnly`、`SameSite` 的不透明 session cookie；数据库只保存 session token
   与 CSRF 的 SHA-256。IdP token 不返回前端，生产 bundle 不持久化共享 bearer token。
-- cookie 认证写操作同时校验 `X-CSRF-Token` 和受信 Origin；登出使服务端 session 失效。identity、
+- cookie 认证写操作同时校验 `X-CSRF-Token` 和受信 Origin；登出使本地 BFF session 失效，但不
+  伪称终止 IdP 全局 SSO。BFF 不保存 refresh token，会话过期后重新执行 Code + PKCE。identity、
   user、tenant 或 project 禁用以及角色变化会在后续请求动态生效。
 - 本地演示 token/dev-login 只在 `local/test/ci` 且 `ALLOW_DEV_AUTH=true` 时可用；生产配置会拒绝它。
 - 受保护的 `/api/v1/*` 请求绑定 `X-Tenant-Id` 和 `X-Project-Id`；资源读取/写入执行项目作用域和
@@ -35,7 +36,8 @@
 - 写操作按资源要求使用 `Idempotency-Key`。
 - 运行、审计和 Outbox 带业务 `trace_id`；结构化日志关联活动 OTel trace/span，并对常见 secret、
   token、password、Authorization、cookie、SQL 和 URL query 等字段脱敏。
-- CORS origins 和 TrustedHost 必须显式配置；`prod/release` 不允许 `*`。
+- CORS origins 和 TrustedHost 必须显式配置；`prod/release` 的 CORS 只接受精确 HTTPS Origin，
+  TrustedHost 只接受无通配符的精确主机。
 - 默认响应包含 `X-Content-Type-Options`、`X-Frame-Options`、`Referrer-Policy`、`Permissions-Policy` 和 CSP；`prod/release` 额外启用 HSTS。
 - `prod/release` 对 demo/弱数据库与 Redis 密码、通配 CORS/TrustedHost、local/fake adapter、
   非严格 readiness、真实 Qdrant/对象存储、completion/callback key binding 和确定性 embedding 执行

@@ -1,0 +1,7 @@
+{
+  "artifact": null,
+  "kind": "auris-flow-visual-baseline-lock",
+  "reason": "No human-approved linux/amd64 visual baseline OCI artifact exists yet.",
+  "schema_version": 1,
+  "status": "PENDING"
+}

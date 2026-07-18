@@ -9,16 +9,35 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Run `python3 scripts/check_platform_readiness.py --release` and confirm
   `open_source_release_readiness: 12/12 passed` against the exact staged candidate.
 - [ ] Run `bash scripts/verify_release.sh`; do not use any skip flag for the real-stack,
-  browser, visual, migration, audit, or security gates.
+  real-Dagster, product-Dagster, browser, visual, migration, audit, or security gates.
+- [ ] Confirm `build/release-evidence/release-gate-manifest.json` is produced only after
+  clean-clone, visual 76/76, real-stack, real-Dagster Compose, product-path Dagster and
+  supply-chain evidence all report `status=ok` for the exact same clean HEAD. Recompute
+  every recorded SHA-256 and reject stale, extra, symlinked or local-path-bearing files.
+- [ ] Confirm `production/visual/visual-baseline.lock.json` is `APPROVED` and points to
+  an immutable `ghcr.io/...@sha256:...` artifact. The gate must download it with ORAS,
+  first verify its keyless signature against the exact current-repository
+  `visual-baseline-build.yml@refs/heads/<default>` identity and GitHub token issuer,
+  then verify package/manifest/76 PNG hashes plus source/runner/scenario/seed bindings and
+  write `build/release-evidence/visual-regression.json` with `status=ok` and
+  `scenario_count=passed=76`. `PENDING`, Darwin diagnostics, goal/seed overrides, host
+  runtime, and update mode are not release evidence.
+- [ ] Protect both `visual-baseline-build` and `visual-baseline-production` environments
+  with required reviewers. Build the candidate from an exact clean commit, retain the
+  workflow-produced GHCR digest and signer metadata, and reject manually written digest,
+  identity, issuer, or approval fields.
 - [ ] Confirm `git status --short` is empty and `git diff --check` is clean after the
   candidate commit is created.
 - [ ] Confirm a fresh clone of that commit can install locked dependencies, migrate,
-  test, build all three first-party images, and produce the same gate result without
-  untracked files or developer caches.
+  test, and build the frontend bundle without untracked files or developer caches.
+  Treat this as functional locked-source reproducibility; the separate release-image
+  workflow must build and scan all three first-party multi-architecture images.
 - [ ] Confirm runtime OpenAPI drift is zero, including every `/api/v1/*` operation and
   the `evaluation-lock` contract.
 - [ ] Confirm `python3 scripts/scan_secrets.py` reports `secret scan ok` and no generated
-  build output, screenshot, local database, cache, audio, or test artifact is tracked.
+  build output, screenshot, geometry, visual manifest, local database, cache, audio, or
+  test artifact is tracked. Git retains only visual scenes/contracts/seed and the small
+  OCI lock pointer.
 - [ ] Confirm the intended changes follow the boundaries in
   `doc/reports/change-submission-plan.md` and the layout decision in
   `doc/reports/repository-layout-review.md`.
@@ -39,7 +58,7 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Exercise callback/completion HMAC key overlap, retirement, nonce replay rejection,
   body-bound idempotency, timeout reconciliation, dead-letter, and governed replay.
 - [ ] Confirm the project owner signed
-  `doc/reports/open-source-rights-authorization.md`, replaced every blocked placeholder
+  `open-source-rights-authorization.md`, replaced every blocked placeholder
   in `NOTICE`, and reviewed `THIRD_PARTY_NOTICES.md` plus public dataset licenses.
 
 ## P2 — Real Production Runtime
@@ -56,6 +75,10 @@ external repository controls, clean-host installation, or recovery drill below.
   protocol fake or deterministic test vector is not production evidence.
 - [ ] Exercise Dagster submission, status synchronization, cancellation, timeout,
   completion write-back, bounded retry, restart recovery, and stale fencing rejection.
+- [ ] Run `bash scripts/verify_product_dagster_path.sh` and confirm its evidence proves
+  BFF submission, tenant/project isolation, confirmed Outbox dispatch, real adapter
+  binding, engine status synchronization, signed completion and `SAFE_TERMINATE`
+  cancellation through the Compose BFF/Worker/real-Dagster deployment.
 - [ ] Exercise database restart, Worker crash, duplicate dispatch, callback timeout,
   Redis/Qdrant transient outage, Outbox lease expiry, dead-letter, and governed replay;
   confirm there is no unexplained duplicate business result.
@@ -94,6 +117,9 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Confirm source archive, digest-pinned Compose, image lock, SBOMs, signatures,
   provenance, `CHANGELOG`, `NOTICE`, migration notes, artifact manifest, and
   `SHA256SUMS` all name the same tag and source commit.
+- [ ] Require the protected `release-publish` approval and confirm the tag-push
+  workflow creates a new immutable GitHub Release; it must never overwrite an
+  existing release or publish from a manual-dispatch-only validation.
 - [ ] Install the signed artifact on a clean external Linux host using only the published
   README/configuration, complete OIDC and the core business flow, then feed every issue
   back into a new candidate commit.

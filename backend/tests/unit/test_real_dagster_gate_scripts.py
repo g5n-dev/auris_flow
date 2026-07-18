@@ -162,6 +162,10 @@ def test_real_dagster_shell_gate_isolated_and_never_starts_protocol_fake() -> No
     assert 'export APP_ENV="ci"' in source
     assert 'SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse --verify HEAD^{commit})"' in source
     assert '--source-commit "${SOURCE_COMMIT}"' in source
+    assert 'DEADLINE_RUNNER="${ROOT}/scripts/run_with_deadline.py"' in source
+    assert 'compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}"' in source
+    assert 'compose_with_deadline "${BUILD_TIMEOUT}"' in source
+    assert '"${COMPOSE[@]}" up --detach --no-build --wait' not in source
 
 
 def test_real_dagster_driver_accepts_only_exact_source_commit() -> None:

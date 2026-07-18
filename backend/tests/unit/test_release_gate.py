@@ -362,6 +362,10 @@ def test_real_stack_bootstraps_the_authenticated_minio_bucket_before_strict_read
         assert deadline_runner in source
         assert bootstrap in source
 
+    assert 'COMPOSE_WAIT_TIMEOUT_SECONDS="${AURIS_REAL_STACK_WAIT_TIMEOUT:-180}"' in gate
+    assert 'compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start real stack"' in gate
+    assert '"${COMPOSE[@]}" up --detach --wait' not in gate
+
     outer_health = gate.index("assert_compose_health")
     outer_bootstrap = gate.index("run_minio_bootstrap", outer_health)
     assert outer_bootstrap < gate.index('echo "Running UI/BFF E2E')

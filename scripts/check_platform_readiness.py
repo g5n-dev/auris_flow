@@ -4,11 +4,22 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Literal, TypedDict
+
+SCRIPTS_DIR = Path(__file__).resolve().parent
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))
+
+from verify_visual_baseline import (  # noqa: E402
+    release_runtime_contract,
+    validate_visual_baseline_lock,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -57,6 +68,7 @@ CHECKS: tuple[Check, ...] = (
             "doc/reports/repository-layout-review.md",
             "doc/reports/change-submission-plan.md",
             "NOTICE",
+            "open-source-rights-authorization.md",
             "THIRD_PARTY_NOTICES.md",
             "production/compose.yaml",
             "production/README.md",
@@ -82,6 +94,13 @@ CHECKS: tuple[Check, ...] = (
                 "NOTICE",
                 "secret scan ok",
                 "protocol fake or deterministic test vector is not production evidence",
+            ),
+            "open-source-rights-authorization.md": (
+                "Authorization status:",
+                "Rights holder legal name:",
+                "Authorized license: Apache-2.0",
+                "Approval evidence reference:",
+                "Final NOTICE confirmed:",
             ),
             "SUPPORT.md": ("SECURITY.md", "trace_id"),
             "MAINTAINERS.md": ("Release Authority",),
@@ -153,6 +172,22 @@ CHECKS: tuple[Check, ...] = (
             "scripts/verify_fast.sh",
             "scripts/verify_release.sh",
             "scripts/verify_real_stack.sh",
+            "scripts/verify_real_dagster.sh",
+            "scripts/verify_real_dagster.py",
+            "scripts/verify_real_dagster_callback_server.py",
+            "scripts/verify_product_dagster_path.sh",
+            "scripts/verify_product_dagster_path.py",
+            "scripts/verify_production_path.sh",
+            "scripts/verify_production_path_gate.py",
+            "scripts/verify_clean_clone.sh",
+            "scripts/verify_release_authorization.py",
+            "scripts/finalize_release_evidence.py",
+            "production/tests/dagster-gate.compose.yaml",
+            "production/tests/dagster-gate-callback.Dockerfile",
+            "production/tests/dagster-product-gate.compose.yaml",
+            "production/tests/production-path-gate.compose.yaml",
+            "production/tests/production-path-gate.md",
+            "backend/tests/unit/test_production_path_gate.py",
             "scripts/check_real_stack_artifact.sh",
             "scripts/dev_up.sh",
             "scripts/audit_ui.sh",
@@ -186,6 +221,26 @@ CHECKS: tuple[Check, ...] = (
             "scripts/verify_release.sh": (
                 "AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1 bash scripts/verify_all.sh",
                 "bash scripts/verify_real_stack.sh",
+                "bash scripts/verify_real_dagster.sh",
+                "bash scripts/verify_product_dagster_path.sh",
+                "bash scripts/verify_production_path.sh",
+                "AURIS_SKIP_REAL_DAGSTER=1 is not allowed",
+                "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
+                "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
+                "AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh",
+                "scripts/verify_release_authorization.py",
+                "scripts/finalize_release_evidence.py",
+            ),
+            "scripts/verify_production_path.sh": (
+                "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
+                "scripts/verify_production_path_gate.py",
+                "scripts/verify_production_path_runtime.py",
+                "build/release-evidence/production-path-gate.json",
+            ),
+            "production/tests/production-path-gate.compose.yaml": (
+                "status: blocked",
+                "OIDC Authorization Code + PKCE",
+                "cross-service OTel trace",
             ),
             "scripts/check_real_stack_artifact.sh": (
                 "real_qdrant",
@@ -468,6 +523,10 @@ RELEASE_ARTIFACT_PATTERNS = (
     "prototype/auris-flow-ui/dist/**",
     "prototype/auris-flow-ui/dist-*/**",
     "prototype/auris-flow-ui/e2e/artifacts/**",
+    "prototype/auris-flow-ui/e2e/screenshots/**",
+    "prototype/auris-flow-ui/test-baselines/**",
+    "prototype/auris-flow-ui/test-results/**",
+    "prototype/auris-flow-ui/playwright-report/**",
     "prototype/auris-flow-ui/audit/*.png",
     "prototype/auris-flow-ui/audit/*.json",
     "prototype/auris-flow-ui/audit/screenshots/**",
@@ -514,11 +573,50 @@ RELEASE_REQUIRED_TRACKED_PATHS = (
     "backend/migrations/versions/0010_label_policy_engine.py",
     "backend/migrations/versions/0020_auth_sessions.py",
     "backend/migrations/versions/0041_oidc_browser_sessions.py",
+    "backend/migrations/versions/0042_task_run_control_plane.py",
     "backend/tests/contract/test_release_blocker_rbac_trace.py",
     "backend/tests/contract/test_resource_read_policy_inventory.py",
     "backend/tests/unit/test_read_policy_service.py",
     "prototype/auris-flow-ui/e2e/preview-smoke.mjs",
     "prototype/auris-flow-ui/src/modules/moduleCatalog.ts",
+    "backend/tests/unit/test_real_dagster_control.py",
+    "backend/tests/unit/test_real_dagster_gate_scripts.py",
+    "backend/tests/unit/test_product_dagster_gate_scripts.py",
+    "backend/tests/unit/test_production_path_gate.py",
+    "backend/app/services/task_run_control_service.py",
+    "backend/app/services/task_run_monitor_service.py",
+    "backend/tests/integration/test_task_run_controls.py",
+    "backend/tests/integration/test_task_run_monitor.py",
+    "open-source-rights-authorization.md",
+    "production/tests/dagster-gate-callback.Dockerfile",
+    "production/tests/dagster-gate.compose.yaml",
+    "production/tests/dagster-product-gate.compose.yaml",
+    "production/tests/production-path-gate.compose.yaml",
+    "production/tests/production-path-gate.md",
+    "production/visual/Dockerfile",
+    "production/visual/runtime-contract.json",
+    "production/visual/runtime.mjs",
+    "production/visual/seed-overlay.json",
+    "production/visual/visual-baseline.lock.json",
+    ".github/workflows/visual-baseline-build.yml",
+    ".github/workflows/visual-baseline-promotion.yml",
+    "scripts/promote_visual_baseline.sh",
+    "scripts/tests/test_verify_clean_clone.py",
+    "scripts/tests/test_finalize_release_evidence.py",
+    "scripts/tests/test_release_authorization.py",
+    "scripts/tests/test_verify_visual_baseline.py",
+    "scripts/verify_clean_clone.sh",
+    "scripts/verify_release_authorization.py",
+    "scripts/finalize_release_evidence.py",
+    "scripts/verify_real_dagster.py",
+    "scripts/verify_real_dagster.sh",
+    "scripts/verify_real_dagster_callback_server.py",
+    "scripts/verify_product_dagster_path.py",
+    "scripts/verify_product_dagster_path.sh",
+    "scripts/verify_production_path_gate.py",
+    "scripts/verify_production_path.sh",
+    "scripts/verify_visual_baseline.py",
+    "scripts/visual_regression.sh",
     "scripts/verify_release.sh",
     "scripts/verify_production_compose.py",
     "scripts/generate_supply_chain_evidence.py",
@@ -572,10 +670,21 @@ def git_untracked_files() -> tuple[str, ...]:
     return tuple(item.decode("utf-8") for item in completed.stdout.split(b"\0") if item)
 
 
-def git_unstaged_files() -> tuple[str, ...]:
+def git_unstaged_files(root: Path = ROOT) -> tuple[str, ...]:
     completed = subprocess.run(
-        ("git", "diff", "--name-only", "--diff-filter=ACMRTUXB", "-z"),
-        cwd=ROOT,
+        ("git", "diff", "--name-only", "-z"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=False,
+    )
+    return tuple(item.decode("utf-8") for item in completed.stdout.split(b"\0") if item)
+
+
+def git_staged_files(root: Path = ROOT) -> tuple[str, ...]:
+    completed = subprocess.run(
+        ("git", "diff", "--cached", "--name-only", "-z"),
+        cwd=root,
         check=True,
         capture_output=True,
         text=False,
@@ -589,6 +698,93 @@ def is_release_artifact(path: str) -> bool:
 
 def tracked_release_artifacts() -> list[str]:
     return [path for path in git_tracked_files() if is_release_artifact(path)]
+
+
+def validate_release_authorization(root: Path = ROOT) -> list[str]:
+    authorization_path = root / "open-source-rights-authorization.md"
+    notice_path = root / "NOTICE"
+    failures: list[str] = []
+    if not authorization_path.is_file():
+        return ["missing open-source-rights-authorization.md"]
+    if not notice_path.is_file():
+        return ["missing NOTICE"]
+
+    authorization = authorization_path.read_text(encoding="utf-8")
+    notice = notice_path.read_text(encoding="utf-8")
+    fields: dict[str, str] = {}
+    for line in authorization.splitlines():
+        if not line.startswith("- ") or ":" not in line:
+            continue
+        key, value = line[2:].split(":", 1)
+        fields[key.strip()] = value.strip()
+
+    expected_fields = {
+        "Authorization status",
+        "Rights holder legal name",
+        "Copyright notice",
+        "Authorized license",
+        "Approval date (UTC)",
+        "Approval evidence reference",
+        "Final NOTICE confirmed",
+    }
+    missing_fields = sorted(expected_fields - fields.keys())
+    failures.extend(
+        f"rights authorization missing field: {field}" for field in missing_fields
+    )
+    if missing_fields:
+        return failures
+
+    placeholder_values = {
+        "",
+        "PENDING",
+        "NO",
+        "TBD",
+        "TODO",
+        "YYYY-MM-DD",
+        "PROJECT OWNER TO COMPLETE",
+    }
+    if fields["Authorization status"] != "APPROVED":
+        failures.append("rights authorization status is not APPROVED")
+    if fields["Authorized license"] != "Apache-2.0":
+        failures.append("rights authorization does not approve Apache-2.0")
+    if fields["Final NOTICE confirmed"] != "YES":
+        failures.append("rights holder has not confirmed the final NOTICE")
+    for field_name in (
+        "Rights holder legal name",
+        "Copyright notice",
+        "Approval evidence reference",
+    ):
+        if fields[field_name].upper() in placeholder_values:
+            failures.append(
+                f"rights authorization field is still a placeholder: {field_name}"
+            )
+    approval_date_raw = fields["Approval date (UTC)"]
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", approval_date_raw):
+        failures.append("rights authorization approval date must be YYYY-MM-DD")
+    else:
+        try:
+            approval_date = date.fromisoformat(approval_date_raw)
+        except ValueError:
+            failures.append("rights authorization approval date is not a real UTC date")
+        else:
+            if approval_date > date.today():
+                failures.append(
+                    "rights authorization approval date cannot be in the future"
+                )
+
+    placeholder_markers = (
+        "confirmation required",
+        "project owner to complete",
+        "unidentified person",
+    )
+    lowered_notice = notice.lower()
+    if any(marker in lowered_notice for marker in placeholder_markers):
+        failures.append("NOTICE still contains an unapproved rights-holder placeholder")
+    if fields["Rights holder legal name"] not in notice:
+        failures.append("NOTICE does not identify the approved rights holder")
+    if fields["Copyright notice"] not in notice:
+        failures.append("NOTICE does not contain the approved copyright notice")
+    return failures
 
 
 def run_release_checks() -> list[ReadinessResult]:
@@ -606,6 +802,7 @@ def run_release_checks() -> list[ReadinessResult]:
         encoding="utf-8"
     ):
         license_failures.append("README.md does not declare Apache License 2.0")
+    license_failures.extend(validate_release_authorization())
     release_results.append(
         {
             "key": "release_license",
@@ -630,6 +827,10 @@ def run_release_checks() -> list[ReadinessResult]:
         "*.sqlite",
         "__pycache__/",
         "e2e/artifacts/",
+        "prototype/auris-flow-ui/e2e/screenshots/",
+        "prototype/auris-flow-ui/test-baselines/",
+        "prototype/auris-flow-ui/test-results/",
+        "prototype/auris-flow-ui/playwright-report/",
         ".vite/",
         "prototype/auris-flow-ui/audit/*.json",
         "prototype/auris-flow-ui/audit/screenshots/",
@@ -672,28 +873,42 @@ def run_release_checks() -> list[ReadinessResult]:
         unstaged_files = [
             path for path in git_unstaged_files() if not is_release_artifact(path)
         ]
+        staged_files = [
+            path for path in git_staged_files() if not is_release_artifact(path)
+        ]
     except (OSError, subprocess.CalledProcessError) as error:
         tree_failures.append(f"unable to inspect Git release tree: {error}")
         tracked_files = set()
         untracked_files = []
         unstaged_files = []
+        staged_files = []
 
     for path in RELEASE_REQUIRED_TRACKED_PATHS:
         if path not in tracked_files:
             tree_failures.append(f"required release source is not in Git index: {path}")
+
+    visual_lock_failures = validate_visual_baseline_lock(
+        ROOT / "production/visual/visual-baseline.lock.json",
+        require_approved=True,
+    )
+    tree_failures.extend(
+        f"visual baseline lock: {failure}" for failure in visual_lock_failures
+    )
     for path in sorted(untracked_files):
         tree_failures.append(f"untracked release source would be omitted: {path}")
     for path in sorted(unstaged_files):
         tree_failures.append(
-            f"unstaged release change is not represented by Git index: {path}"
+            f"unstaged release change is not represented by HEAD: {path}"
         )
+    for path in sorted(staged_files):
+        tree_failures.append(f"staged release change is not committed in HEAD: {path}")
     release_results.append(
         {
             "key": "release_git_tree_integrity",
             "title": "发布树与验证工作区一致",
             "status": "pass" if not tree_failures else "fail",
             "failures": tree_failures,
-            "rationale": "严格发布门禁必须验证 Git 索引中的候选源码，不能依赖未跟踪或未暂存的本地实现。",
+            "rationale": "严格发布门禁必须验证干净 HEAD 中的候选源码，不能依赖未跟踪、未暂存或仅暂存的本地实现。",
         }
     )
 
@@ -799,8 +1014,18 @@ def run_release_checks() -> list[ReadinessResult]:
     )
     for pattern in (
         "AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1",
+        "scripts/verify_release_authorization.py",
+        "AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh",
         "bash scripts/verify_real_stack.sh",
+        "bash scripts/verify_real_dagster.sh",
+        "bash scripts/verify_product_dagster_path.sh",
+        "bash scripts/verify_production_path.sh",
+        "scripts/generate_supply_chain_evidence.py",
+        "scripts/finalize_release_evidence.py",
         "AURIS_SKIP_REAL_STACK_E2E=1 is not allowed",
+        "AURIS_SKIP_REAL_DAGSTER=1 is not allowed",
+        "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
+        "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
     ):
         if pattern not in release_verify_text:
             verification_failures.append(
@@ -812,6 +1037,27 @@ def run_release_checks() -> list[ReadinessResult]:
     ):
         verification_failures.append(
             "scripts/verify_release.sh must not allow AURIS_SKIP_REAL_STACK_E2E to exit 0"
+        )
+    if (
+        "exit 0" in release_verify_text
+        and "AURIS_SKIP_REAL_DAGSTER" in release_verify_text
+    ):
+        verification_failures.append(
+            "scripts/verify_release.sh must not allow AURIS_SKIP_REAL_DAGSTER to exit 0"
+        )
+    if (
+        "exit 0" in release_verify_text
+        and "AURIS_SKIP_PRODUCT_DAGSTER_GATE" in release_verify_text
+    ):
+        verification_failures.append(
+            "scripts/verify_release.sh must not allow AURIS_SKIP_PRODUCT_DAGSTER_GATE to exit 0"
+        )
+    if (
+        "exit 0" in release_verify_text
+        and "AURIS_SKIP_PRODUCTION_PATH_GATE" in release_verify_text
+    ):
+        verification_failures.append(
+            "scripts/verify_release.sh must not allow AURIS_SKIP_PRODUCTION_PATH_GATE to exit 0"
         )
     workflow_path = ROOT / ".github/workflows/verify.yml"
     workflow_text = (
@@ -839,6 +1085,67 @@ def run_release_checks() -> list[ReadinessResult]:
         verification_failures.append(
             ".github/workflows/verify.yml does not run the real dependency stack E2E gate"
         )
+    visual_verify_path = ROOT / "scripts/visual_regression.sh"
+    visual_verify_text = (
+        visual_verify_path.read_text(encoding="utf-8")
+        if visual_verify_path.exists()
+        else ""
+    )
+    for pattern in (
+        "verify_visual_baseline.py check-execution-policy",
+        "verify_visual_baseline.py materialize-locked",
+        "verify_visual_baseline.py verify",
+        "verify_visual_baseline.py write-manifest",
+        "verify_visual_baseline.py write-evidence",
+        "runner-contract-sha256",
+        "--require-release-runtime",
+        "--verify-signature",
+        "--runtime-descriptor",
+        "--platform linux/amd64",
+        "production/visual/visual-baseline.lock.json",
+        "build/release-evidence/visual-regression.json",
+    ):
+        if pattern not in visual_verify_text:
+            verification_failures.append(
+                f"scripts/visual_regression.sh missing frozen baseline gate: {pattern}"
+            )
+    if "AURIS_ALLOW_UPDATE_FROZEN_BASELINE" in visual_verify_text:
+        verification_failures.append(
+            "scripts/visual_regression.sh allows an environment override of the frozen baseline"
+        )
+    if 'AURIS_VISUAL_RUNTIME: "container"' not in workflow_text:
+        verification_failures.append(
+            ".github/workflows/verify.yml does not force the pinned visual container runtime"
+        )
+    if (
+        "oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20"
+        not in workflow_text
+    ):
+        verification_failures.append(
+            ".github/workflows/verify.yml does not install ORAS for the immutable visual artifact"
+        )
+    if (
+        "sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159"
+        not in workflow_text
+    ):
+        verification_failures.append(
+            ".github/workflows/verify.yml does not install pinned Cosign for visual provenance"
+        )
+    visual_dockerfile_path = ROOT / "production/visual/Dockerfile"
+    visual_dockerfile_text = (
+        visual_dockerfile_path.read_text(encoding="utf-8")
+        if visual_dockerfile_path.exists()
+        else ""
+    )
+    try:
+        visual_runner_image = release_runtime_contract()["runner_image"]
+    except (OSError, ValueError) as error:
+        verification_failures.append(f"visual runtime contract is invalid: {error}")
+    else:
+        if f"FROM {visual_runner_image}" not in visual_dockerfile_text:
+            verification_failures.append(
+                "production/visual/Dockerfile does not use the pinned visual image digest"
+            )
     release_results.append(
         {
             "key": "release_verification_gate",

@@ -43,9 +43,28 @@ The locked transitive graph is authoritative for the actual release. CI must
 generate separate BFF Python, Dagster Python, and npm CycloneDX documents from
 `backend/uv.lock`, `production/dagster/uv.lock`, and
 `prototype/auris-flow-ui/package-lock.json`, then retain them with the release
-artifacts. Any dependency with missing or incompatible license metadata in any
-of the three graphs is a release blocker until a maintainer records a reviewed,
-expiring exception for that exact ecosystem, package, and version.
+artifacts. Any dependency with missing, ambiguous, or non-allowlisted license
+metadata in any of the three graphs is a release blocker until a maintainer
+records a reviewed, expiring exception for that exact ecosystem, package, and
+version.
+
+The automated policy approves only expressions composed from the repository's
+explicit permissive/weak-copyleft allowlist (`0BSD`, `Apache-2.0`,
+`BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `MIT`, `MIT-0`, `MPL-2.0`, and
+`PSF-2.0`) with SPDX `AND`/`OR`. Generic or ambiguous labels, SPDX `WITH`
+exceptions, and identifiers outside that allowlist fail closed unless an
+unexpired review exception exists for the exact ecosystem, package, and locked
+version. An exception is evidence of a scoped human review; it is not a
+repository-wide approval of that license family.
+
+As of the current Dagster lock, the following upstream metadata remains outside
+the automatic allowlist and therefore blocks a release until separately
+reviewed: `antlr4-python3-runtime@4.13.2` (`BSD`),
+`python-dateutil@2.9.0.post0` (`Dual License`), and
+`mysql-connector-python@9.7.0` (`GNU GPLv2 (with FOSS License Exception)`). No
+review exception is asserted here for those packages. The existing Jinja2
+exception remains limited to the exact package/version recorded in
+`config/release/license-review-exceptions.json`.
 
 ## Public datasets
 

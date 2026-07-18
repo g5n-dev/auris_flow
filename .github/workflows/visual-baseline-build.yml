@@ -1,0 +1,185 @@
+name: Build signed visual baseline
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact clean commit to render with the pinned Linux runner
+        required: true
+        type: string
+
+concurrency:
+  group: visual-baseline-build-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-signed-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    # Repository admins must configure required reviewers on this environment.
+    # The workflow deliberately does not claim that YAML alone protects it.
+    environment: visual-baseline-build
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    outputs:
+      artifact_ref: ${{ steps.provenance.outputs.artifact_ref }}
+
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_commit }}
+
+      # actions/setup-python v5.6.0
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: prototype/auris-flow-ui/package-lock.json
+
+      # oras-project/setup-oras v1.2.3
+      - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
+        with:
+          version: "1.2.3"
+
+      # docker/login-action v3.4.0
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sigstore/cosign-installer v3.9.2
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+        with:
+          cosign-release: "v2.5.3"
+
+      - name: Bind the protected workflow to the exact source commit
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SOURCE_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "Visual baseline builds must be dispatched from the default branch." >&2
+            exit 2
+          fi
+          if ! [[ "${SOURCE_COMMIT}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_commit must be an exact 40-character Git object id." >&2
+            exit 2
+          fi
+          if [ "$(git rev-parse HEAD)" != "${SOURCE_COMMIT}" ]; then
+            echo "checkout does not match source_commit." >&2
+            exit 2
+          fi
+          default_tip="$(git rev-parse --verify "refs/remotes/origin/${DEFAULT_BRANCH}")"
+          if [ "${SOURCE_COMMIT}" != "${default_tip}" ]; then
+            echo "source_commit must equal the reviewed default-branch tip." >&2
+            exit 2
+          fi
+          if [ "${WORKFLOW_SOURCE_COMMIT}" != "${SOURCE_COMMIT}" ]; then
+            echo "the executing workflow definition must come from source_commit." >&2
+            exit 2
+          fi
+          expected_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/visual-baseline-build.yml@refs/heads/${DEFAULT_BRANCH}"
+          actual_identity="https://github.com/${GITHUB_WORKFLOW_REF}"
+          if [ "${actual_identity}" != "${expected_identity}" ]; then
+            echo "visual build workflow identity is not the default-branch identity." >&2
+            exit 2
+          fi
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Install locked visual-generation dependencies
+        run: |
+          python -m pip install "uv==0.10.0"
+          uv sync --locked --all-extras --project backend
+          npm ci --prefix prototype/auris-flow-ui
+
+      - name: Generate and validate all 76 screenshots in the pinned container
+        env:
+          AURIS_RELEASE_CHECK: "0"
+          AURIS_UPDATE_VISUAL_BASELINE: "1"
+          AURIS_VISUAL_RUNTIME: container
+          AURIS_VISUAL_GOAL_DIR: ${{ github.workspace }}/prototype/auris-flow-ui/e2e/artifacts/protected-linux-build
+          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
+        run: |
+          bash scripts/visual_regression.sh
+          baseline="${AURIS_VISUAL_GOAL_DIR}/visual-regression"
+          python scripts/verify_visual_baseline.py verify \
+            "${baseline}" --require-release-runtime
+          mkdir -p build/visual-baseline
+          python scripts/verify_visual_baseline.py create-package \
+            "${baseline}" build/visual-baseline/visual-baseline.tar
+          git diff --exit-code -- .
+
+      - id: provenance
+        name: Push, keyless-sign, and verify the immutable OCI digest
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SOURCE_COMMIT: ${{ github.workflow_sha }}
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          repository="ghcr.io/${GITHUB_REPOSITORY,,}/visual-baseline"
+          staging_ref="${repository}:source-${SOURCE_COMMIT}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          package_dir="build/visual-baseline"
+          media_type="application/vnd.auris-flow.visual-baseline.v1+tar"
+          (
+            cd "${package_dir}"
+            oras push "${staging_ref}" \
+              --artifact-type "${media_type}" \
+              --annotation "org.opencontainers.image.revision=${SOURCE_COMMIT}" \
+              --annotation "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+              --annotation "org.opencontainers.image.title=Auris Flow visual baseline" \
+              --annotation "io.auris.visual.job-workflow-sha=${WORKFLOW_SOURCE_COMMIT}" \
+              "visual-baseline.tar:${media_type}"
+          )
+          descriptor="$(oras manifest fetch --descriptor "${staging_ref}")"
+          digest="$(jq -er '.digest | select(test("^sha256:[0-9a-f]{64}$"))' <<<"${descriptor}")"
+          artifact_ref="${repository}@${digest}"
+          signature_identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/visual-baseline-build.yml@refs/heads/${DEFAULT_BRANCH}"
+
+          cosign sign --yes "${artifact_ref}"
+          cosign verify "${artifact_ref}" \
+            --certificate-identity "${signature_identity}" \
+            --certificate-oidc-issuer "${SIGNATURE_ISSUER}"
+
+          package_sha256="$(sha256sum "${package_dir}/visual-baseline.tar" | cut -d' ' -f1)"
+          jq -n \
+            --arg artifact_ref "${artifact_ref}" \
+            --arg job_workflow_sha "${WORKFLOW_SOURCE_COMMIT}" \
+            --arg package_sha256 "${package_sha256}" \
+            --arg signature_identity "${signature_identity}" \
+            --arg signature_issuer "${SIGNATURE_ISSUER}" \
+            --arg source_commit "${SOURCE_COMMIT}" \
+            '{artifact_ref: $artifact_ref, job_workflow_sha: $job_workflow_sha, kind: "auris-flow-visual-baseline-build-provenance", package_sha256: $package_sha256, schema_version: 1, signature_identity: $signature_identity, signature_issuer: $signature_issuer, source_commit: $source_commit, status: "signed"}' \
+            > "${package_dir}/visual-baseline-build.json"
+          echo "artifact_ref=${artifact_ref}" >> "${GITHUB_OUTPUT}"
+          {
+            echo "### Signed visual baseline candidate"
+            echo ""
+            echo "\`${artifact_ref}\`"
+            echo ""
+            echo "Source commit: \`${SOURCE_COMMIT}\`"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
+      - name: Upload digest-bound provenance metadata
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: visual-baseline-provenance-${{ inputs.source_commit }}
+          path: build/visual-baseline/visual-baseline-build.json
+          if-no-files-found: error
+          retention-days: 30

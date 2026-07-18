@@ -34,6 +34,7 @@ PY
 "${PYTHON_BIN}" doc/backend-spec/validate_backend_spec.py
 "${PYTHON_BIN}" scripts/validate_public_audio_datasets.py
 "${PYTHON_BIN}" scripts/check_platform_readiness.py
+"${PYTHON_BIN}" -m unittest discover -s scripts/tests -p 'test_*.py'
 
 if [ "${AURIS_RELEASE_CHECK:-0}" = "1" ]; then
   if [ "${AURIS_RUN_E2E:-0}" != "1" ]; then
@@ -84,7 +85,11 @@ fi
 
 "${PYTHON_BIN}" -m ruff format --check backend scripts production/tests
 "${PYTHON_BIN}" -m ruff check backend scripts production/tests
-"${PYTHON_BIN}" -m mypy backend/app backend/scripts/verify_migrations.py scripts/check_platform_readiness.py
+"${PYTHON_BIN}" -m mypy backend/app backend/scripts/verify_migrations.py scripts/check_platform_readiness.py scripts/finalize_release_evidence.py scripts/generate_supply_chain_evidence.py scripts/verify_real_dagster.py
+MYPYPATH=backend "${PYTHON_BIN}" -m mypy \
+  scripts/verify_product_dagster_path.py \
+  scripts/verify_release_authorization.py \
+  scripts/verify_visual_baseline.py
 "${PYTHON_BIN}" backend/scripts/verify_migrations.py
 "${PYTHON_BIN}" -m pytest backend/tests/unit backend/tests/contract backend/tests/integration
 "${PYTHON_BIN}" backend/scripts/smoke_backend.py

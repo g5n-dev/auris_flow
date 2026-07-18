@@ -16,15 +16,25 @@ PRODUCT_COMPOSE="${ROOT}/production/tests/dagster-product-gate.compose.yaml"
 RESULT_ARTIFACT="${AURIS_PRODUCT_DAGSTER_GATE_RESULT:-${ROOT}/build/release-evidence/product-dagster-gate.json}"
 WAIT_TIMEOUT="${AURIS_PRODUCT_DAGSTER_GATE_WAIT_TIMEOUT:-300}"
 RUN_TIMEOUT="${AURIS_PRODUCT_DAGSTER_GATE_RUN_TIMEOUT:-120}"
+BUILD_TIMEOUT="${AURIS_PRODUCT_DAGSTER_GATE_BUILD_TIMEOUT:-900}"
+CLEANUP_TIMEOUT="${AURIS_PRODUCT_DAGSTER_GATE_CLEANUP_TIMEOUT:-60}"
+COMPOSE_DEADLINE_GRACE="${AURIS_PRODUCT_DAGSTER_GATE_DEADLINE_GRACE:-15}"
+DEADLINE_RUNNER="${ROOT}/scripts/run_with_deadline.py"
 
 if [ "${AURIS_SKIP_PRODUCT_DAGSTER_GATE:-0}" = "1" ]; then
   echo "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed by the product Dagster gate." >&2
   exit 2
 fi
-if ! [[ "${WAIT_TIMEOUT}" =~ ^[1-9][0-9]*$ && "${RUN_TIMEOUT}" =~ ^[1-9][0-9]*$ ]]; then
+if ! [[ "${WAIT_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${RUN_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${BUILD_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${CLEANUP_TIMEOUT}" =~ ^[1-9][0-9]*$ && \
+  "${COMPOSE_DEADLINE_GRACE}" =~ ^[1-9][0-9]*$ ]]; then
   echo "Product Dagster gate timeouts must be positive integers." >&2
   exit 2
 fi
+COMPOSE_WAIT_DEADLINE=$((WAIT_TIMEOUT + COMPOSE_DEADLINE_GRACE))
+RUN_COMMAND_DEADLINE=$((RUN_TIMEOUT + COMPOSE_DEADLINE_GRACE))
 RESULT_PARENT="$(dirname -- "${RESULT_ARTIFACT}")"
 RESULT_NAME="$(basename -- "${RESULT_ARTIFACT}")"
 if [ "${RESULT_PARENT}" != "${ROOT}/build/release-evidence" ] || \
@@ -104,15 +114,27 @@ COMPOSE=(
   --file "${PRODUCT_COMPOSE}"
 )
 
+compose_with_deadline() {
+  local timeout_seconds="$1"
+  local label="$2"
+  shift 2
+  "${PYTHON_BIN}" "${DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --label "${label}" -- \
+    "${COMPOSE[@]}" "$@"
+}
+
 cleanup() {
   local status="$?"
   trap - EXIT INT TERM
   if [ "${status}" -ne 0 ]; then
-    "${COMPOSE[@]}" logs --tail 120 \
+    compose_with_deadline "${CLEANUP_TIMEOUT}" "collect product Dagster logs" \
+      logs --tail 120 \
       bff worker dagster-code dagster-webserver dagster-daemon >&2 || true
   fi
   if [[ "${PROJECT_NAME}" =~ ^auris-product-dagster-gate-[0-9]+-[0-9]+$ ]]; then
-    if ! "${COMPOSE[@]}" down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
+    if ! compose_with_deadline "${CLEANUP_TIMEOUT}" "clean product Dagster project" \
+      down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
       echo "Could not clean the isolated product Dagster gate project." >&2
       status=1
     fi
@@ -132,12 +154,13 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-"${COMPOSE[@]}" config --quiet
+compose_with_deadline "${CLEANUP_TIMEOUT}" "validate product Dagster Compose" config --quiet
 mkdir -p "$(dirname "${RESULT_ARTIFACT}")"
 rm -f -- "${RESULT_ARTIFACT}"
 
 echo "Building isolated BFF and real Dagster images for the product gate..."
-"${COMPOSE[@]}" build bff dagster-code
+compose_with_deadline "${BUILD_TIMEOUT}" "build product Dagster gate images" \
+  build bff dagster-code
 
 START_ORDER=(
   dagster-gate-secrets-init
@@ -154,12 +177,14 @@ START_ORDER=(
   worker
 )
 for service in "${START_ORDER[@]}"; do
-  "${COMPOSE[@]}" up --detach --no-build --wait \
+  compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}" \
+    up --detach --no-build --wait \
     --wait-timeout "${WAIT_TIMEOUT}" "${service}"
 done
 
 echo "Exercising BFF submit/query/sync/cancel through the real Dagster deployment..."
-"${COMPOSE[@]}" run --rm --no-deps dagster-product-gate-verifier >/dev/null
+compose_with_deadline "${RUN_COMMAND_DEADLINE}" "run product Dagster verifier" \
+  run --rm --no-deps dagster-product-gate-verifier >/dev/null
 if [ ! -f "${TEMP_ARTIFACT}" ]; then
   echo "Product Dagster verifier did not produce evidence." >&2
   exit 1

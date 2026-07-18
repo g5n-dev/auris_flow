@@ -1,0 +1,13 @@
+{
+  "scene_profile_versions": [
+    {
+      "expected_manifest_sha256": "9625c78ecae3a460392869d218827072d02b4d2b3d064d95a4dac14dfc4ce716",
+      "manifest": {
+        "task_type_refs": [
+          "task_sales_quality"
+        ]
+      },
+      "scene_profile_version_id": "scenev_auto_sales_quality_v1"
+    }
+  ]
+}

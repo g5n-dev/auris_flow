@@ -34,20 +34,74 @@
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "percentunit", "min": 0, "max": 1}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 8},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 16},
       "id": 4,
-      "targets": [{"expr": "min(node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay\"})", "refId": "A"}],
-      "title": "Minimum host disk free ratio",
+      "targets": [{"expr": "min((node_filesystem_avail_bytes{fstype!~\"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?\"} / node_filesystem_size_bytes{fstype!~\"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?\"}) and on (instance, device, mountpoint) node_filesystem_readonly{fstype!~\"tmpfs|overlay|squashfs|nsfs|ramfs|fusectl|tracefs|debugfs|securityfs|proc|sysfs|cgroup2?\"} == 0)", "refId": "A"}],
+      "title": "Storage filesystem free ratio",
       "type": "gauge"
     },
     {
       "datasource": {"type": "prometheus", "uid": "prometheus"},
       "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 8},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 16},
       "id": 5,
       "targets": [{"expr": "auris_dependency_ready", "legendFormat": "{{dependency}}", "refId": "A"}],
       "title": "Dependency health",
       "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+      "id": 6,
+      "targets": [{"expr": "sum by (outcome) (clamp_min(delta(auris_task_run_terminal[1h]), 0))", "legendFormat": "{{outcome}}", "refId": "A"}],
+      "title": "TaskRun completion",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+      "id": 7,
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (auris_task_run_duration_window_seconds_bucket))", "refId": "A"}],
+      "title": "TaskRun P95 duration (24h)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+      "id": 8,
+      "targets": [{"expr": "sum by (outcome) (rate(auris_callback_outcomes_total[10m]))", "legendFormat": "{{outcome}}", "refId": "A"}],
+      "title": "Callback outcomes",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "ops"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 16},
+      "id": 9,
+      "targets": [{"expr": "sum by (outcome) (rate(auris_rate_limit_decisions_total[5m]))", "legendFormat": "{{outcome}}", "refId": "A"}],
+      "title": "Rate-limit decisions",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 24},
+      "id": 10,
+      "targets": [{"expr": "auris_task_run_monitor_actions", "legendFormat": "{{action}} / {{outcome}}", "refId": "A"}],
+      "title": "TaskRun monitor controls",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "short"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 24},
+      "id": 11,
+      "targets": [{"expr": "auris_task_run_deadline_overdue", "legendFormat": "deadline overdue", "refId": "A"}, {"expr": "auris_task_run_status_sync_overdue", "legendFormat": "status sync overdue", "refId": "B"}],
+      "title": "TaskRun monitor overdue",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -58,5 +112,5 @@
   "timezone": "browser",
   "title": "Auris Flow Production Overview",
   "uid": "auris-flow-production",
-  "version": 1
+  "version": 2
 }

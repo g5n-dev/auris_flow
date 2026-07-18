@@ -278,15 +278,34 @@ def build_artifact_manifest(
     base_dir: Path,
     image_lock: Mapping[str, Any],
     excluded: Sequence[Path],
+    included: Sequence[Path] | None = None,
 ) -> tuple[dict[str, Any], str]:
     base = base_dir.resolve()
     excluded_resolved = {path.resolve() for path in excluded}
     artifacts: list[dict[str, Any]] = []
-    for path in sorted(base_dir.rglob("*")):
-        if not path.is_file() or path.resolve() in excluded_resolved:
+    candidates = (
+        sorted(included) if included is not None else sorted(base_dir.rglob("*"))
+    )
+    seen: set[Path] = set()
+    for path in candidates:
+        try:
+            path.lstat()
+        except FileNotFoundError as exc:
+            raise ReleaseComposeError(f"release artifact is missing: {path}") from exc
+        resolved = path.resolve()
+        if resolved in seen:
+            raise ReleaseComposeError(f"duplicate release artifact: {path}")
+        seen.add(resolved)
+        if path.is_symlink() or not path.is_file():
+            if included is not None:
+                raise ReleaseComposeError(
+                    f"release artifact must be a regular file: {path}"
+                )
+            continue
+        if resolved in excluded_resolved:
             continue
         try:
-            relative = path.resolve().relative_to(base).as_posix()
+            relative = resolved.relative_to(base).as_posix()
         except ValueError as exc:
             raise ReleaseComposeError(
                 "release artifact escaped the output directory"
@@ -355,6 +374,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     manifest_parser.add_argument("--image-lock", type=Path, required=True)
     manifest_parser.add_argument("--output", type=Path, required=True)
     manifest_parser.add_argument("--checksums-output", type=Path, required=True)
+    manifest_parser.add_argument("--artifact", type=Path, action="append")
     return parser.parse_args(argv)
 
 
@@ -400,6 +420,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 base_dir=args.base_dir,
                 image_lock=image_lock,
                 excluded=[args.output, args.checksums_output],
+                included=args.artifact,
             )
             _write_bytes_atomic(args.output, _json_bytes(manifest))
             checksum_with_manifest = checksums + (

@@ -25,6 +25,18 @@ RUN_STARTED_AT="$(date +%s)"
 COMPOSE=(docker compose -f "${COMPOSE_FILE}")
 SERVICES=(mysql redis minio qdrant)
 MINIO_BOOTSTRAP_TIMEOUT_SECONDS="${AURIS_MINIO_BOOTSTRAP_TIMEOUT_SECONDS:-60}"
+COMPOSE_WAIT_TIMEOUT_SECONDS="${AURIS_REAL_STACK_WAIT_TIMEOUT:-180}"
+COMPOSE_DEADLINE_GRACE="${AURIS_REAL_STACK_DEADLINE_GRACE:-15}"
+
+compose_with_deadline() {
+  local timeout_seconds="$1"
+  local label="$2"
+  shift 2
+  "${PYTHON_BIN}" "${ROOT}/scripts/run_with_deadline.py" \
+    --timeout-seconds "${timeout_seconds}" \
+    --label "${label}" -- \
+    "${COMPOSE[@]}" "$@"
+}
 
 run_minio_bootstrap() {
   local container_name status
@@ -203,6 +215,12 @@ if [ "${AURIS_SKIP_REAL_STACK_E2E:-0}" = "1" ]; then
   echo "AURIS_SKIP_REAL_STACK_E2E=1 is not allowed by scripts/verify_real_stack.sh." >&2
   exit 2
 fi
+if ! [[ "${COMPOSE_WAIT_TIMEOUT_SECONDS}" =~ ^[1-9][0-9]*$ && \
+  "${COMPOSE_DEADLINE_GRACE}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Real-stack Compose timeout values must be positive integers." >&2
+  exit 2
+fi
+COMPOSE_WAIT_DEADLINE=$((COMPOSE_WAIT_TIMEOUT_SECONDS + COMPOSE_DEADLINE_GRACE))
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required for real-stack verification." >&2
   exit 2
@@ -217,7 +235,8 @@ mkdir -p "${ARTIFACT_DIR}" "$(dirname "${VERIFICATION_RESULT}")"
 rm -f "${PLATFORM_RESULT}" "${OUTBOX_RESULT}" "${VERIFICATION_RESULT}"
 
 echo "Starting MySQL/Redis/MinIO/Qdrant and waiting for health checks..."
-"${COMPOSE[@]}" up --detach --wait --wait-timeout "${AURIS_REAL_STACK_WAIT_TIMEOUT:-180}" "${SERVICES[@]}"
+compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start real stack" \
+  up --detach --wait --wait-timeout "${COMPOSE_WAIT_TIMEOUT_SECONDS}" "${SERVICES[@]}"
 assert_compose_health
 echo "Bootstrapping the authenticated MinIO release-test bucket..."
 run_minio_bootstrap
