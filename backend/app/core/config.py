@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ipaddress
+import re
 from functools import lru_cache
 from typing import Any, Literal
 from urllib.parse import unquote, urlparse
@@ -124,6 +125,11 @@ class Settings(BaseSettings):
     outbox_retry_base_seconds: int = 30
     outbox_retry_max_seconds: int = 300
     outbox_retry_jitter_seconds: int = 5
+    task_run_monitor_enabled: bool = True
+    task_run_default_deadline_seconds: int = 7200
+    task_run_status_sync_interval_seconds: int = 60
+    task_run_monitor_poll_seconds: int = 5
+    task_run_monitor_batch_size: int = 50
     label_optimization_scheduler_enabled: bool = False
     label_optimization_scheduler_poll_seconds: int = 60
     label_optimization_scheduler_batch_size: int = 20
@@ -212,6 +218,14 @@ class Settings(BaseSettings):
             raise ValueError(
                 "LABEL_OPTIMIZATION_SCHEDULER_CLAIM_LEASE_SECONDS must be between 30 and 3600"
             )
+        if not 60 <= self.task_run_default_deadline_seconds <= 7 * 24 * 60 * 60:
+            raise ValueError("TASK_RUN_DEFAULT_DEADLINE_SECONDS must be between 60 and 604800")
+        if not 5 <= self.task_run_status_sync_interval_seconds <= 3600:
+            raise ValueError("TASK_RUN_STATUS_SYNC_INTERVAL_SECONDS must be between 5 and 3600")
+        if not 1 <= self.task_run_monitor_poll_seconds <= 300:
+            raise ValueError("TASK_RUN_MONITOR_POLL_SECONDS must be between 1 and 300")
+        if not 1 <= self.task_run_monitor_batch_size <= 500:
+            raise ValueError("TASK_RUN_MONITOR_BATCH_SIZE must be between 1 and 500")
         if not 0.0 <= self.otel_trace_sample_ratio <= 1.0:
             raise ValueError("OTEL_TRACE_SAMPLE_RATIO must be between 0 and 1")
         if not 0.1 <= self.otel_export_timeout_seconds <= 30.0:
@@ -250,6 +264,8 @@ class Settings(BaseSettings):
             raise ValueError("OTEL_ENABLED must be true in prod/release")
         if not self.metrics_enabled:
             raise ValueError("METRICS_ENABLED must be true in prod/release")
+        if not self.task_run_monitor_enabled:
+            raise ValueError("TASK_RUN_MONITOR_ENABLED must be true in prod/release")
 
         auth_provider = self.auth_provider.strip().lower()
         if self.allow_dev_auth or auth_provider == "dev":
@@ -291,12 +307,7 @@ class Settings(BaseSettings):
             "EXPERIMENT_ASSIGNMENT_SECRET",
             self.experiment_assignment_secret,
         )
-        if not _csv_items(self.cors_allowed_origins) or "*" in _csv_items(
-            self.cors_allowed_origins
-        ):
-            raise ValueError("CORS_ALLOWED_ORIGINS must be explicit in prod/release")
-        if not _csv_items(self.trusted_hosts) or "*" in _csv_items(self.trusted_hosts):
-            raise ValueError("TRUSTED_HOSTS must be explicit in prod/release")
+        _validate_production_browser_boundary(self)
         _require_strong_secret("QDRANT_API_KEY", self.qdrant_api_key)
         _validate_production_callback_settings(self)
         missing = [
@@ -364,6 +375,75 @@ def _require_strong_url_password(setting_name: str, value: str) -> None:
         raise ValueError(
             f"{setting_name} must contain a strong non-demo password in prod/release"
         ) from None
+
+
+_DNS_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+
+def _canonical_browser_host(value: str, *, allow_ipv6: bool) -> str:
+    if not value or value != value.strip() or value.endswith("."):
+        raise ValueError("browser host must be canonical")
+    try:
+        address = ipaddress.ip_address(value)
+    except ValueError:
+        if not value.isascii() or value != value.lower() or len(value) > 253:
+            raise ValueError("browser host must be canonical") from None
+        labels = value.split(".")
+        if not labels or any(not _DNS_LABEL_PATTERN.fullmatch(label) for label in labels):
+            raise ValueError("browser host must be canonical") from None
+        return value
+    if address.version == 6:
+        if not allow_ipv6:
+            raise ValueError("TrustedHost does not support exact IPv6 hosts")
+        return f"[{address.compressed}]"
+    return address.compressed
+
+
+def _validate_production_browser_boundary(settings: Settings) -> None:
+    origins = _csv_items(settings.cors_allowed_origins)
+    if not origins:
+        raise ValueError("CORS_ALLOWED_ORIGINS must be explicit in prod/release")
+    for origin in origins:
+        try:
+            parsed = urlparse(origin)
+            port = parsed.port
+            canonical_host = _canonical_browser_host(parsed.hostname or "", allow_ipv6=True)
+        except ValueError:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS entries must be exact HTTPS origins in prod/release"
+            ) from None
+        if (
+            parsed.scheme != "https"
+            or not parsed.hostname
+            or "*" in parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or bool(parsed.path)
+            or bool(parsed.params)
+            or bool(parsed.query)
+            or bool(parsed.fragment)
+        ):
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS entries must be exact HTTPS origins in prod/release"
+            )
+        canonical_origin = f"https://{canonical_host}"
+        if port is not None and port != 443:
+            canonical_origin = f"{canonical_origin}:{port}"
+        if origin != canonical_origin:
+            raise ValueError(
+                "CORS_ALLOWED_ORIGINS entries must be exact HTTPS origins in prod/release"
+            )
+
+    trusted_hosts = _csv_items(settings.trusted_hosts)
+    if not trusted_hosts:
+        raise ValueError("TRUSTED_HOSTS must be explicit in prod/release")
+    for host in trusted_hosts:
+        try:
+            canonical_host = _canonical_browser_host(host, allow_ipv6=False)
+        except ValueError:
+            raise ValueError("TRUSTED_HOSTS entries must be exact hosts in prod/release") from None
+        if "*" in host or any(character in host for character in "/@?#") or host != canonical_host:
+            raise ValueError("TRUSTED_HOSTS entries must be exact hosts in prod/release")
 
 
 def _normalize_callback_host(value: str) -> str:

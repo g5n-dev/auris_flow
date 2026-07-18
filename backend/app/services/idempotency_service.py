@@ -24,6 +24,38 @@ Reservation = tuple[str, str]
 IDEMPOTENCY_RESERVATIONS_SESSION_KEY = "idempotency_reservations"
 
 
+def api_error_result(ctx: RequestContext, error: ApiError) -> dict[str, Any]:
+    """Serialize an API failure so a write can durably replay the same outcome."""
+
+    return {
+        "error": {
+            "code": error.code,
+            "message": error.message,
+            "details": error.details,
+            "status": error.status_code,
+            "retryable": error.retryable,
+            "trace_id": ctx.trace_id,
+            "idempotency_key": ctx.idempotency_key,
+        }
+    }
+
+
+def raise_replayed_api_error(response: dict[str, Any]) -> None:
+    """Restore a saved error envelope as an ApiError with its original status."""
+
+    raw_error = response.get("error")
+    if not isinstance(raw_error, dict):
+        return
+    details = raw_error.get("details")
+    raise ApiError(
+        str(raw_error.get("code") or "IDEMPOTENT_WRITE_REJECTED"),
+        str(raw_error.get("message") or "幂等写请求已被拒绝"),
+        int(raw_error.get("status") or 409),
+        details=details if isinstance(details, list) else None,
+        retryable=bool(raw_error.get("retryable", False)),
+    )
+
+
 async def request_hash(request: Request) -> str:
     body = await request.body()
     query_items = sorted(request.query_params.multi_items())

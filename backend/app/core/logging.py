@@ -56,7 +56,7 @@ def log_event(
     from app.core.observability import current_trace_context
 
     safe_fields = redact_structured_value(
-        {**_context_payload(ctx), **fields},
+        {**fields, **_context_payload(ctx)},
         field_name="log_fields",
     )
     if not isinstance(safe_fields, dict):

@@ -196,6 +196,32 @@ def lock_owned_claim(session: Session, claim: OutboxClaim) -> OutboxEvent | None
     )
 
 
+def owned_claim_trace_carrier(session: Session, claim: OutboxClaim) -> object | None:
+    """Read the persisted async trace carrier only for the current lease owner.
+
+    Trace propagation must not weaken outbox fencing: a stale or forged worker
+    identity cannot use an event payload as a trusted remote parent even if it
+    knows the public event id. The carrier itself is parsed by the observability
+    boundary, which rejects malformed or unexpected W3C fields.
+    """
+
+    now = database_utc_now(session)
+    payload = session.scalar(
+        select(OutboxEvent.payload).where(
+            OutboxEvent.event_id == claim.event_id,
+            OutboxEvent.status == "processing",
+            OutboxEvent.claim_token == claim.claim_token,
+            OutboxEvent.lease_generation == claim.lease_generation,
+            OutboxEvent.claimed_by == claim.claimed_by,
+            OutboxEvent.lease_expires_at.is_not(None),
+            OutboxEvent.lease_expires_at > now,
+        )
+    )
+    if not isinstance(payload, dict):
+        return None
+    return payload.get("otel_trace_context")
+
+
 def renew_claim(session: Session, claim: OutboxClaim, *, lease_seconds: int) -> bool:
     bounded_lease_seconds = max(5, min(int(lease_seconds), 3600))
     now = database_utc_now(session)

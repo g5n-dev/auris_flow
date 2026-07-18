@@ -7,10 +7,11 @@ import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from sqlalchemy import insert, select
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -49,6 +50,8 @@ from app.services.audio_intelligence_service import (
 from app.services.audit_service import record_audit
 from app.services.data_asset_materialization_service import materialize_asset_completion
 from app.services.idempotency_service import (
+    api_error_result,
+    raise_replayed_api_error,
     replay_or_conflict,
     request_hash,
     save_idempotency_result,
@@ -72,10 +75,44 @@ logger = get_logger("run")
 
 RUN_INITIAL_STATUSES = {"queued", "pending", "running", "blocked"}
 RUN_STATUS_TRANSITIONS: dict[str, set[str]] = {
-    "queued": {"running", "submitted", "success", "failed", "blocked", "cancelled"},
-    "pending": {"running", "submitted", "success", "failed", "blocked", "cancelled"},
-    "running": {"submitted", "success", "failed", "blocked", "cancelled"},
-    "submitted": {"success", "failed", "blocked", "cancelled"},
+    "queued": {
+        "running",
+        "submitted",
+        "success",
+        "failed",
+        "blocked",
+        "cancelling",
+        "cancelled",
+    },
+    "pending": {
+        "running",
+        "submitted",
+        "success",
+        "failed",
+        "blocked",
+        "cancelling",
+        "cancelled",
+    },
+    "running": {
+        "submitted",
+        "completion_pending",
+        "success",
+        "failed",
+        "blocked",
+        "cancelling",
+        "cancelled",
+    },
+    "submitted": {
+        "running",
+        "completion_pending",
+        "success",
+        "failed",
+        "blocked",
+        "cancelling",
+        "cancelled",
+    },
+    "completion_pending": {"success", "failed", "blocked", "cancelling", "cancelled"},
+    "cancelling": {"completion_pending", "failed", "cancelled"},
     "blocked": {"pending", "cancelled"},
     "success": set(),
     "failed": set(),
@@ -173,8 +210,10 @@ RUN_SYSTEM_PAYLOAD_KEYS = {
     "materialized_assets",
     "materialized_outputs",
     "metrics",
+    "monitor_generation",
     "next_actions",
     "next_retry_at",
+    "next_status_sync_at",
     "processed_event_id",
     "prompt_candidate_id",
     "prompt_candidate_status",
@@ -188,6 +227,7 @@ RUN_SYSTEM_PAYLOAD_KEYS = {
     "storage_object_id",
     "task_run_id",
     "trace_id",
+    "deadline_at",
 }
 RUN_FAILURE_SIMULATION_KEYS = FAILURE_INJECTION_KEYS
 HOTWORD_FROZEN_RETRY_KEYS = {
@@ -322,24 +362,55 @@ def transition_run(record: RunRecord, target_status: str, *, reason: str) -> Non
         )
     history = list(record.payload.get("status_history", []))
     history.append({"from": record.status, "to": target_status, "reason": reason})
+    now = datetime.now(UTC)
     record.status = target_status
+    record.status_version = int(record.status_version or 1) + 1
+    if target_status == "running" and record.started_at is None:
+        record.started_at = now
+    if target_status == "submitted" and record.submitted_at is None:
+        record.submitted_at = now
+        if record.run_type == "task_run" and record.next_status_sync_at is None:
+            record.next_status_sync_at = now + timedelta(
+                seconds=get_settings().task_run_status_sync_interval_seconds
+            )
+    if target_status in {"success", "failed", "cancelled"} and record.finished_at is None:
+        record.finished_at = now
+    if target_status in {"success", "failed", "cancelled"}:
+        record.next_status_sync_at = None
     record.payload = {**record.payload, "status": target_status, "status_history": history}
 
 
 def run_payload(record: RunRecord) -> dict[str, Any]:
+    def iso_or_none(value: datetime | None) -> str | None:
+        return value.isoformat() if value is not None else None
+
     return {
         "run_id": record.run_id,
         "id": record.run_id,
         "run_type": record.run_type,
-        "status": record.status,
         "run_key": record.run_key,
         "partition_key": record.partition_key,
+        "submitted_at": iso_or_none(record.submitted_at),
+        "started_at": iso_or_none(record.started_at),
+        "finished_at": iso_or_none(record.finished_at),
+        "engine_status": record.engine_status,
+        "engine_status_observed_at": iso_or_none(record.engine_status_observed_at),
+        "cancel_requested_at": iso_or_none(record.cancel_requested_at),
+        "cancel_reason": record.cancel_reason,
+        "terminal_reason": record.terminal_reason,
         "affected_objects": record.payload.get("affected_objects", []),
         "next_actions": record.payload.get("next_actions", []),
         **record.payload,
         # Adapter and business projections can add their own lineage fields,
         # but the public run trace is always the persisted RunRecord trace.
         "trace_id": record.trace_id,
+        # These control-plane values always come from strong columns. They are
+        # repeated after payload so no legacy/internal JSON can shadow them.
+        "status": record.status,
+        "status_version": record.status_version,
+        "deadline_at": iso_or_none(record.deadline_at),
+        "next_status_sync_at": iso_or_none(record.next_status_sync_at),
+        "monitor_generation": int(record.monitor_generation or 0),
     }
 
 
@@ -469,12 +540,18 @@ def _validate_completion_receipt(
     strict_external_receipt: bool = False,
     authenticated_source: str | None = None,
 ) -> tuple[str, str]:
-    if record.status != "submitted":
+    if record.status not in {"submitted", "running", "completion_pending"}:
         raise ApiError(
             "RUN_COMPLETION_NOT_ALLOWED",
             f"运行状态 {record.status} 不能接收完成回执",
             409,
-            details=[{"run_id": record.run_id, "status": record.status}],
+            details=[
+                {
+                    "run_id": record.run_id,
+                    "status": record.status,
+                    "allowed_statuses": ["completion_pending", "running", "submitted"],
+                }
+            ],
         )
     if record.payload.get("business_completion_required") is not True:
         raise ApiError(
@@ -526,6 +603,104 @@ def _validate_completion_receipt(
     if not actual_external_id and expected_external_id and not strict_external_receipt:
         payload["external_id"] = expected_external_id
     return adapter, str(payload.get("external_id") or "")
+
+
+def _stageable_early_dagster_completion(
+    record: RunRecord,
+    payload: dict[str, Any],
+    *,
+    strict_external_receipt: bool,
+    authenticated_source: str | None,
+) -> bool:
+    if not strict_external_receipt or authenticated_source != "dagster":
+        return False
+    if record.run_type != "task_run" or record.status not in {"pending", "running"}:
+        return False
+    if isinstance(record.payload.get("dispatch"), dict):
+        return False
+    declared_adapter = str(payload.get("adapter") or payload.get("source") or "")
+    declared_source = str(payload.get("source") or payload.get("adapter") or "")
+    if declared_adapter != "dagster" or declared_source != "dagster":
+        raise ApiError(
+            "RUN_COMPLETION_AUTH_SOURCE_MISMATCH",
+            "早到完成回执必须由已验签 Dagster 来源提交",
+            403,
+        )
+    if not payload.get("external_id"):
+        raise ApiError(
+            "RUN_COMPLETION_EXTERNAL_ID_REQUIRED",
+            "早到 Dagster 完成回执必须携带 external_id",
+            400,
+        )
+    return True
+
+
+def _stageable_cancelling_dagster_completion(
+    record: RunRecord,
+    payload: dict[str, Any],
+    *,
+    strict_external_receipt: bool,
+    authenticated_source: str | None,
+) -> bool:
+    """Accept a signed Dagster success receipt while cancellation is unresolved.
+
+    Staging does not mutate the TaskRun or its status-version fence. The receipt
+    becomes authoritative only if a fenced cancel/status query subsequently
+    observes Dagster SUCCESS; an observed cancellation or failure rejects it.
+    """
+
+    if (
+        not strict_external_receipt
+        or authenticated_source != "dagster"
+        or record.run_type != "task_run"
+        or record.status != "cancelling"
+        or payload.get("status") != "success"
+    ):
+        return False
+    if record.payload.get("business_completion_required") is not True:
+        raise ApiError(
+            "RUN_COMPLETION_NOT_REQUIRED",
+            "当前任务运行不需要外部完成回执",
+            409,
+            details=[{"run_id": record.run_id, "status": record.status}],
+        )
+    adapter = _validate_completion_source_binding(
+        record,
+        payload,
+        strict_external_receipt=True,
+        authenticated_source="dagster",
+    )
+    expected_external_id = _completion_external_id(record, adapter)
+    actual_external_id = str(payload.get("external_id") or "")
+    if not expected_external_id:
+        raise ApiError(
+            "RUN_COMPLETION_EXTERNAL_ID_UNAVAILABLE",
+            "运行分发回执缺少可校验的 Dagster 外部 ID",
+            409,
+            details=[{"run_id": record.run_id, "adapter": adapter}],
+        )
+    if not actual_external_id:
+        raise ApiError(
+            "RUN_COMPLETION_EXTERNAL_ID_REQUIRED",
+            "外部完成回执必须携带 external_id",
+            400,
+            details=[{"run_id": record.run_id, "adapter": adapter}],
+        )
+    if not hmac.compare_digest(actual_external_id, expected_external_id):
+        raise ApiError(
+            "RUN_COMPLETION_EXTERNAL_ID_MISMATCH",
+            "取消竞争中的完成回执与可信 Dagster binding 不一致",
+            409,
+            details=[
+                {
+                    "run_id": record.run_id,
+                    "adapter": adapter,
+                    "expected_external_id": expected_external_id,
+                    "actual_external_id": actual_external_id,
+                }
+            ],
+        )
+    return True
 
 
 def _json_copy(value: dict[str, Any]) -> dict[str, Any]:
@@ -880,6 +1055,309 @@ def _link_completion_trace_to_run_root(
     return root_trace_id
 
 
+def apply_staged_dagster_completion(
+    session: Session,
+    record: RunRecord,
+    *,
+    processing_states: tuple[str, ...] = ("pending_binding",),
+) -> bool:
+    """Bind and apply a signed receipt that arrived before Dagster launch finalized.
+
+    The receipt is already authenticated and durable. It becomes authoritative only
+    after the launch receipt supplies the exact external Dagster run id.
+    """
+
+    allowed_states = tuple(
+        state for state in processing_states if state in {"pending_binding", "pending_cancel"}
+    )
+    if not allowed_states:
+        return False
+    receipt = session.scalar(
+        select(RunCompletionReceipt)
+        .where(
+            RunCompletionReceipt.tenant_id == record.tenant_id,
+            RunCompletionReceipt.project_id == record.project_id,
+            RunCompletionReceipt.run_id == record.run_id,
+            RunCompletionReceipt.processing_state.in_(allowed_states),
+        )
+        .with_for_update()
+    )
+    if receipt is None:
+        return False
+    staged_processing_state = receipt.processing_state
+    payload = _json_copy(receipt.request_body)
+    ctx = RequestContext(
+        tenant_id=record.tenant_id,
+        project_id=record.project_id,
+        user_id=f"ext:{(receipt.signature_key_id or 'dagster')[:48]}",
+        roles=("system", "external_completion_client"),
+        request_id=receipt.request_id,
+        trace_id=receipt.request_trace_id,
+        idempotency_key=f"dagster-completion:{receipt.external_id or record.run_id}",
+        parent_trace_id=record.trace_id,
+        correlation_id=record.trace_id,
+        actor_kind="service",
+    )
+    expected_external_id = _completion_external_id(record, "dagster")
+    actual_external_id = str(payload.get("external_id") or receipt.external_id or "")
+
+    def reject(code: str, message: str) -> bool:
+        receipt.processing_state = "rejected"
+        receipt.completion_status = "rejected"
+        receipt.status_code = 409
+        receipt.response_json = {
+            "error": {
+                "code": code,
+                "message": message,
+                "status": 409,
+                "trace_id": receipt.request_trace_id,
+            }
+        }
+        receipt.completed_at = datetime.now(UTC)
+        record_audit(
+            session,
+            ctx,
+            action="task_run.completion_rejected",
+            object_type="task_run",
+            object_id=record.run_id,
+            result="failed",
+            after={
+                "code": code,
+                "completion_receipt_id": receipt.completion_receipt_id,
+                "expected_external_id": expected_external_id,
+                "actual_external_id": actual_external_id,
+            },
+            trace_id=record.trace_id,
+        )
+        return False
+
+    if not expected_external_id or not hmac.compare_digest(
+        actual_external_id, expected_external_id
+    ):
+        return reject(
+            "RUN_COMPLETION_EXTERNAL_ID_MISMATCH",
+            "早到完成回执与可信 Dagster launch binding 不一致",
+        )
+    if record.status not in {"submitted", "completion_pending"}:
+        return reject(
+            "RUN_COMPLETION_NOT_ALLOWED",
+            f"运行状态 {record.status} 不能应用早到完成回执",
+        )
+
+    try:
+        adapter, external_id = _validate_completion_receipt(
+            record,
+            payload,
+            strict_external_receipt=True,
+            authenticated_source="dagster",
+        )
+        status = str(payload.get("status") or "success")
+        target_status = "failed" if status == "failed" else "success"
+        if target_status == "success":
+            _validate_experiment_bundle_execution(record, payload)
+    except ApiError as exc:
+        return reject(exc.code, exc.message)
+
+    completion_root_trace_id = _link_completion_trace_to_run_root(session, ctx, record)
+    completion_reason = (
+        "dagster_completion_won_cancellation_race"
+        if staged_processing_state == "pending_cancel"
+        else "dagster_staged_completion_bound"
+    )
+    transition_run(record, target_status, reason=completion_reason)
+    registered_storage_objects = (
+        register_hotword_completion_storage_objects(
+            session,
+            ctx,
+            record,
+            payload.get("result_ref"),
+        )
+        if target_status == "success"
+        else []
+    )
+    completion_receipt: dict[str, Any] = {
+        "completion_receipt_id": receipt.completion_receipt_id,
+        "receipt_hash": receipt.receipt_hash,
+        "adapter": adapter,
+        "external_id": external_id,
+        "source": "dagster",
+        "status": target_status,
+        "result_ref": payload.get("result_ref") or {},
+        "metrics": payload.get("metrics") or {},
+        "note": payload.get("note"),
+        "error_code": payload.get("error_code"),
+        "retryable": bool(payload.get("retryable", True)),
+        "received_at": receipt.received_at.isoformat(),
+        "trace_id": receipt.request_trace_id,
+        "run_trace_id": record.trace_id,
+        "root_trace_id": completion_root_trace_id,
+        "auth": {
+            "auth_mode": "signed_external_completion",
+            "signature_key_id": receipt.signature_key_id,
+            "authenticated_source": receipt.authenticated_source,
+            "nonce": receipt.signature_nonce,
+            "request_sha256": receipt.signature_request_hash,
+            "body_sha256": receipt.signature_body_hash,
+            "signature_mode": receipt.signature_mode,
+            "signed_at": receipt.signed_at,
+        },
+        "registered_storage_objects": registered_storage_objects,
+    }
+    experiment_completion: dict[str, Any] | None = None
+    if target_status == "success":
+        from app.services.experiment_service import materialize_task_experiment_completion
+
+        experiment_completion = materialize_task_experiment_completion(
+            session,
+            ctx,
+            record,
+            completion_receipt,
+        )
+    record.payload = {
+        **record.payload,
+        "status": target_status,
+        "business_status": "failed" if target_status == "failed" else "completed",
+        "dispatch_state": "failed" if target_status == "failed" else "completed",
+        "business_completion_required": False,
+        "completion_mode": (
+            "cancellation_race_completion_receipt"
+            if staged_processing_state == "pending_cancel"
+            else "staged_completion_receipt"
+        ),
+        "completion_receipt": completion_receipt,
+        "result_ref": payload.get("result_ref") or {},
+        "metrics": payload.get("metrics") or {},
+        "registered_storage_objects": registered_storage_objects,
+        "experiment_completion": experiment_completion,
+        "next_actions": [
+            {"key": "view_trace", "label": "查看 Trace", "route": f"traces/{record.trace_id}"},
+            {
+                "key": "view_result" if target_status == "success" else "retry",
+                "label": "查看结果" if target_status == "success" else "创建重试运行",
+            },
+        ],
+    }
+    if target_status == "failed":
+        record.terminal_reason = str(
+            payload.get("error_code") or "DAGSTER_COMPLETION_REPORTED_FAILURE"
+        )
+        record.payload = {
+            **record.payload,
+            "error": payload.get("note") or "completion receipt reported failure",
+            "error_code": record.terminal_reason,
+            "retryable": bool(payload.get("retryable", True)),
+        }
+    record_agent_completion(session, record, completion_receipt)
+    record_audit(
+        session,
+        ctx,
+        action="task_run.completion_received",
+        object_type="task_run",
+        object_id=record.run_id,
+        result=target_status,
+        after=record.payload,
+        trace_id=record.trace_id,
+    )
+    response = envelope(run_payload(record), ctx)
+    _finalize_completion_receipt(
+        receipt,
+        adapter=adapter,
+        external_id=external_id,
+        completion_status=target_status,
+        response=response,
+    )
+    from app.services.task_run_control_service import emit_task_run_terminal_event
+
+    emit_task_run_terminal_event(
+        session,
+        ctx,
+        record,
+        reason=completion_reason,
+    )
+    return True
+
+
+def resolve_cancellation_race_dagster_completion(
+    session: Session,
+    record: RunRecord,
+    *,
+    observed_status: str,
+) -> bool:
+    """Resolve a signed success receipt staged behind a cancellation fence."""
+
+    normalized = observed_status.upper()
+    if normalized == "SUCCESS":
+        return apply_staged_dagster_completion(
+            session,
+            record,
+            processing_states=("pending_cancel",),
+        )
+    if normalized not in {"CANCELED", "CANCELLED", "FAILURE"}:
+        return False
+
+    receipt = session.scalar(
+        select(RunCompletionReceipt)
+        .where(
+            RunCompletionReceipt.tenant_id == record.tenant_id,
+            RunCompletionReceipt.project_id == record.project_id,
+            RunCompletionReceipt.run_id == record.run_id,
+            RunCompletionReceipt.processing_state == "pending_cancel",
+        )
+        .with_for_update()
+    )
+    if receipt is None:
+        return False
+    code = (
+        "RUN_COMPLETION_CANCELLED_BEFORE_APPLY"
+        if normalized in {"CANCELED", "CANCELLED"}
+        else "RUN_COMPLETION_ENGINE_FAILED_BEFORE_APPLY"
+    )
+    message = (
+        "Dagster cancellation completed before the staged success receipt could be applied"
+        if normalized in {"CANCELED", "CANCELLED"}
+        else "Dagster failed before the staged success receipt could be applied"
+    )
+    receipt.processing_state = "rejected"
+    receipt.completion_status = "rejected"
+    receipt.status_code = 409
+    receipt.response_json = {
+        "error": {
+            "code": code,
+            "message": message,
+            "status": 409,
+            "trace_id": receipt.request_trace_id,
+        }
+    }
+    receipt.completed_at = datetime.now(UTC)
+    ctx = RequestContext(
+        tenant_id=record.tenant_id,
+        project_id=record.project_id,
+        user_id=f"ext:{(receipt.signature_key_id or 'dagster')[:48]}",
+        roles=("system", "external_completion_client"),
+        request_id=receipt.request_id,
+        trace_id=receipt.request_trace_id,
+        idempotency_key=f"dagster-completion:{receipt.external_id or record.run_id}",
+        parent_trace_id=record.trace_id,
+        correlation_id=record.trace_id,
+        actor_kind="service",
+    )
+    record_audit(
+        session,
+        ctx,
+        action="task_run.completion_rejected",
+        object_type="task_run",
+        object_id=record.run_id,
+        result="failed",
+        after={
+            "code": code,
+            "completion_receipt_id": receipt.completion_receipt_id,
+            "observed_engine_status": normalized,
+        },
+        trace_id=record.trace_id,
+    )
+    return True
+
+
 def _validate_experiment_bundle_execution(
     record: RunRecord,
     payload: dict[str, Any],
@@ -924,7 +1402,7 @@ async def complete_run_from_receipt(
     response_data: Callable[[RunRecord], dict[str, Any]] | None = None,
     strict_external_receipt: bool = False,
     completion_auth: dict[str, Any] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     authenticated_source: str | None = None
     if strict_external_receipt:
         require_any_role(
@@ -967,7 +1445,13 @@ async def complete_run_from_receipt(
             403,
         )
 
-    adapter = _validate_completion_source_binding(
+    stage_early_receipt = _stageable_early_dagster_completion(
+        record,
+        payload,
+        strict_external_receipt=strict_external_receipt,
+        authenticated_source=authenticated_source,
+    )
+    stage_cancellation_receipt = _stageable_cancelling_dagster_completion(
         record,
         payload,
         strict_external_receipt=strict_external_receipt,
@@ -976,7 +1460,54 @@ async def complete_run_from_receipt(
     _claim_completion_nonce(session, ctx, completion_auth)
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
+        raise_replayed_api_error(replay)
         return replay
+
+    if record.run_type == "task_run" and record.status in {"success", "failed", "cancelled"}:
+        error = ApiError(
+            "RUN_COMPLETION_NOT_ALLOWED",
+            f"运行状态 {record.status} 不能接收完成回执",
+            409,
+            details=[{"run_id": record.run_id, "status": record.status}],
+        )
+        record_audit(
+            session,
+            ctx,
+            action="task_run.completion_rejected",
+            object_type="task_run",
+            object_id=record.run_id,
+            result="failed",
+            before={"status": record.status},
+            after={
+                "code": error.code,
+                "status": record.status,
+                "completion_receipt_id": payload.get("completion_receipt_id"),
+                "external_id": payload.get("external_id"),
+            },
+            trace_id=record.trace_id,
+        )
+        error_response = api_error_result(ctx, error)
+        save_idempotency_result(
+            session,
+            ctx,
+            operation=operation,
+            body_hash=body_hash,
+            status_code=error.status_code,
+            response_json=error_response,
+        )
+        session.commit()
+        raise error
+
+    adapter = (
+        "dagster"
+        if stage_early_receipt or stage_cancellation_receipt
+        else _validate_completion_source_binding(
+            record,
+            payload,
+            strict_external_receipt=strict_external_receipt,
+            authenticated_source=authenticated_source,
+        )
+    )
 
     raw_receipt_id = payload.get("completion_receipt_id") or payload.get("receipt_id")
     if strict_external_receipt and not raw_receipt_id:
@@ -1020,6 +1551,55 @@ async def complete_run_from_receipt(
             operation=operation,
             body_hash=body_hash,
         )
+
+    if stage_early_receipt or stage_cancellation_receipt:
+        public_receipt_state = (
+            "pending_cancellation_resolution" if stage_cancellation_receipt else "pending_binding"
+        )
+        persisted_receipt_state = (
+            "pending_cancel" if stage_cancellation_receipt else "pending_binding"
+        )
+        response = envelope(
+            {
+                "run_id": record.run_id,
+                "status": record.status,
+                "completion_receipt_id": receipt_id,
+                "receipt_state": public_receipt_state,
+                "trace_id": record.trace_id,
+            },
+            ctx,
+        )
+        inbox_receipt.processing_state = persisted_receipt_state
+        inbox_receipt.status_code = 202
+        inbox_receipt.response_json = _json_copy(response)
+        record_audit(
+            session,
+            ctx,
+            action=(
+                "task_run.completion_staged_during_cancellation"
+                if stage_cancellation_receipt
+                else f"{record.run_type}.completion_staged"
+            ),
+            object_type=record.run_type,
+            object_id=record.run_id,
+            result=persisted_receipt_state,
+            after={
+                "completion_receipt_id": receipt_id,
+                "external_id": payload.get("external_id"),
+                "receipt_state": public_receipt_state,
+            },
+            trace_id=record.trace_id,
+        )
+        save_idempotency_result(
+            session,
+            ctx,
+            operation=operation,
+            body_hash=body_hash,
+            status_code=202,
+            response_json=response,
+        )
+        session.commit()
+        return JSONResponse(status_code=202, content=response)
 
     completion_root_trace_id = _link_completion_trace_to_run_root(session, ctx, record)
 
@@ -1352,6 +1932,15 @@ async def complete_run_from_receipt(
         after=record.payload,
         trace_id=record.trace_id,
     )
+    if record.run_type == "task_run":
+        from app.services.task_run_control_service import emit_task_run_terminal_event
+
+        emit_task_run_terminal_event(
+            session,
+            ctx,
+            record,
+            reason=f"{adapter}_completion_received",
+        )
     response = envelope((response_data or run_payload)(record), ctx)
     _finalize_completion_receipt(
         inbox_receipt,
@@ -1573,6 +2162,16 @@ async def create_run(
     if prepare_payload is not None:
         payload = prepare_payload(payload)
 
+    if run_type == "task_run":
+        # Task-run lifecycle controls are server-owned even for internal retries.
+        # Public requests also use a strict schema, but stripping here prevents a
+        # future internal caller from copying stale or forged monitor state.
+        payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in {"deadline_at", "next_status_sync_at", "monitor_generation"}
+        }
+
     run_id = (
         payload.get("run_id") or payload.get("task_run_id") or f"{run_type}_{uuid.uuid4().hex[:12]}"
     )
@@ -1582,6 +2181,11 @@ async def create_run(
     # implicitly replace either trace.
     trace_id = run_trace_id or ctx.trace_id
     now = datetime.now(UTC)
+    deadline_at = (
+        now + timedelta(seconds=get_settings().task_run_default_deadline_seconds)
+        if run_type == "task_run"
+        else None
+    )
     log_event(
         logger,
         "run.create.start",
@@ -1602,6 +2206,9 @@ async def create_run(
         or payload.get("dataset_id"),
         partition_key=payload.get("partition_key") or payload.get("sample_set"),
         trace_id=trace_id,
+        deadline_at=deadline_at,
+        next_status_sync_at=None,
+        monitor_generation=0,
         created_at=now,
         updated_at=now,
         payload={
@@ -1609,6 +2216,15 @@ async def create_run(
             "run_id": run_id,
             "status": status,
             "trace_id": trace_id,
+            **(
+                {
+                    "deadline_at": deadline_at.isoformat(),
+                    "next_status_sync_at": None,
+                    "monitor_generation": 0,
+                }
+                if deadline_at is not None
+                else {}
+            ),
             "affected_objects": payload.get("affected_objects", []),
             "next_actions": payload.get(
                 "next_actions",

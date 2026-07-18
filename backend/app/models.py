@@ -303,6 +303,35 @@ class RunRecord(Base, TimestampMixin):
             "run_id",
             name="uq_run_records_scope_id",
         ),
+        Index("ix_run_records_status_deadline", "status", "deadline_at"),
+        Index("ix_run_records_status_sync_due", "status", "next_status_sync_at"),
+        Index(
+            "ix_run_records_monitor_deadline",
+            "run_type",
+            "status",
+            "deadline_at",
+        ),
+        Index(
+            "ix_run_records_monitor_sync_due",
+            "run_type",
+            "status",
+            "next_status_sync_at",
+        ),
+        Index(
+            "ix_run_records_monitor_control_active",
+            "tenant_id",
+            "project_id",
+            "run_key",
+            "run_type",
+            "status",
+            mysql_length={"run_key": 128},
+        ),
+        Index(
+            "ix_run_records_type_status_finished",
+            "run_type",
+            "status",
+            "finished_at",
+        ),
     )
 
     run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -313,6 +342,22 @@ class RunRecord(Base, TimestampMixin):
     run_key: Mapped[str | None] = mapped_column(String(512))
     partition_key: Mapped[str | None] = mapped_column(String(512))
     trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    deadline_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_status_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    monitor_generation: Mapped[int] = mapped_column(
+        Integer, default=0, server_default="0", nullable=False
+    )
+    engine_status: Mapped[str | None] = mapped_column(String(32), index=True)
+    engine_status_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    status_version: Mapped[int] = mapped_column(
+        Integer, default=1, server_default="1", nullable=False
+    )
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancel_reason: Mapped[str | None] = mapped_column(String(500))
+    terminal_reason: Mapped[str | None] = mapped_column(String(500))
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 

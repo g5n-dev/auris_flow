@@ -10,8 +10,9 @@ from typing import Any, Literal, cast
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.core.context import RequestContext, project_member_user_ids
+from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.project_membership import project_member_user_ids
 from app.domain.calibration import (
     RUBRIC_PROFILES,
     calculate_calibration_metrics,

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
+import os
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -51,12 +53,39 @@ from app.core.errors import ApiError
 from app.core.logging import configure_logging, get_logger, log_event
 from app.core.metrics import is_metrics_client_allowed, metrics
 from app.core.observability import annotate_current_span, configure_observability
+from app.core.oidc import OIDCError
 from app.core.rate_limit import build_rate_limiter
 from app.services.adapters import object_storage_client_for_provider
 
 settings = get_settings()
 configure_logging(settings.log_level)
 logger = get_logger("app")
+
+DAGSTER_READINESS_QUERY = """
+query AurisReadinessWorkspace {
+  instance {
+    daemonHealth {
+      allDaemonStatuses {
+        daemonType
+        required
+        healthy
+      }
+    }
+  }
+  repositoriesOrError {
+    __typename
+    ... on RepositoryConnection {
+      nodes {
+        name
+        location { name }
+        pipelines { name }
+      }
+    }
+  }
+}
+""".strip()
+DAGSTER_READINESS_MAX_BYTES = 1_048_576
+OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS = 0.25
 
 
 @asynccontextmanager
@@ -140,6 +169,10 @@ async def request_logging_middleware(
             f"{settings.app_env}:{actor}:{request.method}:{request.url.path}",
             limit=settings.rate_limit_per_minute,
             window_seconds=60,
+        )
+        metrics.record_rate_limit_decision(
+            allowed=rate_limit_decision.allowed,
+            backend=rate_limit_decision.backend,
         )
         if not rate_limit_decision.allowed:
             backend_unavailable = rate_limit_decision.backend == "redis-unavailable"
@@ -297,6 +330,106 @@ def prometheus_metrics(request: Request) -> Response:
     )
 
 
+def probe_dagster_workspace(url: str | None) -> str:
+    """Require the exact production code location, repository and generic job."""
+
+    if not url:
+        return "not_configured"
+    body = json.dumps(
+        {"query": DAGSTER_READINESS_QUERY, "variables": {}},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    bearer_token = os.environ.get("DAGSTER_GRAPHQL_BEARER_TOKEN", "").strip()
+    if bearer_token:
+        headers["Authorization"] = f"Bearer {bearer_token}"
+    request = UrlRequest(url, data=body, method="POST", headers=headers)
+    try:
+        with urlopen(request, timeout=1.0) as response:
+            if response.status != 200:
+                return "not_ready"
+            raw = response.read(DAGSTER_READINESS_MAX_BYTES + 1)
+        if len(raw) > DAGSTER_READINESS_MAX_BYTES:
+            return "not_ready"
+        payload = json.loads(raw.decode("utf-8"))
+    except (
+        AttributeError,
+        OSError,
+        URLError,
+        UnicodeDecodeError,
+        ValueError,
+    ):
+        return "not_ready"
+    if not isinstance(payload, dict) or payload.get("errors"):
+        return "not_ready"
+    data = payload.get("data")
+    instance = data.get("instance") if isinstance(data, dict) else None
+    daemon_health = instance.get("daemonHealth") if isinstance(instance, dict) else None
+    daemon_statuses = (
+        daemon_health.get("allDaemonStatuses") if isinstance(daemon_health, dict) else None
+    )
+    if not isinstance(daemon_statuses, list) or not daemon_statuses:
+        return "not_ready"
+    daemon_types: set[str] = set()
+    required_daemons = 0
+    for daemon_status in daemon_statuses:
+        if not isinstance(daemon_status, dict):
+            return "not_ready"
+        daemon_type = daemon_status.get("daemonType")
+        required = daemon_status.get("required")
+        healthy = daemon_status.get("healthy")
+        if (
+            not isinstance(daemon_type, str)
+            or not daemon_type
+            or daemon_type in daemon_types
+            or not isinstance(required, bool)
+            or (healthy is not None and not isinstance(healthy, bool))
+        ):
+            return "not_ready"
+        daemon_types.add(daemon_type)
+        if required:
+            required_daemons += 1
+            if healthy is not True:
+                return "not_ready"
+    if required_daemons == 0:
+        return "not_ready"
+
+    repositories = data.get("repositoriesOrError") if isinstance(data, dict) else None
+    if (
+        not isinstance(repositories, dict)
+        or repositories.get("__typename") != "RepositoryConnection"
+    ):
+        return "not_ready"
+    nodes = repositories.get("nodes")
+    if not isinstance(nodes, list):
+        return "not_ready"
+    expected_location = os.environ.get(
+        "DAGSTER_REPOSITORY_LOCATION_NAME", "auris_flow_defs"
+    ).strip()
+    expected_repository = os.environ.get("DAGSTER_REPOSITORY_NAME", "__repository__").strip()
+    expected_job = os.environ.get("DAGSTER_DEFAULT_JOB_NAME", "auris_flow_generic_job").strip()
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        location = node.get("location")
+        pipelines = node.get("pipelines")
+        pipeline_items = pipelines if isinstance(pipelines, list) else []
+        pipeline_names = {
+            str(item.get("name"))
+            for item in pipeline_items
+            if isinstance(item, dict) and item.get("name")
+        }
+        if (
+            node.get("name") == expected_repository
+            and isinstance(location, dict)
+            and location.get("name") == expected_location
+            and expected_job in pipeline_names
+        ):
+            return "ok"
+    return "not_ready"
+
+
 @app.get("/readyz")
 def readyz() -> JSONResponse:
     def required_checks() -> set[str]:
@@ -324,9 +457,17 @@ def readyz() -> JSONResponse:
     def probe_auth() -> str:
         try:
             get_auth_provider()
-            return "ok"
         except ApiError:
             return "not_configured"
+        if settings.auth_provider.strip().lower() != "oidc":
+            return "ok"
+        try:
+            auth.get_oidc_authorization_flow().discover(
+                force_refresh=is_production_environment(settings.app_env)
+            )
+            return "ok"
+        except OIDCError:
+            return "not_ready"
 
     def probe_redis(url: str | None) -> str:
         if not url:
@@ -344,17 +485,19 @@ def readyz() -> JSONResponse:
         try:
             request = UrlRequest(target, method="GET", headers=headers or {})
             with urlopen(request, timeout=0.25) as response:
-                return "ok" if 200 <= response.status < 500 else "not_ready"
+                return "ok" if 200 <= response.status < 300 else "not_ready"
         except (OSError, URLError, ValueError):
             return "not_ready"
 
     def probe_object_storage() -> str:
-        if settings.object_storage_provider == "minio":
-            return probe_http(settings.object_storage_endpoint, "/minio/health/ready")
         try:
             client = object_storage_client_for_provider(settings.object_storage_provider)
-            client.head_object(client.bucket, "")
-            return "ok"
+            result = client.head_bucket(
+                client.bucket,
+                timeout_seconds=OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS,
+            )
+            status = result.get("status") if isinstance(result, dict) else None
+            return "ok" if isinstance(status, int) and 200 <= status < 300 else "not_ready"
         except (HTTPError, OSError, URLError, TimeoutError, ValueError):
             return "not_ready"
 
@@ -368,7 +511,7 @@ def readyz() -> JSONResponse:
             "/collections",
             {"api-key": settings.qdrant_api_key} if settings.qdrant_api_key else None,
         ),
-        "dagster": probe_http(settings.dagster_graphql_url.removesuffix("/graphql")),
+        "dagster": probe_dagster_workspace(settings.dagster_graphql_url),
     }
     try:
         with SessionLocal() as session:

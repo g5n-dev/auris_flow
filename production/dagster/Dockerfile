@@ -1,7 +1,6 @@
-# syntax=docker/dockerfile:1.7
-FROM python:3.12.10-slim-bookworm AS builder
+# syntax=docker/dockerfile:1.7@sha256:a57df69d0ea827fb7266491f2813635de6f17269be881f696fbfdf2d83dda33e
+FROM python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db AS builder
 
-ARG UV_VERSION=0.10.0
 ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_COMPILE_BYTECODE=1 \
@@ -9,7 +8,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     UV_PROJECT_ENVIRONMENT=/opt/auris/venv
 
 WORKDIR /build
-RUN python -m pip install "uv==${UV_VERSION}"
+COPY --from=ghcr.io/astral-sh/uv:0.10.0@sha256:78a7ff97cd27b7124a5f3c2aefe146170793c56a1e03321dd31a289f6d82a04f /uv /uvx /bin/
 
 COPY production/dagster/pyproject.toml production/dagster/uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
@@ -18,7 +17,7 @@ COPY production/dagster/src ./src
 RUN uv sync --frozen --no-dev --no-editable
 
 
-FROM python:3.12.10-slim-bookworm AS runtime
+FROM python:3.12.10-slim-bookworm@sha256:fd95fa221297a88e1cf49c55ec1828edd7c5a428187e67b5d1805692d11588db AS runtime
 
 ENV PATH=/opt/auris/venv/bin:$PATH \
     PYTHONUNBUFFERED=1 \

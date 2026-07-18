@@ -1,0 +1,14 @@
+services:
+  bff:
+    environment:
+      OIDC_CLIENT_SECRET_FILE: /run/secrets/oidc_client_secret
+    secrets:
+      - source: oidc_client_secret
+        target: oidc_client_secret
+        uid: "10001"
+        gid: "10001"
+        mode: 0400
+
+secrets:
+  oidc_client_secret:
+    file: ${AURIS_OIDC_CLIENT_SECRET_SOURCE_FILE:?set an absolute OIDC client secret source file}

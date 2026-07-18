@@ -20,11 +20,11 @@ from app.core.auth import (
 )
 from app.core.browser_session import (
     authenticate_browser_session,
+    browser_session_csrf_token,
     browser_session_default_scope,
     create_browser_session,
     find_oidc_identity,
     revoke_browser_session,
-    rotate_browser_session_csrf,
 )
 from app.core.config import _csv_items, get_settings, is_production_environment
 from app.core.errors import ApiError
@@ -288,7 +288,7 @@ def get_session(
         raw_token = request.cookies.get(get_settings().browser_session_cookie_name)
         if not raw_token:
             raise ApiError("AUTH_SESSION_INVALID", "浏览器会话无效", 401)
-        csrf_token = rotate_browser_session_csrf(
+        csrf_token = browser_session_csrf_token(
             session,
             raw_token=raw_token,
             session_id=ctx.auth_session_id or "",

@@ -301,6 +301,8 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "storage_object": "data_assets",
         "store": "work_items",
         "task_run": "task_versions",
+        "task_run_cancellation": "task_versions",
+        "task_run_status_sync": "task_versions",
         "task_type": "task_types",
         "task_version": "task_versions",
         "task_version_publish": "task_versions",

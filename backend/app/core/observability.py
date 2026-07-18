@@ -9,6 +9,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from fastapi import FastAPI
 from opentelemetry import trace
+from opentelemetry.context import Context
 from opentelemetry.exporter.otlp.proto.http.trace_exporter import OTLPSpanExporter
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
@@ -23,7 +24,8 @@ from opentelemetry.sdk.trace.export import (
     SpanExportResult,
 )
 from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
-from opentelemetry.trace import Link, Span
+from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode
+from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 from sqlalchemy.engine import Engine
 
@@ -308,15 +310,76 @@ def internal_span(
     name: str,
     *,
     attributes: Mapping[str, AttributeValue] | None = None,
+    parent_context: Context | None = None,
 ) -> Iterator[Span]:
     if _ACTIVE_PROVIDER is None:
         yield trace.get_current_span()
         return
     tracer = _ACTIVE_PROVIDER.get_tracer("auris-flow")
     with tracer.start_as_current_span(
-        name, attributes=sanitize_span_attributes(attributes)
+        name,
+        context=parent_context,
+        attributes=sanitize_span_attributes(attributes),
     ) as span:
         yield span
+
+
+@contextmanager
+def safe_http_client_span(
+    *,
+    method: str,
+    scheme: str,
+    host: str,
+    port: int,
+) -> Iterator[tuple[Span, dict[str, str]]]:
+    """Create a low-sensitivity CLIENT span and a W3C trace-context carrier.
+
+    The pinned callback transport deliberately bypasses the instrumented urllib/httpx
+    clients. Keep its telemetry surface explicit: request paths, queries, headers and
+    bodies never become span names, attributes, events or error descriptions.
+    """
+
+    safe_method = method.upper() if re.fullmatch(r"[A-Za-z]{1,16}", method) else "HTTP"
+    attributes: dict[str, AttributeValue] = {
+        "http.request.method": safe_method,
+        "url.scheme": scheme,
+        # ``server.address`` is intentionally reserved for the global PII scrubber.
+        # This host has already passed the callback target validator, so expose it
+        # under a constrained host-only key without weakening global redaction.
+        "server.host": host,
+        "server.port": port,
+    }
+    provider = _ACTIVE_PROVIDER
+    tracer = (
+        provider.get_tracer("auris-flow.pinned-http")
+        if provider is not None
+        else trace.get_tracer("auris-flow.pinned-http")
+    )
+    with tracer.start_as_current_span(
+        f"HTTP {safe_method}",
+        kind=SpanKind.CLIENT,
+        attributes=sanitize_span_attributes(attributes),
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        trace_headers: dict[str, str] = {}
+        TraceContextTextMapPropagator().inject(trace_headers)
+        try:
+            yield span, trace_headers
+        except BaseException:
+            if span.is_recording():
+                span.set_status(Status(StatusCode.ERROR))
+            raise
+
+
+def record_safe_http_status(span: Span, status_code: int) -> None:
+    """Record only the numeric response status; callback redirects are failures."""
+
+    if not span.is_recording():
+        return
+    span.set_attribute("http.response.status_code", status_code)
+    if status_code >= 300:
+        span.set_status(Status(StatusCode.ERROR))
 
 
 def annotate_current_span(*, business_trace_id: str, request_id: str) -> None:
@@ -336,3 +399,42 @@ def current_trace_context() -> dict[str, str]:
         "otel_span_id": trace.format_span_id(context.span_id),
         "otel_trace_flags": f"{int(context.trace_flags):02x}",
     }
+
+
+def current_trace_carrier() -> dict[str, str]:
+    """Return the minimal W3C carrier for durable asynchronous propagation."""
+
+    carrier: dict[str, str] = {}
+    TraceContextTextMapPropagator().inject(carrier)
+    traceparent = carrier.get("traceparent")
+    if not isinstance(traceparent, str):
+        return {}
+    result = {"traceparent": traceparent}
+    tracestate = carrier.get("tracestate")
+    if isinstance(tracestate, str) and tracestate:
+        result["tracestate"] = tracestate
+    return result
+
+
+def extract_remote_trace_context(value: object) -> Context | None:
+    """Parse a server-owned W3C carrier and fail closed on malformed input."""
+
+    if not isinstance(value, dict) or not value:
+        return None
+    if not set(value).issubset({"traceparent", "tracestate"}):
+        return None
+    if any(
+        not isinstance(key, str) or not isinstance(item, str) or not item or len(item) > 512
+        for key, item in value.items()
+    ):
+        return None
+    traceparent = value.get("traceparent")
+    if not isinstance(traceparent, str) or not re.fullmatch(
+        r"00-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}", traceparent
+    ):
+        return None
+    extracted = TraceContextTextMapPropagator().extract(value)
+    span_context = trace.get_current_span(extracted).get_span_context()
+    if not span_context.is_valid or not span_context.is_remote:
+        return None
+    return extracted

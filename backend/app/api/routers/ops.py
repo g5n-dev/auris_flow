@@ -5,7 +5,7 @@ from sqlalchemy import func, select
 from sqlalchemy.sql.elements import ColumnElement
 
 from app.api.deps import ContextDep, SessionDep
-from app.core.context import user_has_project_membership
+from app.core.project_membership import user_has_project_membership
 from app.core.response import envelope
 from app.models import JsonResource, Project, RunRecord
 from app.repositories.json_resources import JsonResourceRepository

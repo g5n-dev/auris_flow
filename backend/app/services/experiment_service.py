@@ -13,6 +13,7 @@ from typing import Any
 from fastapi import Request
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from app.core.config import get_settings
 from app.core.context import RequestContext
@@ -124,7 +125,7 @@ def _human_only(ctx: RequestContext, *, action: str) -> None:
         )
 
 
-def _experiment_query(ctx: RequestContext):
+def _experiment_query(ctx: RequestContext) -> Select[tuple[ControlledExperiment]]:
     return select(ControlledExperiment).where(
         ControlledExperiment.tenant_id == ctx.tenant_id,
         ControlledExperiment.project_id == ctx.project_id,

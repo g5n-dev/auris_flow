@@ -51,6 +51,19 @@ services:
       retries: 20
       start_period: 5s
 
+  minio-bootstrap:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set auris http://minio:9000 minioadmin minioadmin >/dev/null &&
+        mc mb --ignore-existing auris/auris-flow-local >/dev/null &&
+        mc anonymous set none auris/auris-flow-local >/dev/null &&
+        mc version enable auris/auris-flow-local >/dev/null
+    depends_on:
+      minio:
+        condition: service_healthy
+
   qdrant:
     image: qdrant/qdrant:v1.12.5
     container_name: auris-flow-qdrant

@@ -10,6 +10,7 @@ from typing import Any, Literal, overload
 from fastapi import Request
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql import Select
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
@@ -88,14 +89,14 @@ def _human_only(ctx: RequestContext, *, action: str) -> None:
         )
 
 
-def _profile_query(ctx: RequestContext):
+def _profile_query(ctx: RequestContext) -> Select[tuple[SceneProfile]]:
     return select(SceneProfile).where(
         SceneProfile.tenant_id == ctx.tenant_id,
         SceneProfile.project_id == ctx.project_id,
     )
 
 
-def _version_query(ctx: RequestContext):
+def _version_query(ctx: RequestContext) -> Select[tuple[SceneProfileVersion]]:
     return select(SceneProfileVersion).where(
         SceneProfileVersion.tenant_id == ctx.tenant_id,
         SceneProfileVersion.project_id == ctx.project_id,

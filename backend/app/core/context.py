@@ -15,12 +15,17 @@ from app.core.auth import AuthActor, authenticate_bearer
 from app.core.browser_session import (
     authenticate_browser_session,
     browser_session_default_scope,
+    oidc_bearer_default_scope,
     resolve_oidc_bearer_actor,
 )
 from app.core.completion_signature import verify_completion_signature
 from app.core.config import _csv_items, get_settings, is_production_environment
 from app.core.database import get_session
 from app.core.errors import ApiError
+from app.core.project_membership import (
+    project_member_role_binding,
+    user_has_project_membership,
+)
 from app.models import AuthSession, IdempotencyRecord, Project, Tenant, TraceRef, User
 
 ContextSessionDep = Annotated[Session, Depends(get_session)]
@@ -43,12 +48,6 @@ class RequestContext:
     model_version: str | None = None
     label_version: str | None = None
     actor_kind: str = "human"
-
-
-@dataclass(frozen=True)
-class ProjectMemberRoleBinding:
-    configured: bool
-    roles: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -214,58 +213,6 @@ def require_active_dev_session(session: Session, actor: AuthActor) -> None:
         session.commit()
 
 
-def project_member_user_ids(project: Project) -> tuple[str, ...]:
-    data = project.data or {}
-    member_ids: set[str] = set()
-
-    for key in ("member_user_ids", "user_ids"):
-        values = data.get(key)
-        if isinstance(values, str) and values:
-            member_ids.add(values)
-        elif isinstance(values, list):
-            member_ids.update(value for value in values if isinstance(value, str) and value)
-
-    members = data.get("members")
-    if isinstance(members, list):
-        for member in members:
-            if not isinstance(member, dict):
-                continue
-            user_id = member.get("user_id") or member.get("id")
-            if isinstance(user_id, str) and user_id:
-                member_ids.add(user_id)
-
-    return tuple(sorted(member_ids))
-
-
-def user_has_project_membership(project: Project, user_id: str) -> bool:
-    return user_id in project_member_user_ids(project)
-
-
-def project_member_role_binding(project: Project, user_id: str) -> ProjectMemberRoleBinding:
-    members = (project.data or {}).get("members")
-    if not isinstance(members, list):
-        return ProjectMemberRoleBinding(configured=False, roles=())
-    member_roles: set[str] = set()
-    configured = False
-    for member in members:
-        if not isinstance(member, dict):
-            continue
-        member_user_id = member.get("user_id") or member.get("id")
-        if member_user_id != user_id:
-            continue
-        if "roles" not in member:
-            continue
-        configured = True
-        roles = member.get("roles")
-        if isinstance(roles, list):
-            member_roles.update(role for role in roles if isinstance(role, str) and role)
-    return ProjectMemberRoleBinding(configured=configured, roles=tuple(sorted(member_roles)))
-
-
-def project_member_roles(project: Project, user_id: str) -> tuple[str, ...]:
-    return project_member_role_binding(project, user_id).roles
-
-
 def require_context_membership(
     session: Session,
     ctx: RequestContext,
@@ -295,6 +242,13 @@ def require_context_membership(
             details=[{"unbound_roles": unbound_roles}],
         )
     role_binding = project_member_role_binding(project, ctx.user_id)
+    if enforce_project_roles and role_binding.duplicate:
+        raise ApiError(
+            "PROJECT_ROLE_BINDING_DUPLICATE",
+            "项目成员存在重复角色绑定，服务端拒绝授权",
+            403,
+            details=[{"user_id": ctx.user_id, "roles_state": "duplicate"}],
+        )
     if enforce_project_roles and not role_binding.configured:
         if is_production_environment(get_settings().app_env):
             raise ApiError(
@@ -393,10 +347,30 @@ async def request_context(
     trace = initialize_server_trace(request)
     settings = get_settings()
     raw_browser_session = request.cookies.get(settings.browser_session_cookie_name)
+    # Bearer credentials are authoritative when both mechanisms are present.
+    # Select the mechanism before deriving scope so an unrelated/stale cookie can
+    # neither block a valid bearer nor silently downgrade a cookie write around CSRF.
+    authentication_mode = "bearer" if authorization else "cookie" if raw_browser_session else "none"
     is_session_restore = request.url.path == f"{settings.api_prefix}/auth/session"
-    if is_session_restore and not raw_browser_session and not authorization:
+    resolved_actor: AuthActor | None = None
+    if is_session_restore and authentication_mode == "none":
         raise ApiError("AUTH_REQUIRED", "需要有效的登录会话", 401)
-    if is_session_restore and raw_browser_session and (not x_tenant_id or not x_project_id):
+    if (
+        is_session_restore
+        and authentication_mode == "bearer"
+        and (not x_tenant_id or not x_project_id)
+    ):
+        resolved_actor = resolve_actor(authorization)
+        if resolved_actor.provider == "oidc_bearer":
+            default_scope = oidc_bearer_default_scope(session, resolved_actor)
+            x_tenant_id = x_tenant_id or default_scope.tenant_id
+            x_project_id = x_project_id or default_scope.project_id
+    if (
+        is_session_restore
+        and authentication_mode == "cookie"
+        and raw_browser_session
+        and (not x_tenant_id or not x_project_id)
+    ):
         if raw_browser_session.startswith("auris.v1.") and settings.allow_dev_auth:
             dev_actor = resolve_actor(f"Bearer {raw_browser_session}")
             x_tenant_id = x_tenant_id or next(iter(dev_actor.tenant_ids), "aurora_auto")
@@ -413,9 +387,9 @@ async def request_context(
     if request.url.path.startswith("/api/v1") and not x_project_id:
         raise ApiError("CONTEXT_MISSING_PROJECT", "缺少 X-Project-Id", 400)
 
-    if authorization:
-        actor = resolve_actor(authorization)
-    elif raw_browser_session:
+    if authentication_mode == "bearer":
+        actor = resolved_actor or resolve_actor(authorization)
+    elif authentication_mode == "cookie" and raw_browser_session:
         if raw_browser_session.startswith("auris.v1.") and settings.allow_dev_auth:
             actor = resolve_actor(f"Bearer {raw_browser_session}")
         else:

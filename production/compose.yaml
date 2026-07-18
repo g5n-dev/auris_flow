@@ -49,12 +49,15 @@ x-app-environment: &app-environment
   COMPLETION_RECEIPT_ALLOWED_SOURCES: dagster,object_storage,external_callback
   AUDIO_PLAYBACK_GRANT_SECRET_FILE: /run/secrets/audio_playback_grant_secret
   EXPERIMENT_ASSIGNMENT_SECRET_FILE: /run/secrets/experiment_assignment_secret
-  OIDC_ISSUER: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow
-  OIDC_DISCOVERY_URL: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow/.well-known/openid-configuration
-  OIDC_CLIENT_ID: auris-flow-web
-  OIDC_AUDIENCE: auris-flow-api
-  OIDC_REDIRECT_URI: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/api/v1/auth/oidc/callback
-  OIDC_SCOPES: openid profile email
+  OIDC_ISSUER: ${AURIS_OIDC_ISSUER:-https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow}
+  OIDC_DISCOVERY_URL: ${AURIS_OIDC_DISCOVERY_URL:-https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow/.well-known/openid-configuration}
+  OIDC_CLIENT_ID: ${AURIS_OIDC_CLIENT_ID:-auris-flow-web}
+  OIDC_AUDIENCE: ${AURIS_OIDC_AUDIENCE:-auris-flow-api}
+  OIDC_REDIRECT_URI: ${AURIS_OIDC_REDIRECT_URI:-https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/api/v1/auth/oidc/callback}
+  OIDC_SCOPES: ${AURIS_OIDC_SCOPES:-openid profile email}
+  OIDC_JWKS_CACHE_TTL_SECONDS: ${AURIS_OIDC_JWKS_CACHE_TTL_SECONDS:-300}
+  OIDC_CLOCK_SKEW_SECONDS: ${AURIS_OIDC_CLOCK_SKEW_SECONDS:-30}
+  OIDC_HTTP_TIMEOUT_SECONDS: ${AURIS_OIDC_HTTP_TIMEOUT_SECONDS:-5}
   BROWSER_SESSION_COOKIE_NAME: __Host-auris_session
   CORS_ALLOWED_ORIGINS: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
   TRUSTED_HOSTS: ${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST},bff
@@ -65,6 +68,11 @@ x-app-environment: &app-environment
   OTEL_TRACE_SAMPLE_RATIO: ${AURIS_OTEL_TRACE_SAMPLE_RATIO:-0.1}
   METRICS_ENABLED: "true"
   METRICS_TRUSTED_CIDRS: ${AURIS_METRICS_TRUSTED_CIDRS:-}
+  TASK_RUN_MONITOR_ENABLED: "true"
+  TASK_RUN_DEFAULT_DEADLINE_SECONDS: ${AURIS_TASK_RUN_DEFAULT_DEADLINE_SECONDS:-7200}
+  TASK_RUN_STATUS_SYNC_INTERVAL_SECONDS: ${AURIS_TASK_RUN_STATUS_SYNC_INTERVAL_SECONDS:-60}
+  TASK_RUN_MONITOR_POLL_SECONDS: ${AURIS_TASK_RUN_MONITOR_POLL_SECONDS:-5}
+  TASK_RUN_MONITOR_BATCH_SIZE: ${AURIS_TASK_RUN_MONITOR_BATCH_SIZE:-50}
 
 x-app-secrets: &app-secrets
   - runtime_database_url
@@ -286,10 +294,10 @@ services:
     environment:
       APP_ENV: bootstrap
       DATABASE_URL_FILE: /run/secrets/runtime_database_url
-      AURIS_BOOTSTRAP_OIDC_ISSUER: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow
-      AURIS_BOOTSTRAP_OIDC_SUBJECT: 9d1c5cc4-e661-4af6-8a6f-7402d2555c35
-      AURIS_BOOTSTRAP_IDENTITY_ID: oidc_bootstrap_operator_001
-      AURIS_BOOTSTRAP_USER_ID: u_bootstrap_operator_001
+      AURIS_BOOTSTRAP_OIDC_ISSUER: ${AURIS_OIDC_ISSUER:-https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}/realms/auris-flow}
+      AURIS_BOOTSTRAP_OIDC_SUBJECT: ${AURIS_BOOTSTRAP_OIDC_SUBJECT:-9d1c5cc4-e661-4af6-8a6f-7402d2555c35}
+      AURIS_BOOTSTRAP_IDENTITY_ID: ${AURIS_BOOTSTRAP_IDENTITY_ID:-oidc_bootstrap_operator_001}
+      AURIS_BOOTSTRAP_USER_ID: ${AURIS_BOOTSTRAP_USER_ID:-u_bootstrap_operator_001}
       AURIS_BOOTSTRAP_USERNAME: bootstrap-operator
       AURIS_BOOTSTRAP_EMAIL: bootstrap-operator@auris.invalid
       AURIS_BOOTSTRAP_DISPLAY_NAME: Bootstrap Operator
@@ -400,8 +408,11 @@ services:
       <<: *app-environment
       WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-2}
     secrets: *app-secrets
+    networks:
+      - internal
+      - app-egress
     healthcheck:
-      test: [CMD-SHELL, "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)\""]
+      test: [CMD-SHELL, "python -c \"import urllib.request; urllib.request.urlopen('http://bff:8000/readyz', timeout=3)\""]
       interval: 15s
       timeout: 5s
       retries: 20
@@ -441,6 +452,9 @@ services:
       AURIS_OUTBOX_WORKER_LIMIT: "50"
       AURIS_OUTBOX_HEARTBEAT_INTERVAL_SECONDS: "15"
     secrets: *app-secrets
+    networks:
+      - internal
+      - app-egress
     healthcheck:
       test: [CMD, python, /app/scripts/check_worker_health.py, /run/auris/outbox-worker.json, "45"]
       interval: 15s
@@ -608,6 +622,7 @@ services:
       context: ..
       dockerfile: production/edge/Dockerfile
     cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE]
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -628,7 +643,7 @@ services:
         mode: 0400
     ports:
       - ${AURIS_HTTP_PORT:-80}:8080
-      - ${AURIS_HTTPS_PORT:-443}:8443
+      - ${AURIS_HTTPS_PORT:-443}:443
     networks:
       internal:
         aliases:
@@ -642,7 +657,7 @@ services:
       start_period: 10s
     depends_on:
       bff:
-        condition: service_healthy
+        condition: service_started
       keycloak:
         condition: service_healthy
 
@@ -740,5 +755,7 @@ volumes:
 
 networks:
   edge:
+  app-egress:
+    driver: bridge
   internal:
     internal: true

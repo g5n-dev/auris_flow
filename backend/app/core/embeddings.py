@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from app.core.secrets import is_production_environment, load_secret_file
 
@@ -41,8 +41,15 @@ class EmbeddingProvider(Protocol):
     def embed(self, text: str, *, purpose: EmbeddingPurpose) -> list[float]: ...
 
 
+class _RejectEmbeddingRedirects(HTTPRedirectHandler):
+    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
+        """Refuse redirects so bearer credentials never cross an origin boundary."""
+
+        return None
+
+
 def _urlopen_transport(request: Request, timeout: float) -> object:
-    return urlopen(request, timeout=timeout)
+    return build_opener(_RejectEmbeddingRedirects()).open(request, timeout=timeout)
 
 
 @dataclass(frozen=True)

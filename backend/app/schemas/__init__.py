@@ -72,8 +72,10 @@ from app.schemas.requests import (
     QualityAppealWithdrawalRequest,
     RunCompletionReceiptRequest,
     RunReleaseDecisionRequest,
+    TaskRunCancellationRequest,
     TaskRunRequest,
     TaskRunRetryRequest,
+    TaskRunStatusSyncRequest,
     TaskVersionRequest,
 )
 from app.schemas.scene_profiles import (
@@ -147,8 +149,10 @@ __all__ = [
     "SceneProfilePatchRequest",
     "SceneProfilePublishRequest",
     "SceneProfileReviewRequest",
+    "TaskRunCancellationRequest",
     "TaskRunRetryRequest",
     "TaskRunRequest",
+    "TaskRunStatusSyncRequest",
     "TaskVersionRequest",
     "ExperimentAssignmentRequest",
     "ExperimentCreateRequest",

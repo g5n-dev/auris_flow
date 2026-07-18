@@ -35,7 +35,11 @@ from app.core.embeddings import (
     EmbeddingResponseError,
     build_embedding_provider,
 )
-from app.core.observability import current_trace_context
+from app.core.observability import (
+    current_trace_context,
+    record_safe_http_status,
+    safe_http_client_span,
+)
 from app.core.redaction import redact_structured_value
 from app.core.runtime_guards import failure_injection_enabled
 
@@ -63,6 +67,17 @@ def _stable_receipt_id(prefix: str, payload: dict[str, Any], *keys: str) -> str:
     raw = json.dumps(parts, sort_keys=True, ensure_ascii=True, separators=(",", ":"))
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}_{digest}"
+
+
+def _structured_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=lambda _value: "<non-json-value>",
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _stable_uuid(payload: dict[str, Any], *keys: str) -> str:
@@ -299,6 +314,12 @@ class DagsterClient(Protocol):
     def reconcile_run_request(self, payload: dict[str, Any]) -> DispatchResult:
         """Find a previously submitted run without launching another run."""
 
+    def get_run_status(self, external_run_id: str) -> DispatchResult:
+        """Read the authoritative Dagster status for a submitted run."""
+
+    def cancel_run(self, external_run_id: str) -> DispatchResult:
+        """Safely terminate a non-terminal Dagster run."""
+
 
 class ObjectStorageClient(Protocol):
     def reserve_object(self, payload: dict[str, Any]) -> DispatchResult:
@@ -379,6 +400,54 @@ class LocalDagsterClient:
             retry_after_seconds=dispatched.retry_after_seconds,
         )
 
+    def get_run_status(self, external_run_id: str) -> DispatchResult:
+        return DispatchResult(
+            adapter="dagster",
+            operation="run_status",
+            details={
+                "mode": "local",
+                "external_run_id": external_run_id,
+                "dagster_run_id": external_run_id,
+                "dagster_status": "SUCCESS",
+                "can_terminate": False,
+            },
+        )
+
+    def cancel_run(self, external_run_id: str) -> DispatchResult:
+        return DispatchResult(
+            adapter="dagster",
+            operation="cancel_run",
+            details={
+                "mode": "local",
+                "external_run_id": external_run_id,
+                "dagster_run_id": external_run_id,
+                "dagster_status": "CANCELED",
+            },
+        )
+
+
+MAX_DAGSTER_GRAPHQL_RESPONSE_BYTES = 1_048_576
+DAGSTER_RECONCILIATION_ABSENCE_PROOF = "dagster-exact-dispatch-tag-absent-v1"
+DAGSTER_RUN_REQUEST_EVENT_TYPES = frozenset(
+    {
+        "task_run.requested",
+        "audio_intelligence.requested",
+        "backfill.requested",
+        "asset_check.retry_requested",
+        "conversation_boundary.sync_requested",
+        "platform_sync.requested",
+        "eval_run.requested",
+        "agent_run.requested",
+        "insight_metric_aggregation.requested",
+        "hotword_analysis.requested",
+        "hotword_pack_version.build-requested",
+        "hotword_pack_version.eval-requested",
+        "hotword_pack_version.publish-requested",
+        "release_deployment.command-requested",
+        "provider_test.requested",
+    }
+)
+
 
 DAGSTER_LAUNCH_MUTATION = """
 mutation LaunchAurisRun($executionParams: ExecutionParams!) {
@@ -406,7 +475,7 @@ mutation LaunchAurisRun($executionParams: ExecutionParams!) {
 
 DAGSTER_RUN_BY_KEY_QUERY = """
 query AurisRunByKey($filter: RunsFilter!) {
-  runsOrError(filter: $filter, limit: 1) {
+  runsOrError(filter: $filter, limit: 2) {
     __typename
     ... on Runs {
       results {
@@ -426,6 +495,69 @@ query AurisRunByKey($filter: RunsFilter!) {
 }
 """.strip()
 
+DAGSTER_RUN_STATUS_QUERY = """
+query AurisRunStatus($runId: ID!) {
+  pipelineRunOrError(runId: $runId) {
+    __typename
+    ... on Run {
+      runId
+      status
+      canTerminate
+    }
+    ... on RunNotFoundError {
+      message
+    }
+    ... on PythonError {
+      message
+      stack
+    }
+  }
+}
+""".strip()
+
+DAGSTER_RUN_STATUSES = frozenset(
+    {
+        "QUEUED",
+        "NOT_STARTED",
+        "MANAGED",
+        "STARTING",
+        "STARTED",
+        "SUCCESS",
+        "FAILURE",
+        "CANCELING",
+        "CANCELED",
+    }
+)
+
+DAGSTER_CANCEL_RUN_MUTATION = """
+mutation CancelAurisRun($runId: String!, $terminatePolicy: TerminateRunPolicy!) {
+  terminateRun(runId: $runId, terminatePolicy: $terminatePolicy) {
+    __typename
+    ... on TerminateRunSuccess {
+      run {
+        runId
+        status
+      }
+    }
+    ... on TerminateRunFailure {
+      message
+      run {
+        runId
+        status
+      }
+    }
+    ... on RunNotFoundError {
+      message
+      runId
+    }
+    ... on PythonError {
+      message
+      stack
+    }
+  }
+}
+""".strip()
+
 
 class RealDagsterClient:
     def __init__(
@@ -435,6 +567,7 @@ class RealDagsterClient:
         repository_name: str | None = None,
         default_job_name: str | None = None,
         bearer_token: str | None = None,
+        execution_mode: str | None = None,
     ) -> None:
         self.graphql_url = (
             graphql_url or os.environ.get("DAGSTER_GRAPHQL_URL") or "http://127.0.0.1:3000/graphql"
@@ -445,7 +578,7 @@ class RealDagsterClient:
             or "auris_flow_defs"
         )
         self.repository_name = (
-            repository_name or os.environ.get("DAGSTER_REPOSITORY_NAME") or "auris_flow"
+            repository_name or os.environ.get("DAGSTER_REPOSITORY_NAME") or "__repository__"
         )
         self.default_job_name = (
             default_job_name
@@ -453,6 +586,17 @@ class RealDagsterClient:
             or "auris_flow_generic_job"
         )
         self.bearer_token = bearer_token or os.environ.get("DAGSTER_GRAPHQL_BEARER_TOKEN")
+        selected_execution_mode = execution_mode or "control-plane-acknowledgement"
+        allowed_execution_modes = {
+            "control-plane-acknowledgement",
+            "ci-cancel-delay",
+            "ci-intentional-failure",
+        }
+        if selected_execution_mode not in allowed_execution_modes:
+            raise ValueError("Dagster execution mode is not supported")
+        if selected_execution_mode.startswith("ci-") and os.environ.get("APP_ENV") != "ci":
+            raise ValueError("CI-only Dagster execution mode is disabled")
+        self.execution_mode = selected_execution_mode
 
     def submit_run_request(self, payload: dict[str, Any]) -> DispatchResult:
         failure = _maybe_failure("dagster", "run_request", payload)
@@ -473,7 +617,6 @@ class RealDagsterClient:
             },
             "runConfigData": self._run_config(payload),
             "executionMetadata": {
-                "runKey": run_key,
                 "tags": self._tags(payload, run_key),
             },
         }
@@ -491,14 +634,13 @@ class RealDagsterClient:
         ).hexdigest()
         try:
             response = self._request(graphql_payload)
-        except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
+        except (OSError, URLError, HTTPError, TimeoutError, ValueError):
             return DispatchResult(
                 adapter="dagster",
                 operation="run_request",
                 status="failed",
                 details={
                     "mode": "real",
-                    "graphql_url": self.graphql_url,
                     "graphql_operation": "launchPipelineExecution",
                     "job_name": job_name,
                     "run_key": run_key,
@@ -506,7 +648,7 @@ class RealDagsterClient:
                     "request_sha256": graphql_payload_sha256,
                 },
                 error_code="DAGSTER_RUN_REQUEST_FAILED",
-                error_message=str(exc),
+                error_message="Dagster GraphQL request failed",
                 retryable=True,
                 retry_after_seconds=10,
             )
@@ -519,16 +661,15 @@ class RealDagsterClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "graphql_url": self.graphql_url,
                     "graphql_operation": "launchPipelineExecution",
                     "job_name": job_name,
                     "run_key": run_key,
                     "graphql_payload_sha256": graphql_payload_sha256,
                     "request_sha256": graphql_payload_sha256,
-                    "graphql_errors": graph_errors,
+                    "graphql_error_sha256": _structured_sha256(graph_errors),
                 },
                 error_code="DAGSTER_GRAPHQL_ERROR",
-                error_message=json.dumps(graph_errors, ensure_ascii=False),
+                error_message="Dagster GraphQL request was rejected",
                 retryable=True,
                 retry_after_seconds=10,
             )
@@ -545,13 +686,12 @@ class RealDagsterClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "graphql_url": self.graphql_url,
                     "graphql_operation": "launchPipelineExecution",
                     "job_name": job_name,
                     "run_key": run_key,
                     "graphql_payload_sha256": graphql_payload_sha256,
                     "request_sha256": graphql_payload_sha256,
-                    "response": response,
+                    "response_sha256": _structured_sha256(response),
                 },
                 error_code="DAGSTER_RESPONSE_INVALID",
                 error_message="Dagster response missing launchPipelineExecution",
@@ -567,17 +707,16 @@ class RealDagsterClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "graphql_url": self.graphql_url,
                     "graphql_operation": "launchPipelineExecution",
                     "job_name": job_name,
                     "run_key": run_key,
                     "graphql_payload_sha256": graphql_payload_sha256,
                     "request_sha256": graphql_payload_sha256,
                     "response_typename": response_typename,
-                    "response": launch,
+                    "response_sha256": _structured_sha256(launch),
                 },
                 error_code="DAGSTER_RUN_REJECTED",
-                error_message=str(launch.get("message") or "Dagster rejected run request"),
+                error_message="Dagster rejected run request",
                 retryable=response_typename == "PythonError",
                 retry_after_seconds=10 if response_typename == "PythonError" else None,
             )
@@ -592,14 +731,13 @@ class RealDagsterClient:
                 status="failed",
                 details={
                     "mode": "real",
-                    "graphql_url": self.graphql_url,
                     "graphql_operation": "launchPipelineExecution",
                     "job_name": job_name,
                     "run_key": run_key,
                     "graphql_payload_sha256": graphql_payload_sha256,
                     "request_sha256": graphql_payload_sha256,
                     "response_typename": response_typename,
-                    "response": launch,
+                    "response_sha256": _structured_sha256(launch),
                 },
                 error_code="DAGSTER_RUN_ID_MISSING",
                 error_message="Dagster LaunchRunSuccess missing runId",
@@ -619,7 +757,6 @@ class RealDagsterClient:
             operation="run_request",
             details={
                 "mode": "real",
-                "graphql_url": self.graphql_url,
                 "graphql_operation": "launchPipelineExecution",
                 "external_run_id": external_run_id,
                 "dagster_run_id": external_run_id,
@@ -654,14 +791,14 @@ class RealDagsterClient:
         }
         try:
             response = self._request(graphql_payload)
-        except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
+        except (OSError, URLError, HTTPError, TimeoutError, ValueError):
             return _reconciliation_failure(
                 "dagster",
                 "reconcile_run_request",
                 "DAGSTER_RECONCILIATION_FAILED",
-                str(exc),
+                "Dagster reconciliation request failed",
                 retryable=True,
-                details={"run_key": run_key, "graphql_url": self.graphql_url},
+                details={"run_key": run_key},
             )
         runs_or_error = (
             response.get("data", {}).get("runsOrError") if isinstance(response, dict) else None
@@ -676,11 +813,80 @@ class RealDagsterClient:
                 details={"run_key": run_key},
             )
         results = runs_or_error.get("results")
-        run = results[0] if isinstance(results, list) and results else None
-        if not isinstance(run, dict) or not run.get("runId"):
-            return _reconciliation_not_found(
+        if not isinstance(results, list):
+            return _reconciliation_failure(
                 "dagster",
                 "reconcile_run_request",
+                "DAGSTER_RECONCILIATION_RESPONSE_INVALID",
+                "Dagster reconciliation result list is invalid",
+                retryable=True,
+                details={"run_key": run_key},
+            )
+        if not results:
+            return _reconciliation_failure(
+                "dagster",
+                "reconcile_run_request",
+                "DAGSTER_RECONCILIATION_ABSENT",
+                "Dagster exact dispatch tag is absent",
+                retryable=True,
+                details={
+                    "run_key": run_key,
+                    "absence_proof": DAGSTER_RECONCILIATION_ABSENCE_PROOF,
+                },
+            )
+        if len(results) != 1:
+            return _reconciliation_failure(
+                "dagster",
+                "reconcile_run_request",
+                "DAGSTER_RECONCILIATION_AMBIGUOUS",
+                "Dagster reconciliation matched multiple runs",
+                retryable=False,
+                details={"run_key": run_key, "result_count": len(results)},
+            )
+        run = results[0]
+        if not isinstance(run, dict):
+            return _reconciliation_failure(
+                "dagster",
+                "reconcile_run_request",
+                "DAGSTER_RECONCILIATION_RESPONSE_INVALID",
+                "Dagster reconciliation result is invalid",
+                retryable=False,
+                details={"run_key": run_key},
+            )
+        run_id = run.get("runId")
+        run_status = run.get("status")
+        if (
+            not isinstance(run_id, str)
+            or not run_id.strip()
+            or run_id != run_id.strip()
+            or not isinstance(run_status, str)
+            or run_status not in DAGSTER_RUN_STATUSES
+        ):
+            return _reconciliation_failure(
+                "dagster",
+                "reconcile_run_request",
+                "DAGSTER_RECONCILIATION_RESPONSE_INVALID",
+                "Dagster reconciliation result identity or status is invalid",
+                retryable=False,
+                details={"run_key": run_key},
+            )
+        tags = run.get("tags")
+        idempotency_tags = (
+            [
+                tag
+                for tag in tags
+                if isinstance(tag, dict) and tag.get("key") == "auris/dispatch_idempotency_key"
+            ]
+            if isinstance(tags, list)
+            else []
+        )
+        if len(idempotency_tags) != 1 or idempotency_tags[0].get("value") != run_key:
+            return _reconciliation_failure(
+                "dagster",
+                "reconcile_run_request",
+                "DAGSTER_RECONCILIATION_IDENTITY_MISMATCH",
+                "Dagster reconciliation result is not bound to the requested run key",
+                retryable=False,
                 details={"run_key": run_key},
             )
         return DispatchResult(
@@ -689,25 +895,248 @@ class RealDagsterClient:
             details={
                 "mode": "real",
                 "reconciled": True,
-                "external_run_id": str(run["runId"]),
-                "dagster_run_id": str(run["runId"]),
-                "dagster_status": run.get("status"),
+                "external_run_id": run_id,
+                "dagster_run_id": run_id,
+                "dagster_status": run_status,
                 "run_key": run_key,
-                "graphql_url": self.graphql_url,
             },
         )
 
-    def _job_name(self, payload: dict[str, Any]) -> str:
-        draft = payload.get("dagster_run_draft")
-        if isinstance(draft, dict) and draft.get("job_name"):
-            return str(draft["job_name"])
-        return str(
-            payload.get("job_name") or payload.get("task_version_id") or self.default_job_name
+    def get_run_status(self, external_run_id: str) -> DispatchResult:
+        graphql_payload = {
+            "query": DAGSTER_RUN_STATUS_QUERY,
+            "variables": {"runId": external_run_id},
+        }
+        try:
+            response = self._request(graphql_payload)
+        except (OSError, URLError, HTTPError, TimeoutError, ValueError):
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "graphql_operation": "pipelineRunOrError",
+                    "external_run_id": external_run_id,
+                    "dagster_run_id": external_run_id,
+                },
+                error_code="DAGSTER_STATUS_QUERY_FAILED",
+                error_message="Dagster status request failed",
+                retryable=True,
+                retry_after_seconds=5,
+            )
+
+        graph_errors = response.get("errors") if isinstance(response, dict) else None
+        run_or_error = (
+            response.get("data", {}).get("pipelineRunOrError")
+            if isinstance(response, dict)
+            else None
+        )
+        if graph_errors or not isinstance(run_or_error, dict):
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "graphql_operation": "pipelineRunOrError",
+                    "external_run_id": external_run_id,
+                    "dagster_run_id": external_run_id,
+                    "graphql_error_sha256": _structured_sha256(graph_errors or []),
+                },
+                error_code="DAGSTER_STATUS_RESPONSE_INVALID",
+                error_message="Dagster status response is invalid",
+                retryable=True,
+                retry_after_seconds=5,
+            )
+
+        response_typename = str(run_or_error.get("__typename") or "Unknown")
+        details = {
+            "mode": "real",
+            "graphql_operation": "pipelineRunOrError",
+            "external_run_id": external_run_id,
+            "dagster_run_id": external_run_id,
+            "dagster_status": None,
+            "can_terminate": bool(run_or_error.get("canTerminate", False)),
+            "response_typename": response_typename,
+        }
+        if response_typename not in {"Run", "PipelineRun"}:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                details=details,
+                error_code=(
+                    "DAGSTER_RUN_NOT_FOUND"
+                    if response_typename in {"RunNotFoundError", "PipelineRunNotFoundError"}
+                    else "DAGSTER_STATUS_QUERY_REJECTED"
+                ),
+                error_message="Dagster rejected status query",
+                retryable=response_typename == "PythonError",
+                retry_after_seconds=5 if response_typename == "PythonError" else None,
+            )
+        returned_run_id = run_or_error.get("runId")
+        if returned_run_id != external_run_id:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                details=details,
+                error_code="DAGSTER_STATUS_IDENTITY_MISMATCH",
+                error_message="Dagster status response is bound to another run",
+                retryable=False,
+            )
+        returned_status = run_or_error.get("status")
+        if not isinstance(returned_status, str) or returned_status not in DAGSTER_RUN_STATUSES:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                details=details,
+                error_code="DAGSTER_STATUS_RESPONSE_INVALID",
+                error_message="Dagster status response contains an invalid run status",
+                retryable=False,
+            )
+        details["dagster_status"] = returned_status
+        return DispatchResult(
+            adapter="dagster",
+            operation="run_status",
+            details=details,
         )
 
+    def cancel_run(self, external_run_id: str) -> DispatchResult:
+        graphql_payload = {
+            "query": DAGSTER_CANCEL_RUN_MUTATION,
+            "variables": {
+                "runId": external_run_id,
+                "terminatePolicy": "SAFE_TERMINATE",
+            },
+        }
+        try:
+            response = self._request(graphql_payload)
+        except (OSError, URLError, HTTPError, TimeoutError, ValueError):
+            return DispatchResult(
+                adapter="dagster",
+                operation="cancel_run",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "graphql_operation": "terminateRun",
+                    "external_run_id": external_run_id,
+                    "dagster_run_id": external_run_id,
+                    "terminate_policy": "SAFE_TERMINATE",
+                },
+                error_code="DAGSTER_CANCEL_REQUEST_FAILED",
+                error_message="Dagster cancellation request failed",
+                retryable=True,
+                retry_after_seconds=5,
+            )
+
+        graph_errors = response.get("errors") if isinstance(response, dict) else None
+        terminate = (
+            response.get("data", {}).get("terminateRun") if isinstance(response, dict) else None
+        )
+        if graph_errors or not isinstance(terminate, dict):
+            return DispatchResult(
+                adapter="dagster",
+                operation="cancel_run",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "graphql_operation": "terminateRun",
+                    "external_run_id": external_run_id,
+                    "dagster_run_id": external_run_id,
+                    "terminate_policy": "SAFE_TERMINATE",
+                    "graphql_error_sha256": _structured_sha256(graph_errors or []),
+                },
+                error_code="DAGSTER_CANCEL_RESPONSE_INVALID",
+                error_message="Dagster cancellation response is invalid",
+                retryable=True,
+                retry_after_seconds=5,
+            )
+
+        response_typename = str(terminate.get("__typename") or "Unknown")
+        run_data = terminate.get("run")
+        run = run_data if isinstance(run_data, dict) else {}
+        details = {
+            "mode": "real",
+            "graphql_operation": "terminateRun",
+            "external_run_id": external_run_id,
+            "dagster_run_id": external_run_id,
+            "dagster_status": None,
+            "terminate_policy": "SAFE_TERMINATE",
+            "response_typename": response_typename,
+        }
+        returned_run_id = run.get("runId")
+        returned_status = run.get("status")
+        if run:
+            if returned_run_id != external_run_id:
+                return DispatchResult(
+                    adapter="dagster",
+                    operation="cancel_run",
+                    status="failed",
+                    details=details,
+                    error_code="DAGSTER_CANCEL_IDENTITY_MISMATCH",
+                    error_message="Dagster cancellation response is bound to another run",
+                    retryable=False,
+                )
+            if not isinstance(returned_status, str) or returned_status not in DAGSTER_RUN_STATUSES:
+                return DispatchResult(
+                    adapter="dagster",
+                    operation="cancel_run",
+                    status="failed",
+                    details=details,
+                    error_code="DAGSTER_CANCEL_RESPONSE_INVALID",
+                    error_message="Dagster cancellation response contains an invalid run status",
+                    retryable=False,
+                )
+            details["dagster_status"] = returned_status
+        if response_typename != "TerminateRunSuccess":
+            return DispatchResult(
+                adapter="dagster",
+                operation="cancel_run",
+                status="failed",
+                details=details,
+                error_code=(
+                    "DAGSTER_RUN_NOT_FOUND"
+                    if response_typename == "RunNotFoundError"
+                    else "DAGSTER_CANCEL_REJECTED"
+                ),
+                error_message="Dagster rejected cancellation",
+                retryable=response_typename == "PythonError",
+                retry_after_seconds=5 if response_typename == "PythonError" else None,
+            )
+        if returned_run_id != external_run_id:
+            return DispatchResult(
+                adapter="dagster",
+                operation="cancel_run",
+                status="failed",
+                details=details,
+                error_code="DAGSTER_CANCEL_IDENTITY_MISMATCH",
+                error_message="Dagster cancellation response is bound to another run",
+                retryable=False,
+            )
+        if not isinstance(returned_status, str) or returned_status not in DAGSTER_RUN_STATUSES:
+            return DispatchResult(
+                adapter="dagster",
+                operation="cancel_run",
+                status="failed",
+                details=details,
+                error_code="DAGSTER_CANCEL_RESPONSE_INVALID",
+                error_message="Dagster cancellation response contains an invalid run status",
+                retryable=False,
+            )
+        return DispatchResult(
+            adapter="dagster",
+            operation="cancel_run",
+            details=details,
+        )
+
+    def _job_name(self, payload: dict[str, Any]) -> str:
+        del payload
+        return self.default_job_name
+
     def _run_config(self, payload: dict[str, Any]) -> dict[str, Any]:
-        run_config = payload.get("run_config")
-        caller_context = run_config.get("auris_context") if isinstance(run_config, dict) else None
         otel_context = current_trace_context()
         authoritative_context = {
             "tenant_id": payload.get("tenant_id"),
@@ -734,15 +1163,13 @@ class RealDagsterClient:
             },
         }
         return {
-            **(run_config if isinstance(run_config, dict) else {}),
-            "auris_context": {
-                **(caller_context if isinstance(caller_context, dict) else {}),
-                **authoritative_context,
-            },
+            "auris_context": authoritative_context,
+            "execution": {"mode": self.execution_mode},
         }
 
     def _tags(self, payload: dict[str, Any], run_key: str) -> list[dict[str, str]]:
         tag_values = {
+            "auris/dispatch_idempotency_key": run_key,
             "tenant_id": payload.get("tenant_id"),
             "project_id": payload.get("project_id"),
             "trace_id": payload.get("trace_id"),
@@ -773,7 +1200,10 @@ class RealDagsterClient:
             headers["Authorization"] = f"Bearer {self.bearer_token}"
         request = Request(self.graphql_url, data=data, method="POST", headers=headers)
         with urlopen(request, timeout=5) as response:
-            raw = response.read().decode("utf-8")
+            raw_bytes = response.read(MAX_DAGSTER_GRAPHQL_RESPONSE_BYTES + 1)
+        if len(raw_bytes) > MAX_DAGSTER_GRAPHQL_RESPONSE_BYTES:
+            raise ValueError("Dagster GraphQL response exceeds size limit")
+        raw = raw_bytes.decode("utf-8")
         return json.loads(raw) if raw else {}
 
 
@@ -998,6 +1428,16 @@ class RealObjectStorageClient:
     def head_object(self, bucket: str, object_key: str) -> dict[str, Any]:
         return self._request("HEAD", f"/{bucket}/{object_key}")
 
+    def head_bucket(
+        self,
+        bucket: str,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> dict[str, Any]:
+        """Verify authenticated bucket access without reading or listing objects."""
+
+        return self._request("HEAD", f"/{bucket}", timeout_seconds=timeout_seconds)
+
     def reconcile_object(self, payload: dict[str, Any]) -> DispatchResult:
         storage_object_id = _stable_receipt_id(
             "obj",
@@ -1120,7 +1560,10 @@ class RealObjectStorageClient:
         body: bytes | None = None,
         content_type: str = "application/json",
         extra_headers: dict[str, str] | None = None,
+        timeout_seconds: float = 5.0,
     ) -> dict[str, Any]:
+        if timeout_seconds <= 0:
+            raise ValueError("object storage request timeout must be positive")
         request = self._signed_request(
             method,
             path,
@@ -1128,7 +1571,7 @@ class RealObjectStorageClient:
             content_type=content_type,
             extra_headers=extra_headers,
         )
-        with urlopen(request, timeout=5) as response:
+        with urlopen(request, timeout=timeout_seconds) as response:
             raw = response.read()
             return {
                 "status": response.status,
@@ -2498,20 +2941,38 @@ class RealExternalCallbackClient:
             )
 
         connection.__dict__["_create_connection"] = create_pinned_connection
-        request_headers = {**headers, "Host": target.authority}
-        try:
-            connection.request(method, target.request_target, body=body, headers=request_headers)
-            response = connection.getresponse()
-            response_body = response.read(_MAX_CALLBACK_RESPONSE_BYTES + 1)
-            if len(response_body) > _MAX_CALLBACK_RESPONSE_BYTES:
-                raise _ExternalCallbackSecurityError("callback response exceeds the size limit")
-            return {
-                "status_code": response.status,
-                "headers": dict(response.getheaders()),
-                "body": response_body,
-            }
-        finally:
-            connection.close()
+        request_headers = {
+            key: value
+            for key, value in headers.items()
+            if key.casefold() not in {"traceparent", "tracestate"}
+        }
+        request_headers["Host"] = target.authority
+        with safe_http_client_span(
+            method=method,
+            scheme=target.scheme,
+            host=target.host,
+            port=target.port,
+        ) as (span, trace_headers):
+            request_headers.update(trace_headers)
+            try:
+                connection.request(
+                    method,
+                    target.request_target,
+                    body=body,
+                    headers=request_headers,
+                )
+                response = connection.getresponse()
+                record_safe_http_status(span, response.status)
+                response_body = response.read(_MAX_CALLBACK_RESPONSE_BYTES + 1)
+                if len(response_body) > _MAX_CALLBACK_RESPONSE_BYTES:
+                    raise _ExternalCallbackSecurityError("callback response exceeds the size limit")
+                return {
+                    "status_code": response.status,
+                    "headers": dict(response.getheaders()),
+                    "body": response_body,
+                }
+            finally:
+                connection.close()
 
     def _validate_outbound_url(
         self,
@@ -2784,7 +3245,9 @@ def _default_object_storage_client() -> ObjectStorageClient:
 
 def _default_dagster_client() -> DagsterClient:
     if os.environ.get("AURIS_DAGSTER_ADAPTER", "").lower() == "real":
-        return RealDagsterClient()
+        return RealDagsterClient(
+            execution_mode=os.environ.get("AURIS_DAGSTER_EXECUTION_MODE") or None
+        )
     return LocalDagsterClient()
 
 
@@ -2835,23 +3298,41 @@ def dispatch_event(
     registry: AdapterRegistry | None = None,
 ) -> DispatchResult:
     adapters = registry or AdapterRegistry()
-    if event_type in {
-        "task_run.requested",
-        "audio_intelligence.requested",
-        "backfill.requested",
-        "asset_check.retry_requested",
-        "conversation_boundary.sync_requested",
-        "platform_sync.requested",
-        "eval_run.requested",
-        "agent_run.requested",
-        "insight_metric_aggregation.requested",
-        "hotword_analysis.requested",
-        "hotword_pack_version.build-requested",
-        "hotword_pack_version.eval-requested",
-        "hotword_pack_version.publish-requested",
-        "release_deployment.command-requested",
-        "provider_test.requested",
-    }:
+    if event_type == "task_run.cancel_requested":
+        if payload.get("engine_dispatch_required") is False:
+            return DispatchResult(
+                adapter="control_plane",
+                operation="cancel_pending_run",
+                details={
+                    "external_run_id": None,
+                    "dagster_status": "CANCELED",
+                    "mode": "local_control",
+                },
+            )
+        external_run_id = str(payload.get("external_run_id") or "")
+        if not external_run_id:
+            return DispatchResult(
+                adapter="dagster",
+                operation="cancel_run",
+                status="failed",
+                error_code="TASK_RUN_ENGINE_BINDING_REQUIRED",
+                error_message="Task-run cancellation requires an engine binding",
+                retryable=False,
+            )
+        return adapters.dagster.cancel_run(external_run_id)
+    if event_type == "task_run.status_sync_requested":
+        external_run_id = str(payload.get("external_run_id") or "")
+        if not external_run_id:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                error_code="TASK_RUN_ENGINE_BINDING_REQUIRED",
+                error_message="Task-run status synchronization requires an engine binding",
+                retryable=False,
+            )
+        return adapters.dagster.get_run_status(external_run_id)
+    if event_type in DAGSTER_RUN_REQUEST_EVENT_TYPES:
         return adapters.dagster.submit_run_request(payload)
     if event_type in {"knowledge_source.sync_requested", "knowledge_index.build_requested"}:
         return adapters.qdrant.upsert_index_payload(payload)
@@ -2905,23 +3386,42 @@ def reconcile_event(
 ) -> DispatchResult:
     """Prove a prior remote side effect without repeating the write operation."""
     adapters = registry or AdapterRegistry()
-    if event_type in {
-        "task_run.requested",
-        "audio_intelligence.requested",
-        "backfill.requested",
-        "asset_check.retry_requested",
-        "conversation_boundary.sync_requested",
-        "platform_sync.requested",
-        "eval_run.requested",
-        "agent_run.requested",
-        "insight_metric_aggregation.requested",
-        "hotword_analysis.requested",
-        "hotword_pack_version.build-requested",
-        "hotword_pack_version.eval-requested",
-        "hotword_pack_version.publish-requested",
-        "release_deployment.command-requested",
-        "provider_test.requested",
-    }:
+    if event_type == "task_run.cancel_requested":
+        if payload.get("engine_dispatch_required") is False:
+            return DispatchResult(
+                adapter="control_plane",
+                operation="reconcile_cancel_pending_run",
+                details={
+                    "external_run_id": None,
+                    "dagster_status": "CANCELED",
+                    "mode": "local_control",
+                    "reconciled": True,
+                },
+            )
+        external_run_id = str(payload.get("external_run_id") or "")
+        if not external_run_id:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                error_code="TASK_RUN_ENGINE_BINDING_REQUIRED",
+                error_message="Task-run cancellation reconciliation requires an engine binding",
+                retryable=False,
+            )
+        return adapters.dagster.get_run_status(external_run_id)
+    if event_type == "task_run.status_sync_requested":
+        external_run_id = str(payload.get("external_run_id") or "")
+        if not external_run_id:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_status",
+                status="failed",
+                error_code="TASK_RUN_ENGINE_BINDING_REQUIRED",
+                error_message="Task-run status synchronization requires an engine binding",
+                retryable=False,
+            )
+        return adapters.dagster.get_run_status(external_run_id)
+    if event_type in DAGSTER_RUN_REQUEST_EVENT_TYPES:
         return adapters.dagster.reconcile_run_request(payload)
     if event_type in {"knowledge_source.sync_requested", "knowledge_index.build_requested"}:
         return adapters.qdrant.reconcile_index_payload(payload)

@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.logging import get_logger, log_event
+from app.core.observability import current_trace_carrier
 from app.models import OutboxEvent
 from app.repositories.outbox_events import insert_or_get_event
 
@@ -26,6 +27,7 @@ _RESERVED_ENVELOPE_FIELDS = frozenset(
         "event_version",
         "idempotency_key",
         "occurred_at",
+        "otel_trace_context",
         "project_id",
         "request_id",
         "resource_version_identity",
@@ -176,6 +178,7 @@ def enqueue_event(
         "correlation_id": ctx.trace_id,
         "subject": {"type": aggregate_type, "id": aggregate_id},
         "data": business_payload,
+        **({"otel_trace_context": carrier} if (carrier := current_trace_carrier()) else {}),
     }
     candidate = OutboxEvent(
         tenant_id=ctx.tenant_id,

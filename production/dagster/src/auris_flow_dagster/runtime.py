@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -25,7 +27,22 @@ def acknowledge_domain_workflow(
     """
 
     requested_mode = execution.get("mode", "control-plane-acknowledgement")
-    if requested_mode != "control-plane-acknowledgement":
+    if requested_mode == "ci-cancel-delay":
+        if os.getenv("APP_ENV") != "ci":
+            raise ValueError("CI-only Auris Flow execution mode is disabled")
+        raw_delay = execution.get("delay_seconds", 20)
+        if (
+            isinstance(raw_delay, bool)
+            or not isinstance(raw_delay, int | float)
+            or not 1 <= raw_delay <= 30
+        ):
+            raise ValueError("CI cancel delay must be between 1 and 30 seconds")
+        time.sleep(float(raw_delay))
+    elif requested_mode == "ci-intentional-failure":
+        if os.getenv("APP_ENV") != "ci":
+            raise ValueError("CI-only Auris Flow execution mode is disabled")
+        raise ValueError("intentional CI workflow failure")
+    elif requested_mode != "control-plane-acknowledgement":
         raise ValueError("unsupported Auris Flow execution mode")
     return (
         {

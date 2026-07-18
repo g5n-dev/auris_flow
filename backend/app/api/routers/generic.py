@@ -7,8 +7,13 @@ from fastapi import APIRouter, Request
 from sqlalchemy import select
 
 from app.api.deps import ContextDep, PaginationDep, SessionDep, SignedCompletionContextDep
-from app.core.context import user_has_project_membership
 from app.core.errors import ApiError
+from app.core.project_membership import (
+    conflicting_project_member_identities,
+    duplicate_project_member_user_ids,
+    project_member_user_id,
+    user_has_project_membership,
+)
 from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
 from app.models import Project, RunRecord, Tenant
@@ -46,6 +51,26 @@ from app.services.resource_service import (
 from app.services.run_service import complete_run_from_receipt, create_run, get_run, retry_run
 
 router = APIRouter(tags=["generic"])
+
+
+def _require_unique_project_members(members: object) -> None:
+    conflicts = conflicting_project_member_identities(members)
+    if conflicts:
+        raise ApiError(
+            "PROJECT_MEMBER_IDENTITY_CONFLICT",
+            "项目成员 user_id 与 id 别名冲突",
+            422,
+            details=[{"conflict_count": len(conflicts)}],
+        )
+    duplicates = duplicate_project_member_user_ids(members)
+    if duplicates:
+        raise ApiError(
+            "PROJECT_MEMBER_DUPLICATE",
+            "项目成员 user_id 必须唯一",
+            422,
+            details=[{"duplicate_user_ids": list(duplicates)}],
+        )
+
 
 KNOWLEDGE_QDRANT_COLLECTION = "knowledge_chunks"
 QDRANT_COLLECTION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
@@ -387,8 +412,9 @@ async def post_projects(request: Request, session: SessionDep, ctx: ContextDep):
         if isinstance(requested_members, list)
         else []
     )
+    _require_unique_project_members(members)
     creator_member = next(
-        (member for member in members if member.get("user_id") == ctx.user_id),
+        (member for member in members if project_member_user_id(member) == ctx.user_id),
         None,
     )
     if creator_member is None:
@@ -403,6 +429,7 @@ async def post_projects(request: Request, session: SessionDep, ctx: ContextDep):
                 ]
             )
         )
+    _require_unique_project_members(members)
     data = {
         **body,
         "project_id": project_id,
@@ -483,6 +510,8 @@ async def patch_projects_by_id(id: str, request: Request, session: SessionDep, c
     if project:
         if project.tenant_id != ctx.tenant_id and "system" not in ctx.roles:
             raise ApiError("FORBIDDEN", "当前上下文无权修改目标项目", 403)
+        if "members" in body:
+            _require_unique_project_members(body["members"])
         before = dict(project.data)
         project.data = {**project.data, **body, "trace_id": ctx.trace_id}
         project.status = project.data.get("status", project.status)

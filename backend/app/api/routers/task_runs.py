@@ -7,8 +7,10 @@ from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
 from app.schemas import (
     RunCompletionReceiptRequest,
+    TaskRunCancellationRequest,
     TaskRunRequest,
     TaskRunRetryRequest,
+    TaskRunStatusSyncRequest,
     TaskVersionRequest,
     parse_payload,
 )
@@ -31,6 +33,7 @@ from app.services.task_execution_policy import (
     enforce_task_execution_policy,
     prepare_task_version_write,
 )
+from app.services.task_run_control_service import create_task_run_control
 
 router = APIRouter(tags=["task-runs"])
 
@@ -159,6 +162,36 @@ async def post_task_runs_by_id_retries(
 ):
     body = parse_payload(TaskRunRetryRequest, await request.json()).model_dump(exclude_none=True)
     return await retry_run(session, ctx, request, id, body)
+
+
+@router.post("/task-runs/{id}/cancellations", status_code=202)
+async def post_task_runs_by_id_cancellations(
+    id: str, request: Request, session: SessionDep, ctx: ContextDep
+):
+    body = parse_payload(TaskRunCancellationRequest, await request.json()).model_dump()
+    return await create_task_run_control(
+        session,
+        ctx,
+        request,
+        id,
+        body,
+        action="cancel",
+    )
+
+
+@router.post("/task-runs/{id}/status-syncs", status_code=202)
+async def post_task_runs_by_id_status_syncs(
+    id: str, request: Request, session: SessionDep, ctx: ContextDep
+):
+    body = parse_payload(TaskRunStatusSyncRequest, await request.json()).model_dump()
+    return await create_task_run_control(
+        session,
+        ctx,
+        request,
+        id,
+        body,
+        action="status_sync",
+    )
 
 
 @router.post("/task-runs/{id}/completion-receipts")

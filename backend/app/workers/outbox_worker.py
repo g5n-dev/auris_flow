@@ -17,6 +17,7 @@ from threading import Event, Thread
 from typing import Any, cast
 from uuid import uuid4
 
+from opentelemetry.context import Context
 from sqlalchemy import select
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, object_session
@@ -28,6 +29,7 @@ from app.core.metrics import metrics
 from app.core.observability import (
     annotate_current_span,
     configure_worker_observability,
+    extract_remote_trace_context,
     internal_span,
 )
 from app.core.runtime_guards import failure_injection_enabled
@@ -43,16 +45,37 @@ from app.repositories.outbox_events import (
     clear_claim,
     database_utc_now,
     lock_owned_claim,
+    owned_claim_trace_carrier,
     renew_claim,
 )
-from app.services.adapters import DispatchResult, dispatch_event, reconcile_event
+from app.services.adapters import (
+    DAGSTER_RECONCILIATION_ABSENCE_PROOF,
+    DAGSTER_RUN_REQUEST_EVENT_TYPES,
+    DispatchResult,
+    dispatch_event,
+    reconcile_event,
+)
 from app.services.agentic_execution_service import record_agent_dispatch
+from app.services.audit_service import record_audit
 from app.services.run_service import transition_run
 
 logger = get_logger("worker.outbox")
 DEFAULT_MAX_ATTEMPTS = 3
 BUSINESS_COMPLETION_REQUIRED_ADAPTERS = {"dagster", "external_callback", "object_storage"}
-PROJECTION_ONLY_TERMINAL_EVENT_TYPES = frozenset({"human_review.decision.created"})
+PROJECTION_ONLY_TERMINAL_EVENT_TYPES = frozenset(
+    {
+        "human_review.decision.created",
+        "task_run.succeeded",
+        "task_run.failed",
+        "task_run.cancelled",
+    }
+)
+TASK_RUN_CONTROL_EVENT_TYPES = frozenset(
+    {
+        "task_run.cancel_requested",
+        "task_run.status_sync_requested",
+    }
+)
 DEFAULT_MAX_RECONCILE_ATTEMPTS = 5
 OUTCOME_UNKNOWN_ERROR_CODES = {
     "DAGSTER_RUN_REQUEST_FAILED",
@@ -87,12 +110,24 @@ class WorkerRuntimeState:
     last_successful_poll_at: str | None = None
     last_error: str | None = None
     last_error_at: str | None = None
+    monitor_enabled: bool = False
+    monitor_status: str = "disabled"
+    monitor_consecutive_errors: int = 0
+    last_monitor_success_at: str | None = None
+    last_monitor_error: str | None = None
+    last_monitor_error_at: str | None = None
     shutdown_requested: bool = False
 
     def as_payload(self) -> dict[str, Any]:
+        healthy = bool(
+            self.status == "running"
+            and self.consecutive_errors == 0
+            and self.monitor_status in {"disabled", "healthy"}
+        )
         return {
             "status": self.status,
-            "healthy": self.status == "running" and self.consecutive_errors == 0,
+            "healthy": healthy,
+            "degraded": self.status == "running" and self.monitor_status == "degraded",
             "worker_id": self.worker_id,
             "pid": self.pid,
             "started_at": self.started_at,
@@ -106,6 +141,12 @@ class WorkerRuntimeState:
             "last_successful_poll_at": self.last_successful_poll_at,
             "last_error": self.last_error,
             "last_error_at": self.last_error_at,
+            "monitor_enabled": self.monitor_enabled,
+            "monitor_status": self.monitor_status,
+            "monitor_consecutive_errors": self.monitor_consecutive_errors,
+            "last_monitor_success_at": self.last_monitor_success_at,
+            "last_monitor_error": self.last_monitor_error,
+            "last_monitor_error_at": self.last_monitor_error_at,
             "shutdown_requested": self.shutdown_requested,
         }
 
@@ -244,6 +285,63 @@ def _effective_max_reconcile_attempts(event: OutboxEvent) -> int:
         DEFAULT_MAX_RECONCILE_ATTEMPTS,
     )
     return max(1, min(requested, 20))
+
+
+def _is_exact_dagster_absence_proof(
+    event: OutboxEvent,
+    error: Exception,
+    *,
+    require_reconcile_mode: bool,
+) -> bool:
+    if event.event_type not in DAGSTER_RUN_REQUEST_EVENT_TYPES:
+        return False
+    dispatch_payload = getattr(error, "dispatch_payload", None)
+    if not isinstance(dispatch_payload, dict):
+        return False
+    details = dispatch_payload.get("details")
+    return bool(
+        (not require_reconcile_mode or event.delivery_state == "reconciling")
+        and getattr(error, "error_code", None) == "DAGSTER_RECONCILIATION_ABSENT"
+        and dispatch_payload.get("adapter") == "dagster"
+        and dispatch_payload.get("operation") == "reconcile_run_request"
+        and isinstance(details, dict)
+        and details.get("reconciled") is False
+        and details.get("run_key") == event.dispatch_idempotency_key
+        and details.get("absence_proof") == DAGSTER_RECONCILIATION_ABSENCE_PROOF
+    )
+
+
+def _previous_attempt_is_exact_dagster_absence(
+    event: OutboxEvent,
+    claim: OutboxClaim,
+) -> bool:
+    session = object_session(event)
+    if session is None:
+        raise RuntimeError("Dagster absence proof requires an attached session")
+    previous = session.scalar(
+        select(OutboxDeliveryAttempt)
+        .where(
+            OutboxDeliveryAttempt.event_id == event.event_id,
+            OutboxDeliveryAttempt.lease_generation < claim.lease_generation,
+        )
+        .order_by(OutboxDeliveryAttempt.lease_generation.desc())
+        .limit(1)
+    )
+    if previous is None:
+        return False
+    failed_dispatch = previous.details.get("failed_dispatch")
+    details = failed_dispatch.get("details") if isinstance(failed_dispatch, dict) else None
+    return bool(
+        previous.delivery_mode == "reconcile"
+        and previous.status == "reconcile_retry_scheduled"
+        and previous.error_code == "DAGSTER_RECONCILIATION_ABSENT"
+        and previous.adapter == "dagster"
+        and previous.operation == "reconcile_run_request"
+        and isinstance(details, dict)
+        and details.get("reconciled") is False
+        and details.get("run_key") == event.dispatch_idempotency_key
+        and details.get("absence_proof") == DAGSTER_RECONCILIATION_ABSENCE_PROOF
+    )
 
 
 def _run_for_event(event: OutboxEvent, *, lock: bool = False) -> RunRecord | None:
@@ -455,7 +553,7 @@ def _record_attempt_prepared(
     *,
     request_sha256: str,
     blocked: bool,
-) -> None:
+) -> OutboxDeliveryAttempt:
     attempt = _delivery_attempt(event, claim)
     attempt.status = "blocked" if blocked else "prepared"
     attempt.request_sha256 = request_sha256
@@ -466,6 +564,7 @@ def _record_attempt_prepared(
         "aggregate_id": event.aggregate_id,
         "delivery_mode": attempt.delivery_mode,
     }
+    return attempt
 
 
 def _dispatch_remote_id(dispatch: DispatchResult) -> str | None:
@@ -521,6 +620,182 @@ def _complete_attempt(
             }
 
 
+def _task_run_control_source(
+    session: Session,
+    event: OutboxEvent,
+    control: RunRecord,
+) -> RunRecord:
+    source_run_id = str(control.payload.get("source_run_id") or "")
+    source = session.scalar(
+        select(RunRecord)
+        .where(
+            RunRecord.run_id == source_run_id,
+            RunRecord.tenant_id == event.tenant_id,
+            RunRecord.project_id == event.project_id,
+            RunRecord.run_type == "task_run",
+        )
+        .with_for_update()
+    )
+    if source is None:
+        raise AdapterDispatchError(
+            "task-run control source is missing or outside the event scope",
+            error_code="TASK_RUN_CONTROL_SOURCE_NOT_FOUND",
+            retryable=False,
+        )
+    return source
+
+
+def _task_run_control_fence(
+    event: OutboxEvent,
+    control: RunRecord,
+    source: RunRecord,
+) -> tuple[bool, dict[str, Any]]:
+    expected_status_version = control.payload.get("source_status_version")
+    expected_monitor_generation = control.payload.get("monitor_generation")
+    event_status_version = event.payload.get("source_status_version")
+    event_monitor_generation = event.payload.get("monitor_generation")
+    current_status_version = int(source.status_version or 1)
+    current_monitor_generation = int(source.monitor_generation or 0)
+    identity_matches = (
+        control.run_key == source.run_id
+        and control.payload.get("source_run_id") == source.run_id
+        and event.payload.get("source_run_id") == source.run_id
+    )
+    fence_matches = (
+        identity_matches
+        and type(expected_status_version) is int
+        and type(expected_monitor_generation) is int
+        and type(event_status_version) is int
+        and type(event_monitor_generation) is int
+        and expected_status_version == event_status_version
+        and expected_monitor_generation == event_monitor_generation
+        and expected_status_version == current_status_version
+        and expected_monitor_generation == current_monitor_generation
+    )
+    return fence_matches, {
+        "expected_source_status_version": expected_status_version,
+        "event_source_status_version": event_status_version,
+        "current_source_status_version": current_status_version,
+        "expected_monitor_generation": expected_monitor_generation,
+        "event_monitor_generation": event_monitor_generation,
+        "current_monitor_generation": current_monitor_generation,
+        "identity_matches": identity_matches,
+    }
+
+
+def _supersede_task_run_control(
+    event: OutboxEvent,
+    control: RunRecord,
+    source: RunRecord,
+    *,
+    phase: str,
+    fence: dict[str, Any],
+    dispatch_payload: dict[str, Any] | None = None,
+) -> None:
+    from app.services.task_run_control_service import worker_request_context
+
+    session = cast(Session, object_session(event))
+    ctx = worker_request_context(event)
+    before_control_status = control.status
+    if control.status in {"pending", "queued"}:
+        transition_run(control, "running", reason="task_run_control_superseded")
+    if control.status == "running":
+        transition_run(control, "success", reason="task_run_control_superseded")
+    completed_at = datetime.now(UTC).isoformat()
+    control.payload = {
+        **control.payload,
+        "status": control.status,
+        **({"dispatch": dispatch_payload} if dispatch_payload is not None else {}),
+        "control_outcome": "superseded",
+        "no_op": True,
+        "superseded_reason": "source_fence_mismatch",
+        "superseded_phase": phase,
+        **fence,
+        "source_status": source.status,
+        "completed_at": completed_at,
+    }
+    record_audit(
+        session,
+        ctx,
+        action=f"{control.run_type}.superseded",
+        object_type=control.run_type,
+        object_id=control.run_id,
+        result="superseded",
+        before={"status": before_control_status},
+        after={
+            "status": control.status,
+            "source_run_id": source.run_id,
+            "phase": phase,
+            **fence,
+            "no_op": True,
+        },
+        trace_id=source.trace_id,
+    )
+    log_event(
+        logger,
+        "task_run.control.superseded",
+        event_id=event.event_id,
+        control_id=control.run_id,
+        source_run_id=source.run_id,
+        phase=phase,
+        **fence,
+    )
+
+
+def _confirm_superseded_task_run_control(
+    event: OutboxEvent,
+    claim: OutboxClaim,
+    control: RunRecord,
+    *,
+    phase: str,
+    fence: dict[str, Any],
+) -> None:
+    session = object_session(event)
+    if session is None:
+        raise RuntimeError("task-run control supersede requires an attached session")
+    payload = _logical_dispatch_payload(event)
+    request_sha256 = _dispatch_request_sha256(payload)
+    if event.dispatch_request_sha256 and event.dispatch_request_sha256 != request_sha256:
+        raise AdapterDispatchError(
+            "outbox dispatch payload changed after its first delivery attempt",
+            error_code="OUTBOX_DISPATCH_PAYLOAD_CONFLICT",
+            retryable=False,
+        )
+    event.dispatch_request_sha256 = request_sha256
+    attempt = _record_attempt_prepared(
+        event,
+        claim,
+        request_sha256=request_sha256,
+        blocked=False,
+    )
+    attempt.details = {
+        **attempt.details,
+        "control_id": control.run_id,
+        "control_outcome": "superseded",
+        "superseded_phase": phase,
+        "remote_call_performed": False,
+        **fence,
+    }
+    session.flush()
+    event.status = "processed"
+    event.delivery_state = "confirmed"
+    event.last_error = None
+    event.processed_at = database_utc_now(session)
+    _complete_attempt(event, claim, status="superseded")
+    clear_claim(event)
+    metrics.record_worker_processing("success")
+    log_event(
+        logger,
+        "outbox.process.control_superseded",
+        event_id=event.event_id,
+        event_type=event.event_type,
+        aggregate_id=event.aggregate_id,
+        control_id=control.run_id,
+        phase=phase,
+        remote_call_performed=False,
+    )
+
+
 def _prepare_claim(claim: OutboxClaim, *, lease_seconds: int) -> PreparedDelivery | None:
     with SessionLocal() as session:
         event = lock_owned_claim(session, claim)
@@ -536,6 +811,32 @@ def _prepare_claim(claim: OutboxClaim, *, lease_seconds: int) -> PreparedDeliver
             )
         if run and run.status in {"pending", "queued"}:
             transition_run(run, "running", reason="outbox_dispatch_started")
+        if event.event_type in TASK_RUN_CONTROL_EVENT_TYPES:
+            if run is None:
+                raise AdapterDispatchError(
+                    "task-run control record is missing",
+                    error_code="TASK_RUN_CONTROL_NOT_FOUND",
+                    retryable=False,
+                )
+            source = _task_run_control_source(session, event, run)
+            fence_matches, fence = _task_run_control_fence(event, run, source)
+            if not fence_matches:
+                _supersede_task_run_control(
+                    event,
+                    run,
+                    source,
+                    phase="prepare",
+                    fence=fence,
+                )
+                _confirm_superseded_task_run_control(
+                    event,
+                    claim,
+                    run,
+                    phase="prepare",
+                    fence=fence,
+                )
+                session.commit()
+                return None
         if run and event.event_type == "label_version.publish_requested":
             from app.services.label_policy_service import (
                 revalidate_label_version_release_dispatch,
@@ -661,6 +962,33 @@ def _mark_remote_operation_started(claim: OutboxClaim) -> bool:
         if event is None:
             session.rollback()
             return False
+        if event.event_type in TASK_RUN_CONTROL_EVENT_TYPES:
+            control = _run_for_event(event, lock=True)
+            if control is None:
+                raise AdapterDispatchError(
+                    "task-run control record is missing",
+                    error_code="TASK_RUN_CONTROL_NOT_FOUND",
+                    retryable=False,
+                )
+            source = _task_run_control_source(session, event, control)
+            fence_matches, fence = _task_run_control_fence(event, control, source)
+            if not fence_matches:
+                _supersede_task_run_control(
+                    event,
+                    control,
+                    source,
+                    phase="remote_start",
+                    fence=fence,
+                )
+                _confirm_superseded_task_run_control(
+                    event,
+                    claim,
+                    control,
+                    phase="remote_start",
+                    fence=fence,
+                )
+                session.commit()
+                return False
         attempt = _delivery_attempt(event, claim)
         if claim.exhausted:
             event.delivery_state = "reconciling"
@@ -745,6 +1073,137 @@ def _mark_blocked(event: OutboxEvent, claim: OutboxClaim) -> None:
         aggregate_id=event.aggregate_id,
         run_status=run.status if run else None,
     )
+
+
+def _finalize_task_run_control(
+    event: OutboxEvent,
+    control: RunRecord,
+    dispatch_payload: dict[str, Any],
+) -> bool:
+    if event.event_type not in TASK_RUN_CONTROL_EVENT_TYPES:
+        return False
+    session = cast(Session, object_session(event))
+    source = _task_run_control_source(session, event, control)
+
+    from app.services.task_run_control_service import (
+        audit_task_run_transition,
+        emit_task_run_terminal_event,
+        worker_request_context,
+    )
+
+    ctx = worker_request_context(event)
+    fence_matches, fence = _task_run_control_fence(event, control, source)
+    if not fence_matches:
+        _supersede_task_run_control(
+            event,
+            control,
+            source,
+            phase="finalize",
+            fence=fence,
+            dispatch_payload=dispatch_payload,
+        )
+        return True
+
+    details = dispatch_payload.get("details")
+    details = details if isinstance(details, dict) else {}
+    observed = str(
+        details.get("dagster_status") or details.get("engine_status") or "UNKNOWN"
+    ).upper()
+    source.engine_status = observed
+    observed_at = datetime.now(UTC)
+    source.engine_status_observed_at = observed_at
+    before_status = source.status
+    reason = str(control.payload.get("reason") or "task-run control")
+
+    if event.event_type == "task_run.cancel_requested":
+        if source.status not in {"success", "failed", "cancelled"}:
+            if observed in {"CANCELED", "CANCELLED"}:
+                transition_run(source, "cancelled", reason="dagster_cancellation_confirmed")
+                source.terminal_reason = source.cancel_reason or reason
+            elif observed == "FAILURE":
+                transition_run(source, "failed", reason="dagster_failed_during_cancellation")
+                source.terminal_reason = "dagster_failed_during_cancellation"
+            elif observed == "SUCCESS":
+                transition_run(
+                    source, "completion_pending", reason="dagster_completed_before_cancel"
+                )
+        action = (
+            f"task_run.{source.status}"
+            if source.status in {"failed", "cancelled"}
+            else "task_run.cancellation_observed"
+        )
+    else:
+        if source.status not in {"success", "failed", "cancelled"}:
+            if observed in {"NOT_STARTED", "QUEUED", "STARTING"}:
+                if source.status == "running":
+                    transition_run(source, "submitted", reason="dagster_status_reconciled")
+            elif observed == "STARTED" and source.status == "submitted":
+                transition_run(source, "running", reason="dagster_status_reconciled")
+            elif observed == "SUCCESS" and source.status in {
+                "submitted",
+                "running",
+                "cancelling",
+            }:
+                # Engine success is not trusted business success. A bound signed
+                # completion receipt must still materialize the business result.
+                transition_run(source, "completion_pending", reason="dagster_success_observed")
+            elif observed == "FAILURE":
+                transition_run(source, "failed", reason="dagster_failure_observed")
+                source.terminal_reason = "dagster_failure_observed"
+            elif observed in {"CANCELED", "CANCELLED"}:
+                transition_run(source, "cancelled", reason="dagster_cancellation_observed")
+                source.terminal_reason = source.cancel_reason or "dagster_cancellation_observed"
+        action = (
+            f"task_run.{source.status}"
+            if source.status in {"failed", "cancelled"}
+            else "task_run.engine_status_observed"
+        )
+
+    source.payload = {
+        **source.payload,
+        "status": source.status,
+        "engine_status": observed,
+        "engine_status_observed_at": source.engine_status_observed_at.isoformat(),
+    }
+    source.next_status_sync_at = (
+        None
+        if source.status in {"success", "failed", "cancelled"}
+        else observed_at + timedelta(seconds=get_settings().task_run_status_sync_interval_seconds)
+    )
+    audit_task_run_transition(
+        session,
+        ctx,
+        source,
+        action=action,
+        before_status=before_status,
+        reason=reason,
+    )
+    if source.status in {"failed", "cancelled"} and source.status != before_status:
+        emit_task_run_terminal_event(session, ctx, source, reason=source.terminal_reason or reason)
+
+    # A signed Dagster success callback can arrive after the source entered
+    # `cancelling` but before this fenced engine observation. Resolve that
+    # durable receipt only against the authoritative status seen by this
+    # control attempt; cancellation/failure wins reject it, SUCCESS applies it.
+    from app.services.run_service import resolve_cancellation_race_dagster_completion
+
+    resolve_cancellation_race_dagster_completion(
+        session,
+        source,
+        observed_status=observed,
+    )
+
+    if control.status == "running":
+        transition_run(control, "success", reason="task_run_control_completed")
+    control.payload = {
+        **control.payload,
+        "status": control.status,
+        "dispatch": dispatch_payload,
+        "observed_engine_status": observed,
+        "source_status": source.status,
+        "completed_at": datetime.now(UTC).isoformat(),
+    }
+    return True
 
 
 def _finalize_success(
@@ -833,6 +1292,8 @@ def _finalize_success(
         "details": details,
     }
     event.payload = {**event.payload, "adapter_dispatch": dispatch_payload}
+    if run and _finalize_task_run_control(event, run, dispatch_payload):
+        pass
     if run and event.event_type == "release_deployment.command-requested":
         from app.services.prompt_release_service import mark_release_command_dispatched
 
@@ -885,6 +1346,13 @@ def _finalize_success(
                 for action in next_actions
             ],
         }
+        if event.event_type == "task_run.requested" and run.run_type == "task_run":
+            from app.services.run_service import apply_staged_dagster_completion
+
+            apply_staged_dagster_completion(
+                cast(Session, object_session(event)),
+                run,
+            )
         session = object_session(run)
         if session is not None:
             record_agent_dispatch(session, run, dispatch_payload)
@@ -941,6 +1409,92 @@ def _mark_retry_or_dead_letter(
     failed_dispatch = getattr(error, "dispatch_payload", None)
     if isinstance(failed_dispatch, dict):
         event.payload = {**event.payload, "adapter_dispatch": failed_dispatch}
+
+    consecutive_dagster_absence = bool(
+        claim.exhausted
+        and _is_exact_dagster_absence_proof(
+            event,
+            error,
+            require_reconcile_mode=True,
+        )
+        and _previous_attempt_is_exact_dagster_absence(event, claim)
+    )
+    if consecutive_dagster_absence and event.attempt_count < _effective_max_attempts(event):
+        # The only safe automatic re-dispatch is a Dagster launch request for
+        # which two consecutive exact-tag queries proved that no remote run
+        # exists. The proof count is derived from immutable delivery attempts;
+        # it is intentionally absent from caller-controlled business payloads.
+        event.last_error = f"{error_code}: {error}" if error_code else str(error)
+        event.status = "pending"
+        event.delivery_state = "ready"
+        event.available_at = _next_available_at(
+            event,
+            retry_after_seconds=retry_after_seconds,
+        )
+        event.processed_at = None
+        _complete_attempt(
+            event,
+            claim,
+            status="dagster_redispatch_scheduled",
+            error=error,
+        )
+        clear_claim(event)
+        metrics.record_worker_processing("retry")
+        if run:
+            run.payload = {
+                **run.payload,
+                "status": run.status,
+                "retryable": True,
+                "retry_count": event.attempt_count,
+                "retry_mode": "dagster_safe_redispatch",
+                "next_retry_at": event.available_at.isoformat(),
+                "failed_event_id": event.event_id,
+                "error_code": error_code,
+                "error": event.last_error,
+                "dispatch": event.payload.get("adapter_dispatch"),
+                "dispatch_state": "dagster_redispatch_wait",
+                "next_actions": [
+                    {
+                        "key": "dagster_redispatch_scheduled",
+                        "label": "等待 Dagster 安全重派",
+                        "available_at": event.available_at.isoformat(),
+                    },
+                    {
+                        "key": "view_trace",
+                        "label": "查看 Trace",
+                        "route": f"traces/{run.trace_id}",
+                    },
+                ],
+            }
+        log_event(
+            logger,
+            "outbox.dagster.redispatch_scheduled",
+            level=30,
+            event_id=event.event_id,
+            event_type=event.event_type,
+            aggregate_type=event.aggregate_type,
+            aggregate_id=event.aggregate_id,
+            attempt_count=event.attempt_count,
+            reconcile_attempt_count=event.reconcile_attempt_count,
+            dispatch_idempotency_key=event.dispatch_idempotency_key,
+            available_at=event.available_at.isoformat(),
+        )
+        return
+
+    if consecutive_dagster_absence:
+        error = AdapterDispatchError(
+            "Dagster safe re-dispatch limit is exhausted",
+            error_code="DAGSTER_REDISPATCH_ATTEMPTS_EXHAUSTED",
+            retryable=False,
+            dispatch_payload=failed_dispatch if isinstance(failed_dispatch, dict) else None,
+            remote_outcome_unknown=True,
+        )
+        error_code = error.error_code
+        retryable = error.retryable
+        retry_after_seconds = error.retry_after_seconds
+        requires_reconciliation = True
+        attempts_used = event.reconcile_attempt_count
+        max_attempts = _effective_max_reconcile_attempts(event)
     event.last_error = f"{error_code}: {error}" if error_code else str(error)
     if run and run.status in {"pending", "queued"} and isinstance(error, AdapterDispatchError):
         transition_run(run, "running", reason="outbox_dispatch_started")
@@ -959,7 +1513,9 @@ def _mark_retry_or_dead_letter(
         if run and run.status in {"pending", "queued", "running"}:
             if run.status in {"pending", "queued"}:
                 transition_run(run, "running", reason="outbox_dispatch_started")
+            before_terminal_status = run.status
             transition_run(run, "failed", reason="outbox_dispatch_dead_letter")
+            run.terminal_reason = "outbox_dispatch_dead_letter"
             run.payload = {
                 **run.payload,
                 "status": "failed",
@@ -978,6 +1534,32 @@ def _mark_retry_or_dead_letter(
                     {"key": "view_trace", "label": "查看 Trace", "route": f"traces/{run.trace_id}"},
                 ],
             }
+            if event.event_type == "task_run.requested" and run.run_type == "task_run":
+                # The original TaskRun launch has reached a terminal local
+                # decision. Persist the audit transition and terminal business
+                # event atomically with the dead-letter state so observers never
+                # see a failed run without its durable evidence.
+                from app.services.task_run_control_service import (
+                    audit_task_run_transition,
+                    emit_task_run_terminal_event,
+                    worker_request_context,
+                )
+
+                ctx = worker_request_context(event)
+                audit_task_run_transition(
+                    session,
+                    ctx,
+                    run,
+                    action="task_run.failed",
+                    before_status=before_terminal_status,
+                    reason="outbox_dispatch_dead_letter",
+                )
+                emit_task_run_terminal_event(
+                    session,
+                    ctx,
+                    run,
+                    reason="outbox_dispatch_dead_letter",
+                )
         log_event(
             logger,
             "outbox.process.dead_letter",
@@ -1215,9 +1797,27 @@ def _process_claim_traced(claim: OutboxClaim) -> None:
         _finalize_failure(claim, PostDispatchFinalizeError(exc))
 
 
+def _claim_parent_context(claim: OutboxClaim) -> Context | None:
+    try:
+        with SessionLocal() as session:
+            carrier = owned_claim_trace_carrier(session, claim)
+    except Exception as exc:  # noqa: BLE001 - telemetry cannot stop business delivery.
+        log_event(
+            logger,
+            "outbox.trace_carrier.lookup_failed",
+            level=30,
+            event_id=claim.event_id,
+            lease_generation=claim.lease_generation,
+            error_code=exc.__class__.__name__,
+        )
+        return None
+    return extract_remote_trace_context(carrier)
+
+
 def _process_claim(claim: OutboxClaim) -> None:
     with internal_span(
         "outbox.process",
+        parent_context=_claim_parent_context(claim),
         attributes={
             "messaging.system": "auris-outbox",
             "messaging.operation.name": "process",
@@ -1266,6 +1866,50 @@ def process_aggregate_events(
         aggregate_ids=unique_ids,
     )
     return _process_claims(claims)
+
+
+def monitor_task_runs_once(*, worker_id: str | None = None) -> int:
+    settings = get_settings()
+    if not settings.task_run_monitor_enabled:
+        return 0
+    from app.services.task_run_monitor_service import monitor_task_runs_once as monitor_once
+
+    return monitor_once(
+        worker_id=_worker_identity(worker_id),
+        limit=settings.task_run_monitor_batch_size,
+        settings=settings,
+    )
+
+
+def _monitor_task_runs_isolated(
+    *,
+    worker_id: str,
+    state: WorkerRuntimeState | None = None,
+) -> int:
+    try:
+        processed = monitor_task_runs_once(worker_id=worker_id)
+    except Exception as exc:  # noqa: BLE001 - monitor failure must not stop outbox delivery.
+        error = f"{exc.__class__.__name__}: {exc}"
+        if state is not None:
+            state.monitor_status = "degraded"
+            state.monitor_consecutive_errors += 1
+            state.last_monitor_error = error
+            state.last_monitor_error_at = _utc_now_iso()
+            state.last_error = error
+            state.last_error_at = state.last_monitor_error_at
+        log_event(
+            logger,
+            "task_run.monitor.failed",
+            level=40,
+            worker_id=worker_id,
+            error=error,
+        )
+        return 0
+    if state is not None:
+        state.monitor_status = "healthy"
+        state.monitor_consecutive_errors = 0
+        state.last_monitor_success_at = _utc_now_iso()
+    return processed
 
 
 def _utc_now_iso() -> str:
@@ -1383,14 +2027,19 @@ def run_forever(
     resolved_health_path = Path(health_path).expanduser() if health_path else None
     shutdown = stop_event or Event()
     started_at = _utc_now_iso()
+    settings = get_settings()
+    monitor_enabled = bool(settings.task_run_monitor_enabled)
     state = WorkerRuntimeState(
         worker_id=resolved_worker_id,
         pid=os.getpid(),
         status="running",
         started_at=started_at,
         heartbeat_at=started_at,
+        monitor_enabled=monitor_enabled,
+        monitor_status="pending" if monitor_enabled else "disabled",
     )
     last_heartbeat = time.monotonic()
+    next_task_run_monitor_at = 0.0
     _publish_worker_health(state, resolved_health_path)
     log_event(
         logger,
@@ -1410,7 +2059,15 @@ def run_forever(
         state.iteration_count += 1
         processed = 0
         try:
-            processed = process_once(bounded_limit, worker_id=resolved_worker_id)
+            monotonic_now = time.monotonic()
+            monitored = 0
+            if monitor_enabled and monotonic_now >= next_task_run_monitor_at:
+                monitored = _monitor_task_runs_isolated(
+                    worker_id=resolved_worker_id,
+                    state=state,
+                )
+                next_task_run_monitor_at = monotonic_now + settings.task_run_monitor_poll_seconds
+            processed = monitored + process_once(bounded_limit, worker_id=resolved_worker_id)
             now = _utc_now_iso()
             state.last_successful_poll_at = now
             state.consecutive_errors = 0
@@ -1461,6 +2118,8 @@ def run_forever(
                 processed_total=state.processed_total,
                 processed=processed,
                 consecutive_errors=state.consecutive_errors,
+                monitor_status=state.monitor_status,
+                monitor_consecutive_errors=state.monitor_consecutive_errors,
                 consecutive_idle_polls=state.consecutive_idle_polls,
                 next_poll_in_seconds=wait_seconds,
             )
@@ -1548,7 +2207,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     observability = configure_worker_observability(get_settings(), engine=engine)
     try:
         if args.once:
-            count = process_once(args.limit, worker_id=worker_id)
+            count = _monitor_task_runs_isolated(worker_id=worker_id) + process_once(
+                args.limit, worker_id=worker_id
+            )
             log_event(
                 logger,
                 "outbox.process.complete",

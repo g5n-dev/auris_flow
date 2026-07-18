@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import secrets
+from base64 import urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -14,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.auth_models import BrowserAuthSession, OidcIdentity, UserSecurityState
 from app.core.auth import AuthActor
 from app.core.errors import ApiError
+from app.core.project_membership import project_member_role_binding
 from app.models import Project, Tenant, User
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
@@ -56,24 +58,17 @@ def _secret_sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _derived_csrf_token(raw_token: str, session_id: str) -> str:
+    digest = hmac.new(
+        raw_token.encode("utf-8"),
+        f"auris-flow-browser-csrf-v1\x00{session_id}".encode(),
+        hashlib.sha256,
+    ).digest()
+    return urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
+
+
 def _reject_invalid_session() -> ApiError:
     return ApiError("AUTH_SESSION_INVALID", "浏览器会话无效", 401)
-
-
-def _member_roles(project: Project, user_id: str) -> tuple[str, ...] | None:
-    members = (project.data or {}).get("members")
-    if not isinstance(members, list):
-        return None
-    for member in members:
-        if not isinstance(member, dict):
-            continue
-        if (member.get("user_id") or member.get("id")) != user_id:
-            continue
-        roles = member.get("roles")
-        if not isinstance(roles, list):
-            return None
-        return tuple(sorted({role for role in roles if isinstance(role, str) and role}))
-    return None
 
 
 def _require_live_subject(
@@ -101,6 +96,8 @@ def _require_live_subject(
         raise ApiError("AUTH_SUBJECT_DISABLED", "认证主体不可用", 401)
     if (
         tenant_id != record.tenant_id
+        or project_id != record.project_id
+        or identity.project_id != record.project_id
         or tenant is None
         or tenant.status != "active"
         or project is None
@@ -108,11 +105,11 @@ def _require_live_subject(
         or project.status != "active"
     ):
         raise ApiError("AUTH_SCOPE_REJECTED", "请求资源不可用", 404)
-    bound_roles = _member_roles(project, record.user_id)
-    if not bound_roles:
+    role_binding = project_member_role_binding(project, record.user_id)
+    if role_binding.duplicate or not role_binding.configured or not role_binding.roles:
         raise ApiError("AUTH_SCOPE_REJECTED", "请求资源不可用", 404)
     user_roles = {role for role in (user.roles or []) if isinstance(role, str) and role}
-    effective_roles = tuple(sorted(user_roles.intersection(bound_roles)))
+    effective_roles = tuple(sorted(user_roles.intersection(role_binding.roles)))
     if not effective_roles:
         raise ApiError("AUTHORIZATION_REJECTED", "当前操作未获授权", 403)
     return user, effective_roles
@@ -167,6 +164,19 @@ def resolve_oidc_bearer_actor(
     )
 
 
+def oidc_bearer_default_scope(session: Session, actor: AuthActor) -> BrowserSessionScope:
+    """Resolve the frozen provisioned scope for bearer-based session restore only."""
+
+    if actor.provider != "oidc_bearer" or not actor.oidc_issuer or not actor.oidc_subject:
+        raise _reject_invalid_session()
+    identity = find_oidc_identity(
+        session,
+        issuer=actor.oidc_issuer,
+        subject=actor.oidc_subject,
+    )
+    return BrowserSessionScope(tenant_id=identity.tenant_id, project_id=identity.project_id)
+
+
 def create_browser_session(
     session: Session,
     *,
@@ -203,7 +213,7 @@ def create_browser_session(
         project_id=identity.project_id,
     )
     raw_token = secrets.token_urlsafe(48)
-    csrf_token = secrets.token_urlsafe(48)
+    csrf_token = _derived_csrf_token(raw_token, provisional.browser_session_id)
     provisional.token_sha256 = _secret_sha256(raw_token)
     provisional.csrf_sha256 = _secret_sha256(csrf_token)
     identity.last_login_at = issued_at
@@ -244,7 +254,7 @@ def browser_session_default_scope(session: Session, *, raw_token: str) -> Browse
     return BrowserSessionScope(tenant_id=record.tenant_id, project_id=record.project_id)
 
 
-def rotate_browser_session_csrf(
+def browser_session_csrf_token(
     session: Session,
     *,
     raw_token: str,
@@ -255,10 +265,32 @@ def rotate_browser_session_csrf(
         raise _reject_invalid_session()
     if _utc_now() >= _as_utc(record.expires_at):
         raise ApiError("AUTH_SESSION_EXPIRED", "浏览器会话已过期", 401)
-    csrf_token = secrets.token_urlsafe(48)
-    record.csrf_sha256 = _secret_sha256(csrf_token)
-    session.flush()
+    # Stable for the bounded parent-session lifetime: concurrent tabs and safe
+    # cross-site navigations cannot invalidate each other, and no plaintext CSRF
+    # secret is persisted. Revocation/expiry of the opaque session invalidates it.
+    csrf_token = _derived_csrf_token(raw_token, record.browser_session_id)
+    csrf_sha256 = _secret_sha256(csrf_token)
+    if record.csrf_sha256 != csrf_sha256:
+        # One-time compatibility migration for sessions issued by the previous
+        # random-per-restore implementation.
+        record.csrf_sha256 = csrf_sha256
+        session.flush()
     return csrf_token
+
+
+def rotate_browser_session_csrf(
+    session: Session,
+    *,
+    raw_token: str,
+    session_id: str,
+) -> str:
+    """Compatibility alias for callers predating stable per-session derivation."""
+
+    return browser_session_csrf_token(
+        session,
+        raw_token=raw_token,
+        session_id=session_id,
+    )
 
 
 def find_oidc_identity(

@@ -83,14 +83,34 @@ class TaskVersionRequest(FlexiblePayload):
     label_version: str | None = None
 
 
-class TaskRunRequest(FlexiblePayload):
+class TaskRunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     task_version_id: str
-    trigger_type: str = "manual"
+    trigger_type: Literal["manual", "schedule", "data_arrival", "backfill"] = "manual"
     execution_mode: Literal["production", "diagnostic", "shadow", "experiment"] = "production"
     partition_key: str | None = None
-    run_key: str | None = None
-    experiment_id: str | None = None
-    experiment_subject_key: str | None = Field(default=None, max_length=512)
+    run_key: str | None = Field(default=None, max_length=256)
+    experiment_id: str | None = Field(default=None, min_length=2, max_length=128)
+    experiment_subject_key: str | None = Field(default=None, min_length=1, max_length=512)
+    # These client-supplied values are accepted only so the execution policy can
+    # deterministically overwrite them with the server-controlled safety mode.
+    # They are never trusted as authorization to enable external side effects.
+    external_outputs_enabled: bool | None = None
+    writeback_mode: Literal["enabled", "disabled", "configured"] | None = None
+    business_context: dict[str, Any] | None = Field(default=None, max_length=50)
+    # Explicit test-harness fields let the production guard return its stable
+    # fail-closed error while arbitrary request extras remain forbidden.
+    force_worker_error: bool | None = None
+    simulate_worker_failure: bool | None = None
+    failure_reason: str | None = Field(default=None, max_length=1000)
+    simulate_adapter_failure: bool | None = None
+    force_adapter_error: bool | None = None
+    adapter_error_code: str | None = Field(default=None, max_length=128)
+    adapter_error_message: str | None = Field(default=None, max_length=1000)
+    adapter_retryable: bool | None = None
+    retry_after_seconds: int | None = Field(default=None, ge=0, le=3600)
+    max_attempts: int | None = Field(default=None, ge=1, le=100)
 
     @model_validator(mode="after")
     def experiment_binding_is_complete(self) -> TaskRunRequest:
@@ -104,6 +124,16 @@ class TaskRunRequest(FlexiblePayload):
 class TaskRunRetryRequest(FlexiblePayload):
     reason: str | None = Field(default=None, max_length=500)
     payload_overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+class TaskRunCancellationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field(min_length=1, max_length=500)
+
+
+class TaskRunStatusSyncRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
 class RunReleaseDecisionRequest(BaseModel):

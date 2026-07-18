@@ -11,10 +11,10 @@ from sqlalchemy.orm import Session
 
 from app.core.context import (
     RequestContext,
-    project_member_roles,
     require_context_membership,
 )
 from app.core.errors import ApiError
+from app.core.project_membership import project_member_roles
 from app.domain.label_policy import PolicyCompileError, compile_policy, evaluate_policy
 from app.domain.label_policy.compiler import COMPILER_VERSION
 from app.domain.label_policy.defaults import default_release_policy
