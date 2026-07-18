@@ -30,7 +30,7 @@ IDEMPOTENCY_EXEMPT_OPERATIONS = {
     ("post", "/auth/dev-login"),
     ("post", "/auth/logout"),
 }
-PAGING_EXEMPT_PATHS = {"/hotword-statistics"}
+PAGING_EXEMPT_PATHS = {"/hotword-statistics", "/insights/metric-comparisons"}
 TYPED_RESOURCE_PREFIXES = (
     "/work-items",
     "/event-links",
@@ -431,6 +431,15 @@ LABEL_LIFECYCLE_PREFLIGHT_RESPONSE_FIELDS = {
     "active_environment_references",
     "draining_environment_references",
     "in_flight_run_references",
+    "downstream_impacts",
+    "downstream_impact_total",
+    "blocking_impact_total",
+    "migration_required_impact_total",
+    "historical_reference_total",
+    "impact_next_cursor",
+    "impact_scan_complete",
+    "migration_evidence_required",
+    "migration_evidence_satisfied",
     "blockers",
     "ready_for_transition",
     "safe_stop_required",
@@ -1732,6 +1741,7 @@ def validate_label_lifecycle_http_contract(openapi: dict[str, Any]) -> None:
         "LabelVersionEnvironmentReference",
         "LabelVersionInFlightRunReference",
         "LabelVersionLifecycleBlocker",
+        "LabelVersionDownstreamImpact",
         "LabelVersionDeprecationPreflight",
         "LabelVersionDeprecationPreflightResponse",
         "LabelVersionTransition",
@@ -1759,6 +1769,8 @@ def validate_label_lifecycle_http_contract(openapi: dict[str, Any]) -> None:
         "replacement_label_version_id",
         "mapping_bundle_id",
         "reason",
+        "impact_cursor",
+        "impact_limit",
     }
     permitted_transition_request_fields = {
         "action",
@@ -1800,7 +1812,13 @@ def validate_label_lifecycle_http_contract(openapi: dict[str, Any]) -> None:
         .get("reference_type", {})
         .get("enum", [])
     )
-    if blocker_types != {"active-head", "draining-deployment", "in-flight-run"}:
+    if blocker_types != {
+        "active-head",
+        "draining-deployment",
+        "in-flight-run",
+        "downstream-impact",
+        "impact-scan",
+    }:
         errors.append("LabelVersionLifecycleBlocker.reference_type drifted")
     in_flight_fields = {
         "run_id",

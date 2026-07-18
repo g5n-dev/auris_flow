@@ -11,6 +11,7 @@ servers:
     description: BFF v1
 security:
   - bearerAuth: []
+  - browserSession: []
 tags:
   - name: auth
   - name: ops
@@ -67,7 +68,13 @@ paths:
                   writeOnly: true
       responses:
         "200":
-          description: 服务端签发的本地开发会话
+          description: 服务端签发的本地开发会话；同时设置 HttpOnly 兼容会话 cookie
+          headers:
+            Set-Cookie:
+              description: >
+                local/test/ci 的 HttpOnly、SameSite=Lax 会话 cookie；生产环境禁用 dev-login。
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -75,22 +82,123 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /auth/oidc/login:
+    get:
+      tags: [auth]
+      summary: 发起通用 OIDC Authorization Code + PKCE 登录
+      description: >
+        生成一次性 state、nonce 和 PKCE S256 challenge，持久化短期服务端状态后以 303
+        重定向至配置的标准 OIDC Provider。return_path 只接受站内绝对路径，拒绝开放重定向。
+        Keycloak 可作为参考 IdP，但该接口不依赖 Keycloak 私有协议。
+      operationId: getAuthOidcLogin
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+        - name: return_path
+          in: query
+          required: false
+          description: 登录成功后的站内绝对路径；缺省为 `/`，不接受 scheme、host 或协议相对 URL。
+          schema:
+            type: string
+            maxLength: 1024
+            example: /insights
+      responses:
+        "303":
+          description: 重定向至 OIDC Provider authorization endpoint
+          headers:
+            Location:
+              description: 含 state、nonce 和 code_challenge_method=S256 的 Provider URL。
+              schema:
+                type: string
+                format: uri
+            Cache-Control:
+              description: 固定为 no-store。
+              schema:
+                type: string
+                enum: [no-store]
+        default:
+          $ref: "#/components/responses/Error"
+
+  /auth/oidc/callback:
+    get:
+      tags: [auth]
+      summary: 完成 OIDC 回调并建立不透明浏览器会话
+      description: >
+        一次性消费 state，以 PKCE verifier 交换 code，校验 issuer、audience、RS256 签名、exp、iat
+        与 nonce，并仅映射预配置的内部 OIDC identity。服务端不把 IdP access/ID/refresh token
+        返回给浏览器；成功后只设置不透明 HttpOnly cookie，其原值不落库。
+      operationId: getAuthOidcCallback
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+        - name: code
+          in: query
+          required: false
+          description: Provider 返回的一次性 authorization code；授权失败响应可不包含。
+          schema:
+            type: string
+            minLength: 1
+        - name: state
+          in: query
+          required: true
+          description: 必须精确匹配尚未过期、未消费的服务端 state hash 记录。
+          schema:
+            type: string
+            minLength: 32
+        - name: iss
+          in: query
+          required: false
+          description: Provider 返回时必须与配置的 issuer 精确一致（如果存在）。
+          schema:
+            type: string
+            format: uri
+        - name: error
+          in: query
+          required: false
+          description: OIDC 标准授权错误；存在时回调 fail closed，且不回显敏感详情。
+          schema:
+            type: string
+      responses:
+        "303":
+          description: 已建立浏览器会话并重定向至经校验的站内 return_path
+          headers:
+            Location:
+              description: 发起登录时冻结并校验的站内路径。
+              schema:
+                type: string
+            Set-Cookie:
+              description: >
+                不透明 HttpOnly、SameSite=Lax 会话 cookie；prod/release 使用
+                `__Host-auris_session` 并强制 Secure、Path=/、无 Domain。
+              schema:
+                type: string
+            Cache-Control:
+              description: 固定为 no-store。
+              schema:
+                type: string
+                enum: [no-store]
+        default:
+          $ref: "#/components/responses/Error"
+
   /auth/session:
     get:
       tags: [auth]
-      summary: 校验当前会话并返回租户、项目和角色范围
+      summary: 恢复当前 bearer 或浏览器会话及动态权限范围
+      description: >
+        浏览器 cookie 会话可不提供租户/项目 Header，服务端使用会话绑定 scope；如显式提供则必须
+        精确匹配。每次读取当前用户、identity、租户、项目和项目成员角色，禁用或降权即时生效。
+        浏览器会话响应轮换并返回仅保存在前端内存中的 csrf_token。
       operationId: getAuthSession
+      security:
+        - bearerAuth: []
+        - browserSession: []
       parameters:
-        - $ref: "#/components/parameters/XTenantId"
-        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/OptionalXTenantId"
+        - $ref: "#/components/parameters/OptionalXProjectId"
         - $ref: "#/components/parameters/XRequestId"
-        - $ref: "#/components/parameters/Cursor"
-        - $ref: "#/components/parameters/Limit"
-        - $ref: "#/components/parameters/Cursor"
-        - $ref: "#/components/parameters/Limit"
       responses:
         "200":
-          description: 当前认证会话
+          description: 当前认证会话；响应禁止缓存
           content:
             application/json:
               schema:
@@ -101,15 +209,27 @@ paths:
   /auth/logout:
     post:
       tags: [auth]
-      summary: 撤销当前服务端会话
+      summary: 撤销当前 bearer 或不透明浏览器会话
+      description: >
+        浏览器 cookie 路径要求 X-CSRF-Token 与受信 Origin，并清除 cookie；无需租户/项目 Header。
+        开发 bearer 兼容路径仍要求显式 scope Header。重复撤销保持幂等。
       operationId: postAuthLogout
+      security:
+        - bearerAuth: []
+        - browserSession: []
       parameters:
-        - $ref: "#/components/parameters/XTenantId"
-        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/OptionalXTenantId"
+        - $ref: "#/components/parameters/OptionalXProjectId"
         - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/XCsrfToken"
       responses:
         "200":
           description: 当前会话已撤销；重复提交保持幂等
+          headers:
+            Set-Cookie:
+              description: 浏览器会话路径通过 Max-Age=0 清除原会话 cookie。
+              schema:
+                type: string
           content:
             application/json:
               schema:
@@ -3031,13 +3151,129 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /label-recompute-runs:
+    post:
+      tags: [label-recomputations]
+      summary: 请求真实全量标签重算
+      description: >
+        冻结目标 LabelVersion、可选 Mapping Bundle、源 FactSet Head generation/manifest、
+        fact cutoff、候选 namespace、完整分区/资产范围、覆盖策略和预算。服务端预留候选
+        FactSet 并为每个分区创建内部执行映射；API 不暴露底层 Dagster 画布或 run ID。
+      operationId: postLabelRecomputeRuns
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LabelRecomputeRunCreateRequest"}
+      responses:
+        "201":
+          description: 已冻结重算请求及全部分区 Item
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LabelRecomputeMutationEnvelope"}
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        default: {$ref: "#/components/responses/Error"}
+
+  /label-recompute-runs/{run_id}/items/{item_id}/completions:
+    post:
+      tags: [label-recomputations]
+      summary: 接收一个重算分区的可信完成回执
+      description: >
+        仅接受当前 attempt 所绑定的内部执行终态与持久化成功/失败回执。成功时服务端验证
+        Observation→Aggregate lineage 并写 append-only candidate LabelFact；row_count 和全部
+        source/result/content SHA 均从实际数据库行重算，调用方不能提交这些值。
+      operationId: postLabelRecomputeRunItemsByIdCompletions
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: run_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: item_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LabelRecomputeRunItemCompletionRequest"}
+      responses:
+        "200":
+          description: 分区终态已物化；全部成功时同时冻结完整候选 FactSet manifest
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LabelRecomputeRunItemMutationEnvelope"}
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        default: {$ref: "#/components/responses/Error"}
+
+  /label-recompute-runs/{run_id}/items/{item_id}/retries:
+    post:
+      tags: [label-recomputations]
+      summary: CAS 重试一个失败重算分区
+      description: >
+        仅 retryable 失败 Item 可按 expected attempt generation 重试；新 attempt 获得新的内部
+        执行映射，旧回执和失败审计保留，重复请求精确重放且不重复写候选事实。
+      operationId: postLabelRecomputeRunItemsByIdRetries
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: run_id
+          in: path
+          required: true
+          schema: {type: string}
+        - name: item_id
+          in: path
+          required: true
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "#/components/schemas/LabelRecomputeRunItemRetryRequest"}
+      responses:
+        "200":
+          description: 已创建下一代分区 attempt 或精确重放
+          content:
+            application/json:
+              schema: {$ref: "#/components/schemas/LabelRecomputeRunItemMutationEnvelope"}
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+        default: {$ref: "#/components/responses/Error"}
+
   /label-versions/{id}/deprecation-preflights:
     post:
       tags: [label-lifecycle]
       summary: 预检标签版本废弃条件
       description: >
         在同一事务快照中校验 CAS、替代版本、映射包、active Head、draining 部署与
-        in-flight 运行引用。预检只生成审计和 Outbox 事实，不改变标签版本状态。
+        in-flight 运行引用，并按稳定游标分页返回 FactSet、Label MetricResult、冻结
+        ReportDocument 绑定和可识别下游资产。扫描超上限 fail-closed；预检只生成
+        审计和 Outbox 事实，不改变标签版本状态。
       operationId: postLabelVersionsByIdDeprecationPreflights
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -3069,7 +3305,9 @@ paths:
       summary: 废弃或归档标签版本
       description: >
         仅实名人工 project_admin 可执行。服务端重新执行完整预检，并原子更新强表、
-        JSON 投影、Audit 与 Outbox；历史 Observation、Aggregate 与 Fact 不改写。
+        JSON 投影、Audit 与 Outbox；当前 FactSet Head、进行中候选和发布下游引用必须先
+        切换，冻结 MetricResult/Report 仅作 historical-reference，不阻断无 replacement
+        retire；历史 Observation、Aggregate、Fact、MetricResult、Report 不改写。
       operationId: postLabelVersionsByIdTransitions
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -4787,6 +5025,21 @@ paths:
           in: query
           schema:
             type: string
+        - name: source_run_id
+          in: query
+          description: 报告链路按成功聚合 run 精确读取唯一 current 快照集合。
+          schema:
+            type: string
+        - name: metric_key
+          in: query
+          description: 可重复传入；指定后缺失或同 run 重复 current 快照均以 409 fail closed。
+          style: form
+          explode: true
+          schema:
+            type: array
+            uniqueItems: true
+            items:
+              type: string
       responses:
         "200":
           description: 指标和证据下钻
@@ -4794,6 +5047,35 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/InsightMetricListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /insights/metric-comparisons:
+    get:
+      tags: [insights]
+      summary: 比较两个不可变指标快照的完整冻结口径
+      operationId: getInsightMetricComparison
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: baseline_metric_result_id
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: current_metric_result_id
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 服务端冻结的双快照可比性、原因与内容哈希
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MetricSnapshotComparisonResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6198,6 +6480,13 @@ components:
       type: http
       scheme: bearer
       bearerFormat: JWT
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: __Host-auris_session
+      description: >
+        prod/release 的不透明 HttpOnly browser session；数据库只保存 token SHA-256。
+        local/test/ci 可配置为 auris_session 以支持本地 HTTP。
   parameters:
     XTenantId:
       name: X-Tenant-Id
@@ -6213,6 +6502,22 @@ components:
       schema:
         type: string
       description: 项目上下文，服务端必须与成员权限校验。
+    OptionalXTenantId:
+      name: X-Tenant-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: >
+        bearer 兼容路径的显式租户上下文；浏览器会话可省略并使用会话绑定值，提供时必须精确匹配。
+    OptionalXProjectId:
+      name: X-Project-Id
+      in: header
+      required: false
+      schema:
+        type: string
+      description: >
+        bearer 兼容路径的显式项目上下文；浏览器会话可省略并使用会话绑定值，提供时必须精确匹配。
     XRequestId:
       name: X-Request-Id
       in: header
@@ -6235,6 +6540,15 @@ components:
       schema:
         type: string
       description: 写操作和异步动作必填。
+    XCsrfToken:
+      name: X-CSRF-Token
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 32
+      description: >
+        cookie 认证的写操作必填，并与受信 Origin 一起校验；bearer 认证不使用此 token。
     Cursor:
       name: cursor
       in: query
@@ -6644,6 +6958,14 @@ components:
           type: string
         provider:
           type: string
+          enum: [oidc_session, oidc_bearer, dev_session, configured]
+          description: 服务端实际认证提供方；浏览器不得用该字段推导权限。
+        csrf_token:
+          type: string
+          minLength: 32
+          description: >
+            仅浏览器 cookie 会话返回的轮换 CSRF token；只保存在前端内存，写操作经
+            X-CSRF-Token 回传。bearer/dev-login 响应可省略。
     AuthLoginResponse:
       type: object
       additionalProperties: false
@@ -6656,7 +6978,9 @@ components:
           properties:
             access_token:
               type: string
-              description: 仅用于 local/test/ci 的短期签名会话；生产环境由配置的身份提供方签发。
+              description: >
+                仅用于 local/test/ci 的短期签名兼容会话；前端只在内存持有，不写入
+                localStorage/sessionStorage。prod/release 禁用 dev-login，OIDC token 不返回浏览器。
             token_type:
               type: string
               enum: [Bearer]
@@ -10423,6 +10747,246 @@ components:
         data: {$ref: "#/components/schemas/ManualLabelDraftRebaseConfirmResponse"}
         meta: {$ref: "#/components/schemas/ApiMeta"}
 
+    LabelRecomputePartition:
+      type: object
+      additionalProperties: false
+      required: [partition_id, source_scope]
+      properties:
+        partition_id:
+          type: string
+          minLength: 2
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$'
+        source_scope:
+          type: object
+          minProperties: 1
+          additionalProperties: true
+
+    LabelRecomputeRunCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - target_label_version_id
+        - source_environment
+        - source_fact_namespace
+        - source_head_generation
+        - source_fact_set_id
+        - source_manifest_sha256
+        - fact_namespace
+        - fact_as_of
+        - partitions
+        - asset_scope
+        - coverage_policy
+        - coverage_min
+        - budget
+        - budget_units
+      description: >
+        full recompute 强请求；目标、源 Head、cutoff、范围、覆盖与预算全部冻结。
+        mapping_bundle_id/sha 必须同时为空或同时提供；candidate namespace 必须独立于源 namespace。
+      properties:
+        target_label_version_id:
+          type: string
+          minLength: 2
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$'
+        mapping_bundle_id:
+          type: string
+          nullable: true
+          minLength: 2
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$'
+        mapping_bundle_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+        source_environment:
+          type: string
+          minLength: 2
+          maxLength: 32
+        source_fact_namespace:
+          type: string
+          minLength: 2
+          maxLength: 128
+        source_head_generation: {type: integer, minimum: 1}
+        source_fact_set_id:
+          type: string
+          minLength: 2
+          maxLength: 128
+        source_manifest_sha256: {type: string, pattern: '^[0-9a-f]{64}$'}
+        fact_namespace:
+          type: string
+          minLength: 2
+          maxLength: 128
+        fact_as_of: {type: string, format: date-time}
+        partitions:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items: {$ref: "#/components/schemas/LabelRecomputePartition"}
+        asset_scope:
+          type: object
+          minProperties: 1
+          additionalProperties: true
+        coverage_policy:
+          type: object
+          minProperties: 1
+          additionalProperties: true
+        coverage_min: {type: number, minimum: 0, maximum: 1}
+        budget:
+          type: object
+          minProperties: 1
+          additionalProperties: true
+        budget_units: {type: integer, minimum: 1}
+
+    LabelRecomputeFactCandidate:
+      type: object
+      additionalProperties: false
+      required:
+        - aggregate_id
+        - observation_ids
+        - subject_scope
+        - subject_key
+        - event_or_segment_id
+        - assertion_slot
+        - occurred_at
+        - label_id
+        - value_type
+        - value
+      properties:
+        aggregate_id: {type: string, minLength: 2, maxLength: 128}
+        observation_ids:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          uniqueItems: true
+          items: {type: string}
+        subject_scope: {type: string, minLength: 1, maxLength: 64}
+        subject_key: {type: string, minLength: 1, maxLength: 256}
+        event_or_segment_id: {type: string, minLength: 1, maxLength: 256}
+        assertion_slot: {type: string, minLength: 1, maxLength: 128}
+        occurred_at: {type: string, format: date-time}
+        label_id: {type: string, minLength: 1, maxLength: 128}
+        value_type:
+          type: string
+          enum: [boolean, categorical, multi, numeric, temporal, hierarchical]
+        value: {}
+
+    LabelRecomputeRunItemCompletionRequest:
+      type: object
+      additionalProperties: false
+      required: [attempt_generation, completion_receipt_id, status]
+      description: >
+        客户端只提交回执引用和目标事实 lineage，不得提交 row_count 或任何 manifest SHA。
+        服务端从持久化执行回执及实际 Observation/Aggregate/LabelFact 行重算全部锚点。
+      properties:
+        attempt_generation: {type: integer, minimum: 1}
+        completion_receipt_id: {type: string, minLength: 2, maxLength: 128}
+        status: {type: string, enum: [success, failed]}
+        facts:
+          type: array
+          maxItems: 100000
+          items: {$ref: "#/components/schemas/LabelRecomputeFactCandidate"}
+          default: []
+        error_code: {type: string, nullable: true, minLength: 1, maxLength: 128}
+        retryable: {type: boolean, default: true}
+
+    LabelRecomputeRunItemRetryRequest:
+      type: object
+      additionalProperties: false
+      required: [expected_attempt_generation]
+      properties:
+        expected_attempt_generation: {type: integer, minimum: 1}
+
+    LabelRecomputeMutationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - recompute_run_id
+        - status
+        - candidate_fact_set_id
+        - candidate_manifest_sha256
+        - fact_namespace
+        - partition_count
+        - completed_partition_count
+        - failed_partition_count
+        - row_count
+        - audit_id
+        - outbox_event_id
+        - trace_id
+      properties:
+        recompute_run_id: {type: string}
+        status:
+          type: string
+          enum: [requested, running, candidate-complete, partial-failed, failed, blocked]
+        candidate_fact_set_id: {type: string}
+        candidate_manifest_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+        fact_namespace: {type: string}
+        partition_count: {type: integer, minimum: 1}
+        completed_partition_count: {type: integer, minimum: 0}
+        failed_partition_count: {type: integer, minimum: 0}
+        row_count: {type: integer, minimum: 0}
+        audit_id: {type: integer, minimum: 1}
+        outbox_event_id: {type: integer, minimum: 1}
+        trace_id: {type: string}
+
+    LabelRecomputeRunItemMutationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        - recompute_run_id
+        - recompute_run_item_id
+        - partition_id
+        - status
+        - attempt_generation
+        - row_count
+        - source_manifest_sha256
+        - result_manifest_sha256
+        - content_sha256
+        - run_status
+        - candidate_manifest_sha256
+        - audit_id
+        - outbox_event_id
+        - trace_id
+      properties:
+        recompute_run_id: {type: string}
+        recompute_run_item_id: {type: string}
+        partition_id: {type: string}
+        status: {type: string, enum: [queued, running, succeeded, failed]}
+        attempt_generation: {type: integer, minimum: 1}
+        row_count: {type: integer, minimum: 0}
+        source_manifest_sha256: {type: string, nullable: true, pattern: '^[0-9a-f]{64}$'}
+        result_manifest_sha256: {type: string, nullable: true, pattern: '^[0-9a-f]{64}$'}
+        content_sha256: {type: string, nullable: true, pattern: '^[0-9a-f]{64}$'}
+        run_status:
+          type: string
+          enum: [requested, running, candidate-complete, partial-failed, failed, blocked]
+        candidate_manifest_sha256:
+          type: string
+          nullable: true
+          pattern: '^[0-9a-f]{64}$'
+        audit_id: {type: integer, minimum: 1}
+        outbox_event_id: {type: integer, minimum: 1}
+        trace_id: {type: string}
+
+    LabelRecomputeMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: {$ref: "#/components/schemas/LabelRecomputeMutationResponse"}
+        meta: {$ref: "#/components/schemas/ApiMeta"}
+
+    LabelRecomputeRunItemMutationEnvelope:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: {$ref: "#/components/schemas/LabelRecomputeRunItemMutationResponse"}
+        meta: {$ref: "#/components/schemas/ApiMeta"}
+
     LabelFactSetCreateRequest:
       type: object
       additionalProperties: false
@@ -10735,6 +11299,17 @@ components:
           type: string
           minLength: 1
           maxLength: 1000
+        impact_cursor:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          pattern: '^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._:-]*$'
+        impact_limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
 
     LabelVersionTransitionRequest:
       type: object
@@ -10766,6 +11341,17 @@ components:
           type: string
           minLength: 1
           maxLength: 1000
+        impact_cursor:
+          type: string
+          nullable: true
+          minLength: 1
+          maxLength: 512
+          pattern: '^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._:-]*$'
+        impact_limit:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 50
 
     LabelVersionEnvironmentReference:
       type: object
@@ -10800,15 +11386,37 @@ components:
     LabelVersionLifecycleBlocker:
       type: object
       additionalProperties: false
-      required: [code, reference_type, environment]
+      required: [code, reference_type]
       properties:
         code: {type: string}
         reference_type:
           type: string
-          enum: [active-head, draining-deployment, in-flight-run]
+          enum: [active-head, draining-deployment, in-flight-run, downstream-impact, impact-scan]
         deployment_id: {type: string, nullable: true}
         run_id: {type: string, nullable: true}
-        environment: {type: string}
+        resource_id: {type: string, nullable: true}
+        environment: {type: string, nullable: true}
+
+    LabelVersionDownstreamImpact:
+      type: object
+      additionalProperties: false
+      required: [impact_key, impact_type, resource_id, status, reference_role, impact_disposition, details]
+      properties:
+        impact_key: {type: string}
+        impact_type:
+          type: string
+          enum: [fact-set, metric-result, report-document, data-asset, asset-partition, asset-materialization, task-version-release-head]
+        resource_id: {type: string}
+        status: {type: string, nullable: true}
+        reference_role:
+          type: string
+          enum: [target-version, source-version, frozen-metric-binding, payload-reference]
+        impact_disposition:
+          type: string
+          enum: [blocking, migration-required, historical-reference]
+        details:
+          type: object
+          additionalProperties: true
 
     LabelVersionDeprecationPreflight:
       type: object
@@ -10822,6 +11430,15 @@ components:
         - active_environment_references
         - draining_environment_references
         - in_flight_run_references
+        - downstream_impacts
+        - downstream_impact_total
+        - blocking_impact_total
+        - migration_required_impact_total
+        - historical_reference_total
+        - impact_next_cursor
+        - impact_scan_complete
+        - migration_evidence_required
+        - migration_evidence_satisfied
         - blockers
         - ready_for_transition
         - safe_stop_required
@@ -10846,6 +11463,18 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/LabelVersionInFlightRunReference"
+        downstream_impacts:
+          type: array
+          items:
+            $ref: "#/components/schemas/LabelVersionDownstreamImpact"
+        downstream_impact_total: {type: integer, minimum: 0}
+        blocking_impact_total: {type: integer, minimum: 0}
+        migration_required_impact_total: {type: integer, minimum: 0}
+        historical_reference_total: {type: integer, minimum: 0}
+        impact_next_cursor: {type: string, nullable: true}
+        impact_scan_complete: {type: boolean}
+        migration_evidence_required: {type: boolean}
+        migration_evidence_satisfied: {type: boolean}
         blockers:
           type: array
           items:
@@ -12447,7 +13076,7 @@ components:
     LabelMetricScope:
       type: object
       additionalProperties: false
-      required: [taxonomy_mode, source_label_version_ids, target_label_version_id, mapping_bundle_id, fact_set_generation, fact_as_of, metric_definition_versions, timezone, period_boundary, denominator_definition]
+      required: [taxonomy_mode, source_label_version_ids, target_label_version_id, mapping_bundle_id, fact_namespace, fact_set_id, fact_set_generation, fact_as_of, metric_definition_versions, timezone, period_boundary, denominator_definition]
       properties:
         taxonomy_mode:
           $ref: "#/components/schemas/LabelTaxonomyMode"
@@ -12469,6 +13098,23 @@ components:
           maxLength: 128
           nullable: true
           description: normalized 必填；native 为 null；recomputed 按 lineage 冻结。
+        mapping_bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          nullable: true
+          readOnly: true
+        fact_namespace:
+          type: string
+          minLength: 1
+          maxLength: 128
+        fact_set_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        fact_set_manifest_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          readOnly: true
         fact_set_generation:
           type: integer
           minimum: 1
@@ -12567,7 +13213,7 @@ components:
     InsightMetricAggregationResult:
       type: object
       additionalProperties: false
-      required: [metric_key, value, unit, sample_size]
+      required: [metric_key, value, unit, sample_size, result_status, reason_codes]
       properties:
         metric_key:
           type: string
@@ -12575,13 +13221,25 @@ components:
           maxLength: 128
         value:
           type: number
+          nullable: true
         unit:
           type: string
           minLength: 1
           maxLength: 64
         sample_size:
           type: integer
-          minimum: 1
+          minimum: 0
+        result_status:
+          type: string
+          enum: [value, not-applicable, zero-denominator, coverage-gap, recompute-required]
+          default: value
+        reason_codes:
+          type: array
+          uniqueItems: true
+          description: 受 result_status 约束的稳定原因码；value 必须为空，N/A 必须非空。
+          items:
+            type: string
+            enum: [LABEL_NOT_APPLICABLE, LABEL_DEPRECATED_NOT_APPLICABLE, ZERO_DENOMINATOR, COVERAGE_GAP, RECOMPUTE_REQUIRED, FACT_SET_EMPTY, SOURCE_DATA_MISSING, MAPPING_RECOMPUTE_REQUIRED]
     InsightMetricCompletion:
       type: object
       additionalProperties: false
@@ -12712,6 +13370,8 @@ components:
         - value
         - unit
         - sample_size
+        - result_status
+        - reason_codes
         - status
         - time_range
         - dimensions
@@ -12738,11 +13398,21 @@ components:
           type: string
         value:
           type: number
+          nullable: true
         unit:
           type: string
         sample_size:
           type: integer
-          minimum: 1
+          minimum: 0
+        result_status:
+          type: string
+          enum: [value, not-applicable, zero-denominator, coverage-gap, recompute-required]
+        reason_codes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            enum: [LABEL_NOT_APPLICABLE, LABEL_DEPRECATED_NOT_APPLICABLE, ZERO_DENOMINATOR, COVERAGE_GAP, RECOMPUTE_REQUIRED, FACT_SET_EMPTY, SOURCE_DATA_MISSING, MAPPING_RECOMPUTE_REQUIRED]
         formula:
           type: string
         owner:
@@ -12775,6 +13445,19 @@ components:
           uniqueItems: true
           items:
             type: string
+        comparison:
+          $ref: "#/components/schemas/MetricSnapshotComparison"
+        comparison_status:
+          type: string
+          enum: [comparable, structural-break]
+        comparison_reason_codes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        comparison_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
         scope_sha256:
           type: string
           pattern: '^[a-f0-9]{64}$'
@@ -12827,6 +13510,110 @@ components:
           type: boolean
         trace_id:
           type: string
+    MetricSnapshotComparisonAnchor:
+      type: object
+      additionalProperties: true
+      required: [metric_result_id, metric_key, dimensions, metric_definition_versions, time_window]
+      properties:
+        metric_result_id:
+          type: string
+        metric_key:
+          type: string
+        taxonomy_mode:
+          type: string
+          nullable: true
+        source_label_version_ids:
+          type: array
+          items:
+            type: string
+        target_label_version_id:
+          type: string
+          nullable: true
+        mapping_bundle_id:
+          type: string
+          nullable: true
+        mapping_bundle_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          nullable: true
+        fact_set_id:
+          type: string
+          nullable: true
+        fact_set_generation:
+          type: integer
+          minimum: 1
+          nullable: true
+        fact_set_manifest_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+          nullable: true
+        fact_as_of:
+          type: string
+          format: date-time
+          nullable: true
+        fact_as_of_rule:
+          type: string
+          nullable: true
+        timezone:
+          type: string
+          nullable: true
+        period_boundary:
+          type: string
+          nullable: true
+        denominator_definition:
+          type: string
+          nullable: true
+        definition_version:
+          type: string
+          nullable: true
+        metric_definition_versions:
+          type: object
+          additionalProperties:
+            type: string
+        dimensions:
+          type: object
+          additionalProperties: true
+        time_range:
+          type: string
+        time_window:
+          type: object
+          additionalProperties: true
+    MetricSnapshotComparison:
+      type: object
+      additionalProperties: false
+      required: [schema_version, baseline, current, comparison_status, reason_codes, comparison_sha256, continuous_trend_allowed]
+      properties:
+        schema_version:
+          type: string
+          enum: [auris.metric-snapshot-comparison/1]
+        baseline:
+          allOf:
+            - $ref: "#/components/schemas/MetricSnapshotComparisonAnchor"
+          nullable: true
+        current:
+          $ref: "#/components/schemas/MetricSnapshotComparisonAnchor"
+        comparison_status:
+          type: string
+          enum: [comparable, structural-break]
+        reason_codes:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        comparison_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
+        continuous_trend_allowed:
+          type: boolean
+    MetricSnapshotComparisonResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/MetricSnapshotComparison"
+        meta:
+          $ref: "#/components/schemas/InsightResponseMeta"
     InsightMetricDimensions:
       type: object
       additionalProperties: false
@@ -12899,10 +13686,22 @@ components:
           type: string
           pattern: '^[a-f0-9]{64}$'
           description: 所有引用 MetricResult 的共同冻结 scope hash；报告不得重新查询最新事实。
+        report_metric_binding_id:
+          type: string
+        report_metric_binding_content_sha256:
+          type: string
+          pattern: '^[a-f0-9]{64}$'
         metric_results:
           type: array
           items:
             $ref: "#/components/schemas/MetricResult"
+        report_document:
+          type: object
+          additionalProperties: true
+          description: >
+            BFF 冻结的受治理报告正文；generated 后预览和导出必须逐项校验其
+            metric_result_ids 顺序、result_status/reason_codes、comparability disposition
+            及 report binding hashes；N/A 不得转写为 0，禁止回退本地 fixture。
         evidence_refs:
           type: array
           items:

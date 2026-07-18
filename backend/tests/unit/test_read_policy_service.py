@@ -46,6 +46,34 @@ def test_registered_sensitive_resource_requires_declared_role() -> None:
     assert getattr(exc_info.value, "code", None) == "FORBIDDEN"
 
 
+def test_label_recompute_trace_objects_use_a_sensitive_read_policy() -> None:
+    for object_type in ("label_recompute_run", "label_recompute_run_item"):
+        assert trace_reference_collection(object_type) == "label_recompute_runs"
+        assert not trace_reference_is_visible(
+            {"type": object_type, "id": "recompute-hidden"},
+            _context("annotator"),
+        )
+        for role in ("project_admin", "model_engineer", "system"):
+            assert trace_reference_is_visible(
+                {"type": object_type, "id": "recompute-visible"},
+                _context(role),
+            )
+
+
+def test_oidc_identity_trace_object_uses_an_admin_only_sensitive_policy() -> None:
+    assert trace_reference_collection("oidc_identity") == "oidc_identities"
+    for role in ("annotator", "model_engineer", "asset_manager"):
+        assert not trace_reference_is_visible(
+            {"type": "oidc_identity", "id": "identity-hidden"},
+            _context(role),
+        )
+    for role in ("project_admin", "system"):
+        assert trace_reference_is_visible(
+            {"type": "oidc_identity", "id": "identity-visible"},
+            _context(role),
+        )
+
+
 def test_voiceprint_sensitive_reads_require_explicit_privileged_role() -> None:
     for role in ("annotator", "model_engineer", "asset_manager"):
         with pytest.raises(ApiError) as exc_info:
@@ -318,7 +346,10 @@ def test_all_static_audit_and_outbox_object_types_have_trace_policies() -> None:
         ("label_fact_set_head_event", "label_aggregates"),
         ("label_mapping_bundle", "label_versions"),
         ("label_mapping_version", "label_versions"),
+        ("label_recompute_run", "label_recompute_runs"),
+        ("label_recompute_run_item", "label_recompute_runs"),
         ("label_version_deprecation_preflight", "label_versions"),
+        ("oidc_identity", "oidc_identities"),
         ("release_bundle_head_event", "task_versions"),
     ],
 )

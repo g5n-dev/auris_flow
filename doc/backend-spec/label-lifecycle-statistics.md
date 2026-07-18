@@ -174,9 +174,13 @@ InsightReport 保存 `metric_result_ids[] + metric_scope_sha256`，只读取这�
 
 无 replacement 时：必须执行 impact preflight，列出环境、运行、资产、报告与下游 TaskVersion；生产停用需要自然人高风险审批与 safe-stop。原生历史保留，normalized 形成 coverage-gap，不能补 0。
 
+impact preflight 使用 scope 内稳定 `impact_type:resource_id` 游标分页，单页最多 100 条、服务端单类扫描上限 5000 条。至少枚举目标 FactSet、source/target Label MetricResult scope、冻结 ReportDocument metric binding，以及 payload 中可识别 label version 指针的数据资产、分区、物化和 TaskVersion Release Head。每项明确分类为 `blocking/migration-required/historical-reference`：冻结 MetricResult/Report 和已退出 Head 的 FactSet 仅作历史引用提示，不阻断无 replacement retire，也不改写内容；当前 FactSet Head、candidate/validated/approved FactSet、发布中的下游资产与 TaskVersion Release Head 属于 blocking，必须先切换/终止；无法完整扫描时 fail-closed。transition 写接口会重新扫描，不能只依赖客户端预检结果。
+
 `POST /api/v1/label-versions/{id}/publish` 只保留为兼容 adapter：它必须创建/委托 ReleaseDeployment command，不能直接改生产 Head，也不能成为第二个发布真相源。
 
 run create、deployment ACK、drain/deprecate、completion receipt 并发时，以 Head 行锁/generation CAS 和冻结 Manifest 决定唯一终态。完成回执校验受理时的 Manifest，而不是要求完成时制品仍为当前 Head。
+
+Release Bundle activation ledger 采用半开区间 `[effective_from,effective_to)`。promote/rollback 的 Head CAS、上一代 `effective_to` 一次性闭合和新一代事件追加必须在同一事务；边界严格相等，因此同 scope/environment 连续且不重叠。事件除 `effective_to: NULL -> boundary` 外不可更新或删除；content hash 固化激活起点和版本指针，闭合字段不参与该不可变哈希。
 
 ## 10. Fact、人工打标与 FactSet
 
@@ -195,6 +199,14 @@ tenant/project + fact_namespace + subject kind/id
 
 full recompute 写独立 candidate namespace 与完整 Asset/FactSet Manifest。批准时在一个事务锁定 FactSet/Asset Head expected generations、验证完整分区和 SHA，再各执行一次 CAS。查询只能看到整套旧或整套新 Manifest。
 
+`0040_label_recomputation_fact_sets` 已落地真实 full recompute 生产链路：
+`LabelRecomputeRun/RunItem` 冻结目标版本、可选 bundle、源 FactSet Head generation/manifest、
+cutoff、分区/资产范围、覆盖和预算；分区完成只接受绑定内部执行的持久化终态回执。BFF 从
+实际 Observation→Aggregate→append-only LabelFact lineage 计算行数和 partition/source/result/content
+SHA，API 不接收调用方声明的 row_count/manifest SHA。候选 FactSet 在全部分区成功前不可 validate；
+validate/approve/promote 每次重新查询实际 Item 与 Fact 行，缺分区、额外行或哈希漂移一律阻断。
+底层执行仅作为内部 Dagster adapter 映射，业务 API 不暴露 Dagster run 或画布。
+
 ## 11. 事件、隔离与审计
 
 | 事件 | 最小 payload |
@@ -203,7 +215,8 @@ full recompute 写独立 candidate namespace 与完整 Asset/FactSet Manifest。
 | `label_version.deprecated` | version/replacement/bundle、artifact timestamp、reason、Audit/Trace |
 | `label_mapping_bundle.published` | source set、target、edge IDs、compiler version、canonical SHA、approver、Trace |
 | `label_fact.created` | logical key/revision、label/version、source、occurred/recorded times、evidence、Trace |
-| `label_recomputation.requested` | target/bundle、source Head generations、partitions、fact cutoff、budget、Trace |
+| `label_recompute_run.requested` | target/bundle、source FactSet Head generation/manifest、partitions、fact cutoff、coverage/budget、Trace |
+| `label_recompute_run_item.succeeded/failed/retried` | run/item/partition、attempt、服务端计算 row count 与 source/result/content SHA、可信回执引用、Trace |
 | `label_fact_set.promoted` | old/new FactSet/Asset generations、manifest SHA、approval、Trace |
 | `insight_metric.materialized` | mode/scope SHA、source SHA、result IDs/hashes、comparability、Trace |
 
@@ -215,7 +228,7 @@ full recompute 写独立 candidate namespace 与完整 Asset/FactSet Manifest。
 
 迁移顺序固定为：Expand nullable 强表 → Dual-write → 可重入 Backfill/Shadow → 按 scope Read switch → orphan/旧写为 0 后 Contract。生产不 downgrade 已写新数据的 migration；以 forward migration 放宽或补偿。删除旧列/表另立 ADR。
 
-`0037_label_fact_logical_active_heads` 是 Contract 修正：兼容 `active_slot` 唯一索引从 subject/label 改为 namespace/`logical_key_sha`。因此同一主体、同一标签的两个不同事件可各自拥有 Head，同一逻辑事件仍只能有一个 active revision。若已经写入这类多事件 Head，downgrade 会显式失败，必须用 forward compensation，不能把真实事件重新压成一条。
+`0037_label_fact_logical_active_heads` 先把兼容 `active_slot` 唯一索引从 subject/label 修正为 namespace/`logical_key_sha`，因此同一主体、同一标签的不同事件可分别拥有 Head。`0039_label_fact_append_only_contract` 再移除 Fact 行上的 current 唯一索引，把 `LabelFactHead` 设为唯一 current 投影，并安装 INSERT/UPDATE/DELETE 数据库守卫：升级原样保留既有 `active/superseded` 行，新行只能写 `recorded/NULL`，任何 Fact UPDATE/DELETE 都失败。Contract 前必须验证 revision 从 1 连续、supersedes 只指同链前一版、Head 指向最新 revision；若降级会要求改写新 `recorded` 历史，则显式失败并要求 forward compensation。
 
 必测：
 
@@ -231,7 +244,8 @@ full recompute 写独立 candidate namespace 与完整 Asset/FactSet Manifest。
 
 ## 13. 请求、结果与失败示例
 
-以下路径是冻结目标契约；在对应 FastAPI 工作包合入前不属于 live runtime。
+本节同时包含冻结目标契约与已落地路径；以 OpenAPI 和 FastAPI runtime drift 门禁为准。
+`/label-recompute-runs` 及其 Item completion/retry 路径已经是 live runtime。
 
 ### 13.1 Mapping relation
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC
 from types import SimpleNamespace
 
 import pytest
@@ -81,7 +82,7 @@ def test_bootstrap_appends_generation_one_activation_ledger_event(client, auth_h
         assert event.actor_id == "u_admin_001"
         assert event.root_trace_id
         assert len(event.content_sha256) == 64
-        assert event.payload["head_event_schema"] == "release-bundle-head-event/v1"
+        assert event.payload["head_event_schema"] == "release-bundle-head-event/v2"
         assert release_head_event_hash_document(event)
         assert release_head_event_content_sha256(event) == event.content_sha256
 
@@ -163,11 +164,19 @@ def test_rollback_ack_backfills_legacy_anchor_and_appends_receipt_bound_event(cl
         ]
         anchor, rollback = events
         assert anchor.payload["legacy_anchor_backfill"] is True
+        assert anchor.effective_to == rollback.effective_from
+        assert rollback.effective_to is None
+        assert anchor.payload["interval_semantics"] == "[effective_from,effective_to)"
+        assert rollback.payload["previous_head_event_id"] == anchor.head_event_id
+        assert rollback.payload["previous_interval_closed_at"] == (
+            rollback.effective_from.replace(tzinfo=UTC).isoformat()
+        )
         assert rollback.previous_generation == 1
         assert rollback.command_id
         assert rollback.completion_receipt_id == f"receipt-{rollback.command_id}"
         assert rollback.old_deployment_id == "rd_default_stable_target"
         assert rollback.new_deployment_id == "rd_default_stable_target"
+        assert release_head_event_content_sha256(anchor) == anchor.content_sha256
         assert release_head_event_content_sha256(rollback) == rollback.content_sha256
 
     head_response = client.get(
@@ -178,3 +187,6 @@ def test_rollback_ack_backfills_legacy_anchor_and_appends_receipt_bound_event(cl
     head_data = head_response.json()["data"]
     assert head_data["ledger_health"]["status"] == "consistent"
     assert [item["generation"] for item in head_data["activation_timeline"]] == [1, 2]
+    first_interval, current_interval = head_data["activation_timeline"]
+    assert first_interval["effective_to"] == current_interval["effective_from"]
+    assert current_interval["effective_to"] is None

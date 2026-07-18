@@ -16,6 +16,7 @@ from app.models import (
     LabelAggregationRun,
     LabelExtractionRun,
     LabelFact,
+    LabelFactHead,
     LabelNode,
     LabelTaxonomySuggestion,
     LabelVersion,
@@ -455,9 +456,18 @@ def test_l2_fact_can_never_supersede_active_human_fact(client) -> None:
         session.flush()
 
         assert retained.fact_id == human_fact.fact_id
-        assert human_fact.status == "active"
+        assert human_fact.status == "recorded"
+        assert human_fact.active_slot is None
         assert human_fact.authority == "human-confirmed"
         assert human_fact.value_json is True
+        assert human_fact.aggregate_id is None
+        assert human_fact.payload["reviewed_aggregate_id"] == human_aggregate.aggregate_id
+        head = session.scalar(
+            select(LabelFactHead).where(LabelFactHead.current_fact_id == human_fact.fact_id)
+        )
+        assert head is not None
+        assert head.current_revision == human_fact.revision == 1
+        assert head.generation == 1
         assert session.query(LabelFact).count() == 1
 
 

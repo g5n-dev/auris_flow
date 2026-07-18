@@ -349,10 +349,11 @@ Qdrant payload 必须包含：
 | `human_review.decision.created` | 单个候选级人审任务形成唯一终态。 | `decision_id`、`review_task_id`、显式 `target_refs`、decision、field diff、actor、继承的根 `trace_id/source_trace_id` 与本次 `action_trace_id`。 |
 | `human_review_decision_batch.completed` | 低风险同 cohort 批量决策完成。 | `batch_id`、cohort、`counts`、逐项 `success/skipped/failed` 与原因码。 |
 | `label_fact.created` | Human Loop 接受/修改、L2 安全门禁自动接受或 approved recompute 物化。 | `fact_id`、logical key/revision、稳定 label/version、aggregate/human-decision/recompute-item 三选一 source、`fact_occurred_at/recorded_at`、supersedes、evidence/content SHA、FactSet namespace、根/action Trace。 |
-| `label_version.deprecation-requested` | 自然人提交制品废弃并完成 impact preflight。 | version/replacement、`mapping_bundle_id`、active/draining 环境与在途运行、expected resource version、approval、mutation/root Trace。 |
+| `label_version.deprecation-requested` | 自然人提交制品废弃并完成 impact preflight。 | version/replacement、`mapping_bundle_id`、active/draining 环境与在途运行、分页 downstream impact/scan health、迁移证据状态、expected resource version、approval、mutation/root Trace。 |
 | `label_version.deprecated` | 所有受保护环境已停止引用，制品状态与审计/Outbox 同事务提交。 | version/replacement/bundle、artifact timestamp、reason、resource version、Audit/root Trace。 |
 | `label_mapping_bundle.published` | 完整 edge 闭包编译、校验并经自然人批准。 | source version set、target、edge IDs、compiled path SHA、compiler version、canonical SHA、approver、Trace。 |
-| `label_recomputation.requested` | split/语义变化请求候选重算。 | target version/bundle、source FactSet/Asset Head generations、partitions、fact cutoff、budget、Manifest SHA、Trace。 |
+| `label_recompute_run.requested` | split/语义变化请求候选重算。 | target version/bundle、source FactSet Head generation/manifest、candidate FactSet/独立 namespace、partitions/asset scope、fact cutoff、coverage/budget、Trace；Dagster 仅保存在内部 execution mapping，不进入业务 API。 |
+| `label_recompute_run_item.succeeded` / `label_recompute_run_item.failed` / `label_recompute_run_item.retried` | 可信 completion receipt 通过或失败、或对失败分区执行 attempt CAS 重试。 | run/item/partition、attempt、receipt、服务端从实际 Observation/Aggregate/Fact lineage 重算的 row count 与 source/result/content SHA、错误码、Trace；禁止携带或相信调用方自报 manifest/count。 |
 | `label_fact_set.promoted` | 完整 candidate FactSet/Asset Manifest 经审批后单事务 CAS。 | old/new FactSet 与 Asset Head generations、manifest SHA、approval、rollback target、Trace。 |
 | `insight_metric.materialized` | 受信回执与冻结 scope/Manifest 一致并追加不可变 MetricResult。 | taxonomy mode、source/target versions、bundle、FactSet generation、fact_as_of、definition/scope/source/content SHA、result IDs、comparability、Trace。 |
 | `feedback_example.created` | 人工接受、修改或拒绝形成反馈样本。 | `feedback_example_id`、target、feedback type、reason、field diff、`gold_status=candidate`。 |
@@ -374,6 +375,7 @@ Qdrant payload 必须包含：
 | `release_deployment.command-blocked` | ACK 到达时 Bundle、指针或 expected head CAS 已漂移。 | command/deployment/action、blockers、receipt；不改变有效 head，active slot 关闭。 |
 | `release_deployment.command-failed` | 受信执行回执明确失败。 | command/deployment/action、failure receipt/error；不改变有效 head，部署回到可解释 blocked。 |
 | `release_bundle_head.bootstrapped` | 自然人项目管理员确认首次 production LKG。 | 初始 head/deployment/bundle、generation=1、bootstrapped=true、冻结版本和 Trace；仅无 head 且可重验的 blocked Bundle。 |
+| `release_bundle_head.activation-recorded` | bootstrap/promote/rollback 在 Head CAS 同事务追加 activation interval。 | scope/environment/generation、old/new pointer、`[effective_from,effective_to)`、command/receipt、actor/root Trace；切换时上一 event `effective_to` 必须等于新 event `effective_from`。 |
 | `release_deployment.monitor-sample-recorded` | system 写入未触发硬退化的类型化在线样本。 | sample ID/hash/window、`stable_window_complete`、typed metrics、`status=monitoring`、Trace；稳定窗口事实同步写入权威 monitor metrics，但不自动 promote。 |
 | `release_deployment.auto-rollback-requested` | 在线样本命中硬阈值且 Bundle 有稳定锁定回滚目标。 | deployment/target、violations、sample、rollback command/run；当前 `status=materializing`、rollout=0，尚未声称回滚完成。 |
 | `release_deployment.auto-rollback-blocked` | 命中硬阈值但缺少/无效回滚目标。 | violations、sample ID、`status=blocked`、`automatic_action=safe-stop-blocked`、rollout=0。 |
@@ -413,6 +415,10 @@ Qdrant payload 必须包含：
 - 请求体由 `request_mapping_ref` 指向版本化映射，不在事件中存完整敏感 payload。
 - 回写响应保存摘要、状态码和回执 ID；敏感响应体脱敏后保存。
 - 同一 `idempotency_key` 的重复回写必须被识别为同一业务结果。
+- 真实回写使用 HMAC v2；`method/path/canonical query/tenant_id/project_id/idempotency_key/epoch timestamp/nonce/key-id/body SHA-256` 必须进入同一规范化签名消息。
+- 请求头使用 `X-Auris-Signature-Version: v2`、`X-Auris-Signature: v2=<hex>`、`X-Auris-Key-Id`、`X-Auris-Timestamp`、`X-Auris-Nonce` 和 `X-Auris-Signature-Mode: hmac-sha256-v2`；旧 `X-Auris-Signature-Id` 不再承担认证 key-id 语义。
+- 接收端必须先做常量时间验签，再在共享原子存储中声明 `key-id + nonce`；超出时间窗、重复 nonce、未知或 retired key 一律拒绝。轮换期间仅 active key 可签名，active 与未过期 overlap key 可验签。
+- 同一幂等键和相同 body hash 可返回原回执；同一幂等键绑定不同 body hash 必须返回 `409`，不得覆盖原业务结果。
 
 ## 6. Dagster RunRequest 映射
 
@@ -624,7 +630,7 @@ resolution
 2. `POST /api/v1/label-extraction-runs` -> `agent_run.requested` -> 真实模型回执 -> `label_observation.created` -> `label_extraction_run.materialized`（同事务自动创建确定性 AggregationRun）-> `label_aggregate.created` / `label_taxonomy_suggestion.created` -> Human Loop 或 L2 `label_fact.created`；客户端不得再次 POST 同输入聚合。
 3. `human_review.decision.created` -> `feedback_example.created` / `badcase.created` -> `POST /api/v1/label-optimization-trigger-scans` -> `label_optimization.trigger_scan.completed` -> `agent_run.requested` -> `prompt_version.created` -> 锁定 EvalRun -> `release_deployment.created` -> `release_deployment.command-requested` -> 受信 `release_deployment.command-acknowledged` 或 blocked/failed -> 在线监控 -> promote/rollback command 链。旧 `POST /api/v1/label-optimization-runs` 继续作为兼容入口，但不代表发布完成。
 4. LabelVersion 退出：deprecation preflight -> `label_version.deprecation-requested` -> 各环境 ReleaseCommand 切换 Head/旧 activation draining -> 在途运行完成或显式取消 -> `label_version.deprecated`；任何一步都不改历史事实或快照。
-5. 跨版本统计：mapping edge/bundle 编译审批 -> `label_mapping_bundle.published` -> `POST /api/v1/insights/metric-runs` -> `insight_metric.materialized` -> Report 引用固定 metric result IDs/scope hash。split 走 `label_recomputation.requested` -> candidate FactSet -> `label_fact_set.promoted` -> 新指标快照。
+5. 跨版本统计：mapping edge/bundle 编译审批 -> `label_mapping_bundle.published` -> `POST /api/v1/insights/metric-runs` -> `insight_metric.materialized` -> Report 引用固定 metric result IDs/scope hash。split 走 `label_recompute_run.requested` -> 逐分区可信回执 -> candidate FactSet validate/approve -> `label_fact_set.promoted` -> 新指标快照；promotion 前 production Head 不可见候选，rollback 只追加 Head generation，不删除候选事实。
 6. `POST /api/v1/knowledge-indexes/{id}/build-runs` -> `qdrant.index_requested` -> `qdrant.chunking_completed` -> `qdrant.embedding_completed` -> `qdrant.upsert_succeeded` -> `qdrant.quality_check_completed`。
 7. `POST /api/v1/data-assets/{asset_key}/backfills` -> `dagster.backfill.requested` -> 分区运行事件 -> 回填结果写入候选资产版本。
 8. 输出节点触发 `external_callback.requested` -> `external_callback.sent` -> `external_callback.succeeded` 或 `external_callback.dead_lettered`。

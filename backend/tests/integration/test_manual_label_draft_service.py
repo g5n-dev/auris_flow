@@ -465,20 +465,20 @@ def test_submit_current_draft_materializes_human_decision_and_bitemporal_fact() 
         assert decision.status == "success"
         assert decision.payload["decision"] == "accepted"
         assert decision.payload["source"] == "manual-label-draft"
+        aggregate_ref = decision.payload["affected_objects"][0]["id"]
         assert (
-            decision.payload["after_json"]["targets"][f"label_aggregates:{fact.aggregate_id}"][
-                "value"
-            ]
+            decision.payload["after_json"]["targets"][f"label_aggregates:{aggregate_ref}"]["value"]
             is True
         )
+        assert fact.aggregate_id is None
         assert fact.human_review_decision_id == decision.decision_id
         assert fact.review_decision_id == decision.decision_id
         assert fact.authority == "human-confirmed"
         assert fact.source_kind == "human-decision"
         assert fact.fact_namespace == "production"
         assert fact.revision == 1
-        assert fact.status == "active"
-        assert fact.active_slot == "active"
+        assert fact.status == "recorded"
+        assert fact.active_slot is None
         assert fact.label_version_id == VERSION_V1
         assert fact.label_id == LABEL_V1
         assert fact.value_json is True
@@ -576,7 +576,8 @@ def test_same_subject_label_on_distinct_events_keeps_two_authoritative_heads() -
             )
         )
         assert {fact.event_or_segment_id for fact in facts} == {"segment-17", "segment-18"}
-        assert {fact.status for fact in facts} == {"active"}
+        assert {fact.status for fact in facts} == {"recorded"}
+        assert {fact.active_slot for fact in facts} == {None}
         assert len({fact.logical_key_sha for fact in facts}) == 2
         assert (
             _count(
@@ -826,6 +827,25 @@ def test_rebase_failures_are_scope_bound_and_atomic() -> None:
             )
         session.rollback()
         assert scope_error.value.code == "MANUAL_LABEL_DRAFT_NOT_FOUND"
+
+    with SessionLocal() as session:
+        with pytest.raises(ApiError) as outside_mapping_path:
+            rebase_manual_label_draft(
+                session,
+                _ctx("negative-outside-mapping-path"),
+                audio_session_id=AUDIO_SESSION_ID,
+                annotation_id="annotation-rebase-negative",
+                request=_preview_request(target_label_id=LABEL_V2_NUMERIC),
+            )
+        session.rollback()
+        assert outside_mapping_path.value.code == "MANUAL_LABEL_REBASE_TARGET_OUTSIDE_PATH"
+        assert outside_mapping_path.value.details == [
+            {
+                "mapping_bundle_id": BUNDLE_V1_V2,
+                "path_target_label_ids": [LABEL_V2],
+                "target_label_id": LABEL_V2_NUMERIC,
+            }
+        ]
 
     with SessionLocal.begin() as session:
         numeric_preview = rebase_manual_label_draft(

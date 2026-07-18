@@ -12,6 +12,7 @@ from app.models import (
     GoldSetVersion,
     LabelCalibrationVersion,
     LabelFact,
+    LabelFactHead,
     LabelVersion,
     PromptAsset,
     PromptVersion,
@@ -442,5 +443,9 @@ def test_server_calibrated_independent_sources_can_auto_accept_low_risk_l2_fact(
     with SessionLocal() as session:
         fact = session.query(LabelFact).filter_by(aggregate_id=aggregate_id).one()
         assert fact.authority == "l2-auto-accepted"
-        assert fact.status == "active"
+        assert fact.status == "recorded"
+        assert fact.active_slot is None
         assert fact.value_json is True
+        fact_head = session.query(LabelFactHead).filter_by(current_fact_id=fact.fact_id).one()
+        assert fact_head.current_revision == fact.revision == 1
+        assert fact_head.generation == 1

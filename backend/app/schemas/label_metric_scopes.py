@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import Literal
 
@@ -16,6 +17,43 @@ from pydantic import (
 
 IDENTIFIER_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$"
 NAMESPACE_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{1,127}$"
+MetricResultStatus = Literal[
+    "value",
+    "not-applicable",
+    "zero-denominator",
+    "coverage-gap",
+    "recompute-required",
+]
+MetricResultReasonCode = Literal[
+    "LABEL_NOT_APPLICABLE",
+    "LABEL_DEPRECATED_NOT_APPLICABLE",
+    "ZERO_DENOMINATOR",
+    "COVERAGE_GAP",
+    "RECOMPUTE_REQUIRED",
+    "FACT_SET_EMPTY",
+    "SOURCE_DATA_MISSING",
+    "MAPPING_RECOMPUTE_REQUIRED",
+]
+RESULT_REASON_CODES_BY_STATUS: dict[str, set[str]] = {
+    "value": set(),
+    "not-applicable": {
+        "LABEL_NOT_APPLICABLE",
+        "LABEL_DEPRECATED_NOT_APPLICABLE",
+    },
+    "zero-denominator": {"ZERO_DENOMINATOR"},
+    "coverage-gap": {"COVERAGE_GAP", "SOURCE_DATA_MISSING", "FACT_SET_EMPTY"},
+    "recompute-required": {"RECOMPUTE_REQUIRED", "MAPPING_RECOMPUTE_REQUIRED"},
+}
+
+
+def validate_result_reason_semantics(status: str, reasons: list[str]) -> None:
+    allowed = RESULT_REASON_CODES_BY_STATUS[status]
+    if status == "value":
+        if reasons:
+            raise ValueError("value result must not include outcome reason_codes")
+        return
+    if not reasons or any(reason not in allowed for reason in reasons):
+        raise ValueError(f"reason_codes do not match result_status={status}")
 
 
 class StrictLabelMetricScopeModel(BaseModel):
@@ -104,6 +142,8 @@ class LabelMetricResultMaterializeRequest(StrictLabelMetricScopeModel):
     value: JsonValue
     unit: StrictStr = Field(min_length=1, max_length=64)
     sample_size: StrictInt = Field(ge=0)
+    result_status: MetricResultStatus = "value"
+    reason_codes: list[MetricResultReasonCode] = Field(default_factory=list, max_length=64)
     source_run_id: StrictStr = Field(
         min_length=2,
         max_length=128,
@@ -173,6 +213,14 @@ class LabelMetricResultMaterializeRequest(StrictLabelMetricScopeModel):
             raise ValueError("metric definition version keys and values must not be blank")
         return {key.strip(): values[key].strip() for key in sorted(values)}
 
+    @field_validator("reason_codes")
+    @classmethod
+    def reasons_are_unique_and_non_blank(cls, values: list[str]) -> list[str]:
+        normalized = [item.strip() for item in values]
+        if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
+            raise ValueError("reason_codes must be unique and non-blank")
+        return normalized
+
     @field_validator("fact_as_of")
     @classmethod
     def fact_cutoff_is_aware(cls, value: datetime) -> datetime:
@@ -192,4 +240,24 @@ class LabelMetricResultMaterializeRequest(StrictLabelMetricScopeModel):
             )
         if self.taxonomy_mode == "recomputed" and target is None:
             raise ValueError("recomputed mode requires target_label_version_id")
+        value = self.value
+        validate_result_reason_semantics(self.result_status, list(self.reason_codes))
+        finite_value = (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+        )
+        if self.result_status == "value":
+            if not finite_value or self.sample_size < 1:
+                raise ValueError("value result requires finite value and sample_size >= 1")
+        elif self.result_status == "coverage-gap":
+            if not self.reason_codes:
+                raise ValueError("coverage-gap requires reason_codes")
+            if value is None:
+                if self.sample_size != 0:
+                    raise ValueError("null coverage-gap requires sample_size = 0")
+            elif not finite_value or self.sample_size < 1:
+                raise ValueError("numeric coverage-gap requires finite value and samples")
+        elif value is not None or self.sample_size != 0 or not self.reason_codes:
+            raise ValueError("non-value result requires value=null, sample_size=0 and reason_codes")
         return self

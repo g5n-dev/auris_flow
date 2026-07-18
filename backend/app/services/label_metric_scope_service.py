@@ -422,9 +422,9 @@ def lock_label_metric_run_scope(
             metric_result_id=f"scope-lock-{sha256_document([metric_key])[:24]}",
             metric_key=metric_key,
             metric_family=metric_family,
-            value=None,
+            value=0,
             unit=unit,
-            sample_size=0,
+            sample_size=1,
             source_run_id="scope-lock-placeholder",
             taxonomy_mode=scope_request.taxonomy_mode,
             source_label_version_ids=list(scope_request.source_label_version_ids),
@@ -554,6 +554,19 @@ def materialize_label_metric_result(
                 details=[{"metric_key": request.metric_key}],
             )
 
+    if request.result_status != "value":
+        outcome_comparability = {
+            "coverage-gap": "partial",
+            "recompute-required": "structural-break",
+            "not-applicable": "not-applicable",
+            "zero-denominator": "not-applicable",
+        }[request.result_status]
+        comparability = max(
+            (comparability, outcome_comparability),
+            key=lambda item: _COMPARABILITY_SEVERITY[item],
+        )
+        reason_codes = list(dict.fromkeys([*reason_codes, *request.reason_codes]))
+
     source_manifest = {
         "fact_as_of": _iso(fact_set.fact_as_of),
         "fact_namespace": fact_set.fact_namespace,
@@ -621,6 +634,8 @@ def materialize_label_metric_result(
         "metric_key": request.metric_key,
         "metric_result_id": request.metric_result_id,
         "sample_size": request.sample_size,
+        "result_status": request.result_status,
+        "reason_codes": list(request.reason_codes),
         "snapshot_role": "aggregation",
         "source_run_id": request.source_run_id,
         "status": "materialized",
@@ -687,6 +702,8 @@ def materialize_label_metric_result(
         payload={
             "fact_set_head_id": head.fact_set_head_id,
             "mapping_path_sha256s": path_hashes,
+            "reason_codes": list(request.reason_codes),
+            "result_status": request.result_status,
             "schema_version": "auris.metric-result-label-scope/1",
             "source_manifest": source_manifest,
         },

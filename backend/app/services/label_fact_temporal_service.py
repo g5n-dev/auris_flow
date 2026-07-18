@@ -322,7 +322,7 @@ def _fact_content_document(
 ) -> dict[str, Any]:
     return {
         "action_trace_id": ctx.trace_id,
-        "aggregate_id": request.aggregate_id,
+        "aggregate_id": request.aggregate_id if request.source_kind == "aggregate" else None,
         "assertion_slot": request.assertion_slot,
         "authority": request.authority,
         "event_or_segment_id": request.event_or_segment_id,
@@ -386,9 +386,9 @@ def append_label_fact_revision(
 ) -> dict[str, Any]:
     """Append one authoritative revision and atomically advance its logical Head.
 
-    During the 0035 Expand window the legacy ``status/active_slot`` projection is
-    still maintained for old readers. As-of reads in this module ignore that
-    mutable compatibility projection and resolve revisions by ``recorded_at``.
+    A Fact row is immutable after INSERT.  Supersession is represented only by
+    ``supersedes_fact_id`` plus the mutable ``LabelFactHead`` pointer; as-of
+    reads resolve revisions by ``recorded_at`` and never rewrite history.
     """
 
     logical_key_sha256 = label_fact_logical_key_sha256(ctx, request)
@@ -510,17 +510,11 @@ def append_label_fact_revision(
         ).hex[:24]
     )
 
-    # 0035 intentionally keeps the old single-active index. This is the only
-    # compatibility mutation and is removed by the later Contract migration.
-    if current is not None:
-        current.status = "superseded"
-        current.active_slot = None
-
     fact = LabelFact(
         fact_id=fact_id,
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
-        aggregate_id=request.aggregate_id,
+        aggregate_id=request.aggregate_id if request.source_kind == "aggregate" else None,
         supersedes_fact_id=supersedes_fact_id,
         fact_namespace=request.fact_namespace,
         logical_key_sha=logical_key_sha256,
@@ -544,13 +538,16 @@ def append_label_fact_revision(
         value_type=request.value_type,
         value_json=request.value,
         authority=request.authority,
-        status="active",
-        active_slot="active",
+        status="recorded",
+        active_slot=None,
         review_decision_id=request.human_review_decision_id,
         trace_id=root_trace_id,
         payload={
             "action_trace_id": ctx.trace_id,
             "logical_key_document": _logical_key_document(ctx, request),
+            "reviewed_aggregate_id": (
+                request.aggregate_id if request.source_kind == "human-decision" else None
+            ),
             "root_trace_id": root_trace_id,
             "source_aggregate_hash": aggregate.deterministic_hash,
         },

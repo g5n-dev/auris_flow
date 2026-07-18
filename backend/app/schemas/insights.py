@@ -5,7 +5,12 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.schemas.label_metric_scopes import LabelMetricRunScopeRequest
+from app.schemas.label_metric_scopes import (
+    LabelMetricRunScopeRequest,
+    MetricResultReasonCode,
+    MetricResultStatus,
+    validate_result_reason_semantics,
+)
 
 InsightReportType = Literal[
     "business",
@@ -67,9 +72,11 @@ class InsightMetricAggregationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metric_key: str = Field(min_length=1, max_length=128)
-    value: float
+    value: float | None
     unit: str = Field(min_length=1, max_length=64)
-    sample_size: int = Field(ge=1)
+    sample_size: int = Field(ge=0)
+    result_status: MetricResultStatus = "value"
+    reason_codes: list[MetricResultReasonCode] = Field(default_factory=list, max_length=64)
 
     @field_validator("metric_key", "unit")
     @classmethod
@@ -79,12 +86,31 @@ class InsightMetricAggregationResult(BaseModel):
             raise ValueError("value must not be blank")
         return normalized
 
-    @field_validator("value")
+    @field_validator("reason_codes")
     @classmethod
-    def finite_value(cls, value: float) -> float:
-        if not math.isfinite(value):
-            raise ValueError("value must be finite")
-        return value
+    def unique_reasons(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
+            raise ValueError("reason_codes must be unique and non-blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def governed_result_outcome(self) -> InsightMetricAggregationResult:
+        validate_result_reason_semantics(self.result_status, list(self.reason_codes))
+        finite_value = self.value is not None and math.isfinite(self.value)
+        if self.result_status == "value":
+            if not finite_value or self.sample_size < 1:
+                raise ValueError("value result requires finite value and sample_size >= 1")
+        elif self.result_status == "coverage-gap":
+            if not self.reason_codes:
+                raise ValueError("coverage-gap requires reason_codes")
+            if self.value is None and self.sample_size != 0:
+                raise ValueError("null coverage-gap requires sample_size = 0")
+            if self.value is not None and (not finite_value or self.sample_size < 1):
+                raise ValueError("numeric coverage-gap requires finite value and samples")
+        elif self.value is not None or self.sample_size != 0 or not self.reason_codes:
+            raise ValueError("non-value result requires value=null, sample_size=0 and reason_codes")
+        return self
 
 
 class InsightReportArtifactResult(BaseModel):
@@ -111,21 +137,43 @@ class InsightReportMetricSnapshot(BaseModel):
     metric_result_id: str = Field(min_length=1, max_length=128)
     metric_key: str = Field(min_length=1, max_length=128)
     label: str = Field(min_length=1, max_length=255)
-    value: float
+    value: float | None
     unit: str = Field(min_length=1, max_length=64)
-    sample_size: int = Field(ge=1)
+    sample_size: int = Field(ge=0)
+    result_status: MetricResultStatus
+    reason_codes: list[MetricResultReasonCode] = Field(default_factory=list, max_length=64)
+    comparability_status: Literal["comparable", "partial", "structural-break", "not-applicable"]
+    comparability_reason_codes: list[str] = Field(default_factory=list, max_length=64)
     definition_version: str = Field(min_length=1, max_length=128)
     scope: dict[str, Any]
     source_run_id: str = Field(min_length=1, max_length=128)
     trace_id: str = Field(min_length=1, max_length=128)
     payload_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
-    @field_validator("value")
+    @field_validator("reason_codes", "comparability_reason_codes")
     @classmethod
-    def finite_metric_value(cls, value: float) -> float:
-        if not math.isfinite(value):
-            raise ValueError("value must be finite")
-        return value
+    def report_reasons_are_valid(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized) or len(normalized) != len(set(normalized)):
+            raise ValueError("report reason codes must be unique and non-blank")
+        return normalized
+
+    @model_validator(mode="after")
+    def report_outcome_is_explicit(self) -> InsightReportMetricSnapshot:
+        validate_result_reason_semantics(self.result_status, list(self.reason_codes))
+        if self.value is not None:
+            if not math.isfinite(self.value) or self.sample_size < 1:
+                raise ValueError("numeric report metric requires finite value and samples")
+            return self
+        if (
+            self.sample_size != 0
+            or self.result_status == "value"
+            or not self.reason_codes
+            or self.comparability_status == "comparable"
+            or not self.comparability_reason_codes
+        ):
+            raise ValueError("N/A report metric requires governed non-comparable disposition")
+        return self
 
 
 class InsightReportEvidenceSnapshot(BaseModel):

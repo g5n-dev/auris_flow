@@ -698,8 +698,7 @@ def test_label_closed_loop_from_observation_to_feedback_optimization_and_rollbac
         )
         fact = session.scalar(
             select(LabelFact).where(
-                LabelFact.aggregate_id == aggregate_id,
-                LabelFact.review_decision_id == decision_id,
+                LabelFact.human_review_decision_id == decision_id,
             )
         )
         badcase = session.scalar(
@@ -716,7 +715,10 @@ def test_label_closed_loop_from_observation_to_feedback_optimization_and_rollbac
         assert fact is not None
         assert fact.value_json is True
         assert fact.authority == "human-confirmed"
-        assert fact.status == "active"
+        assert fact.status == "recorded"
+        assert fact.active_slot is None
+        assert fact.aggregate_id is None
+        assert fact.payload["reviewed_aggregate_id"] == aggregate_id
         assert fact.fact_namespace == "production"
         assert fact.logical_key_sha is not None and len(fact.logical_key_sha) == 64
         assert fact.revision == 1

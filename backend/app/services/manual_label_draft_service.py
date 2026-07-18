@@ -609,6 +609,19 @@ def _rebase_preview(
     target_label_id = request.target_label_id
     if target_label_id is None and len(path_targets) == 1:
         target_label_id = path_targets[0]
+    if target_label_id is not None and target_label_id not in path_targets:
+        raise ApiError(
+            "MANUAL_LABEL_REBASE_TARGET_OUTSIDE_PATH",
+            "目标标签不属于已发布 Mapping Bundle 的编译路径",
+            409,
+            details=[
+                {
+                    "mapping_bundle_id": bundle.mapping_bundle_id,
+                    "path_target_label_ids": path_targets,
+                    "target_label_id": target_label_id,
+                }
+            ],
+        )
     if target_label_id is not None:
         _label_item(
             session,

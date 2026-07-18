@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from app.core.database import SessionLocal
 from app.models import (
     AuditLog,
+    DataAsset,
     JsonResource,
     LabelMappingBundle,
     LabelMappingBundleSource,
@@ -274,6 +275,62 @@ def test_preflight_http_response_replays_exactly_and_conflicts_on_a_new_body(
             )
             == 1
         )
+
+
+def test_preflight_http_exposes_bounded_scoped_downstream_impacts(
+    client,
+    auth_headers,
+) -> None:
+    _seed_versions()
+    with SessionLocal() as session:
+        session.add_all(
+            [
+                DataAsset(
+                    data_asset_id="asset_lifecycle_api_impact",
+                    tenant_id=TENANT_ID,
+                    project_id=PROJECT_ID,
+                    status="archived",
+                    trace_id="trace-lifecycle-api-impact",
+                    payload={"label_version_id": SOURCE_VERSION_ID},
+                ),
+                DataAsset(
+                    data_asset_id="asset_lifecycle_api_other_project",
+                    tenant_id=TENANT_ID,
+                    project_id="other-project",
+                    status="published",
+                    trace_id="trace-lifecycle-api-other",
+                    payload={"label_version_id": SOURCE_VERSION_ID},
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.post(
+        f"/api/v1/label-versions/{SOURCE_VERSION_ID}/deprecation-preflights",
+        json={**_preflight_body(), "impact_limit": 1},
+        headers=_headers(auth_headers, "lifecycle-impact-http"),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["downstream_impact_total"] == 1
+    assert data["blocking_impact_total"] == 0
+    assert data["migration_required_impact_total"] == 0
+    assert data["historical_reference_total"] == 1
+    assert data["impact_scan_complete"] is True
+    assert data["migration_evidence_required"] is False
+    assert data["migration_evidence_satisfied"] is True
+    assert data["downstream_impacts"] == [
+        {
+            "impact_key": "data-asset:asset_lifecycle_api_impact",
+            "impact_type": "data-asset",
+            "resource_id": "asset_lifecycle_api_impact",
+            "status": "archived",
+            "reference_role": "payload-reference",
+            "impact_disposition": "historical-reference",
+            "details": {"trace_id": "trace-lifecycle-api-impact"},
+        }
+    ]
 
 
 def test_transition_endpoint_commits_strong_and_json_projections(client, auth_headers) -> None:

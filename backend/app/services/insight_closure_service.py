@@ -218,6 +218,10 @@ def _label_scope_payload(scope: MetricResultLabelScope) -> dict[str, Any]:
         "source_label_version_ids": list(scope.source_label_version_ids),
         "target_label_version_id": scope.target_label_version_id,
         "mapping_bundle_id": scope.mapping_bundle_id,
+        "mapping_bundle_sha256": scope.mapping_bundle_sha256,
+        "fact_namespace": scope.fact_namespace,
+        "fact_set_id": scope.fact_set_id,
+        "fact_set_manifest_sha256": scope.fact_set_manifest_sha256,
         "fact_set_generation": scope.fact_set_generation,
         "fact_as_of": _datetime_iso(scope.fact_as_of),
         "metric_definition_versions": dict(scope.metric_definition_versions),
@@ -264,7 +268,39 @@ def metric_payload(
             details=[{"metric_result_id": metric.metric_result_id}],
         )
     if label_scope is None:
-        return payload
+        generic_payload = {
+            **payload,
+            "content_sha256": metric.content_sha256 or _canonical_sha256(metric.payload),
+            "scope_sha256": metric.scope_sha256
+            or _canonical_sha256(metric.payload.get("scope") or {}),
+            "source_manifest_sha256": metric.source_manifest_sha256
+            or _canonical_sha256(
+                {
+                    "source_run_id": metric.payload.get("source_run_id"),
+                    "trace_id": metric.trace_id,
+                }
+            ),
+        }
+        result_status = str(payload.get("result_status") or "value")
+        result_reasons = list(payload.get("reason_codes") or [])
+        generic_payload.update(
+            {
+                "result_status": result_status,
+                "reason_codes": result_reasons,
+                "comparability_status": payload.get("comparability_status")
+                or {
+                    "coverage-gap": "partial",
+                    "recompute-required": "structural-break",
+                    "not-applicable": "not-applicable",
+                    "zero-denominator": "not-applicable",
+                }.get(result_status, "comparable"),
+                "comparability_reason_codes": list(
+                    payload.get("comparability_reason_codes")
+                    or (result_reasons if result_status != "value" else [])
+                ),
+            }
+        )
+        return generic_payload
     expected_hashes = (
         label_scope.content_sha256,
         label_scope.scope_sha256,
@@ -474,6 +510,8 @@ def current_metric_payloads(
     fact_set_generation: int | None = None,
     fact_as_of: datetime | None = None,
     model_version: str | None = None,
+    source_run_id: str | None = None,
+    metric_keys: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     materialized = session.scalars(
         select(MetricResult)
@@ -489,7 +527,7 @@ def current_metric_payloads(
         ctx,
         [item.metric_result_id for item in materialized],
     )
-    items: list[dict[str, Any]] = []
+    candidates: list[tuple[MetricResult, MetricResultLabelScope | None]] = []
     for result in materialized:
         payload = result.payload
         if payload.get("snapshot_role") != "aggregation":
@@ -524,7 +562,101 @@ def current_metric_payloads(
                 continue
         if model_version and scope["model_version"] != model_version:
             continue
-        items.append(metric_payload(result, label_scope))
+        candidates.append((result, label_scope))
+
+    requested_keys = sorted({item.strip() for item in (metric_keys or []) if item.strip()})
+    if source_run_id is not None:
+        selected_candidates = [
+            item
+            for item in candidates
+            if item[0].payload.get("source_run_id") == source_run_id
+            and (not requested_keys or item[0].payload.get("metric_key") in requested_keys)
+        ]
+    elif requested_keys:
+        by_run: dict[str, list[tuple[MetricResult, MetricResultLabelScope | None]]] = {}
+        for item in candidates:
+            candidate_run_id = item[0].payload.get("source_run_id")
+            if isinstance(candidate_run_id, str) and candidate_run_id:
+                by_run.setdefault(candidate_run_id, []).append(item)
+        selected_candidates = []
+        for run_items in by_run.values():
+            keys = [str(item[0].payload.get("metric_key") or "") for item in run_items]
+            if all(keys.count(key) == 1 for key in requested_keys):
+                selected_candidates = [
+                    item
+                    for item in run_items
+                    if item[0].payload.get("metric_key") in requested_keys
+                ]
+                break
+    else:
+        selected_by_key: dict[str, tuple[MetricResult, MetricResultLabelScope | None]] = {}
+        for item in candidates:
+            key = str(item[0].payload.get("metric_key") or "")
+            if key and key not in selected_by_key:
+                selected_by_key[key] = item
+        selected_candidates = list(selected_by_key.values())
+
+    if requested_keys:
+        selected_keys = [
+            str(item[0].payload.get("metric_key") or "") for item in selected_candidates
+        ]
+        duplicate_keys = sorted(key for key in requested_keys if selected_keys.count(key) > 1)
+        missing_keys = sorted(set(requested_keys) - set(selected_keys))
+        if duplicate_keys:
+            raise ApiError(
+                "INSIGHT_METRIC_CURRENT_SNAPSHOT_AMBIGUOUS",
+                "当前筛选范围为同一指标返回了重复的 current 快照",
+                409,
+                details=[{"metric_keys": duplicate_keys, "source_run_id": source_run_id}],
+            )
+        if missing_keys:
+            raise ApiError(
+                "INSIGHT_METRIC_CURRENT_SNAPSHOT_MISSING",
+                "当前筛选范围缺少明确的 current 指标快照",
+                409,
+                details=[{"metric_keys": missing_keys, "source_run_id": source_run_id}],
+            )
+
+    from app.services.metric_snapshot_comparison_service import (
+        compare_metric_snapshots,
+        missing_baseline_comparison,
+    )
+
+    items: list[dict[str, Any]] = []
+    for result, label_scope in selected_candidates:
+        metric_key = result.payload.get("metric_key")
+        current_index = next(
+            index
+            for index, (candidate, _candidate_scope) in enumerate(candidates)
+            if candidate.metric_result_id == result.metric_result_id
+        )
+        baseline = next(
+            (
+                candidate
+                for candidate, _candidate_scope in candidates[current_index + 1 :]
+                if candidate.payload.get("metric_key") == metric_key
+            ),
+            None,
+        )
+        comparison = (
+            compare_metric_snapshots(
+                session,
+                ctx,
+                baseline.metric_result_id,
+                result.metric_result_id,
+            )
+            if baseline is not None
+            else missing_baseline_comparison(result, label_scope)
+        )
+        items.append(
+            {
+                **metric_payload(result, label_scope),
+                "comparison": comparison,
+                "comparison_sha256": comparison["comparison_sha256"],
+                "comparison_status": comparison["comparison_status"],
+                "comparison_reason_codes": comparison["reason_codes"],
+            }
+        )
     return items
 
 
@@ -732,6 +864,19 @@ def _build_report_document(
     metric_snapshots = []
     for metric in metric_results:
         payload = metric.payload
+        result_status = str(payload.get("result_status") or "value")
+        result_reasons = list(payload.get("reason_codes") or [])
+        default_comparability = {
+            "coverage-gap": "partial",
+            "recompute-required": "structural-break",
+            "not-applicable": "not-applicable",
+            "zero-denominator": "not-applicable",
+        }.get(result_status, "comparable")
+        comparability_status = str(payload.get("comparability_status") or default_comparability)
+        comparability_reasons = list(
+            payload.get("comparability_reason_codes")
+            or (result_reasons if result_status != "value" else [])
+        )
         metric_snapshots.append(
             {
                 "metric_result_id": metric.metric_result_id,
@@ -740,6 +885,10 @@ def _build_report_document(
                 "value": payload["value"],
                 "unit": str(payload["unit"]),
                 "sample_size": payload["sample_size"],
+                "result_status": result_status,
+                "reason_codes": result_reasons,
+                "comparability_status": comparability_status,
+                "comparability_reason_codes": comparability_reasons,
                 "definition_version": str(payload["definition_version"]),
                 "scope": _metric_scope(payload),
                 "source_run_id": str(payload["source_run_id"]),
@@ -765,7 +914,11 @@ def _build_report_document(
     metric_ids = [item["metric_result_id"] for item in metric_snapshots]
     evidence_refs = [item["evidence_ref"] for item in evidence_snapshots]
     metric_text = "，".join(
-        f"{item['label']}={item['value']} {item['unit']}（样本 {item['sample_size']}）"
+        (
+            f"{item['label']}=N/A（{','.join(item['reason_codes'])}）"
+            if item["value"] is None
+            else f"{item['label']}={item['value']} {item['unit']}（样本 {item['sample_size']}）"
+        )
         for item in metric_snapshots
     )
     evidence_text = "；".join(str(item["summary"]) for item in evidence_snapshots)
@@ -2038,6 +2191,8 @@ def _materialize_metric_aggregation(
             "value": result.value,
             "unit": result.unit,
             "sample_size": result.sample_size,
+            "result_status": result.result_status,
+            "reason_codes": list(result.reason_codes),
             "definition_version": "insight-metric-v1",
             "scene_profile_id": record.payload.get("scene_profile_id"),
             "scene_profile_version_id": record.payload.get("scene_profile_version_id"),
@@ -2093,6 +2248,8 @@ def _materialize_metric_aggregation(
                     "value": result.value,
                     "unit": result.unit,
                     "sample_size": result.sample_size,
+                    "result_status": result.result_status,
+                    "reason_codes": list(result.reason_codes),
                     "source_run_id": record.run_id,
                     **raw_label_scope,
                     "metric_definition_versions": {result.metric_key: expected_definition_version},
@@ -2244,12 +2401,29 @@ def _validated_governed_report_document(
         actual_hash = _canonical_sha256(metric.payload) if metric is not None else None
         field_mismatches: list[dict[str, Any]] = []
         if metric is not None:
+            result_status = str(metric.payload.get("result_status") or "value")
+            result_reasons = list(metric.payload.get("reason_codes") or [])
+            default_comparability = {
+                "coverage-gap": "partial",
+                "recompute-required": "structural-break",
+                "not-applicable": "not-applicable",
+                "zero-denominator": "not-applicable",
+            }.get(result_status, "comparable")
             expected_snapshot_fields = {
                 "metric_key": str(metric.payload.get("metric_key") or ""),
                 "label": str(metric.payload.get("label") or metric.payload.get("metric_key") or ""),
                 "value": metric.payload.get("value"),
                 "unit": str(metric.payload.get("unit") or ""),
                 "sample_size": metric.payload.get("sample_size"),
+                "result_status": result_status,
+                "reason_codes": result_reasons,
+                "comparability_status": str(
+                    metric.payload.get("comparability_status") or default_comparability
+                ),
+                "comparability_reason_codes": list(
+                    metric.payload.get("comparability_reason_codes")
+                    or (result_reasons if result_status != "value" else [])
+                ),
                 "definition_version": str(metric.payload.get("definition_version") or ""),
                 "scope": _metric_scope(metric.payload),
                 "source_run_id": str(metric.payload.get("source_run_id") or ""),

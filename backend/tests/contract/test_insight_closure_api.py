@@ -483,6 +483,9 @@ def test_metrics_endpoint_normalizes_and_forwards_every_label_scope_filter(
             ("mapping_bundle_id", "mapping-bundle-v3"),
             ("fact_set_generation", "42"),
             ("fact_as_of", "2026-07-18T18:00:00+08:00"),
+            ("source_run_id", "metric-run-current"),
+            ("metric_key", "metric-b"),
+            ("metric_key", "metric-a"),
         ],
         headers=auth_headers,
     )
@@ -496,6 +499,42 @@ def test_metrics_endpoint_normalizes_and_forwards_every_label_scope_filter(
     assert captured["fact_set_generation"] == 42
     assert captured["fact_as_of"] == datetime(2026, 7, 18, 10, 0, tzinfo=UTC)
     assert captured["fact_as_of"].utcoffset() == timedelta(0)
+    assert captured["source_run_id"] == "metric-run-current"
+    assert captured["metric_keys"] == ["metric-a", "metric-b"]
+
+
+def test_metric_comparison_endpoint_forwards_exact_ordered_snapshot_ids(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    captured: dict[str, str] = {}
+
+    def comparison(_session, _ctx, baseline_id, current_id):
+        captured.update(baseline=baseline_id, current=current_id)
+        return {
+            "schema_version": "auris.metric-snapshot-comparison/1",
+            "baseline": {"metric_result_id": baseline_id},
+            "current": {"metric_result_id": current_id},
+            "comparison_status": "comparable",
+            "reason_codes": [],
+            "comparison_sha256": "a" * 64,
+            "continuous_trend_allowed": True,
+        }
+
+    monkeypatch.setattr(insights_router, "compare_metric_snapshots", comparison)
+    response = client.get(
+        "/api/v1/insights/metric-comparisons",
+        params={
+            "baseline_metric_result_id": "metric-baseline",
+            "current_metric_result_id": "metric-current",
+        },
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200, response.text
+    assert captured == {"baseline": "metric-baseline", "current": "metric-current"}
+    assert response.json()["data"]["comparison_sha256"] == "a" * 64
 
 
 @pytest.mark.parametrize(

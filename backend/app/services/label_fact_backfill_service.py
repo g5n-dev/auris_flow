@@ -32,6 +32,7 @@ class _FactProjection:
     occurred_at: datetime
     recorded_at: datetime
     source_kind: str
+    aggregate_id: str | None
     human_review_decision_id: str | None
     root_trace_id: str
     action_trace_id: str
@@ -105,13 +106,14 @@ def _content_document(
     occurred_at: datetime,
     recorded_at: datetime,
     source_kind: str,
+    aggregate_id: str | None,
     human_review_decision_id: str | None,
     root_trace_id: str,
     action_trace_id: str,
 ) -> dict[str, Any]:
     return {
         "action_trace_id": action_trace_id,
-        "aggregate_id": fact.aggregate_id,
+        "aggregate_id": aggregate_id,
         "assertion_slot": ASSERTION_SLOT,
         "authority": fact.authority,
         "event_or_segment_id": fact.subject_key,
@@ -183,7 +185,20 @@ def _source_aggregate(
     aggregates: dict[str, LabelAggregate],
     fact: LabelFact,
 ) -> LabelAggregate:
-    aggregate = aggregates.get(fact.aggregate_id)
+    reviewed_aggregate_id = fact.aggregate_id
+    if reviewed_aggregate_id is None:
+        payload_value = fact.payload.get("reviewed_aggregate_id") or fact.payload.get(
+            "legacy_reviewed_aggregate_id"
+        )
+        reviewed_aggregate_id = str(payload_value) if payload_value else None
+    if reviewed_aggregate_id is None:
+        _raise_conflict(
+            "LABEL_FACT_BACKFILL_SOURCE_CONFLICT",
+            "旧 LabelFact 缺少冻结 Aggregate 来源标识",
+            fact_id=fact.fact_id,
+            reason_code="AGGREGATE_ID_MISSING",
+        )
+    aggregate = aggregates.get(reviewed_aggregate_id)
     if aggregate is None:
         _raise_conflict(
             "LABEL_FACT_BACKFILL_SOURCE_CONFLICT",
@@ -276,6 +291,9 @@ def _human_source(
 
 
 def _validate_chain(facts: list[LabelFact]) -> None:
+    immutable_projection = all(
+        fact.status == "recorded" and fact.active_slot is None for fact in facts
+    )
     for index, fact in enumerate(facts):
         predecessor_id = facts[index - 1].fact_id if index else None
         is_current = index == len(facts) - 1
@@ -286,9 +304,10 @@ def _validate_chain(facts: list[LabelFact]) -> None:
                 fact_id=fact.fact_id,
                 reason_code="NON_CONTIGUOUS_CHAIN",
             )
-        projection_matches = fact.status == (
-            "active" if is_current else "superseded"
-        ) and fact.active_slot == ("active" if is_current else None)
+        projection_matches = immutable_projection or (
+            fact.status == ("active" if is_current else "superseded")
+            and fact.active_slot == ("active" if is_current else None)
+        )
         if not projection_matches:
             _raise_conflict(
                 "LABEL_FACT_BACKFILL_CHAIN_CONFLICT",
@@ -312,6 +331,7 @@ def _validate_existing_projection(
         and _same_datetime(fact.recorded_at, projection.recorded_at)
         and fact.occurred_at_origin == "legacy-recorded-fallback"
         and fact.source_kind == projection.source_kind
+        and fact.aggregate_id == projection.aggregate_id
         and fact.human_review_decision_id == projection.human_review_decision_id
         and fact.recompute_run_item_id is None
         and fact.fact_set_id is None
@@ -368,7 +388,17 @@ def _project_chains(
     ctx: RequestContext,
     facts: list[LabelFact],
 ) -> list[_ChainProjection]:
-    aggregate_ids = {fact.aggregate_id for fact in facts}
+    aggregate_ids = {
+        str(
+            fact.aggregate_id
+            or fact.payload.get("reviewed_aggregate_id")
+            or fact.payload.get("legacy_reviewed_aggregate_id")
+        )
+        for fact in facts
+        if fact.aggregate_id
+        or fact.payload.get("reviewed_aggregate_id")
+        or fact.payload.get("legacy_reviewed_aggregate_id")
+    }
     aggregates = {
         aggregate.aggregate_id: aggregate
         for aggregate in session.scalars(
@@ -458,6 +488,7 @@ def _project_chains(
             if fact.authority == _HUMAN_AUTHORITY:
                 source_kind = "human-decision"
                 human_review_decision_id = _human_source(decisions, fact, aggregate)
+            projected_aggregate_id = aggregate.aggregate_id if source_kind == "aggregate" else None
 
             legacy = not _has_any_temporal_state(fact)
             occurred_at = _as_utc(fact.created_at)
@@ -481,6 +512,7 @@ def _project_chains(
                         occurred_at=occurred_at,
                         recorded_at=recorded_at,
                         source_kind=source_kind,
+                        aggregate_id=projected_aggregate_id,
                         human_review_decision_id=human_review_decision_id,
                         root_trace_id=root_trace_id,
                         action_trace_id=action_trace_id,
@@ -500,6 +532,7 @@ def _project_chains(
                 occurred_at=occurred_at,
                 recorded_at=recorded_at,
                 source_kind=source_kind,
+                aggregate_id=projected_aggregate_id,
                 human_review_decision_id=human_review_decision_id,
                 root_trace_id=root_trace_id,
                 action_trace_id=action_trace_id,
@@ -530,6 +563,9 @@ def _apply_fact_projection(projection: _FactProjection) -> None:
     fact.recorded_at = projection.recorded_at
     fact.occurred_at_origin = "legacy-recorded-fallback"
     fact.source_kind = projection.source_kind
+    if projection.source_kind == "human-decision" and fact.aggregate_id is not None:
+        fact.payload = {**fact.payload, "reviewed_aggregate_id": fact.aggregate_id}
+    fact.aggregate_id = projection.aggregate_id
     fact.human_review_decision_id = projection.human_review_decision_id
     fact.recompute_run_item_id = None
     fact.fact_set_id = None

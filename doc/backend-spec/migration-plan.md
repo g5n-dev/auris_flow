@@ -38,7 +38,23 @@
 | 0022 | `eval_dataset_versions` | 固定评测集版本、清单哈希和锁定快照 | 0021 |
 | 0023 | `hotword_production_activation` | 区分候选当前版本与 TaskVersion 门禁后的生产版本 | 0022 |
 | 0024 | `asr_annotation_corrections` | 追加式 ASR 修正观察、词级证据与不可变约束 | 0023 |
-| 0025 | `eval_dataset_object_lock` | 固定评测集 manifest 的 Provider/bucket/key、Content-Length 与强 ETag 对象锁；当前 head | 0024 |
+| 0025 | `eval_dataset_object_lock` | 固定评测集 manifest 的 Provider/bucket/key、Content-Length 与强 ETag 对象锁 | 0024 |
+| 0026 | `label_closed_loop` | 标签闭环 Observation、冲突、优化运行与建议强表 | 0025 |
+| 0027 | `label_eval_results` | 标签评测结果与统计物化链 | 0026 |
+| 0028 | `release_active_head` | ReleaseCommand 与环境 active head CAS | 0027 |
+| 0029 | `label_calibration_fact_chain` | 追加式校准版本、Fact 与 MetricSnapshot | 0028 |
+| 0030 | `label_optimization_runtime` | 优化调度、轮次与运行时状态 | 0029 |
+| 0031 | `scene_profiles` | 场景 Profile 与不可变版本 | 0030 |
+| 0032 | `controlled_experiments` | 受控实验与分配证据 | 0031 |
+| 0033 | `task_version_release_heads` | TaskVersion 发布 head 与 generation | 0032 |
+| 0034 | `label_lifecycle_mapping_expand` | 标签生命周期、替代与映射 expand | 0033 |
+| 0035 | `label_fact_temporal_heads` | Fact 时间窗口与 current head 投影 | 0034 |
+| 0036 | `label_metric_snapshot_scopes` | MetricSnapshot 冻结 scope 与可比性 | 0035 |
+| 0037 | `label_fact_logical_active_heads` | Fact logical key active head | 0036 |
+| 0038 | `release_head_interval_closure` | 发布 generation 生效区间一次闭合 | 0037 |
+| 0039 | `label_fact_append_only_contract` | Fact append-only Contract 与 head 唯一真相源 | 0038 |
+| 0040 | `label_recomputation_fact_sets` | 全量重算 candidate FactSet/namespace | 0039 |
+| 0041 | `oidc_browser_sessions` | OIDC identity/state 与 hash-only browser session；当前 head | 0040 |
 
 ## 3. 0001 Platform Foundation
 
@@ -310,6 +326,14 @@ S2.b 已在应用层实现可暂停、可重入的 taxonomy/LabelVersion 强字�
 
 中央 `JsonResource` 投影以及评测锁定、策略发布、taxonomy candidate 和 LabelVersionItem 物化路径均执行强字段双写；冲突只报告/阻断，禁止覆盖已存在的强字段。生产若已写入 0034 新制品，不执行 destructive downgrade；暂停新 writer 后切回兼容读，并以 forward migration 补偿。
 
+`0038_release_head_interval_closure.py` 将 activation ledger 的全 UPDATE 拒绝触发器替换为 write-once interval closure：只允许既有 event 的 `effective_to` 从 NULL 写为不早于 `effective_from` 的边界，其余列、二次闭合和 DELETE 仍拒绝；新 generation INSERT 必须找到同 scope/environment 的上一 generation，且上一 `effective_to`、新 `effective_from` 与 old/new pointer 连续一致。应用在 Head generation CAS、上一 interval 闭合和新 event 追加之间保持单事务。downgrade 只恢复旧版全 UPDATE 拒绝触发器，不删除任何 ledger 行。
+
+`0039_label_fact_append_only_contract.py` 在 Contract 前验证每条 Fact 链 revision 从 1 连续、supersedes 指向同链前一 revision、Head 指向最新 revision；随后移除 Fact `active_slot` current 唯一索引，使 `label_fact_heads` 成为唯一 current 投影。升级不 UPDATE 任何既有 Fact，legacy `active/superseded` 状态逐值保留；新 Fact 只能插入为 `recorded/NULL`，数据库触发器拒绝所有 Fact UPDATE/DELETE。若 downgrade 需要把新 `recorded` 行反写为旧投影则 fail closed，生产使用 forward compensation。
+
+`0040_label_recomputation_fact_sets.py` 在 `0039` append-only Fact 契约之上增加 `label_recompute_runs/items` 强表、冻结 source FactSet Head generation/manifest、target/bundle、candidate namespace、分区/资产范围、coverage/budget、执行回执与 Trace，并为 candidate Fact 增加同 scope recompute-item 复合 FK。升级只扩展 source union 和 `aggregate_id` nullable 布局，不改写任何既有 LabelFact；历史 human-decision 行的 `aggregate_id/payload/content_sha256` 逐值保持不变。新 human-decision 写入由 API 与 INSERT trigger 强制 `aggregate_id=NULL`，reviewed Aggregate 仅作为 payload lineage。SQLite 在事务写锁内随 batch recreate 重建三类守卫；MySQL/MariaDB 的 Fact ALTER 全程保留 UPDATE/DELETE 守卫，INSERT 守卫用 `next → replace → remove next` 双触发器顺序切换，避免无保护空窗。downgrade 恢复 0039 legacy human insert 契约；在已有 candidate Fact、新布局 human Fact 或任一不可变 RecomputeRun/RunItem 历史时 fail closed。所有阻断查询必须在 DROP TRIGGER/DDL 之前完成，失败后 revision、复合 FK、Fact 字节和 append-only 触发器保持不变。
+
+`0041_oidc_browser_sessions.py` 在不修改既有 `users/auth_sessions` 兼容语义的前提下，expand 创建 `user_security_states`、`oidc_identities`、`oidc_authorization_states` 与 `browser_auth_sessions` 四张强表。升级为每个既有用户回填 `status=active, authz_version=1` 的安全状态；OIDC identity 必须由维护者显式 provision，并以 issuer/subject SHA-256 唯一映射内部 user/tenant/project。授权 state 只保存 hash，短期 verifier/nonce 一次性消费；浏览器 session 只保存 cookie 与 CSRF 的 SHA-256，原值不得持久化或记录日志。应用发布顺序为 expand → provision identity → 启用 OIDC canary → 切换前端 cookie session；Keycloak 只能作为参考 IdP，切换不得引入其私有协议依赖。downgrade 只按 FK 逆序删除四张 0041 表，保留全部权威用户与旧开发会话；生产已有活跃 OIDC 会话时优先用 forward migration，回退前先撤销/过期会话并切回受控认证路径。
+
 ## 18. 迁移验收
 
 - 空库可完整执行到最新版本。
@@ -317,5 +341,5 @@ S2.b 已在应用层实现可暂停、可重入的 taxonomy/LabelVersion 强字�
 - 回滚最近一版在本地可执行；生产回滚使用 forward migration。
 - `tenant_id + project_id` 索引覆盖所有项目级大表。
 - 幂等、审计、outbox 表先于任何业务写接口上线。
-- 迁移图必须线性到 `0034_label_lifecycle_mapping_expand`，并能在本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping/activation ledger append-only 触发器在两种方言都可验证。
-- 0028 后每个 environment 只有一个 `release_bundle_heads` 行、每个 deployment 只有一个 active ReleaseCommand；0029 后每个 subject+label 只有一个 active Fact head。
+- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表，以及 0041 OIDC/browser session hash-only 强表在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
+- 0028 后每个 environment 只有一个 `release_bundle_heads` 行、每个 deployment 只有一个 active ReleaseCommand；0039 后每个 scope/namespace/logical key 只有一个 `label_fact_heads` current 指针，Fact 行本身不再承担可变 current 状态。

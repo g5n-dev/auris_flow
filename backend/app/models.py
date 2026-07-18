@@ -2591,6 +2591,209 @@ class LabelAggregateMember(Base, TimestampMixin):
     trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
 
 
+class LabelRecomputeRun(Base, TimestampMixin):
+    """Frozen full-recompute request; orchestration details stay server-side."""
+
+    __tablename__ = "label_recompute_runs"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "project_id", "recompute_run_id", name="uq_label_recompute_runs_scope"
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "candidate_fact_set_id",
+            name="uq_label_recompute_runs_scope_candidate",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "target_label_version_id"],
+            [
+                "label_versions.tenant_id",
+                "label_versions.project_id",
+                "label_versions.label_version_id",
+            ],
+            name="fk_label_recompute_runs_scope_target",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            [
+                "tenant_id",
+                "project_id",
+                "mapping_bundle_id",
+                "mapping_bundle_sha256",
+            ],
+            [
+                "label_mapping_bundles.tenant_id",
+                "label_mapping_bundles.project_id",
+                "label_mapping_bundles.mapping_bundle_id",
+                "label_mapping_bundles.canonical_manifest_sha256",
+            ],
+            name="fk_label_recompute_runs_scope_mapping_bundle",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "source_fact_set_id"],
+            [
+                "label_fact_sets.tenant_id",
+                "label_fact_sets.project_id",
+                "label_fact_sets.fact_set_id",
+            ],
+            name="fk_label_recompute_runs_scope_source_fact_set",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "candidate_fact_set_id"],
+            [
+                "label_fact_sets.tenant_id",
+                "label_fact_sets.project_id",
+                "label_fact_sets.fact_set_id",
+            ],
+            name="fk_label_recompute_runs_scope_candidate_fact_set",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('requested', 'running', 'candidate-complete', "
+            "'partial-failed', 'failed', 'blocked')",
+            name="ck_label_recompute_runs_status",
+        ),
+        CheckConstraint(
+            "(mapping_bundle_id IS NULL AND mapping_bundle_sha256 IS NULL) OR "
+            "(mapping_bundle_id IS NOT NULL AND mapping_bundle_sha256 IS NOT NULL)",
+            name="ck_label_recompute_runs_mapping_pair",
+        ),
+        CheckConstraint(
+            "source_head_generation > 0 AND budget_units > 0 AND coverage_min >= 0 "
+            "AND coverage_min <= 1",
+            name="ck_label_recompute_runs_limits",
+        ),
+        CheckConstraint(
+            "LENGTH(source_manifest_sha256) = 64 AND LENGTH(target_content_sha256) = 64 "
+            "AND LENGTH(request_sha256) = 64 AND "
+            "(mapping_bundle_sha256 IS NULL OR LENGTH(mapping_bundle_sha256) = 64)",
+            name="ck_label_recompute_runs_hashes",
+        ),
+        Index(
+            "ix_label_recompute_runs_scope_status",
+            "tenant_id",
+            "project_id",
+            "status",
+        ),
+        Index("ix_label_recompute_runs_trace_id", "trace_id"),
+    )
+
+    recompute_run_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="requested")
+    target_label_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    target_resource_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    target_content_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    mapping_bundle_id: Mapped[str | None] = mapped_column(String(128))
+    mapping_bundle_sha256: Mapped[str | None] = mapped_column(String(64))
+    source_fact_set_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_fact_namespace: Mapped[str] = mapped_column(String(128), nullable=False)
+    source_head_generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    candidate_fact_set_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    fact_namespace: Mapped[str] = mapped_column(String(128), nullable=False)
+    fact_as_of: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    partition_scope: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False)
+    asset_scope: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    coverage_policy: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    coverage_min: Mapped[float] = mapped_column(Float, nullable=False)
+    budget: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    budget_units: Mapped[int] = mapped_column(Integer, nullable=False)
+    request_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    root_trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    action_trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class LabelRecomputeRunItem(Base, TimestampMixin):
+    """Retryable partition execution whose manifest is calculated by the BFF."""
+
+    __tablename__ = "label_recompute_run_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "recompute_run_item_id",
+            name="uq_label_recompute_run_items_scope",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "recompute_run_id",
+            "partition_id",
+            name="uq_label_recompute_run_items_partition",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "recompute_run_id"],
+            [
+                "label_recompute_runs.tenant_id",
+                "label_recompute_runs.project_id",
+                "label_recompute_runs.recompute_run_id",
+            ],
+            name="fk_label_recompute_run_items_scope_run",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "execution_run_id"],
+            ["run_records.tenant_id", "run_records.project_id", "run_records.run_id"],
+            name="fk_label_recompute_run_items_scope_execution",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'failed')",
+            name="ck_label_recompute_run_items_status",
+        ),
+        CheckConstraint(
+            "attempt_generation > 0 AND row_count >= 0",
+            name="ck_label_recompute_run_items_counts",
+        ),
+        CheckConstraint(
+            "(status = 'succeeded' AND completion_receipt_id IS NOT NULL "
+            "AND source_manifest_sha256 IS NOT NULL AND result_manifest_sha256 IS NOT NULL "
+            "AND content_sha256 IS NOT NULL) OR status <> 'succeeded'",
+            name="ck_label_recompute_run_items_completion",
+        ),
+        Index(
+            "ix_label_recompute_run_items_scope_status",
+            "tenant_id",
+            "project_id",
+            "recompute_run_id",
+            "status",
+        ),
+        Index("ix_label_recompute_run_items_trace_id", "trace_id"),
+    )
+
+    recompute_run_item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    recompute_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    partition_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    attempt_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    execution_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    completion_receipt_id: Mapped[str | None] = mapped_column(String(128))
+    source_manifest_sha256: Mapped[str | None] = mapped_column(String(64))
+    result_manifest_sha256: Mapped[str | None] = mapped_column(String(64))
+    content_sha256: Mapped[str | None] = mapped_column(String(64))
+    row_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    lineage_manifest: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+    root_trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    action_trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class LabelFactSet(Base, TimestampMixin):
     __tablename__ = "label_fact_sets"
     __table_args__ = (
@@ -2736,6 +2939,17 @@ class LabelFact(Base, TimestampMixin):
             ondelete="RESTRICT",
             onupdate="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "recompute_run_item_id"],
+            [
+                "label_recompute_run_items.tenant_id",
+                "label_recompute_run_items.project_id",
+                "label_recompute_run_items.recompute_run_item_id",
+            ],
+            name="fk_label_facts_scope_recompute_item",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
         Index(
             "ix_label_facts_scope_subject",
             "tenant_id",
@@ -2743,15 +2957,6 @@ class LabelFact(Base, TimestampMixin):
             "subject_scope",
             "subject_key",
             "status",
-        ),
-        Index(
-            "uq_label_facts_active_head",
-            "tenant_id",
-            "project_id",
-            "fact_namespace",
-            "logical_key_sha",
-            "active_slot",
-            unique=True,
         ),
         Index(
             "ix_label_facts_temporal_as_of",
@@ -2786,8 +2991,9 @@ class LabelFact(Base, TimestampMixin):
         ),
         CheckConstraint(
             "(status = 'active' AND active_slot = 'active') OR "
-            "(status = 'superseded' AND active_slot IS NULL)",
-            name="ck_label_facts_active_slot",
+            "(status = 'superseded' AND active_slot IS NULL) OR "
+            "(status = 'recorded' AND active_slot IS NULL)",
+            name="ck_label_facts_append_only_projection",
         ),
         CheckConstraint(
             "revision IS NULL OR revision > 0",
@@ -2804,14 +3010,13 @@ class LabelFact(Base, TimestampMixin):
             name="ck_label_facts_occurred_origin",
         ),
         CheckConstraint(
-            "recompute_run_item_id IS NULL",
-            name="ck_label_facts_recompute_reserved",
-        ),
-        CheckConstraint(
             "source_kind IS NULL OR "
             "(source_kind = 'aggregate' AND aggregate_id IS NOT NULL "
-            "AND human_review_decision_id IS NULL) OR "
-            "(source_kind = 'human-decision' AND human_review_decision_id IS NOT NULL)",
+            "AND human_review_decision_id IS NULL AND recompute_run_item_id IS NULL) OR "
+            "(source_kind = 'human-decision' "
+            "AND human_review_decision_id IS NOT NULL AND recompute_run_item_id IS NULL) OR "
+            "(source_kind = 'recompute-run-item' AND aggregate_id IS NULL "
+            "AND human_review_decision_id IS NULL AND recompute_run_item_id IS NOT NULL)",
             name="ck_label_facts_expand_source",
         ),
         CheckConstraint(
@@ -2828,7 +3033,7 @@ class LabelFact(Base, TimestampMixin):
     fact_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
     project_id: Mapped[str] = mapped_column(String(64), nullable=False)
-    aggregate_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    aggregate_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     supersedes_fact_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     fact_namespace: Mapped[str | None] = mapped_column(String(128), nullable=True)
     logical_key_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -2852,8 +3057,8 @@ class LabelFact(Base, TimestampMixin):
     value_type: Mapped[str] = mapped_column(String(32), nullable=False)
     value_json: Mapped[Any] = mapped_column(JSON, nullable=False)
     authority: Mapped[str] = mapped_column(String(64), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
-    active_slot: Mapped[str | None] = mapped_column(String(16), nullable=True, default="active")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="recorded")
+    active_slot: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
     review_decision_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
@@ -5581,10 +5786,167 @@ for _label_lifecycle_append_only_table in (
     LabelMappingBundleSource.__table__,
     LabelMappingBundleMember.__table__,
     LabelMappingBundlePath.__table__,
-    ReleaseBundleHeadEvent.__table__,
+    LabelFact.__table__,
     LabelFactSetHeadEvent.__table__,
 ):
     _install_experiment_fact_guards(_label_lifecycle_append_only_table)
+
+
+def _install_label_fact_contract_insert_guard(table: Any) -> None:
+    """Reject legacy mutable Fact projections after the Contract migration."""
+
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_label_facts_contract_insert "
+            "BEFORE INSERT ON label_facts "
+            "WHEN NEW.source_kind IS NULL OR NEW.status <> 'recorded' "
+            "OR NEW.active_slot IS NOT NULL "
+            "OR (NEW.source_kind = 'human-decision' "
+            "AND NEW.aggregate_id IS NOT NULL) "
+            "BEGIN SELECT RAISE(ABORT, "
+            "'label_facts contract requires recorded rows'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_label_facts_contract_insert "
+            "BEFORE INSERT ON label_facts FOR EACH ROW "
+            "BEGIN IF NEW.source_kind IS NULL OR NEW.status <> 'recorded' "
+            "OR NEW.active_slot IS NOT NULL "
+            "OR (NEW.source_kind = 'human-decision' "
+            "AND NEW.aggregate_id IS NOT NULL) THEN SIGNAL SQLSTATE '45000' "
+            "SET MESSAGE_TEXT = 'label_facts contract requires recorded rows'; END IF; END"
+        ).execute_if(dialect="mysql"),
+    )
+
+
+_install_label_fact_contract_insert_guard(LabelFact.__table__)
+
+
+def _install_release_head_interval_guards(table: Any) -> None:
+    """Keep activation events immutable except for one ``effective_to`` closure."""
+
+    immutable_columns = (
+        "head_event_id",
+        "tenant_id",
+        "project_id",
+        "environment",
+        "generation",
+        "previous_generation",
+        "action",
+        "activation_status",
+        "old_deployment_id",
+        "new_deployment_id",
+        "old_label_version_id",
+        "new_label_version_id",
+        "old_bundle_sha256",
+        "new_bundle_sha256",
+        "effective_from",
+        "command_id",
+        "completion_receipt_id",
+        "approval_id",
+        "content_sha256",
+        "actor_id",
+        "root_trace_id",
+        "trace_id",
+        "payload",
+        "created_at",
+    )
+    sqlite_equal = " AND ".join(f"OLD.{column} IS NEW.{column}" for column in immutable_columns)
+    mysql_equal = " AND ".join(f"OLD.{column} <=> NEW.{column}" for column in immutable_columns)
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_release_bundle_head_events_interval_update "
+            "BEFORE UPDATE ON release_bundle_head_events "
+            "WHEN NOT (OLD.effective_to IS NULL AND NEW.effective_to IS NOT NULL "
+            "AND NEW.effective_to >= OLD.effective_from AND "
+            f"{sqlite_equal}) BEGIN SELECT RAISE(ABORT, "
+            "'release head interval permits one effective_to closure only'); END"
+        ).execute_if(dialect="sqlite"),
+    )
+    event.listen(
+        table,
+        "after_create",
+        DDL(
+            "CREATE TRIGGER trg_release_bundle_head_events_interval_update "
+            "BEFORE UPDATE ON release_bundle_head_events FOR EACH ROW "
+            "BEGIN IF NOT (OLD.effective_to IS NULL AND NEW.effective_to IS NOT NULL "
+            "AND NEW.effective_to >= OLD.effective_from AND "
+            f"{mysql_equal}) THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = "
+            "'release head interval permits one effective_to closure only'; END IF; END"
+        ).execute_if(dialect="mysql"),
+    )
+    sqlite_continuity_trigger = (
+        "CREATE TRIGGER trg_release_bundle_head_events_interval_insert "
+        "BEFORE INSERT ON release_bundle_head_events "
+        "WHEN NEW.effective_to IS NOT NULL OR "
+        "(NEW.generation = 1 AND EXISTS (SELECT 1 FROM release_bundle_head_events prior "
+        "WHERE prior.tenant_id = NEW.tenant_id AND prior.project_id = NEW.project_id "
+        "AND prior.environment = NEW.environment)) OR "
+        "(NEW.generation > 1 AND NOT EXISTS (SELECT 1 FROM release_bundle_head_events prior "
+        "WHERE prior.tenant_id = NEW.tenant_id AND prior.project_id = NEW.project_id "
+        "AND prior.environment = NEW.environment "
+        "AND prior.generation = NEW.previous_generation "
+        "AND prior.effective_to = NEW.effective_from "
+        "AND prior.new_deployment_id IS NEW.old_deployment_id "
+        "AND prior.new_label_version_id IS NEW.old_label_version_id "
+        "AND prior.new_bundle_sha256 IS NEW.old_bundle_sha256)) "
+        "BEGIN SELECT RAISE(ABORT, "
+        "'release head activation intervals must be continuous'); END"
+    )
+    mysql_continuity_trigger = (
+        "CREATE TRIGGER trg_release_bundle_head_events_interval_insert "
+        "BEFORE INSERT ON release_bundle_head_events FOR EACH ROW "
+        "BEGIN IF NEW.effective_to IS NOT NULL OR "
+        "(NEW.generation = 1 AND EXISTS (SELECT 1 FROM release_bundle_head_events prior "
+        "WHERE prior.tenant_id = NEW.tenant_id AND prior.project_id = NEW.project_id "
+        "AND prior.environment = NEW.environment)) OR "
+        "(NEW.generation > 1 AND NOT EXISTS (SELECT 1 FROM release_bundle_head_events prior "
+        "WHERE prior.tenant_id = NEW.tenant_id AND prior.project_id = NEW.project_id "
+        "AND prior.environment = NEW.environment "
+        "AND prior.generation = NEW.previous_generation "
+        "AND prior.effective_to = NEW.effective_from "
+        "AND prior.new_deployment_id <=> NEW.old_deployment_id "
+        "AND prior.new_label_version_id <=> NEW.old_label_version_id "
+        "AND prior.new_bundle_sha256 <=> NEW.old_bundle_sha256)) "
+        "THEN SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = "
+        "'release head activation intervals must be continuous'; END IF; END"
+    )
+    event.listen(
+        table,
+        "after_create",
+        DDL(sqlite_continuity_trigger).execute_if(dialect="sqlite"),
+    )
+    event.listen(
+        table,
+        "after_create",
+        DDL(mysql_continuity_trigger).execute_if(dialect="mysql"),
+    )
+    for dialect, statement in (
+        (
+            "sqlite",
+            "CREATE TRIGGER trg_release_bundle_head_events_no_delete "
+            "BEFORE DELETE ON release_bundle_head_events "
+            "BEGIN SELECT RAISE(ABORT, 'append-only release_bundle_head_events'); END",
+        ),
+        (
+            "mysql",
+            "CREATE TRIGGER trg_release_bundle_head_events_no_delete "
+            "BEFORE DELETE ON release_bundle_head_events FOR EACH ROW "
+            "SIGNAL SQLSTATE '45000' "
+            "SET MESSAGE_TEXT = 'append-only release_bundle_head_events'",
+        ),
+    ):
+        event.listen(table, "after_create", DDL(statement).execute_if(dialect=dialect))
+
+
+_install_release_head_interval_guards(ReleaseBundleHeadEvent.__table__)
 
 
 def _install_single_active_release_guard(table: Any) -> None:

@@ -14,6 +14,7 @@ from app.models import (
     LabelAggregationRun,
     LabelExtractionRun,
     LabelFact,
+    LabelFactHead,
     LabelObservation,
     LabelVersion,
     OutboxEvent,
@@ -533,14 +534,24 @@ def test_l1_aggregation_is_replayable_candidate_scoped_and_human_feedback_become
         feedback = session.scalar(
             select(FeedbackExample).where(FeedbackExample.review_decision_id == decision_id)
         )
-        fact = session.scalar(select(LabelFact).where(LabelFact.aggregate_id == aggregate_id))
+        fact = session.scalar(
+            select(LabelFact).where(LabelFact.human_review_decision_id == decision_id)
+        )
         assert feedback is not None
         assert feedback.feedback_type == "human-confirmed"
         assert feedback.gold_status == "candidate"
         assert feedback.target_type == "label-aggregate"
         assert fact is not None
         assert fact.authority == "human-confirmed"
-        assert fact.status == "active"
+        assert fact.status == "recorded"
+        assert fact.active_slot is None
+        assert fact.aggregate_id is None
+        assert fact.payload["reviewed_aggregate_id"] == aggregate_id
+        fact_head = session.scalar(
+            select(LabelFactHead).where(LabelFactHead.current_fact_id == fact.fact_id)
+        )
+        assert fact_head is not None
+        assert fact_head.current_revision == fact.revision == 1
         assert fact.trace_id == aggregate["trace_id"]
         assert decision.json()["data"]["trace_id"] == aggregate["trace_id"]
         assert decision.json()["data"]["action_trace_id"] == decision.json()["meta"]["trace_id"]
@@ -623,11 +634,28 @@ def test_low_risk_batch_decisions_are_candidate_scoped_and_return_per_item_resul
     assert all(item["decision_id"] for item in data["results"])
 
     with SessionLocal() as session:
+        decision_ids = [str(item["decision_id"]) for item in data["results"]]
         facts = list(
             session.scalars(
-                select(LabelFact).where(
-                    LabelFact.aggregate_id.in_([item["aggregate_id"] for item in aggregates])
-                )
+                select(LabelFact).where(LabelFact.human_review_decision_id.in_(decision_ids))
             )
         )
         assert len(facts) == 2
+        assert all(
+            fact.source_kind == "human-decision"
+            and fact.aggregate_id is None
+            and fact.status == "recorded"
+            and fact.active_slot is None
+            for fact in facts
+        )
+        assert {fact.payload["reviewed_aggregate_id"] for fact in facts} == {
+            item["aggregate_id"] for item in aggregates
+        }
+        fact_heads = list(
+            session.scalars(
+                select(LabelFactHead).where(
+                    LabelFactHead.current_fact_id.in_([fact.fact_id for fact in facts])
+                )
+            )
+        )
+        assert len(fact_heads) == 2

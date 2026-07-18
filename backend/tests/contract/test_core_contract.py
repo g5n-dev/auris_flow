@@ -91,11 +91,28 @@ def test_readyz_production_alias_is_strict_by_default(client, monkeypatch):
     assert response.status_code == 503
     assert response.json()["data"]["required_checks"] == [
         "auth",
+        "dagster",
         "database",
         "object_storage",
         "qdrant",
         "redis",
     ]
+
+
+def test_readyz_production_cannot_omit_dagster_from_explicit_dependencies(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database")
+    monkeypatch.setattr(settings, "dagster_graphql_url", "http://127.0.0.1:1/graphql")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["required_checks"] == ["auth", "dagster", "database"]
+    assert response.json()["data"]["missing_required"]["dagster"] == "not_ready"
 
 
 def test_ops_summary_contract(client, auth_headers):

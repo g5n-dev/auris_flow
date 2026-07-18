@@ -32,6 +32,13 @@ class LabelVersionDeprecationPreflightRequest(StrictLabelLifecycleModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$",
     )
     reason: StrictStr = Field(min_length=1, max_length=1000)
+    impact_cursor: StrictStr | None = Field(
+        default=None,
+        min_length=1,
+        max_length=512,
+        pattern=r"^[a-z][a-z0-9-]*:[A-Za-z0-9][A-Za-z0-9._:-]*$",
+    )
+    impact_limit: StrictInt = Field(default=50, ge=1, le=100)
 
     @field_validator("reason")
     @classmethod
@@ -75,10 +82,44 @@ class LabelVersionEnvironmentReference(StrictLabelLifecycleModel):
 
 class LabelVersionLifecycleBlocker(StrictLabelLifecycleModel):
     code: StrictStr
-    reference_type: Literal["active-head", "draining-deployment", "in-flight-run"]
+    reference_type: Literal[
+        "active-head",
+        "draining-deployment",
+        "in-flight-run",
+        "downstream-impact",
+        "impact-scan",
+    ]
     deployment_id: StrictStr | None = None
     run_id: StrictStr | None = None
-    environment: StrictStr
+    resource_id: StrictStr | None = None
+    environment: StrictStr | None = None
+
+
+class LabelVersionDownstreamImpact(StrictLabelLifecycleModel):
+    impact_key: StrictStr
+    impact_type: Literal[
+        "fact-set",
+        "metric-result",
+        "report-document",
+        "data-asset",
+        "asset-partition",
+        "asset-materialization",
+        "task-version-release-head",
+    ]
+    resource_id: StrictStr
+    status: StrictStr | None
+    reference_role: Literal[
+        "target-version",
+        "source-version",
+        "frozen-metric-binding",
+        "payload-reference",
+    ]
+    impact_disposition: Literal[
+        "blocking",
+        "migration-required",
+        "historical-reference",
+    ]
+    details: dict[str, object]
 
 
 class LabelVersionInFlightRunReference(StrictLabelLifecycleModel):
@@ -99,6 +140,15 @@ class LabelVersionDeprecationPreflightResponse(StrictLabelLifecycleModel):
     active_environment_references: list[LabelVersionEnvironmentReference]
     draining_environment_references: list[LabelVersionEnvironmentReference]
     in_flight_run_references: list[LabelVersionInFlightRunReference]
+    downstream_impacts: list[LabelVersionDownstreamImpact]
+    downstream_impact_total: StrictInt
+    blocking_impact_total: StrictInt
+    migration_required_impact_total: StrictInt
+    historical_reference_total: StrictInt
+    impact_next_cursor: StrictStr | None
+    impact_scan_complete: bool
+    migration_evidence_required: bool
+    migration_evidence_satisfied: bool
     blockers: list[LabelVersionLifecycleBlocker]
     ready_for_transition: bool
     safe_stop_required: bool

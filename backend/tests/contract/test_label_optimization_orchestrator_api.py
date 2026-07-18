@@ -3,9 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import select
 
-from app.api.routers.label_optimization_orchestrator import router
 from app.core.database import SessionLocal
-from app.main import app
 from app.models import (
     AuditLog,
     EvalDatasetVersion,
@@ -17,15 +15,6 @@ from app.models import (
     PromptVersion,
     RunRecord,
 )
-
-# Keep this contract runnable while the root task wires the router into ``main.py``.
-# Once wired, the path check prevents a duplicate registration.
-if not any(
-    getattr(route, "path", None) == "/api/v1/label-optimization-trigger-scans"
-    for route in app.routes
-):
-    app.include_router(router, prefix="/api/v1")
-
 
 @pytest.fixture(autouse=True)
 def _seed_locked_bundle(client):

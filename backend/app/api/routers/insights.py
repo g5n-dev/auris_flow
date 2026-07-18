@@ -33,6 +33,7 @@ from app.services.insight_closure_service import (
     get_insight_report,
     report_detail_payload,
 )
+from app.services.metric_snapshot_comparison_service import compare_metric_snapshots
 from app.services.resource_service import list_resource_data
 
 router = APIRouter(tags=["insights"])
@@ -83,6 +84,8 @@ def get_insights_metrics(
     fact_set_generation: Annotated[int | None, Query(ge=1)] = None,
     fact_as_of: QueryTimestamp | None = None,
     model_version: str | None = None,
+    source_run_id: QueryIdentifier | None = None,
+    metric_key: Annotated[set[QueryIdentifier] | None, Query()] = None,
 ) -> dict[str, Any]:
     all_items = current_metric_payloads(
         session,
@@ -100,6 +103,8 @@ def get_insights_metrics(
         fact_set_generation=fact_set_generation,
         fact_as_of=fact_as_of,
         model_version=model_version,
+        source_run_id=source_run_id,
+        metric_keys=sorted(metric_key) if metric_key is not None else None,
     )
     raw_cursor = str(page.get("cursor") or "0")
     offset = int(raw_cursor) if raw_cursor.isdigit() else 0
@@ -112,6 +117,24 @@ def get_insights_metrics(
         total=len(all_items),
         limit=limit,
         next_cursor=next_cursor,
+    )
+
+
+@router.get("/insights/metric-comparisons")
+def get_insight_metric_comparison(
+    session: SessionDep,
+    ctx: ContextDep,
+    baseline_metric_result_id: QueryIdentifier,
+    current_metric_result_id: QueryIdentifier,
+) -> dict[str, Any]:
+    return envelope(
+        compare_metric_snapshots(
+            session,
+            ctx,
+            baseline_metric_result_id,
+            current_metric_result_id,
+        ),
+        ctx,
     )
 
 

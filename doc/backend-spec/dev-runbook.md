@@ -39,7 +39,9 @@ DAGSTER_REPOSITORY_NAME=auris_flow
 DAGSTER_DEFAULT_JOB_NAME=auris_flow_generic_job
 AURIS_EXTERNAL_CALLBACK_ADAPTER=local
 EXTERNAL_CALLBACK_URL=http://127.0.0.1:8089/callbacks/platform
-EXTERNAL_CALLBACK_SECRET=auris-dev-callback-secret
+EXTERNAL_CALLBACK_KEY_BINDINGS=
+EXTERNAL_CALLBACK_ACTIVE_KEY_ID=
+EXTERNAL_CALLBACK_LEGACY_HMAC_ENABLED=false
 OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 
 JWT_PUBLIC_KEY_PATH=./secrets/local_jwt_public.pem
@@ -57,6 +59,8 @@ JWT_AUDIENCE=auris-flow-bff
 4. 启动 BFF：`uvicorn app.main:app --reload --port 8000`。
 5. 启动 Worker：`python -m app.workers.outbox_worker`。
 6. 前端继续使用现有 `http://127.0.0.1:5173`，后续通过 proxy 指向 BFF。
+
+生产迁移仍需先暂停 LabelFact writer 并确认无在途写事务，再执行 0039/0040 Contract。迁移自身会在 MySQL/MariaDB Fact ALTER 期间持续保留 UPDATE/DELETE 守卫，并以双 INSERT trigger 顺序切换新旧写契约；维护窗口用于避免应用版本与列/来源 union 在短时发布顺序中不一致，不能用来绕过 preflight 或删除历史 Fact/RecomputeRun。
 
 ## 4. 健康检查
 

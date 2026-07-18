@@ -240,6 +240,17 @@ def test_as_of_uses_recorded_at_revision_and_occurred_at_business_window(
                 expected_head_generation=0,
             ),
         )
+    with SessionLocal() as session:
+        frozen_first = session.get(LabelFact, first["fact_id"])
+        assert frozen_first is not None
+        first_row_snapshot = {
+            "active_slot": frozen_first.active_slot,
+            "content_sha256": frozen_first.content_sha256,
+            "recorded_at": frozen_first.recorded_at,
+            "status": frozen_first.status,
+            "updated_at": frozen_first.updated_at,
+            "value_json": frozen_first.value_json,
+        }
 
     monkeypatch.setattr(label_fact_temporal_service, "_utcnow", lambda: second_time)
     with SessionLocal.begin() as session:
@@ -302,7 +313,16 @@ def test_as_of_uses_recorded_at_revision_and_occurred_at_business_window(
 
         first_fact = session.get(LabelFact, first["fact_id"])
         assert first_fact is not None
-        assert first_fact.status == "superseded"
+        assert {
+            "active_slot": first_fact.active_slot,
+            "content_sha256": first_fact.content_sha256,
+            "recorded_at": first_fact.recorded_at,
+            "status": first_fact.status,
+            "updated_at": first_fact.updated_at,
+            "value_json": first_fact.value_json,
+        } == first_row_snapshot
+        assert first_fact.status == "recorded"
+        assert first_fact.active_slot is None
         assert first_fact.value_json is True
         assert _as_utc(first_fact.recorded_at) == first_time
 

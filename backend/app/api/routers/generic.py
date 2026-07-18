@@ -192,6 +192,16 @@ def knowledge_qdrant_payload(
         else source.get("version") or source.get("freshness") or "source-current"
     )
     asset_key = source.get("asset_key") or f"auris/knowledge/{authoritative_source_id}"
+    embedding_text = "\n".join(
+        str(value).strip()
+        for value in (
+            source.get("name"),
+            source.get("description"),
+            source.get("source_type"),
+            source.get("connector_id"),
+        )
+        if value is not None and str(value).strip()
+    )
     return {
         "tenant_id": ctx.tenant_id,
         "project_id": ctx.project_id,
@@ -203,6 +213,7 @@ def knowledge_qdrant_payload(
         "source_type": source.get("source_type"),
         "asset_key": asset_key,
         "version": version,
+        "embedding_text": embedding_text,
         "business_ref": {
             "connector_id": source.get("connector_id"),
             "source_name": source.get("name"),

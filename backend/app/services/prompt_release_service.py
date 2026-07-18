@@ -98,6 +98,12 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if value is not None else None
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
 def _scoped(
     session: Session,
     model: type[_Model],
@@ -381,7 +387,11 @@ def release_head_event_hash_document(event: ReleaseBundleHeadEvent) -> dict[str,
         "old_bundle_sha256": event.old_bundle_sha256,
         "new_bundle_sha256": event.new_bundle_sha256,
         "effective_from": effective_from,
-        "effective_to": _iso(event.effective_to),
+        # ``effective_to`` is the only write-once closure field on an otherwise
+        # immutable activation event.  It is deliberately committed as null in
+        # the event hash so closing a half-open interval does not invalidate the
+        # immutable activation pointer/hash evidence.
+        "effective_to": payload.get("canonical_effective_to"),
         "command_id": event.command_id,
         "completion_receipt_id": event.completion_receipt_id,
         "approval_id": event.approval_id,
@@ -2194,6 +2204,76 @@ def _append_release_head_event(
     effective_from: datetime,
     legacy_anchor_backfill: bool = False,
 ) -> ReleaseBundleHeadEvent:
+    previous_head_event_id: str | None = None
+    if previous_generation is not None:
+        if old_pointer is None:
+            raise ApiError(
+                "RELEASE_ACTIVATION_LEDGER_DRIFT",
+                "上一代 activation interval 缺少旧 Head 指针",
+                409,
+            )
+        previous = session.scalar(
+            select(ReleaseBundleHeadEvent)
+            .where(
+                ReleaseBundleHeadEvent.tenant_id == ctx.tenant_id,
+                ReleaseBundleHeadEvent.project_id == ctx.project_id,
+                ReleaseBundleHeadEvent.environment == head.environment,
+                ReleaseBundleHeadEvent.generation == previous_generation,
+            )
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if previous is None:
+            raise ApiError(
+                "RELEASE_ACTIVATION_LEDGER_DRIFT",
+                "上一代 activation interval 不存在，Head 切换已拒绝",
+                409,
+                details=[{"previous_generation": previous_generation}],
+            )
+        previous_head_event_id = previous.head_event_id
+        pointer_mismatches = {
+            "deployment_id": (previous.new_deployment_id, old_pointer.get("deployment_id")),
+            "label_version_id": (
+                previous.new_label_version_id,
+                old_pointer.get("label_version_id"),
+            ),
+            "bundle_sha256": (previous.new_bundle_sha256, old_pointer.get("bundle_sha256")),
+        }
+        pointer_drift = {
+            key: {"ledger": values[0], "head": values[1]}
+            for key, values in pointer_mismatches.items()
+            if values[0] != values[1]
+        }
+        if pointer_drift:
+            raise ApiError(
+                "RELEASE_ACTIVATION_LEDGER_DRIFT",
+                "上一代 activation interval 与 Head 旧指针不一致",
+                409,
+                details=[{"mismatches": pointer_drift}],
+            )
+        previous_effective_from = _as_utc(previous.effective_from)
+        effective_from = _as_utc(effective_from)
+        if previous_effective_from > effective_from:
+            # Database time can move backwards slightly across workers.  The
+            # ledger remains monotonic by using the prior start as the boundary.
+            effective_from = previous_effective_from
+        if previous.effective_to is not None and _as_utc(previous.effective_to) != effective_from:
+            raise ApiError(
+                "RELEASE_ACTIVATION_INTERVAL_ALREADY_CLOSED",
+                "上一代 activation interval 已被不同边界闭合",
+                409,
+                details=[
+                    {
+                        "previous_generation": previous_generation,
+                        "effective_to": _iso(previous.effective_to),
+                        "requested_effective_to": _iso(effective_from),
+                    }
+                ],
+            )
+        if previous.effective_to is None:
+            previous.effective_to = effective_from
+            session.flush()
+
     new_pointer = _release_head_pointer(head)
     root_trace_id = str(
         (head.payload or {}).get("root_trace_id")
@@ -2208,11 +2288,17 @@ def _append_release_head_event(
     )
     trace_id = str(command.trace_id if command is not None else head.trace_id or ctx.trace_id)
     payload = {
-        "head_event_schema": "release-bundle-head-event/v1",
+        "head_event_schema": "release-bundle-head-event/v2",
         "release_head_id": head.release_head_id,
         "bootstrapped": head.bootstrapped,
         "legacy_anchor_backfill": legacy_anchor_backfill,
         "canonical_effective_from": effective_from.isoformat(),
+        "canonical_effective_to": None,
+        "interval_semantics": "[effective_from,effective_to)",
+        "previous_head_event_id": previous_head_event_id,
+        "previous_interval_closed_at": (
+            effective_from.isoformat() if previous_head_event_id is not None else None
+        ),
     }
     document = {
         "tenant_id": ctx.tenant_id,

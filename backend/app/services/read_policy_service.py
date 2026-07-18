@@ -108,6 +108,22 @@ RESOURCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyType(
     }
 )
 
+# Strong-table trace subjects are not generic JsonResource collections. Keep
+# their visibility policy separate so registering an audit/outbox object type
+# cannot accidentally expose a new runtime projection collection.
+TRACE_REFERENCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyType(
+    {
+        "label_recompute_runs": ResourceReadPolicy(
+            "sensitive",
+            ("project_admin", "model_engineer"),
+        ),
+        "oidc_identities": ResourceReadPolicy(
+            "sensitive",
+            ("project_admin",),
+        ),
+    }
+)
+
 TRACE_READ_ROLES = (
     "project_admin",
     "asset_manager",
@@ -241,8 +257,11 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "label_optimization_trigger_scan": "label_versions",
         "label_policy_version": "label_versions",
         "label_publish": "label_versions",
+        "label_recompute_run": "label_recompute_runs",
+        "label_recompute_run_item": "label_recompute_runs",
         "label_version": "label_versions",
         "label_versions": "label_versions",
+        "oidc_identity": "oidc_identities",
         "label_taxonomy_suggestion": "label_taxonomy_suggestions",
         "label_version_deprecation_preflight": "label_versions",
         "taxonomy_suggestion": "label_taxonomy_suggestions",
@@ -345,6 +364,7 @@ TRACE_GOVERNED_FIELD_ALIASES = build_json_key_aliases(
         *TRACE_REFERENCE_CONTAINER_FIELDS,
         *TRACE_REFERENCE_KEY_COLLECTIONS,
         *RESOURCE_READ_POLICIES,
+        *TRACE_REFERENCE_READ_POLICIES,
         *TRACE_REFERENCE_COLLECTION_ALIASES,
     )
 )
@@ -503,7 +523,7 @@ def trace_reference_collection(value: object) -> str | None:
     normalized = _normalize_trace_field(value)
     if not normalized:
         return None
-    if normalized in RESOURCE_READ_POLICIES:
+    if normalized in RESOURCE_READ_POLICIES or normalized in TRACE_REFERENCE_READ_POLICIES:
         return normalized
     return TRACE_REFERENCE_COLLECTION_ALIASES.get(normalized)
 
@@ -670,7 +690,10 @@ def _trace_collection_reference_is_visible(
     visible_review_task_ids: set[str] | frozenset[str],
     visible_review_decision_ids: set[str] | frozenset[str],
 ) -> bool:
-    if not can_read_resource_collection(ctx, collection):
+    policy = RESOURCE_READ_POLICIES.get(collection) or TRACE_REFERENCE_READ_POLICIES.get(collection)
+    if policy is None or (
+        "system" not in ctx.roles and policy.roles and not set(ctx.roles).intersection(policy.roles)
+    ):
         return False
     if collection == "human_review_tasks":
         return bool(reference_id and reference_id in visible_review_task_ids)

@@ -58,7 +58,7 @@ def test_label_fact_model_mirrors_nullable_0035_expand_columns() -> None:
 
     assert TEMPORAL_FACT_COLUMNS <= set(columns.keys())
     assert all(columns[column_name].nullable for column_name in TEMPORAL_FACT_COLUMNS)
-    assert not columns.aggregate_id.nullable
+    assert columns.aggregate_id.nullable
     assert "active_slot" in columns
 
     assert {
@@ -67,33 +67,24 @@ def test_label_fact_model_mirrors_nullable_0035_expand_columns() -> None:
     } <= _constraint_names(LabelFact, UniqueConstraint)
     assert {
         "fk_label_facts_scope_human_decision",
+        "fk_label_facts_scope_recompute_item",
         "fk_label_facts_scope_fact_set",
     } <= _constraint_names(LabelFact, ForeignKeyConstraint)
     assert {
         "ck_label_facts_temporal_revision",
         "ck_label_facts_temporal_hashes",
         "ck_label_facts_occurred_origin",
-        "ck_label_facts_recompute_reserved",
         "ck_label_facts_expand_source",
         "ck_label_facts_temporal_completeness",
+        "ck_label_facts_append_only_projection",
     } <= _constraint_names(LabelFact, CheckConstraint)
     assert {
-        "uq_label_facts_active_head",
         "ix_label_facts_temporal_as_of",
         "ix_label_facts_temporal_occurred",
         "ix_label_facts_temporal_source",
         "ix_label_facts_scope_fact_set",
     } <= _index_names(LabelFact)
-    active_head_index = next(
-        index for index in LabelFact.__table__.indexes if index.name == "uq_label_facts_active_head"
-    )
-    assert tuple(column.name for column in active_head_index.columns) == (
-        "tenant_id",
-        "project_id",
-        "fact_namespace",
-        "logical_key_sha",
-        "active_slot",
-    )
+    assert "uq_label_facts_active_head" not in _index_names(LabelFact)
 
 
 def test_temporal_head_models_cover_strong_0035_tables() -> None:
@@ -215,3 +206,70 @@ def test_create_all_installs_fact_set_head_event_append_only_guards() -> None:
             )
 
     assert inspect(engine).has_table("label_fact_set_head_events")
+
+
+def test_create_all_installs_label_fact_append_only_contract_guards() -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    Base.metadata.create_all(engine)
+
+    with engine.begin() as connection:
+        trigger_names = {
+            row[0]
+            for row in connection.execute(
+                text(
+                    "SELECT name FROM sqlite_master "
+                    "WHERE type = 'trigger' AND tbl_name = 'label_facts'"
+                )
+            )
+        }
+        connection.execute(
+            text(
+                "INSERT INTO label_facts "
+                "(fact_id, tenant_id, project_id, aggregate_id, supersedes_fact_id, "
+                "fact_namespace, logical_key_sha, revision, event_or_segment_id, "
+                "assertion_slot, occurred_at, recorded_at, occurred_at_origin, source_kind, "
+                "human_review_decision_id, recompute_run_item_id, fact_set_id, content_sha256, "
+                "root_trace_id, action_trace_id, label_version_id, subject_scope, subject_key, "
+                "label_id, value_type, value_json, authority, status, active_slot, "
+                "review_decision_id, trace_id, payload) VALUES "
+                "('fact-append-only', 'tenant-a', 'project-a', 'aggregate-a', NULL, "
+                "'native:version-a', :logical_sha, 1, 'event-a', 'presence', "
+                "CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 'source', 'aggregate', NULL, NULL, "
+                "NULL, :content_sha, 'root-a', 'action-a', 'version-a', 'business-event', "
+                "'subject-a', 'label-a', 'boolean', 'true', 'l2-auto-accepted', "
+                "'recorded', NULL, NULL, 'root-a', '{}')"
+            ),
+            {"content_sha": "b" * 64, "logical_sha": "a" * 64},
+        )
+
+    assert trigger_names == {
+        "trg_label_facts_contract_insert",
+        "trg_label_facts_no_delete",
+        "trg_label_facts_no_update",
+    }
+
+    with pytest.raises(IntegrityError, match="append-only label_facts"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "UPDATE label_facts SET value_json = 'false' WHERE fact_id = 'fact-append-only'"
+                )
+            )
+
+    with pytest.raises(IntegrityError, match="append-only label_facts"):
+        with engine.begin() as connection:
+            connection.execute(text("DELETE FROM label_facts WHERE fact_id = 'fact-append-only'"))
+
+    with pytest.raises(IntegrityError, match="label_facts contract requires recorded rows"):
+        with engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO label_facts "
+                    "(fact_id, tenant_id, project_id, aggregate_id, label_version_id, "
+                    "subject_scope, subject_key, label_id, value_type, value_json, authority, "
+                    "status, active_slot, trace_id, payload) VALUES "
+                    "('legacy-after-contract', 'tenant-a', 'project-a', 'aggregate-b', "
+                    "'version-a', 'business-event', 'subject-b', 'label-a', 'boolean', "
+                    "'true', 'l2-auto-accepted', 'active', 'active', 'root-b', '{}')"
+                )
+            )

@@ -473,6 +473,14 @@ def _assert_fact_set_integrity(
             409,
             details=[{"fact_set_id": fact_set.fact_set_id}],
         )
+    if isinstance(fact_set.payload.get("recompute_run_id"), str):
+        # Import lazily to keep the FactSet primitive reusable while the
+        # recomputation service itself uses its canonical manifest helpers.
+        from app.services.label_recomputation_service import (
+            assert_recompute_fact_set_materialized,
+        )
+
+        assert_recompute_fact_set_materialized(session, ctx, fact_set)
 
 
 def _assert_expected_manifest(

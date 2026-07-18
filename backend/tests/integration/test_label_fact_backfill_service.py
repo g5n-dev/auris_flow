@@ -4,7 +4,7 @@ import json
 from datetime import UTC, datetime
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.core.context import RequestContext
 from app.core.database import SessionLocal
@@ -113,6 +113,18 @@ def _legacy_fact(
 
 
 def _seed_valid_legacy_chains() -> None:
+    # This suite exercises the pre-0039 Expand backfill window.  The current
+    # schema correctly rejects legacy inserts and every Fact mutation, so the
+    # fixture explicitly removes only those Contract triggers to reproduce the
+    # older deployment state.  The autouse database reset restores them before
+    # every test.
+    with SessionLocal.begin() as session:
+        for trigger_name in (
+            "trg_label_facts_contract_insert",
+            "trg_label_facts_no_update",
+            "trg_label_facts_no_delete",
+        ):
+            session.execute(text(f"DROP TRIGGER IF EXISTS {trigger_name}"))
     first_time = datetime(2026, 6, 1, 8, 0, tzinfo=UTC)
     second_time = datetime(2026, 6, 2, 8, 0, tzinfo=UTC)
     human_time = datetime(2026, 6, 3, 8, 0, tzinfo=UTC)

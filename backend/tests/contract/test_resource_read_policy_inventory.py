@@ -49,6 +49,10 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
         ("api/routers/traces.py", "get_traces_by_trace_id", "select", "ToolCall"): 1,
         ("api/routers/traces.py", "get_traces_by_trace_id", "select", "TraceRef"): 1,
         ("api/routers/traces.py", "get_traces_by_trace_id", "select", "VoiceprintEnrollment"): 1,
+        ("identity_bootstrap.py", "_validate_evidence", "get", "TraceRef"): 1,
+        ("identity_bootstrap.py", "_validate_evidence", "select", "AuditLog"): 1,
+        ("identity_bootstrap.py", "bootstrap_identity", "get", "TraceRef"): 1,
+        ("identity_bootstrap.py", "bootstrap_identity", "select", "AuditLog"): 1,
         ("repositories/outbox_events.py", "claim_events", "select", "OutboxDeliveryAttempt"): 1,
         ("repositories/outbox_events.py", "claim_events", "select", "OutboxEvent"): 2,
         ("repositories/outbox_events.py", "insert_or_get_event", "select", "OutboxEvent"): 1,
@@ -204,6 +208,12 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
         (
             "services/label_metric_scope_service.py",
             "_source_run",
+            "select",
+            "RunRecord",
+        ): 1,
+        (
+            "services/label_recomputation_service.py",
+            "_execution_receipt",
             "select",
             "RunRecord",
         ): 1,

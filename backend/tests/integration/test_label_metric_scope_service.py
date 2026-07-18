@@ -381,6 +381,10 @@ def test_metric_read_projection_joins_the_authoritative_label_scope() -> None:
         "source_label_version_ids": [SOURCE_VERSION_ID],
         "target_label_version_id": None,
         "mapping_bundle_id": None,
+        "mapping_bundle_sha256": None,
+        "fact_namespace": FACT_NAMESPACE,
+        "fact_set_id": "fact-set-metric-v1",
+        "fact_set_manifest_sha256": "6" * 64,
         "fact_set_generation": 1,
         "fact_as_of": "2026-07-18T10:00:00Z",
         "metric_definition_versions": {"purchase_intent_rate": "metric-catalog/3"},
@@ -394,6 +398,10 @@ def test_metric_read_projection_joins_the_authoritative_label_scope() -> None:
     assert item["scope_sha256"]
     assert item["source_manifest_sha256"]
     assert item["content_sha256"]
+    assert item["comparison_status"] == "structural-break"
+    assert item["comparison_reason_codes"] == ["BASELINE_SNAPSHOT_MISSING"]
+    assert item["comparison"]["continuous_trend_allowed"] is False
+    assert len(item["comparison_sha256"]) == 64
 
 
 def test_metric_read_projection_never_uses_legacy_label_version_when_strong_scope_exists() -> None:
@@ -502,6 +510,98 @@ def test_metric_read_projection_fails_closed_when_required_scope_is_missing() ->
         current_metric_payloads(session, _ctx("read-missing-label-scope"))
 
     assert missing.value.code == "INSIGHT_METRIC_LABEL_SCOPE_MISSING"
+
+
+def test_explicit_historical_current_run_never_uses_a_future_snapshot_as_baseline() -> None:
+    def metric(
+        metric_result_id: str,
+        source_run_id: str,
+        created_at: datetime,
+    ) -> MetricResult:
+        return MetricResult(
+            metric_result_id=metric_result_id,
+            tenant_id=TENANT_ID,
+            project_id=PROJECT_ID,
+            status="materialized",
+            trace_id=f"trace-{metric_result_id}",
+            created_at=created_at,
+            payload={
+                "definition_version": "metric-catalog/3",
+                "immutable": True,
+                "label_version_applicability": "none",
+                "metric_key": "generic_conversion_rate",
+                "sample_size": 10,
+                "snapshot_role": "aggregation",
+                "source_run_id": source_run_id,
+                "scope": {
+                    "time_range": "30d",
+                    "store_ids": [],
+                    "model_version": "model-v1",
+                    "label_version": None,
+                },
+                "unit": "percent",
+                "value": 86.2,
+            },
+        )
+
+    with SessionLocal.begin() as session:
+        session.add_all(
+            [
+                metric(
+                    "metric-future",
+                    "run-future",
+                    datetime(2026, 7, 20, tzinfo=UTC),
+                ),
+                metric(
+                    "metric-historical-current",
+                    "run-historical-current",
+                    datetime(2026, 7, 18, tzinfo=UTC),
+                ),
+                MetricResult(
+                    metric_result_id="metric-unrequested-same-run",
+                    tenant_id=TENANT_ID,
+                    project_id=PROJECT_ID,
+                    status="materialized",
+                    trace_id="trace-metric-unrequested-same-run",
+                    created_at=datetime(2026, 7, 18, tzinfo=UTC),
+                    payload={
+                        "definition_version": "metric-catalog/3",
+                        "immutable": True,
+                        "label_version_applicability": "none",
+                        "metric_key": "unrequested_metric",
+                        "sample_size": 5,
+                        "snapshot_role": "aggregation",
+                        "source_run_id": "run-historical-current",
+                        "scope": {
+                            "time_range": "30d",
+                            "store_ids": [],
+                            "model_version": "model-v1",
+                            "label_version": None,
+                        },
+                        "unit": "count",
+                        "value": 5,
+                    },
+                ),
+                metric(
+                    "metric-historical-baseline",
+                    "run-historical-baseline",
+                    datetime(2026, 7, 16, tzinfo=UTC),
+                ),
+            ]
+        )
+
+    with SessionLocal() as session:
+        items = current_metric_payloads(
+            session,
+            _ctx("read-historical-current"),
+            source_run_id="run-historical-current",
+            metric_keys=["generic_conversion_rate"],
+        )
+
+    assert len(items) == 1
+    assert items[0]["metric_result_id"] == "metric-historical-current"
+    assert items[0]["comparison"]["baseline"]["metric_result_id"] == ("metric-historical-baseline")
+    assert items[0]["comparison"]["current"]["metric_result_id"] == ("metric-historical-current")
 
 
 def test_report_detail_projects_the_same_authoritative_label_scope() -> None:

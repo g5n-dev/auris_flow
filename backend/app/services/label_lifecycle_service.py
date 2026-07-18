@@ -13,20 +13,30 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.models import (
+    AssetMaterialization,
+    AssetPartition,
+    DataAsset,
     IdempotencyRecord,
+    InsightReport,
+    InsightReportMetricBinding,
     JsonResource,
+    LabelFactSet,
+    LabelFactSetHead,
     LabelMappingBundle,
     LabelMappingBundleSource,
     LabelVersion,
     LabelVersionItem,
+    MetricResultLabelScope,
     ReleaseBundleHead,
     ReleaseBundleHeadEvent,
     ReleaseDeployment,
     RunRecord,
+    TaskVersionReleaseHead,
 )
 from app.schemas.label_lifecycle import (
     LabelVersionDeprecationPreflightRequest,
     LabelVersionDeprecationPreflightResponse,
+    LabelVersionDownstreamImpact,
     LabelVersionEnvironmentReference,
     LabelVersionInFlightRunReference,
     LabelVersionLifecycleBlocker,
@@ -48,6 +58,7 @@ from app.services.outbox_service import enqueue_event
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production"})
 _MAX_REPLACEMENT_CHAIN_DEPTH = 64
+_MAX_IMPACT_SCAN_ROWS = 5000
 _TERMINAL_RUN_STATUSES = frozenset(
     {"blocked", "cancelled", "completed", "failed", "rolled-back", "success"}
 )
@@ -125,6 +136,17 @@ class _EnvironmentReferences:
     in_flight: list[dict[str, Any]]
     blockers: list[dict[str, Any]]
     safe_stop_required: bool
+
+
+@dataclass(frozen=True)
+class _DownstreamImpactScan:
+    impacts: list[dict[str, Any]]
+    total: int
+    blocking_total: int
+    migration_required_total: int
+    historical_reference_total: int
+    next_cursor: str | None
+    scan_complete: bool
 
 
 def _canonical_json(value: object) -> str:
@@ -650,6 +672,375 @@ def _environment_references(
     )
 
 
+_LABEL_VERSION_PAYLOAD_KEYS = frozenset(
+    {
+        "label_version",
+        "label_version_id",
+        "source_label_version_id",
+        "source_label_version_ids",
+        "target_label_version_id",
+        "replacement_label_version_id",
+    }
+)
+
+
+def _payload_references_label_version(
+    value: object,
+    label_version_id: str,
+    *,
+    depth: int = 0,
+) -> bool:
+    if depth > 12:
+        return False
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            if key in _LABEL_VERSION_PAYLOAD_KEYS:
+                if nested == label_version_id:
+                    return True
+                if isinstance(nested, list) and label_version_id in nested:
+                    return True
+            if isinstance(nested, (dict, list)) and _payload_references_label_version(
+                nested,
+                label_version_id,
+                depth=depth + 1,
+            ):
+                return True
+    elif isinstance(value, list):
+        return any(
+            _payload_references_label_version(
+                nested,
+                label_version_id,
+                depth=depth + 1,
+            )
+            for nested in value
+            if isinstance(nested, (dict, list))
+        )
+    return False
+
+
+def _downstream_impact_scan(
+    session: Session,
+    ctx: RequestContext,
+    *,
+    label_version_id: str,
+    cursor: str | None,
+    limit: int,
+) -> _DownstreamImpactScan:
+    """Return a bounded, project-scoped impact page and fail-closed scan health."""
+
+    impacts_by_key: dict[str, dict[str, Any]] = {}
+    scan_complete = True
+
+    def add_impact(
+        impact_type: str,
+        resource_id: str,
+        *,
+        status: str | None,
+        reference_role: str,
+        impact_disposition: str,
+        details: dict[str, Any],
+    ) -> None:
+        impact_key = f"{impact_type}:{resource_id}"
+        impacts_by_key[impact_key] = {
+            "impact_key": impact_key,
+            "impact_type": impact_type,
+            "resource_id": resource_id,
+            "status": status,
+            "reference_role": reference_role,
+            "impact_disposition": impact_disposition,
+            "details": details,
+        }
+
+    fact_set_heads = list(
+        session.scalars(
+            select(LabelFactSetHead)
+            .where(
+                LabelFactSetHead.tenant_id == ctx.tenant_id,
+                LabelFactSetHead.project_id == ctx.project_id,
+                LabelFactSetHead.status == "active",
+            )
+            .order_by(LabelFactSetHead.fact_set_head_id)
+            .limit(_MAX_IMPACT_SCAN_ROWS + 1)
+            .with_for_update()
+        )
+    )
+    if len(fact_set_heads) > _MAX_IMPACT_SCAN_ROWS:
+        scan_complete = False
+        fact_set_heads = fact_set_heads[:_MAX_IMPACT_SCAN_ROWS]
+    heads_by_fact_set: dict[str, list[LabelFactSetHead]] = {}
+    for head in fact_set_heads:
+        heads_by_fact_set.setdefault(head.current_fact_set_id, []).append(head)
+
+    fact_sets = list(
+        session.scalars(
+            select(LabelFactSet)
+            .where(
+                LabelFactSet.tenant_id == ctx.tenant_id,
+                LabelFactSet.project_id == ctx.project_id,
+                LabelFactSet.target_label_version_id == label_version_id,
+            )
+            .order_by(LabelFactSet.fact_set_id)
+            .limit(_MAX_IMPACT_SCAN_ROWS + 1)
+            .with_for_update()
+        )
+    )
+    if len(fact_sets) > _MAX_IMPACT_SCAN_ROWS:
+        scan_complete = False
+        fact_sets = fact_sets[:_MAX_IMPACT_SCAN_ROWS]
+    for fact_set in fact_sets:
+        active_heads = heads_by_fact_set.get(fact_set.fact_set_id, [])
+        is_in_progress = fact_set.status in {"candidate", "validated", "approved"}
+        add_impact(
+            "fact-set",
+            fact_set.fact_set_id,
+            status=fact_set.status,
+            reference_role="target-version",
+            impact_disposition=(
+                "blocking" if active_heads or is_in_progress else "historical-reference"
+            ),
+            details={
+                "fact_namespace": fact_set.fact_namespace,
+                "fact_as_of": _isoformat(fact_set.fact_as_of),
+                "manifest_sha256": fact_set.manifest_sha256,
+                "row_count": fact_set.row_count,
+                "active_head_references": [
+                    {
+                        "fact_set_head_id": head.fact_set_head_id,
+                        "environment": head.environment,
+                        "generation": head.generation,
+                    }
+                    for head in active_heads
+                ],
+                "in_progress": is_in_progress,
+            },
+        )
+
+    metric_scopes = list(
+        session.scalars(
+            select(MetricResultLabelScope)
+            .where(
+                MetricResultLabelScope.tenant_id == ctx.tenant_id,
+                MetricResultLabelScope.project_id == ctx.project_id,
+            )
+            .order_by(MetricResultLabelScope.metric_result_id)
+            .limit(_MAX_IMPACT_SCAN_ROWS + 1)
+            .with_for_update()
+        )
+    )
+    if len(metric_scopes) > _MAX_IMPACT_SCAN_ROWS:
+        scan_complete = False
+        metric_scopes = metric_scopes[:_MAX_IMPACT_SCAN_ROWS]
+    impacted_metric_result_ids: set[str] = set()
+    for scope in metric_scopes:
+        sources = {str(value) for value in scope.source_label_version_ids if isinstance(value, str)}
+        roles: list[str] = []
+        if label_version_id in sources:
+            roles.append("source-version")
+        if scope.target_label_version_id == label_version_id:
+            roles.append("target-version")
+        if not roles:
+            continue
+        impacted_metric_result_ids.add(scope.metric_result_id)
+        add_impact(
+            "metric-result",
+            scope.metric_result_id,
+            status="snapshot",
+            reference_role=("target-version" if "target-version" in roles else "source-version"),
+            impact_disposition="historical-reference",
+            details={
+                "reference_roles": roles,
+                "taxonomy_mode": scope.taxonomy_mode,
+                "fact_set_id": scope.fact_set_id,
+                "fact_set_generation": scope.fact_set_generation,
+                "fact_as_of": _isoformat(scope.fact_as_of),
+                "scope_sha256": scope.scope_sha256,
+                "content_sha256": scope.content_sha256,
+            },
+        )
+
+    if impacted_metric_result_ids:
+        report_bindings = list(
+            session.scalars(
+                select(InsightReportMetricBinding)
+                .where(
+                    InsightReportMetricBinding.tenant_id == ctx.tenant_id,
+                    InsightReportMetricBinding.project_id == ctx.project_id,
+                )
+                .order_by(InsightReportMetricBinding.report_id)
+                .limit(_MAX_IMPACT_SCAN_ROWS + 1)
+                .with_for_update()
+            )
+        )
+        if len(report_bindings) > _MAX_IMPACT_SCAN_ROWS:
+            scan_complete = False
+            report_bindings = report_bindings[:_MAX_IMPACT_SCAN_ROWS]
+        impacted_bindings = [
+            binding
+            for binding in report_bindings
+            if impacted_metric_result_ids.intersection(
+                str(value) for value in binding.metric_result_ids if isinstance(value, str)
+            )
+        ]
+        report_ids = {binding.report_id for binding in impacted_bindings}
+        reports = (
+            list(
+                session.scalars(
+                    select(InsightReport)
+                    .where(
+                        InsightReport.tenant_id == ctx.tenant_id,
+                        InsightReport.project_id == ctx.project_id,
+                        InsightReport.report_id.in_(report_ids),
+                    )
+                    .with_for_update()
+                )
+            )
+            if report_ids
+            else []
+        )
+        reports_by_id = {report.report_id: report for report in reports}
+        for binding in impacted_bindings:
+            report = reports_by_id.get(binding.report_id)
+            if report is None:
+                scan_complete = False
+                continue
+            report_document = (report.payload or {}).get("report_document")
+            report_document = report_document if isinstance(report_document, dict) else {}
+            bound_metric_ids = sorted(
+                impacted_metric_result_ids.intersection(
+                    str(value) for value in binding.metric_result_ids if isinstance(value, str)
+                )
+            )
+            add_impact(
+                "report-document",
+                binding.report_id,
+                status=report.status,
+                reference_role="frozen-metric-binding",
+                impact_disposition="historical-reference",
+                details={
+                    "bound_metric_result_ids": bound_metric_ids,
+                    "metric_scope_sha256": binding.metric_scope_sha256,
+                    "binding_content_sha256": binding.content_sha256,
+                    "document_schema_version": report_document.get("schema_version"),
+                    "document_version": report_document.get("document_version"),
+                    "artifact_state": report_document.get("artifact_state"),
+                },
+            )
+
+    payload_models = (
+        ("data-asset", DataAsset, DataAsset.data_asset_id),
+        ("asset-partition", AssetPartition, AssetPartition.asset_partition_id),
+        (
+            "asset-materialization",
+            AssetMaterialization,
+            AssetMaterialization.materialization_id,
+        ),
+        (
+            "task-version-release-head",
+            TaskVersionReleaseHead,
+            TaskVersionReleaseHead.release_head_id,
+        ),
+    )
+    for impact_type, model, identity_column in payload_models:
+        rows = list(
+            session.scalars(
+                select(model)
+                .where(
+                    model.tenant_id == ctx.tenant_id,
+                    model.project_id == ctx.project_id,
+                )
+                .order_by(identity_column)
+                .limit(_MAX_IMPACT_SCAN_ROWS + 1)
+                .with_for_update()
+            )
+        )
+        if len(rows) > _MAX_IMPACT_SCAN_ROWS:
+            scan_complete = False
+            rows = rows[:_MAX_IMPACT_SCAN_ROWS]
+        for row in rows:
+            typed_row: Any = row
+            payload = typed_row.payload or {}
+            if not _payload_references_label_version(payload, label_version_id):
+                continue
+            resource_id = str(getattr(typed_row, identity_column.key))
+            add_impact(
+                impact_type,
+                resource_id,
+                status=str(typed_row.status),
+                reference_role="payload-reference",
+                impact_disposition=(
+                    "blocking"
+                    if impact_type == "task-version-release-head"
+                    or str(typed_row.status).lower()
+                    not in {
+                        "archived",
+                        "cancelled",
+                        "completed",
+                        "deprecated",
+                        "failed",
+                        "materialized",
+                        "success",
+                        "superseded",
+                    }
+                    else "historical-reference"
+                ),
+                details={"trace_id": typed_row.trace_id},
+            )
+
+    impacts = [impacts_by_key[key] for key in sorted(impacts_by_key)]
+    page_candidates = [
+        impact for impact in impacts if cursor is None or impact["impact_key"] > cursor
+    ]
+    page = page_candidates[:limit]
+    next_cursor = str(page[-1]["impact_key"]) if len(page_candidates) > limit and page else None
+    return _DownstreamImpactScan(
+        impacts=page,
+        total=len(impacts),
+        blocking_total=sum(impact["impact_disposition"] == "blocking" for impact in impacts),
+        migration_required_total=sum(
+            impact["impact_disposition"] == "migration-required" for impact in impacts
+        ),
+        historical_reference_total=sum(
+            impact["impact_disposition"] == "historical-reference" for impact in impacts
+        ),
+        next_cursor=next_cursor,
+        scan_complete=scan_complete,
+    )
+
+
+def _downstream_impact_blockers(
+    scan: _DownstreamImpactScan,
+    *,
+    label_version_id: str,
+    replacement_label_version_id: str | None,
+) -> list[dict[str, Any]]:
+    blockers: list[dict[str, Any]] = []
+    if not scan.scan_complete:
+        blockers.append(
+            {
+                "code": "LABEL_VERSION_IMPACT_SCAN_LIMIT_EXCEEDED",
+                "reference_type": "impact-scan",
+                "resource_id": label_version_id,
+            }
+        )
+    if scan.blocking_total > 0:
+        blockers.append(
+            {
+                "code": "LABEL_VERSION_ACTIVE_DOWNSTREAM_REFERENCE",
+                "reference_type": "downstream-impact",
+                "resource_id": label_version_id,
+            }
+        )
+    if scan.migration_required_total > 0 and replacement_label_version_id is None:
+        blockers.append(
+            {
+                "code": "LABEL_VERSION_DOWNSTREAM_IMPACT_MIGRATION_REQUIRED",
+                "reference_type": "downstream-impact",
+                "resource_id": label_version_id,
+            }
+        )
+    return blockers
+
+
 def _preflight_id(
     ctx: RequestContext,
     *,
@@ -710,6 +1101,23 @@ def create_label_version_deprecation_preflight(
         label_version_id=label_version_id,
         replacement_label_version_id=request.replacement_label_version_id,
     )
+    impact_scan = _downstream_impact_scan(
+        session,
+        ctx,
+        label_version_id=label_version_id,
+        cursor=request.impact_cursor,
+        limit=request.impact_limit,
+    )
+    impact_blockers = _downstream_impact_blockers(
+        impact_scan,
+        label_version_id=label_version_id,
+        replacement_label_version_id=request.replacement_label_version_id,
+    )
+    blockers = [*references.blockers, *impact_blockers]
+    migration_evidence_required = impact_scan.migration_required_total > 0
+    migration_evidence_satisfied = not migration_evidence_required or (
+        request.replacement_label_version_id is not None and request.mapping_bundle_id is not None
+    )
     preflight_id = _preflight_id(
         ctx,
         label_version_id=label_version_id,
@@ -725,8 +1133,17 @@ def create_label_version_deprecation_preflight(
         "active_environment_references": references.active,
         "draining_environment_references": references.draining,
         "in_flight_run_references": references.in_flight,
-        "blockers": references.blockers,
-        "ready_for_transition": not references.blockers,
+        "downstream_impacts": impact_scan.impacts,
+        "downstream_impact_total": impact_scan.total,
+        "blocking_impact_total": impact_scan.blocking_total,
+        "migration_required_impact_total": impact_scan.migration_required_total,
+        "historical_reference_total": impact_scan.historical_reference_total,
+        "impact_next_cursor": impact_scan.next_cursor,
+        "impact_scan_complete": impact_scan.scan_complete,
+        "migration_evidence_required": migration_evidence_required,
+        "migration_evidence_satisfied": migration_evidence_satisfied,
+        "blockers": blockers,
+        "ready_for_transition": not blockers,
         "safe_stop_required": references.safe_stop_required,
     }
     audit = record_audit(
@@ -735,7 +1152,7 @@ def create_label_version_deprecation_preflight(
         action="label_version.deprecation_preflight",
         object_type="label_version",
         object_id=label_version_id,
-        result="success" if not references.blockers else "blocked",
+        result="success" if not blockers else "blocked",
         after=summary,
     )
     outbox_event = enqueue_event(
@@ -765,10 +1182,19 @@ def create_label_version_deprecation_preflight(
             LabelVersionInFlightRunReference.model_validate(reference)
             for reference in references.in_flight
         ],
-        blockers=[
-            LabelVersionLifecycleBlocker.model_validate(blocker) for blocker in references.blockers
+        downstream_impacts=[
+            LabelVersionDownstreamImpact.model_validate(impact) for impact in impact_scan.impacts
         ],
-        ready_for_transition=not references.blockers,
+        downstream_impact_total=impact_scan.total,
+        blocking_impact_total=impact_scan.blocking_total,
+        migration_required_impact_total=impact_scan.migration_required_total,
+        historical_reference_total=impact_scan.historical_reference_total,
+        impact_next_cursor=impact_scan.next_cursor,
+        impact_scan_complete=impact_scan.scan_complete,
+        migration_evidence_required=migration_evidence_required,
+        migration_evidence_satisfied=migration_evidence_satisfied,
+        blockers=[LabelVersionLifecycleBlocker.model_validate(blocker) for blocker in blockers],
+        ready_for_transition=not blockers,
         safe_stop_required=references.safe_stop_required,
         audit_id=audit.audit_id,
         outbox_event_id=outbox_event.event_id,
@@ -807,7 +1233,10 @@ def _raise_environment_reference_conflict(
 
 
 def _isoformat(value: datetime | None) -> str | None:
-    return value.isoformat() if value is not None else None
+    if value is None:
+        return None
+    normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+    return normalized.isoformat()
 
 
 def enrich_label_version_lifecycle_views(
@@ -873,9 +1302,12 @@ def enrich_label_version_lifecycle_views(
         heads_by_id.setdefault(head.label_version_id, []).append(head)
     events_by_id: dict[str, list[ReleaseBundleHeadEvent]] = {item: [] for item in resource_ids}
     for event in events:
-        for label_version_id in {event.old_label_version_id, event.new_label_version_id}:
-            if label_version_id in resource_ids:
-                events_by_id.setdefault(label_version_id, []).append(event)
+        # Each event's half-open interval belongs to the newly activated label
+        # version.  The old version's interval is already closed on its own
+        # prior event; projecting the switch event onto both versions would
+        # falsely assign the successor interval to the retired version.
+        if event.new_label_version_id in resource_ids:
+            events_by_id.setdefault(event.new_label_version_id, []).append(event)
 
     result: list[dict[str, Any]] = []
     for resource in resources:
@@ -1085,6 +1517,50 @@ def transition_label_version(
         replacement_label_version_id=replacement_label_version_id,
     )
     _raise_environment_reference_conflict(references)
+    if request.action == "deprecate":
+        impact_scan = _downstream_impact_scan(
+            session,
+            ctx,
+            label_version_id=label_version_id,
+            cursor=None,
+            limit=1,
+        )
+        if not impact_scan.scan_complete:
+            raise ApiError(
+                "LABEL_VERSION_IMPACT_SCAN_LIMIT_EXCEEDED",
+                "下游影响扫描超过安全上限，标签版本废弃已拒绝",
+                409,
+                details=[
+                    {
+                        "scan_limit": _MAX_IMPACT_SCAN_ROWS,
+                        "discovered_impact_count": impact_scan.total,
+                    }
+                ],
+            )
+        if impact_scan.blocking_total > 0:
+            raise ApiError(
+                "LABEL_VERSION_ACTIVE_DOWNSTREAM_REFERENCE",
+                "标签版本仍被当前 FactSet Head、进行中候选或活跃下游资产引用",
+                409,
+                details=[
+                    {
+                        "blocking_impact_total": impact_scan.blocking_total,
+                        "sample_impacts": impact_scan.impacts,
+                    }
+                ],
+            )
+        if impact_scan.migration_required_total > 0 and replacement_label_version_id is None:
+            raise ApiError(
+                "LABEL_VERSION_DOWNSTREAM_IMPACT_MIGRATION_REQUIRED",
+                "标签版本存在冻结下游引用，必须提供 replacement 与已发布 mapping bundle",
+                409,
+                details=[
+                    {
+                        "downstream_impact_total": impact_scan.total,
+                        "sample_impacts": impact_scan.impacts,
+                    }
+                ],
+            )
 
     before = {
         "status": version.status,

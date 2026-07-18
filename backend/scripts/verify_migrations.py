@@ -22,12 +22,17 @@ BACKEND = ROOT / "backend"
 
 
 CORE_TABLES = {
+    "auth_sessions",
+    "browser_auth_sessions",
     "tenants",
     "projects",
     "users",
     "json_resources",
     "run_records",
+    "user_security_states",
     "idempotency_records",
+    "oidc_authorization_states",
+    "oidc_identities",
     "audit_logs",
     "outbox_delivery_attempts",
     "outbox_events",
@@ -513,6 +518,21 @@ INSIGHT_CAUSAL_FOREIGN_KEYS = {
             ["tenant_id", "project_id", "metric_result_id"],
         ),
     },
+}
+
+OIDC_BROWSER_SESSION_COLUMNS = {
+    "browser_session_id",
+    "token_sha256",
+    "csrf_sha256",
+    "oidc_identity_id",
+    "user_id",
+    "tenant_id",
+    "project_id",
+    "provider",
+    "issued_at",
+    "expires_at",
+    "revoked_at",
+    "last_seen_at",
 }
 
 INSIGHT_CAUSAL_INDEXES = {
@@ -2037,6 +2057,29 @@ def assert_tables_present(database_url: str) -> None:
         )
         if missing:
             raise AssertionError(f"missing migrated tables: {', '.join(missing)}")
+
+        browser_session_columns = {
+            column["name"] for column in inspector.get_columns("browser_auth_sessions")
+        }
+        missing_browser_columns = sorted(OIDC_BROWSER_SESSION_COLUMNS - browser_session_columns)
+        if missing_browser_columns:
+            raise AssertionError(
+                "missing OIDC browser-session columns: " + ", ".join(missing_browser_columns)
+            )
+        forbidden_raw_columns = {"token", "raw_token", "csrf_token"} & browser_session_columns
+        if forbidden_raw_columns:
+            raise AssertionError(
+                "browser sessions must store only token hashes: "
+                + ", ".join(sorted(forbidden_raw_columns))
+            )
+        identity_columns = {column["name"] for column in inspector.get_columns("oidc_identities")}
+        if "subject" in identity_columns or "subject_sha256" not in identity_columns:
+            raise AssertionError("OIDC identities must persist only the subject hash")
+        with engine.connect() as connection:
+            user_count = connection.scalar(text("SELECT COUNT(*) FROM users"))
+            security_count = connection.scalar(text("SELECT COUNT(*) FROM user_security_states"))
+        if user_count != security_count:
+            raise AssertionError("every migrated user must have an explicit security state")
 
         assert_label_lifecycle_schema(inspector)
 

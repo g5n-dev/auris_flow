@@ -23,15 +23,41 @@
 
 ### 2.1 认证上下文
 
-所有非公开接口必须有认证用户和租户项目上下文。
+所有非公开接口必须有认证用户和租户项目上下文。浏览器产品路径使用通用 OIDC
+Authorization Code + PKCE 和 BFF 不透明会话；服务到服务或兼容工具可使用经后端验证的
+bearer。Keycloak 只作为参考 IdP，认证契约只依赖标准 OIDC discovery、authorization、token
+与 JWKS 接口，不使用 Keycloak 私有角色或管理 API。
 
-必需 Header：
+浏览器登录与会话接口：
+
+| API | 语义 | 安全约束 |
+| --- | --- | --- |
+| `GET /api/v1/auth/oidc/login?return_path=/insights` | 生成 state、nonce、PKCE S256 challenge 并 303 到 IdP | `return_path` 仅接受站内绝对路径；state/nonce/verifier 短期、一次性 |
+| `GET /api/v1/auth/oidc/callback` | 一次性消费 state、交换 code、校验 ID token 并 303 回站内页面 | 精确校验 issuer/audience、RS256 签名、exp/iat、nonce；未知 `kid` 只允许刷新 JWKS 后重试；IdP token 不返回浏览器 |
+| `GET /api/v1/auth/session` | 由 bearer 或 HttpOnly cookie 恢复内部用户、scope 与当前角色 | cookie 可省略 scope Header；响应 `Cache-Control: no-store`，浏览器会话轮换 `csrf_token` |
+| `POST /api/v1/auth/logout` | 幂等撤销服务端会话并清除 cookie | cookie 路径必须同时验证 `X-CSRF-Token` 与受信 `Origin`；开发 bearer 路径保留 scope Header 兼容 |
+
+`prod/release` cookie 固定命名为 `__Host-auris_session`，并设置 `HttpOnly; Secure;
+SameSite=Lax; Path=/` 且不设置 Domain。cookie 是高熵不透明值，MySQL 仅保存 token SHA-256
+与 CSRF SHA-256；OIDC access token、ID token、refresh token 和 cookie/CSRF 原值不得写入数据库、
+浏览器持久存储或日志。本地 HTTP 可配置 `auris_session`，但不改变生产约束。
+
+浏览器 cookie 请求可省略 scope Header，由服务端使用会话冻结的 tenant/project；如果显式传入，
+必须精确匹配。bearer 和需要显式选择 scope 的兼容调用使用：
 
 ```http
 Authorization: Bearer <access_token>
 X-Request-Id: <client_request_id>
 X-Tenant-Id: <tenant_id>
 X-Project-Id: <project_id>
+```
+
+前端不得把 bearer 写入 `localStorage` 或 `sessionStorage`。所有 OIDC 不透明 cookie 认证的 POST/PATCH/PUT/DELETE
+还必须带内存中的 CSRF token 和浏览器 Origin：
+
+```http
+X-CSRF-Token: <rotated_csrf_token>
+Origin: https://flow.example.com
 ```
 
 写操作、异步动作和外部回写还必须带：
@@ -58,9 +84,13 @@ BFF 解析后的 `auth_context` 至少包含：
 
 - `tenant_id` 是强隔离边界，任何查询、写入、运行、召回、导出都必须带租户过滤。
 - `project_id` 是工作空间边界，跨项目读取默认拒绝；需要共享时只返回脱敏引用。
+- OIDC `(issuer, subject)` 必须先映射到明确 provision 的 `oidc_identities`；未知主体 default-deny，响应不回显 subject。
+- 每次认证都读取 `user_security_states`、identity、租户、项目与当前项目成员角色；ID token/session 中的旧角色不授权，用户禁用、identity 禁用和角色降权即时生效。
+- 浏览器写请求必须同时校验 CSRF token 和显式 allowlist Origin；缺失、错误或跨站请求返回稳定 403，且不执行写入。
 - `store_id`、`date`、`model_version`、`label_version` 是业务筛选上下文，不替代租户项目校验。
 - 权限失败返回 `403 forbidden`，不要返回空列表伪装成功。
 - 找不到资源且用户无权确认其存在时，返回 `404 not_found`，避免泄漏跨租户对象。
+- 认证失效/禁用返回稳定 401；跨 scope 的对象存在性按 404 隐藏；错误 envelope 不包含 token、subject、内部异常或配置。
 
 ### 2.2 分页、筛选、排序和搜索
 
@@ -549,11 +579,11 @@ LabelVersion artifact lifecycle 与 environment activation lifecycle 必须分�
 
 以下是 S3/S5/S6/S8 待实现的冻结资源路径，不属于当前 live runtime operation table，不能以空壳 2xx 路由冒充完成：
 
-- `/api/v1/label-versions/{id}/deprecation-preflights`：冻结 expected resource version，返回 active/draining 环境、在途运行、下游资产和 safe next actions。
+- `/api/v1/label-versions/{id}/deprecation-preflights`：冻结 expected resource version，返回 active/draining 环境、在途运行，以及按 `impact_type:resource_id` 游标分页（`impact_limit<=100`）的 FactSet、Label MetricResult、冻结 ReportDocument 绑定和可识别下游资产；每项给出 `blocking/migration-required/historical-reference`，冻结历史快照只提示不阻断，当前 Head/进行中候选/发布下游阻断；扫描超服务端上限 fail-closed。
 - `/api/v1/label-versions/{id}/transitions`：制品 deprecate/archive；replacement 时必须绑定已发布 `mapping_bundle_id`，且无受保护环境引用。
 - `/api/v1/label-mapping-versions` 与 `/api/v1/label-mapping-bundles`：不可变 edge/bundle 的 validate、review、publish、coverage 与 compiled path。
 - `/api/v1/audio-sessions/{session_id}/annotations/{annotation_id}/submissions` 与 `/rebases`：人工 draft 强绑定 label/version/event/evidence/occurred_at；过期版本显式 rebase。
-- `/api/v1/label-recomputation-runs` 与 `/{id}/promotions`：候选 FactSet/Asset Manifest 重算和整批 Head CAS 晋级。
+- `/api/v1/label-recompute-runs` 及 Item completion/retry：候选 FactSet/Asset Manifest 重算；整批晋级统一复用 `/api/v1/label-fact-sets/{id}/promotions` 的 Head CAS，不另建第二套 promotion 真相源。
 
 #### 3.9.1 标签观察、聚合与事实闭环
 
@@ -652,15 +682,21 @@ Prompt 审核的 `modified` 不是原地批准：两份密封修改一致或独�
 | API | 用途 | 最低字段 |
 | --- | --- | --- |
 | `POST /api/v1/insights/metric-runs` | 冻结 scope 并创建不可变指标物化运行 | `metric_keys[]`、`time_range`；标签派生指标还必须带 `label_scope={taxonomy_mode,source_label_version_ids,target_label_version_id,mapping_bundle_id,fact_set_generation,fact_as_of,metric_definition_versions,timezone,period_boundary,denominator_definition}` |
-| `GET /api/v1/insights/metrics` | 读取已物化趋势、雷达和指标卡 | `metric_result_id`、value/unit/sample、`label_version_applicability`、label scope、`comparability_status/reason_codes`、scope/source/content SHA、evidence、Trace |
+| `GET /api/v1/insights/metrics` | 按 `source_run_id` 与重复 `metric_key` 精确读取唯一 current 快照；重复或缺失时 409 fail-closed | 同一 `metric_result_id` 冻结的 value/unit/sample、`label_version_applicability`、完整 label scope、scope/source/content SHA、服务端双快照 `comparison`、evidence、Trace |
+| `GET /api/v1/insights/metric-comparisons` | 比较显式 baseline/current 两个不可变物化快照 | 完整 baseline/current anchor、`comparison_status`、`reason_codes`、`continuous_trend_allowed`、`comparison_sha256` |
 | `GET /api/v1/insights/funnels` | 漏斗和桑吉图 | `nodes[]`、`edges[]`、`drop_offs[]`、`filters`、`trace_id` |
 | `GET /api/v1/insights/reports` | 报告列表 | `id`、`title`、`status`、`range`、`owner`、`asset_ref`、`created_at` |
+| `GET /api/v1/insights/reports/{report_id}` | 读取服务端冻结报告正文及精确指标绑定 | `report_document`、有序 `metric_result_ids[]/metric_results[]`、`report_metric_binding_id/content_sha256`、`metric_scope_sha256`；绑定漂移时 409，禁止客户端拼装正文 |
 | `POST /api/v1/insights/reports` | 从同 scope 的已物化快照生成报告草稿 | `metric_result_ids[]`、`metric_scope_sha256`、`evidence_refs[]`、`report_sections[]`、`status`、`trace_id`；不得按 metric key 重查最新事实 |
 | `POST /api/v1/insights/actions` | 从洞察生成动作草稿 | `metric_key`、`action_type`、`owner`、`evidence_refs[]`、`work_item_id` |
 
 统计口径固定为 `taxonomy_mode=native|normalized|recomputed`。标签派生指标由服务端指标目录声明 `label_version_applicability=required`，缺完整 label scope 返回 `INSIGHT_LABEL_VERSION_REQUIRED`；非标签指标显式声明 applicability=none。normalized 必须绑定已发布 `mapping_bundle_id`，否则返回 `INSIGHT_MAPPING_BUNDLE_REQUIRED`；split/语义变化无 approved 重算资产时返回 `LABEL_MAPPING_RECOMPUTE_REQUIRED`。
 
-只有 target version、mapping bundle ID/SHA、metric definition versions、FactSet generation、`fact_as_of` 规则、时区/周期边界/分母定义全部相同时，`comparability_status` 才能是 comparable。coverage-gap、structural-break、not-applicable 与数值 0 是不同结果；客户端不得自行计算或覆盖 comparability。
+双快照比较必须同时冻结并核对 source/target version、taxonomy mode、mapping bundle ID/SHA、FactSet namespace/ID/generation/manifest SHA、metric definition/version、dimensions、unit、时间窗口规则、`fact_as_of` 单调规则、时区/周期边界/分母定义；不能用单个快照的 mapping path 状态代替跨快照比较。任一锚点不可验证或漂移即 `comparability_status=structural-break`，客户端必须隐藏连续线、目标线和涨跌；没有逐点 scope/comparison 的趋势也不得连线。coverage-gap、structural-break、not-applicable 与数值 0 是不同结果，客户端不得自行计算或覆盖 comparability。
+
+报告生成后只允许展示和导出 `GET /insights/reports/{report_id}` 返回的冻结 `report_document`。客户端必须精确校验创建时的有序 MetricResult ID、三类快照 SHA 与报告 binding hash；缺失、重复、乱序或哈希不合法时整体阻断，不得回退到 fixture、当前筛选值或本地拼接正文。
+
+指标结果必须显式冻结 `result_status=value|not-applicable|zero-denominator|coverage-gap|recompute-required` 与受控 `reason_codes`。真实数值 0 必须是 `result_status=value` 且 `sample_size>=1`；只有受控非数值状态允许 `value=null,sample_size=0`，前端与报告统一展示 `N/A + 原因`，不得转成 0，且双快照比较和连续图表必须断线。
 
 洞察解释可以使用 Qdrant 召回，但响应只返回业务解释和证据链接：
 
@@ -803,6 +839,19 @@ Prompt 审核的 `modified` 不是原地批准：两份密封修改一致或独�
 - `notifications.daily-report`
 
 注意：原型设置页可能展示不同存储或分析组件名称，一期实现以基线为准，默认业务库为 MySQL，分析大盘不默认依赖 ClickHouse。
+
+### 3.16 标签 full recompute
+
+| API | 用途 | 最低字段/约束 |
+| --- | --- | --- |
+| `POST /api/v1/label-recompute-runs` | 冻结真实全量重算请求 | target LabelVersion、可选 Mapping Bundle、source FactSet Head generation/manifest、独立 candidate namespace、fact cutoff、partition/asset scope、coverage、budget；同事务 Audit/Outbox/幂等 |
+| `POST /api/v1/label-recompute-runs/{run_id}/items/{item_id}/completions` | 接收分区执行终态并物化候选事实 | attempt generation、可信 completion receipt、目标 Observation/Aggregate lineage；客户端不得提交 row_count 或 manifest SHA，全部由 BFF 从实际行计算 |
+| `POST /api/v1/label-recompute-runs/{run_id}/items/{item_id}/retries` | CAS 重试 retryable 失败分区 | expected attempt generation；新 attempt 绑定新内部执行，旧回执/Audit/Outbox 保留 |
+
+`LabelFact.source_kind` 在 Contract 后严格为 `aggregate | human-decision | recompute-run-item`
+三选一引用；重算事实只写 candidate FactSet/namespace，不能逐 Fact 切生产 Head。FactSet validate、
+人工 approve、promote/rollback 必须重新查询实际分区 Item 和 append-only Fact 行并校验完整 manifest；
+生产切换只走单个 FactSet Head generation CAS。API 只暴露业务 Run/Item，不暴露 Dagster 名称、run ID 或画布。
 
 ## 4. 前端状态映射
 
