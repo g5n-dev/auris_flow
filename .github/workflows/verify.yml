@@ -40,10 +40,11 @@ jobs:
           cache: "npm"
           cache-dependency-path: prototype/auris-flow-ui/package-lock.json
 
-      - name: Install locked backend dependencies
+      - name: Install locked Python dependencies
         run: |
           python -m pip install "uv==0.10.0"
           uv sync --locked --all-extras --project backend
+          uv sync --locked --all-extras --project production/dagster
 
       - name: Install frontend dependencies
         run: npm ci --prefix prototype/auris-flow-ui
@@ -56,3 +57,11 @@ jobs:
         env:
           PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
         run: bash scripts/verify_release.sh
+
+      - name: Upload release supply-chain evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: auris-flow-release-evidence-${{ github.sha }}
+          path: build/release-evidence/
+          if-no-files-found: error
+          retention-days: 30

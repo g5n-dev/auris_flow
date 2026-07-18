@@ -57,6 +57,26 @@ def test_scanner_ignores_explicit_placeholders_and_local_urls() -> None:
     assert findings == []
 
 
+def test_scanner_accepts_docker_secret_file_references_but_not_inline_values() -> None:
+    scanner = _load_scanner()
+    text = "\n".join(
+        (
+            "OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key",
+            "MYSQL_ROOT_PASSWORD_FILE=/run/secrets/mysql_root_password",
+            "AUTH_TOKEN_SECRET_FILE=/tmp/Qq19-untrusted-inline-secret",
+            "AUTH_TOKEN_SECRET=" + "Qq19_" * 7,
+        )
+    )
+    findings: list[str] = []
+
+    scanner.scan_text(text, "production/compose.yaml", findings)
+
+    assert findings == [
+        "production/compose.yaml:3: potential generic_secret_assignment",
+        "production/compose.yaml:4: potential generic_secret_assignment",
+    ]
+
+
 def test_scanner_ignores_code_expressions_and_named_test_fixtures() -> None:
     scanner = _load_scanner()
     text = "\n".join(
@@ -89,3 +109,12 @@ def test_index_scan_reads_staged_content_missing_from_worktree(
     scanner.scan_index(findings)
 
     assert findings == ["index:staged.env:1: potential generic_secret_assignment"]
+
+
+def test_history_scan_is_bound_to_checked_out_release_lineage() -> None:
+    scanner_source = (
+        Path(__file__).resolve().parents[3] / "scripts" / "scan_secrets.py"
+    ).read_text(encoding="utf-8")
+
+    assert '["git", "rev-list", "--objects", "HEAD"]' in scanner_source
+    assert '["git", "rev-list", "--objects", "--all"]' not in scanner_source

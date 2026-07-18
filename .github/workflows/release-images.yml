@@ -1,0 +1,409 @@
+name: Release images
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "SemVer release candidate (for example v1.0.0-rc.1)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-images-${{ github.ref }}-${{ inputs.release_tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-context:
+    runs-on: ubuntu-latest
+    outputs:
+      release_tag: ${{ steps.context.outputs.release_tag }}
+      source_commit: ${{ steps.context.outputs.source_commit }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - id: context
+        name: Validate immutable release context
+        env:
+          REQUESTED_TAG: ${{ inputs.release_tag || github.ref_name }}
+        run: |
+          python3 - "${REQUESTED_TAG}" "${GITHUB_SHA}" <<'PY'
+          import os
+          import re
+          import sys
+
+          tag, commit = sys.argv[1:]
+          if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-rc\.[1-9]\d*)?", tag) is None:
+              raise SystemExit("release tag must be SemVer or an rc.N prerelease")
+          if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit) is None:
+              raise SystemExit("workflow must run from a complete Git object id")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              output.write(f"release_tag={tag}\nsource_commit={commit}\n")
+          PY
+
+  dependency-evidence:
+    needs: release-context
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: prototype/auris-flow-ui/package-lock.json
+
+      - name: Synchronize all locked dependency environments
+        run: |
+          python -m pip install "uv==0.10.0"
+          uv sync --locked --all-extras --project backend
+          uv sync --locked --all-extras --project production/dagster
+          npm ci --prefix prototype/auris-flow-ui
+
+      - name: Install browser used by the release gate
+        working-directory: prototype/auris-flow-ui
+        run: npx playwright install chromium --with-deps
+
+      - name: Verify the complete release candidate in a clean runner
+        env:
+          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
+        run: bash scripts/verify_release.sh
+
+      - name: Generate license inventory and dependency SBOMs
+        run: python3 scripts/generate_supply_chain_evidence.py
+
+      - name: Block vulnerable Python and npm dependencies
+        run: |
+          uv export --quiet --frozen --no-dev --no-emit-project --format requirements.txt \
+            --project backend \
+            --output-file build/release-evidence/backend-runtime-requirements.txt
+          uv export --quiet --frozen --no-dev --no-emit-project --format requirements.txt \
+            --project production/dagster \
+            --output-file build/release-evidence/dagster-runtime-requirements.txt
+          audit_status=0
+          backend/.venv/bin/pip-audit --strict --require-hashes --disable-pip \
+            --requirement build/release-evidence/backend-runtime-requirements.txt \
+            --format json \
+            --output build/release-evidence/backend-python-audit.json \
+            || audit_status=1
+          backend/.venv/bin/pip-audit --strict --require-hashes --disable-pip \
+            --requirement build/release-evidence/dagster-runtime-requirements.txt \
+            --format json \
+            --output build/release-evidence/dagster-python-audit.json \
+            || audit_status=1
+          npm audit --prefix prototype/auris-flow-ui --audit-level=high --json \
+            > build/release-evidence/npm-audit.json \
+            || audit_status=1
+          exit "${audit_status}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: dependency-evidence-${{ needs.release-context.outputs.source_commit }}
+          path: build/release-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  build-images:
+    needs: [release-context, dependency-evidence]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image_id: bff
+            repository: auris-flow-bff
+            dockerfile: production/backend/Dockerfile
+          - image_id: dagster
+            repository: auris-flow-dagster
+            dockerfile: production/dagster/Dockerfile
+          - image_id: edge
+            repository: auris-flow-edge
+            dockerfile: production/edge/Dockerfile
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Define lowercase immutable image reference
+        env:
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          IMAGE_NAME: ${{ matrix.repository }}
+        run: |
+          registry_path="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${IMAGE_NAME}"
+          echo "IMAGE_REPOSITORY=${registry_path}" >> "${GITHUB_ENV}"
+          echo "IMAGE_TAGGED_REFERENCE=${registry_path}:${RELEASE_TAG}" >> "${GITHUB_ENV}"
+          echo "IMAGE_BUILD_REFERENCE=${registry_path}:sha-${GITHUB_SHA}" >> "${GITHUB_ENV}"
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        name: Build and push multi-architecture image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.IMAGE_BUILD_REFERENCE }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.release-context.outputs.source_commit }}
+            org.opencontainers.image.version=${{ needs.release-context.outputs.release_tag }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          provenance: mode=max
+          sbom: true
+
+      - name: Generate downloadable CycloneDX image SBOM
+        uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
+        with:
+          image: ${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}
+          format: cyclonedx-json
+          output-file: build/image-evidence/${{ matrix.image_id }}.cdx.json
+          upload-artifact: false
+
+      - name: Block HIGH and CRITICAL image vulnerabilities on amd64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}
+          format: json
+          output: build/image-evidence/${{ matrix.image_id }}.linux-amd64.trivy.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+
+      - name: Block HIGH and CRITICAL image vulnerabilities on arm64
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}
+          format: json
+          output: build/image-evidence/${{ matrix.image_id }}.linux-arm64.trivy.json
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: "1"
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+
+      - name: Keyless sign and verify the exact manifest digest
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          WORKFLOW_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
+          image="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          cosign sign --yes "${image}"
+          cosign verify "${image}" \
+            --certificate-identity "${WORKFLOW_IDENTITY}" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com
+
+      - name: Record signed image provenance
+        env:
+          IMAGE_ID: ${{ matrix.image_id }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          mkdir -p build/image-evidence
+          jq -n \
+            --arg image_id "${IMAGE_ID}" \
+            --arg repository "${IMAGE_REPOSITORY}" \
+            --arg tagged_reference "${IMAGE_TAGGED_REFERENCE}" \
+            --arg image "${IMAGE_TAGGED_REFERENCE}@${IMAGE_DIGEST}" \
+            --arg release_tag "${RELEASE_TAG}" \
+            --arg source_commit "${SOURCE_COMMIT}" \
+            '{image_id: $image_id, repository: $repository, tagged_reference: $tagged_reference, image: $image, release_tag: $release_tag, source_commit: $source_commit}' \
+            > "build/image-evidence/${IMAGE_ID}.image.json"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: image-evidence-${{ matrix.image_id }}-${{ needs.release-context.outputs.source_commit }}
+          path: build/image-evidence/
+          if-no-files-found: error
+          retention-days: 30
+
+  assemble-release:
+    needs: [release-context, dependency-evidence, build-images]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dependency-evidence-${{ needs.release-context.outputs.source_commit }}
+          path: build/release/dependencies
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: image-evidence-*-${{ needs.release-context.outputs.source_commit }}
+          path: build/release/images
+          merge-multiple: true
+
+      - name: Resolve every Compose image to an immutable digest
+        env:
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+          AURIS_PUBLIC_HOST: auris.example.com
+          AURIS_EXTERNAL_CALLBACK_URL: https://platform.example.com/callbacks/auris-flow
+          AURIS_EXTERNAL_CALLBACK_HOST: platform.example.com
+        run: |
+          export AURIS_BFF_IMAGE="$(jq -r '.image' build/release/images/bff.image.json)"
+          export AURIS_DAGSTER_IMAGE="$(jq -r '.image' build/release/images/dagster.image.json)"
+          export AURIS_EDGE_IMAGE="$(jq -r '.image' build/release/images/edge.image.json)"
+          candidate_compose="${RUNNER_TEMP}/auris-candidate-compose.json"
+          docker compose --env-file production/.env.example --file production/compose.yaml \
+            config --no-path-resolution --format json --output "${candidate_compose}"
+
+          lock_arguments=()
+          while IFS=$'\t' read -r service image; do
+            if [[ "${image}" == *@sha256:* ]]; then
+              pinned="${image}"
+            else
+              manifest="$(docker buildx imagetools inspect "${image}" --format '{{json .Manifest}}')"
+              digest="$(jq -er '.digest' <<<"${manifest}")"
+              pinned="${image}@${digest}"
+            fi
+            lock_arguments+=(--image "${service}=${pinned}")
+          done < <(jq -r '.services | to_entries[] | [.key, .value.image] | @tsv' "${candidate_compose}")
+
+          python3 scripts/render_release_compose.py create-lock \
+            --release-tag "${RELEASE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            "${lock_arguments[@]}" \
+            --output build/release/images.lock.json
+          python3 scripts/render_release_compose.py scan-plan \
+            --image-lock build/release/images.lock.json \
+            --output build/release/compose-image-scans/index.json
+
+      - name: Install pinned Trivy scanner
+        uses: aquasecurity/setup-trivy@3fb12ec12f41e471780db15c232d5dd185dcb514 # v0.2.6
+        with:
+          version: v0.70.0
+          cache: true
+
+      - name: Scan every unique final Compose digest on both architectures
+        run: |
+          scan_status=0
+          while IFS=$'\t' read -r digest image; do
+            report_id="${digest#sha256:}"
+            for platform in linux/amd64 linux/arm64; do
+              platform_id="${platform//\//-}"
+              trivy image \
+                --platform "${platform}" \
+                --scanners vuln \
+                --severity HIGH,CRITICAL \
+                --ignore-unfixed=false \
+                --ignorefile /dev/null \
+                --exit-code 1 \
+                --format json \
+                --output "build/release/compose-image-scans/${report_id}.${platform_id}.trivy.json" \
+                "${image}" \
+                || scan_status=1
+            done
+          done < <(jq -r '.images[] | [.digest, .image] | @tsv' build/release/compose-image-scans/index.json)
+          exit "${scan_status}"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: compose-image-scans-${{ needs.release-context.outputs.source_commit }}
+          path: build/release/compose-image-scans/
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Promote only verified and signed digests to immutable release tags
+        run: |
+          for image_id in bff dagster edge; do
+            record="build/release/images/${image_id}.image.json"
+            repository="$(jq -er '.repository' "${record}")"
+            tagged_reference="$(jq -er '.tagged_reference' "${record}")"
+            digest="$(jq -er '.image | split("@") | .[1]' "${record}")"
+            if existing_manifest="$(docker buildx imagetools inspect "${tagged_reference}" --format '{{json .Manifest}}' 2>/dev/null)"; then
+              existing_digest="$(jq -er '.digest' <<<"${existing_manifest}")"
+              if [[ "${existing_digest}" != "${digest}" ]]; then
+                echo "refusing to retarget immutable release image ${tagged_reference}" >&2
+                exit 1
+              fi
+            else
+              docker buildx imagetools create \
+                --tag "${tagged_reference}" \
+                "${repository}@${digest}"
+            fi
+          done
+
+      - name: Render and verify the production release bundle
+        run: |
+          python3 scripts/render_release_compose.py render \
+            --image-lock build/release/images.lock.json \
+            --output production/compose.release.json
+          python3 scripts/verify_production_compose.py --release \
+            --compose-file production/compose.release.json \
+            --env-file production/.env.example
+          mkdir -p build/release/production
+          cp production/.env.example production/compose.release.json build/release/production/
+          rsync -a --exclude '__pycache__' \
+            production/backup \
+            production/keycloak \
+            production/minio \
+            production/mysql \
+            production/observability \
+            production/qdrant \
+            production/scripts \
+            build/release/production/
+
+      - name: Produce commit-bound checksums and release manifest
+        run: |
+          python3 scripts/render_release_compose.py manifest \
+            --base-dir build/release \
+            --image-lock build/release/images.lock.json \
+            --output build/release/release-manifest.json \
+            --checksums-output build/release/SHA256SUMS
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: auris-flow-${{ needs.release-context.outputs.release_tag }}-${{ needs.release-context.outputs.source_commit }}
+          path: build/release/
+          if-no-files-found: error
+          retention-days: 90

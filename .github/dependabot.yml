@@ -61,3 +61,26 @@ updates:
     labels:
       - "dependencies"
       - "backend"
+
+  - package-ecosystem: "uv"
+    directory: "/production/dagster"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "10:30"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    groups:
+      dagster-runtime:
+        patterns:
+          - "dagster*"
+          - "click"
+          - "pymysql"
+      dagster-quality:
+        patterns:
+          - "pytest"
+          - "ruff"
+          - "mypy"
+    labels:
+      - "dependencies"
+      - "dagster"

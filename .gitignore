@@ -74,3 +74,10 @@ datasets-cache/
 .env
 .env.*
 !.env.example
+
+# Production secrets, private keys and local backup artifacts
+production/secrets/
+production/tls/
+production/backups/
+production/runtime-metrics/
+production/compose.release.json

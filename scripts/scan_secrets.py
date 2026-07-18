@@ -214,7 +214,10 @@ def scan_text(text: str, origin: str, findings: list[str]) -> None:
     for match in SECRET_ASSIGNMENT_PATTERN.finditer(text):
         if _line_is_allowlisted(text, match.start()):
             continue
+        key = match.group("key").replace("-", "_").upper()
         value = match.group("value")
+        if key.endswith("_FILE") and value.startswith("/run/secrets/"):
+            continue
         if (
             len(value) < 16
             or _is_placeholder_secret(value)
@@ -238,7 +241,12 @@ def scan_text(text: str, origin: str, findings: list[str]) -> None:
 def scan_history(findings: list[str]) -> None:
     try:
         output = subprocess.check_output(
-            ["git", "rev-list", "--objects", "--all"],
+            # A release publishes the checked-out lineage. Local Codex checkpoint
+            # refs, worktree refs, and unrelated private branches are not part of
+            # that object graph and must not create false blockers. Conversely,
+            # every ancestor of HEAD is scanned, so a public branch cannot hide a
+            # historical leak merely by fixing the current file.
+            ["git", "rev-list", "--objects", "HEAD"],
             cwd=ROOT,
             text=True,
             stderr=subprocess.DEVNULL,
@@ -292,7 +300,7 @@ def main() -> int:
     parser.add_argument(
         "--history",
         action="store_true",
-        help="also scan all reachable Git blobs before a first public push",
+        help="also scan every blob in the checked-out release lineage",
     )
     parser.add_argument(
         "--scope",

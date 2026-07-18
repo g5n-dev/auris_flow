@@ -51,9 +51,25 @@ if [ "${AURIS_RELEASE_CHECK:-0}" = "1" ]; then
   fi
   uv lock --check --project backend
   uv sync --check --locked --all-extras --project backend
+  uv lock --check --project production/dagster
+  uv sync --check --locked --all-extras --project production/dagster
+  "${PYTHON_BIN}" scripts/verify_production_compose.py
+  "${PYTHON_BIN}" -m pytest production/tests
+  uv run --frozen --all-extras --project production/dagster pytest production/dagster/tests
+  uv run --frozen --all-extras --project production/dagster ruff format --check production/dagster/src production/dagster/tests
+  uv run --frozen --all-extras --project production/dagster ruff check production/dagster/src production/dagster/tests
+  uv run --frozen --all-extras --project production/dagster mypy production/dagster/src
   "${PYTHON_BIN}" scripts/scan_secrets.py --history
   "${PYTHON_BIN}" scripts/check_platform_readiness.py --release
   "${PYTHON_BIN}" -m pip_audit --local --strict --skip-editable --progress-spinner off
+  release_audit_dir="$(mktemp -d "${TMPDIR:-/tmp}/auris-flow-release-audit.XXXXXX")"
+  trap 'rm -rf -- "${release_audit_dir}"' EXIT
+  uv export --quiet --frozen --no-dev --no-emit-project \
+    --format requirements.txt --project production/dagster \
+    --output-file "${release_audit_dir}/dagster-runtime-requirements.txt"
+  "${PYTHON_BIN}" -m pip_audit --strict --require-hashes --disable-pip \
+    --requirement "${release_audit_dir}/dagster-runtime-requirements.txt" \
+    --progress-spinner off
   npm audit --prefix prototype/auris-flow-ui --audit-level=high
   npm audit signatures --prefix prototype/auris-flow-ui
 else
@@ -66,8 +82,8 @@ if [ ! -d backend ]; then
   exit 1
 fi
 
-"${PYTHON_BIN}" -m ruff format --check backend scripts
-"${PYTHON_BIN}" -m ruff check backend scripts
+"${PYTHON_BIN}" -m ruff format --check backend scripts production/tests
+"${PYTHON_BIN}" -m ruff check backend scripts production/tests
 "${PYTHON_BIN}" -m mypy backend/app backend/scripts/verify_migrations.py scripts/check_platform_readiness.py
 "${PYTHON_BIN}" backend/scripts/verify_migrations.py
 "${PYTHON_BIN}" -m pytest backend/tests/unit backend/tests/contract backend/tests/integration

@@ -12,6 +12,11 @@ fi
 
 AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1 bash scripts/verify_all.sh
 
+# Generate deterministic SBOMs and the complete dependency-license inventory
+# from the same locked installations used by the release gate. Any unknown or
+# unreviewed license fails closed.
+python3 scripts/generate_supply_chain_evidence.py
+
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required for release real-stack E2E." >&2
   echo "Run bash scripts/verify_fast.sh or AURIS_RUN_E2E=1 bash scripts/verify_all.sh for constrained local development." >&2

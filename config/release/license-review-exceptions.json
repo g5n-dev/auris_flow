@@ -1,0 +1,15 @@
+{
+  "exceptions": [
+    {
+      "ecosystem": "dagster-python",
+      "expires_on": "2027-01-18",
+      "name": "jinja2",
+      "reason": "The bundled license text was reviewed as BSD-3-Clause; upstream Core Metadata only declares the generic BSD classifier.",
+      "review_reference": "LIC-2026-JINJA2-3.1.6",
+      "reviewed_by": "release-security",
+      "reviewed_on": "2026-07-18",
+      "version": "3.1.6"
+    }
+  ],
+  "schema_version": "auris.license-review-exceptions.v1"
+}
