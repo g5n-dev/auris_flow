@@ -215,6 +215,8 @@ full recompute 写独立 candidate namespace 与完整 Asset/FactSet Manifest。
 
 迁移顺序固定为：Expand nullable 强表 → Dual-write → 可重入 Backfill/Shadow → 按 scope Read switch → orphan/旧写为 0 后 Contract。生产不 downgrade 已写新数据的 migration；以 forward migration 放宽或补偿。删除旧列/表另立 ADR。
 
+`0037_label_fact_logical_active_heads` 是 Contract 修正：兼容 `active_slot` 唯一索引从 subject/label 改为 namespace/`logical_key_sha`。因此同一主体、同一标签的两个不同事件可各自拥有 Head，同一逻辑事件仍只能有一个 active revision。若已经写入这类多事件 Head，downgrade 会显式失败，必须用 forward compensation，不能把真实事件重新压成一条。
+
 必测：
 
 - identity/rename 的 semantic hash；replace 1:1 未审批时不能 exact。
