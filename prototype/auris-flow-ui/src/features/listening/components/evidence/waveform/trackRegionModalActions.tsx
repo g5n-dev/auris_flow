@@ -8,18 +8,27 @@ import type { TrackRegionModalModel } from "./trackRegionModalModel";
 export function createTrackRegionModalActions(context: TrackRegionModalModel) {
   const {
     allTracks,
+    audioSessionId,
     customLayers,
     dragState,
     endRegionDrag,
     hideTag,
+    inferRegionFieldKey,
     lastCreatedAnnotationId,
+    manualLabelWorkflow,
     modalRegion,
+    modalRegionDraft,
+    modalTrack,
     moveRegionDrag,
     previewWindowForRegion,
     regionDragClickGuard,
     selectedRegion,
+    sessionStartedAt,
     setActiveTrack,
+    setCreateFeedback,
+    setManualLabelWorkflow,
     setRegionEdits,
+    setSavingAnnotationId,
     setSelectedRegion,
     setTrackPreviewState,
     setTrackRegionModalId,
@@ -31,14 +40,30 @@ export function createTrackRegionModalActions(context: TrackRegionModalModel) {
     loadManualLabelScope,
     saveModalAnnotationDraft,
     submitModalAnnotationDraft
-  } = createManualLabelDraftActions(context);
+  } = createManualLabelDraftActions({
+    allTracks,
+    audioSessionId,
+    inferRegionFieldKey,
+    manualLabelWorkflow,
+    modalRegion,
+    modalRegionDraft,
+    modalTrack,
+    sessionStartedAt,
+    setCreateFeedback,
+    setManualLabelWorkflow,
+    setSavingAnnotationId
+  });
   const {
     confirmModalAnnotationRebase,
     previewModalAnnotationRebase,
     setManualLabelSelection,
     setManualMappingBundleId,
     setManualRebaseConfirmed
-  } = createManualLabelRebaseActions(context);
+  } = createManualLabelRebaseActions({
+    audioSessionId,
+    manualLabelWorkflow,
+    setManualLabelWorkflow
+  });
 
   const startTrackPreview = (region: TrackRegion, clip: "before" | "current" | "after") => {
     const windowText = previewWindowForRegion(region, clip);

@@ -5,7 +5,12 @@ import {
 import { rebasedAnnotationId } from "./manualLabelWorkflow";
 import type { TrackRegionModalModel } from "./trackRegionModalModel";
 
-export function createManualLabelRebaseActions(context: TrackRegionModalModel) {
+export type ManualLabelRebaseActionContext = Pick<
+  TrackRegionModalModel,
+  "audioSessionId" | "manualLabelWorkflow" | "setManualLabelWorkflow"
+>;
+
+export function createManualLabelRebaseActions(context: ManualLabelRebaseActionContext) {
   const { audioSessionId, manualLabelWorkflow, setManualLabelWorkflow } = context;
 
   const previewModalAnnotationRebase = async () => {

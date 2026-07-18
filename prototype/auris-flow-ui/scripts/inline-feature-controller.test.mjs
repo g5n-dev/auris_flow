@@ -136,6 +136,38 @@ test("内联分组不得在形参解构消除后继续直接引用形参", () =>
   }), /buildFirst.*直接引用形参 scope/);
 });
 
+test("内联分组不得把 context 聚合对象误注入为组件 prop", () => {
+  const directory = mkdtempSync(join(tmpdir(), "auris-controller-context-"));
+  const controllerPath = join(directory, "useExampleController.ts");
+  writeFileSync(join(directory, "helper.ts"), "export const helper = (value) => value.x;\n");
+  writeFileSync(join(directory, "groups.ts"), [
+    'import { helper } from "./helper";',
+    "export function buildFirst(context) {",
+    "  const { x } = context;",
+    "  const first = helper(context);",
+    "  return { first };",
+    "}",
+    "export function buildSecond(context) {",
+    "  const { first } = context;",
+    "  return { second: first };",
+    "}"
+  ].join("\n"));
+  writeFileSync(controllerPath, [
+    'import { buildFirst, buildSecond } from "./groups";',
+    "export function useExampleController(props) {",
+    "  const first = buildFirst(props);",
+    "  const second = buildSecond({ ...props, ...first });",
+    "  return { ...first, ...second };",
+    "}"
+  ].join("\n"));
+
+  assert.throws(() => generateController({
+    controllerPath,
+    exportName: "useExampleController",
+    propertyMap: new Map([["first", "a"], ["second", "b"]])
+  }), /buildFirst.*直接引用形参 context/);
+});
+
 test("内联分组不得依赖会被虚拟模块丢弃的同文件模块级运行时绑定", () => {
   const directory = mkdtempSync(join(tmpdir(), "auris-controller-module-binding-"));
   const controllerPath = join(directory, "useExampleController.ts");
@@ -197,4 +229,39 @@ test("内联分组的额外形参继续由 props 注入", () => {
   });
   assert.match(generated.code, /const \{ multiplier, x \} = props;/);
   assert.match(generated.code, /const first = x \* multiplier;/);
+});
+
+test("后续分组依赖前序返回表达式时生成局部别名而非误读 props", () => {
+  const directory = mkdtempSync(join(tmpdir(), "auris-controller-return-alias-"));
+  const controllerPath = join(directory, "useExampleController.ts");
+  writeFileSync(join(directory, "groups.ts"), [
+    "export function buildFirst(scope) {",
+    "  const { x } = scope;",
+    "  const state = { value: x };",
+    "  return { derived: state.value };",
+    "}",
+    "export function buildSecond(scope) {",
+    "  const { derived } = scope;",
+    "  const second = derived * 2;",
+    "  return { second };",
+    "}"
+  ].join("\n"));
+  writeFileSync(controllerPath, [
+    'import { buildFirst, buildSecond } from "./groups";',
+    "export function useExampleController(props) {",
+    "  const first = buildFirst(props);",
+    "  const second = buildSecond({ ...props, ...first });",
+    "  return { ...first, ...second };",
+    "}"
+  ].join("\n"));
+
+  const generated = generateController({
+    controllerPath,
+    exportName: "useExampleController",
+    propertyMap: new Map([["derived", "a"], ["second", "b"]])
+  });
+  assert.match(generated.code, /const \{ x \} = props;/);
+  assert.match(generated.code, /const derived = state\.value;/);
+  assert.doesNotMatch(generated.code, /const \{ derived(?:,| \})/);
+  assert.match(generated.code, /const second = derived \* 2;/);
 });

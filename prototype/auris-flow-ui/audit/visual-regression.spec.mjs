@@ -1,11 +1,11 @@
 import { expect, test } from "playwright/test";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 
 const baseUrl = process.env.AURIS_AUDIT_URL || "http://127.0.0.1:5180/";
 const updateBaseline = process.env.AURIS_UPDATE_VISUAL_BASELINE === "1";
 const geometryPath = process.env.AURIS_VISUAL_GEOMETRY_PATH || new URL(
-  "../audit-iteration/frontend-decomposition/visual-regression/geometry.json",
+  "../test-baselines/visual-regression/geometry.json",
   import.meta.url
 ).pathname;
 const fixedTime = "2025-05-26T12:27:18+08:00";
@@ -179,6 +179,20 @@ test("所有业务模块与 tab 保持像素和关键几何等价", async ({ pag
   });
 
   await page.clock.setFixedTime(new Date(fixedTime));
+  const visualSessionResponse = await page.request.post(
+    new URL("/api/v1/auth/dev-login", baseUrl).toString(),
+    {
+      data: {
+        email: "demo.operator@auris.local",
+        password: "auris-demo"
+      }
+    }
+  );
+  expect(visualSessionResponse.ok(), "视觉回归无法建立服务端开发会话").toBeTruthy();
+  const visualSessionCookie = (await page.context().cookies(baseUrl)).find(
+    (cookie) => cookie.name === "auris_session"
+  );
+  expect(visualSessionCookie?.httpOnly, "视觉回归必须使用 HttpOnly Cookie 会话").toBe(true);
   await page.route("**/api/v1/**", async (route) => {
     const response = await route.fetch();
     const contentType = response.headers()["content-type"] ?? "";
@@ -202,9 +216,6 @@ test("所有业务模块与 tab 保持像素和关键几何等价", async ({ pag
       transition-duration: 0s !important;
     }
   ` });
-  if (await page.getByRole("button", { name: "演示账号" }).count()) {
-    await page.getByRole("button", { name: "演示账号" }).click();
-  }
   await page.locator('button[aria-label^="导航："]').first().waitFor({ state: "visible" });
 
   const geometry = {};
@@ -229,7 +240,7 @@ test("所有业务模块与 tab 保持像素和关键几何等价", async ({ pag
 
   if (updateBaseline) {
     mkdirSync(dirname(geometryPath), { recursive: true });
-    const priorGeometry = moduleFilter.size
+    const priorGeometry = moduleFilter.size && existsSync(geometryPath)
       ? JSON.parse(readFileSync(geometryPath, "utf8"))
       : {};
     writeFileSync(geometryPath, `${JSON.stringify({ ...priorGeometry, ...geometry }, null, 2)}\n`, "utf8");

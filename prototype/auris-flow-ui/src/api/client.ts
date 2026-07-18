@@ -1668,14 +1668,18 @@ export async function decideControlledExperiment(
   );
 }
 
+export type TaskRunCreatePayload = {
+  task_version_id: string;
+  trigger_type?: "manual" | "schedule" | "data_arrival" | "backfill";
+  execution_mode?: "production" | "diagnostic" | "shadow" | "experiment";
+  partition_key?: string;
+  run_key?: string;
+  experiment_id?: string;
+  experiment_subject_key?: string;
+};
+
 export async function runTaskVersionOnce(
-  payload: {
-    task_version_id: string;
-    trigger_type?: string;
-    partition_key?: string;
-    run_key?: string;
-    [key: string]: unknown;
-  },
+  payload: TaskRunCreatePayload,
   options?: WriteRequestOptions
 ): Promise<ApiEnvelope<BackendActionReceipt>> {
   const body = {

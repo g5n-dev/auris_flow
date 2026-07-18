@@ -25,11 +25,15 @@ test("browser auth discards compatibility bearer material and remains cookie-onl
 });
 
 test("cookie restore, OIDC redirect, CSRF and credential rules are explicit", async () => {
-  const [authClientSource, apiClientSource, authPageSource, platformBffSource] = await Promise.all([
+  const [authClientSource, apiClientSource, authPageSource, platformBffSource, uiSmokeSource, visualRegressionSource, viteConfigSource, previewSmokeSource] = await Promise.all([
     source("../api/authClient.ts"),
     source("../api/client.ts"),
     source("../shell/AuthPage.tsx"),
-    source("../../e2e/platform-bff.mjs")
+    source("../../e2e/platform-bff.mjs"),
+    source("../../e2e/ui-smoke.mjs"),
+    source("../../audit/visual-regression.spec.mjs"),
+    source("../../vite.config.ts"),
+    source("../../e2e/preview-smoke.mjs")
   ]);
 
   assert.match(authClientSource, /credentials:\s*"include"/);
@@ -55,4 +59,19 @@ test("cookie restore, OIDC redirect, CSRF and credential rules are explicit", as
     platformBffSource,
     /assert\(\s*(?:grantRequestHeaders|requestHeaders|submissionHeaders)\.authorization\s*&&|(?:grantRequestHeaders|requestHeaders|submissionHeaders|headers\(\))\.authorization\s*===\s*`Bearer/
   );
+  assert.match(uiSmokeSource, /const hasSessionCookie\s*=/);
+  assert.match(uiSmokeSource, /const isSystemWorkerBearer\s*=/);
+  assert.match(uiSmokeSource, /browserAuthorizationRequests/);
+  assert.match(uiSmokeSource, /request\.headers\["x-csrf-token"\]\s*!==\s*smokeCsrfToken/);
+  assert.match(uiSmokeSource, /invalidBrowserCsrfRequests/);
+  assert.match(uiSmokeSource, /!request\.headers\.authorization/);
+  assert.doesNotMatch(
+    uiSmokeSource,
+    /path\.startsWith\("\/api\/v1\/"\)\s*&&\s*request\.headers\.authorization\s*!==/
+  );
+  assert.match(visualRegressionSource, /page\.request\.post\([\s\S]{0,180}\/api\/v1\/auth\/dev-login/);
+  assert.doesNotMatch(visualRegressionSource, /getByRole\("button",\s*\{\s*name:\s*"演示账号"/);
+  assert.match(viteConfigSource, /"\/readyz"\s*:\s*\{/);
+  assert.match(previewSmokeSource, /path === "\/readyz"/);
+  assert.match(previewSmokeSource, /"\/readyz"\s*:\s*\{\s*target:\s*proxyTarget/);
 });

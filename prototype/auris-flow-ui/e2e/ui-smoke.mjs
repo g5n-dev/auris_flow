@@ -1405,6 +1405,11 @@ let authLogoutRequests = 0;
 const authEmails = [];
 let activeSmokeEmail = "";
 let browserSessionActive = false;
+const protectedBrowserRequests = [];
+const browserAuthorizationRequests = [];
+const browserCsrfRequests = [];
+const invalidBrowserCsrfRequests = [];
+const systemWorkerBearerRequests = [];
 let hotwordReadRequests = 0;
 const hotwordWriteRequests = [];
 const hotwordStatisticsRequests = [];
@@ -1549,6 +1554,7 @@ let badcaseResourceVersion = 3;
 let candidateItemResourceVersion = 1;
 let candidateItemAliases = ["星越 L"];
 const smokeSessionToken = "auris.v1.ui-smoke.server-issued";
+const smokeCsrfToken = "ui-smoke-csrf-token";
 const uiSmokeSceneManifestSha256 = "4c15a212be8c1ebc466e1c8845412737d8be38df85980a057dbccf489303581f";
 const uiSmokeSceneManifest = {
   schema_version: "scene-profile/1",
@@ -1708,6 +1714,7 @@ const bffStub = createHttpServer((request, response) => {
           access_token: smokeSessionToken,
           token_type: "Bearer",
           expires_at: "2099-01-01T00:00:00+00:00",
+          csrf_token: smokeCsrfToken,
           user: {
             user_id: user.user_id,
             name: user.name,
@@ -1727,7 +1734,10 @@ const bffStub = createHttpServer((request, response) => {
     return;
   }
   if (path === "/api/v1/auth/session" && request.method === "GET") {
-    if (!browserSessionActive) {
+    const hasSessionCookie = request.headers.cookie
+      ?.split(";")
+      .some((item) => item.trim() === `auris_session=${smokeSessionToken}`);
+    if (!browserSessionActive || !hasSessionCookie || request.headers.authorization) {
       response.writeHead(401, { "Content-Type": "application/json" });
       response.end(JSON.stringify({ error: { code: "AUTH_SESSION_INVALID", message: "浏览器会话无效" } }));
       return;
@@ -1746,7 +1756,8 @@ const bffStub = createHttpServer((request, response) => {
         tenant_name: "极光汽车",
         project_id: "sales_qa",
         project_name: "销售话术质检",
-        provider: "dev_session"
+        provider: "dev_session",
+        csrf_token: smokeCsrfToken
       },
       meta: { trace_id: "trace_ui_smoke_session", request_id: "ui-smoke-session" }
     }));
@@ -1756,11 +1767,11 @@ const bffStub = createHttpServer((request, response) => {
     const hasSessionCookie = request.headers.cookie
       ?.split(";")
       .some((item) => item.trim() === `auris_session=${smokeSessionToken}`);
-    const hasScopedSession =
-      request.headers.authorization === `Bearer ${smokeSessionToken}` || hasSessionCookie;
     if (
       !browserSessionActive ||
-      !hasScopedSession ||
+      !hasSessionCookie ||
+      request.headers.authorization ||
+      request.headers["x-csrf-token"] !== smokeCsrfToken ||
       request.headers["x-tenant-id"] !== "aurora_auto" ||
       request.headers["x-project-id"] !== "sales_qa"
     ) {
@@ -1785,10 +1796,44 @@ const bffStub = createHttpServer((request, response) => {
     }));
     return;
   }
-  if (path.startsWith("/api/v1/") && request.headers.authorization !== `Bearer ${smokeSessionToken}`) {
-    response.writeHead(401, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "缺少服务端会话" } }));
-    return;
+  if (path.startsWith("/api/v1/")) {
+    const hasSessionCookie = request.headers.cookie
+      ?.split(";")
+      .some((item) => item.trim() === `auris_session=${smokeSessionToken}`);
+    const isSystemWorkerBearer =
+      path.startsWith("/api/v1/release-deployments/") &&
+      path.endsWith("/monitor-samples") &&
+      request.headers["x-auris-system-worker"] === "ui-smoke-monitor" &&
+      request.headers.authorization === `Bearer ${smokeSessionToken}`;
+    const hasBrowserSession =
+      browserSessionActive && hasSessionCookie && !request.headers.authorization;
+    const hasSystemWorkerSession = browserSessionActive && isSystemWorkerBearer;
+
+    if (request.headers.authorization && !isSystemWorkerBearer) {
+      browserAuthorizationRequests.push({ method: request.method, path });
+    }
+    if (!hasBrowserSession && !hasSystemWorkerSession) {
+      response.writeHead(401, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "UNAUTHORIZED", message: "缺少服务端会话" } }));
+      return;
+    }
+    if (isSystemWorkerBearer) {
+      systemWorkerBearerRequests.push({ method: request.method, path });
+    } else {
+      const requiresCsrf = !["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET");
+      if (requiresCsrf && request.headers["x-csrf-token"] !== smokeCsrfToken) {
+        invalidBrowserCsrfRequests.push({
+          method: request.method,
+          path,
+          csrfToken: request.headers["x-csrf-token"]
+        });
+        response.writeHead(403, { "Content-Type": "application/json" });
+        response.end(JSON.stringify({ error: { code: "CSRF_TOKEN_INVALID", message: "CSRF 校验失败" } }));
+        return;
+      }
+      if (requiresCsrf) browserCsrfRequests.push({ method: request.method, path });
+      protectedBrowserRequests.push({ method: request.method, path });
+    }
   }
   if (path === "/api/v1/scene-profiles" && request.method === "GET") {
     response.writeHead(200, { "Content-Type": "application/json" });
@@ -3977,6 +4022,7 @@ const browserErrors = [];
 const requestFailures = [];
 const failedResponses = [];
 let expectedInitialAuthConsoleErrors = 0;
+let expectedInitialAuthResponseFailures = 0;
 page.on("pageerror", (error) => browserErrors.push(error.message));
 page.on("console", (message) => {
   if (
@@ -3998,7 +4044,15 @@ page.on("requestfailed", (request) => {
 });
 page.on("response", (response) => {
   const pathname = new URL(response.url()).pathname;
-  if (response.status() >= 400 && !(pathname === "/api/v1/auth/session" && response.status() === 401)) {
+  if (
+    pathname === "/api/v1/auth/session" &&
+    response.status() === 401 &&
+    expectedInitialAuthResponseFailures === 0
+  ) {
+    expectedInitialAuthResponseFailures += 1;
+    return;
+  }
+  if (response.status() >= 400) {
     failedResponses.push({
       status: response.status(),
       method: response.request().method(),
@@ -4053,6 +4107,13 @@ try {
   assert(exportRequests === 1, "UI smoke 未通过全局导出创建后端导出运行", { exportRequests });
   assert(authLoginRequests === 2, "UI smoke 未完成模型负责人到项目管理员的分权登录", { authLoginRequests });
   assert(authEmails.join(",") === "model@auris.local,demo.operator@auris.local", "UI smoke 登录身份顺序不符合审批 RBAC", { authEmails });
+  assert(expectedInitialAuthResponseFailures === 1, "UI smoke 启动时匿名会话探测应且仅应失败一次", { expectedInitialAuthResponseFailures });
+  assert(expectedInitialAuthConsoleErrors === 1, "UI smoke 启动时匿名会话 401 控制台记录应且仅应出现一次", { expectedInitialAuthConsoleErrors });
+  assert(protectedBrowserRequests.length > 0, "UI smoke 未通过 Cookie 会话访问任何受保护业务接口");
+  assert(browserAuthorizationRequests.length === 0, "浏览器业务请求不得携带 Authorization", { browserAuthorizationRequests });
+  assert(browserCsrfRequests.length > 0, "UI smoke 未通过 CSRF 保护执行任何浏览器写请求");
+  assert(invalidBrowserCsrfRequests.length === 0, "浏览器写请求必须携带当前会话 CSRF token", { invalidBrowserCsrfRequests });
+  assert(systemWorkerBearerRequests.length === 2, "内部监控 Worker Bearer 请求数量异常", { systemWorkerBearerRequests });
   assert(hotwordReadRequests >= 1, "UI smoke 未读取热词统计投影", { hotwordReadRequests });
   const manualHeadReads = manualLabelRequests.filter((request) => request.kind === "release-head-read");
   const manualItemReads = manualLabelRequests.filter((request) => request.kind === "label-items-read");
@@ -4354,6 +4415,12 @@ try {
   assert(!JSON.stringify(taskDraftWrite?.payload ?? {}).includes("legacy_hotwords_ref") && !JSON.stringify(taskDraftWrite?.payload ?? {}).includes("hotwords_ref"), "TaskVersion 新写入仍包含 legacy hotwords_ref", taskDraftWrite);
   const taskRunWrite = taskWriteRequests.find((request) => request.path === "/api/v1/task-runs");
   assert(taskRunWrite && !("audio_intelligence" in taskRunWrite.payload), "TaskRun 嵌套请求不得覆盖 TaskVersion 的 audio_intelligence/hotword 绑定", taskRunWrite);
+  assert(
+    Object.keys(taskRunWrite?.payload ?? {}).sort().join(",") ===
+      ["execution_mode", "partition_key", "run_key", "task_version_id", "trigger_type"].sort().join(","),
+    "TaskRun 请求只能提交公开业务字段，不得覆盖 Dagster 或冻结 TaskVersion 控制面字段",
+    taskRunWrite
+  );
   const taskPublishWrite = taskReleaseRequests.find((request) => request.path.endsWith("/task-version-hotword-ui-1/publish"));
   assert(taskPublishWrite?.payload?.source === "canvas_module", "热词发布生成的 TaskVersion 未经过现有任务发布接口", taskPublishWrite);
   const taskReleaseDecision = taskReleaseRequests.find((request) => request.path.endsWith("/task-version-publish-ui-1/decisions"));

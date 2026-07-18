@@ -293,6 +293,14 @@ const bffStub = createHttpServer(async (request, response) => {
     sendJson(response, 200, { status: "ok", service: "preview-smoke-stub" });
     return;
   }
+  if (path === "/readyz") {
+    sendJson(response, 200, {
+      status: "ok",
+      service: "preview-smoke-stub",
+      dependencies: { identity: "ready", database: "ready" }
+    });
+    return;
+  }
   if (path === "/api/v1/auth/dev-login" && request.method === "POST") {
     const payload = await readJsonBody(request);
     if (payload.email !== "demo.operator@auris.local" || payload.password !== "auris-demo") {
@@ -504,7 +512,8 @@ const previewServer = await preview({
     strictPort: false,
     proxy: {
       "/api": { target: proxyTarget, changeOrigin: true },
-      "/healthz": { target: proxyTarget, changeOrigin: true }
+      "/healthz": { target: proxyTarget, changeOrigin: true },
+      "/readyz": { target: proxyTarget, changeOrigin: true }
     }
   }
 });
@@ -577,6 +586,11 @@ try {
     identityResourcePaths
   );
   await enterApp(normalPage, baseUrl);
+  const readinessPill = normalPage.getByTitle("FastAPI BFF /readyz 就绪状态");
+  await readinessPill.waitFor({ state: "visible", timeout: 10000 });
+  assert((await readinessPill.innerText()).includes("后端已就绪"), "生产 preview 未通过 /readyz 展示后端就绪", {
+    text: await readinessPill.innerText()
+  });
   const catalogRequests = startupAssetSignals.filter((signal) => signal.kind === "catalog-request");
   const appRequests = startupAssetSignals.filter((signal) => signal.kind === "app-request");
   const appResponseIndex = startupAssetSignals.findIndex((signal) => signal.kind === "app-response");

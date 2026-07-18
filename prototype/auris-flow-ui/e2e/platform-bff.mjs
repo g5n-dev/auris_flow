@@ -4791,7 +4791,14 @@ async function runCanvasToolbarClosedLoopSmoke(page) {
   await page.locator('[data-action-key="experiment-run-sample"]').first().click();
   const experimentRunResponse = await experimentRunResponsePromise;
   const experimentRunJson = await experimentRunResponse.json().catch(() => ({}));
+  const experimentRunRequest = experimentRunResponse.request().postDataJSON();
   assert(experimentRunResponse.status() === 202, `controlled experiment task run expected 202, got ${experimentRunResponse.status()}`, experimentRunJson);
+  assert(
+    Object.keys(experimentRunRequest ?? {}).sort().join(",") ===
+      ["execution_mode", "experiment_id", "experiment_subject_key", "partition_key", "run_key", "task_version_id", "trigger_type"].sort().join(","),
+    "controlled experiment task run request must contain only the public BFF contract fields",
+    experimentRunRequest
+  );
   const experimentRun = experimentRunJson?.data;
   assert(experimentRun?.run_id, "controlled experiment task run missing run_id", experimentRunJson);
   assert(experimentRun?.execution_mode === "experiment", "controlled experiment task run must use experiment mode", experimentRunJson);
@@ -5012,6 +5019,12 @@ async function runCanvasToolbarClosedLoopSmoke(page) {
     runRequest?.task_version_id === saveJson.data.id,
     "canvas run once should execute the task version that just became production release head",
     { expected: saveJson.data.id, actual: runRequest?.task_version_id, runRequest }
+  );
+  assert(
+    Object.keys(runRequest ?? {}).sort().join(",") ===
+      ["execution_mode", "partition_key", "run_key", "task_version_id", "trigger_type"].sort().join(","),
+    "canvas run once request must not submit server-controlled Dagster or TaskVersion fields",
+    runRequest
   );
   assert(runJson?.data?.run_id || runJson?.data?.id, "canvas run once missing backend run id", runJson);
   assert(runJson?.data?.status === "pending", "canvas run once should create pending task run", runJson);

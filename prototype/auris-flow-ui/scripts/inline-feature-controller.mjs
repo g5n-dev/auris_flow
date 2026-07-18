@@ -195,6 +195,10 @@ function directParameterReferences(statement, parameterNames) {
   return references;
 }
 
+function isAggregateParameter(name) {
+  return name === "context" || name === "scope" || name === "props";
+}
+
 function sameFileRuntimeReferences(fn, sourceFile) {
   const moduleBindings = new Map();
   for (const statement of sourceFile.statements) {
@@ -426,17 +430,26 @@ export function generateController(spec) {
     }
 
     for (const parameterName of parameterNames) {
-      if (parameterName !== "scope" && parameterName !== "props") dependencies.add(parameterName);
+      if (!isAggregateParameter(parameterName)) dependencies.add(parameterName);
     }
 
     for (const statement of statements.slice(0, -1)) {
       const generatedDependencies = objectBindingDependencies(statement, parameterNames);
       if (generatedDependencies) {
-        for (const name of generatedDependencies) dependencies.add(name);
+        for (const name of generatedDependencies) {
+          const priorExpression = returnedProperties.get(name);
+          if (!declared.has(name) && priorExpression && priorExpression !== name) {
+            body.push(`const ${name} = ${priorExpression};`);
+            declared.add(name);
+            dependencies.delete(name);
+          } else if (!declared.has(name) && !imports.hasLocal(name)) {
+            dependencies.add(name);
+          }
+        }
         continue;
       }
       const eliminatedObjectParameters = new Set(
-        [...parameterNames].filter((name) => name === "scope" || name === "props")
+        [...parameterNames].filter(isAggregateParameter)
       );
       const directParameters = directParameterReferences(statement, eliminatedObjectParameters);
       if (directParameters.size) {

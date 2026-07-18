@@ -75,6 +75,24 @@ DAGSTER_PID=""
 CALLBACK_PID=""
 REAL_STACK_DB_NAME=""
 MIGRATION_DB_URL=""
+MINIO_BOOTSTRAP_TIMEOUT_SECONDS="${AURIS_MINIO_BOOTSTRAP_TIMEOUT_SECONDS:-60}"
+
+run_minio_bootstrap() {
+  local container_name status
+  container_name="auris-flow-minio-bootstrap-$(date +%s)-$$"
+  if "${PYTHON_BIN}" "${ROOT}/scripts/run_with_deadline.py" \
+    --timeout-seconds "${MINIO_BOOTSTRAP_TIMEOUT_SECONDS}" \
+    --label "MinIO bootstrap" -- \
+    docker compose -f "${COMPOSE_FILE}" run --name "${container_name}" --rm --no-deps minio-bootstrap; then
+    return 0
+  else
+    status=$?
+  fi
+  if [ "${status}" -eq 124 ]; then
+    docker rm --force "${container_name}" >/dev/null 2>&1 || true
+  fi
+  return "${status}"
+}
 
 cleanup() {
   local status=$?
@@ -212,7 +230,7 @@ from sqlalchemy import create_engine, text
 def http_ready(url: str, headers: dict[str, str] | None = None) -> bool:
     try:
         with urlopen(Request(url, headers=headers or {}), timeout=0.5) as response:
-            return 200 <= response.status < 500
+            return 200 <= response.status < 300
     except (OSError, URLError, ValueError):
         return False
 
@@ -362,6 +380,8 @@ if [ "${FORCE_AUTOSTART}" = "1" ] || ! curl -fsS "${E2E_URL%/}/healthz" >/dev/nu
     fi
     docker compose -f "${COMPOSE_FILE}" up -d mysql redis minio qdrant
     wait_for_real_stack "${DB_URL}"
+    echo "Bootstrapping the authenticated MinIO E2E bucket..."
+    run_minio_bootstrap
     if [ -z "${DATABASE_URL:-}" ] && [ "${AURIS_E2E_ISOLATED_MYSQL_DB:-1}" = "1" ]; then
       REAL_STACK_DB_NAME="auris_flow_e2e_$(date +%s)_${BFF_PORT}"
       DB_URL="$(prepare_real_stack_database "${REAL_STACK_DB_NAME}")"

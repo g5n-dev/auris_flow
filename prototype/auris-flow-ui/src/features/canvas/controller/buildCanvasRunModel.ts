@@ -19,7 +19,7 @@ import { backendRunFailed, backendRunStatusLabel, backendRunSubmitted, backendRu
 import { isRecordValue } from "../../../shared/runtime/records";
 
 export function buildCanvasRunModel(scope: CanvasModuleProps & CanvasState & CanvasPrimitiveActions & CanvasRecoveryModel & CanvasSectionModel & CanvasScheduleModel & CanvasExecutionPlan & CanvasRuntimeModel & CanvasNodeCollections & CanvasNodeContextModel & CanvasNodeInteractions & CanvasTaskDagModel & CanvasDraftModelActions & CanvasExecutionActions & CanvasExperimentActions) {
-  const { activePartitionKey, activeRunKey, activeTab, controlledExperiment, currentUser, dagsterRunDraft, draftState, experimentSubjectKey, markTaskDraftDirty, persistTaskDraft, pushRunHistory, reloadControlledExperiment, resetActiveMappings, savedTaskVersionId, savedTaskVersionIdRef, selectedCanvasVariant, setCanvasAction, setCanvasNotice, setDraftState, setDrawerTab, setExecutionState, shortTrace, taskReleaseGate, updateExecutionState } = scope;
+  const { activePartitionKey, activeRunKey, activeTab, controlledExperiment, currentUser, dagsterRunDraft, draftState, experimentSubjectKey, markTaskDraftDirty, persistTaskDraft, pushRunHistory, reloadControlledExperiment, resetActiveMappings, savedTaskVersionId, savedTaskVersionIdRef, setCanvasAction, setCanvasNotice, setDraftState, setDrawerTab, setExecutionState, shortTrace, taskReleaseGate, updateExecutionState } = scope;
   const runTaskOnce = async () => {
       const runningExperiment = activeTab === "experiments" && controlledExperiment?.status === "running" ? controlledExperiment : null;
       if (runningExperiment && !experimentSubjectKey.trim()) {
@@ -80,13 +80,7 @@ export function buildCanvasRunModel(scope: CanvasModuleProps & CanvasState & Can
               }
             : {}),
           partition_key: dagsterRunDraft.partitionKey || activePartitionKey,
-          run_key: experimentRunKey ?? activeRunKey,
-          source: "canvas_module",
-          ...(!runningExperiment ? {
-            job_name: dagsterRunDraft.jobName,
-            asset_selection: dagsterRunDraft.assetSelection,
-            canvas_variant: selectedCanvasVariant.key
-          } : {})
+          run_key: experimentRunKey ?? activeRunKey
         });
         const runState = await refreshBackendRunReceipt(receipt.data);
         const runStatus = operationStatusFromBackendRun(runState.status);

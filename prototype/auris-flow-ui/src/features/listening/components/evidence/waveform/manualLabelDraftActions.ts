@@ -18,7 +18,22 @@ import {
 } from "./manualLabelWorkflow";
 import type { TrackRegionModalModel } from "./trackRegionModalModel";
 
-export function createManualLabelDraftActions(context: TrackRegionModalModel) {
+export type ManualLabelDraftActionContext = Pick<
+  TrackRegionModalModel,
+  | "allTracks"
+  | "audioSessionId"
+  | "inferRegionFieldKey"
+  | "manualLabelWorkflow"
+  | "modalRegion"
+  | "modalRegionDraft"
+  | "modalTrack"
+  | "sessionStartedAt"
+  | "setCreateFeedback"
+  | "setManualLabelWorkflow"
+  | "setSavingAnnotationId"
+>;
+
+export function createManualLabelDraftActions(context: ManualLabelDraftActionContext) {
   const {
     allTracks,
     audioSessionId,
