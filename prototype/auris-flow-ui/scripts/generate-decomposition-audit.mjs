@@ -139,6 +139,7 @@ const summary = {
   },
   bundle: {
     brotliQuality: 11,
+    budgetPolicy: bundle.budgetPolicy,
     js: bundle.totals.js,
     all: bundle.totals.all,
     initialClosure: {

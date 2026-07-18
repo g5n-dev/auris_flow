@@ -8,6 +8,10 @@ import {
   compareDynamicEdgeCoverage,
   initialDynamicEdges
 } from "./bundle-route-scenarios.mjs";
+import {
+  frontendBundleBudgetPolicy,
+  frontendBundleLimits
+} from "./frontend-bundle-budget-policy.mjs";
 import { buildProductionFixturePayload, productionFixtureSpecs } from "./production-fixture-policy.mjs";
 import { auditPrecompressedAssets, listProductionResources } from "./precompressed-assets.mjs";
 
@@ -17,18 +21,7 @@ const assetsDir = join(distDir, "assets");
 const manifestPath = join(distDir, ".vite", "manifest.json");
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
 
-const limits = {
-  totalJsRawBytes: 1_121_280,
-  totalJsBrotliBytes: 286_720,
-  initialClosureBrotliBytes: 276_480,
-  routeJsClosureBytes: 307_200,
-  maxJsAssetBytes: 512_000,
-  totalAssetsRawBytes: 2_194_125,
-  totalAssetsBrotliBytes: 454_963,
-  maxKnowledgeBytes: 80 * 1024,
-  maxCatalogBytes: 180 * 1024,
-  maxCssAssetBytes: 830 * 1024
-};
+const limits = frontendBundleLimits;
 
 const routeDefinitions = buildRouteScenarioDefinitions();
 
@@ -236,6 +229,7 @@ const report = {
   generatedAt: new Date().toISOString(),
   brotliQuality: 11,
   diagnosticBrotliQuality: 5,
+  budgetPolicy: frontendBundleBudgetPolicy,
   limits,
   totals: { js: totalJs, all: totalAssets },
   initialClosure: { ...initialClosure, assets: initialAssets.map((asset) => asset.name) },
