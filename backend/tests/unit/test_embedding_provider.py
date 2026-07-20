@@ -9,6 +9,7 @@ from urllib.request import Request
 import pytest
 
 from app.core.embeddings import (
+    EMBEDDING_MAX_RESPONSE_BYTES,
     DeterministicTestEmbeddingProvider,
     EmbeddingConfigurationError,
     EmbeddingResponseError,
@@ -28,8 +29,29 @@ class Response:
     def __exit__(self, *_args: object) -> bool:
         return False
 
-    def read(self) -> bytes:
-        return json.dumps(self.payload).encode("utf-8")
+    def read(self, size: int = -1) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")[:size]
+
+
+def test_http_embedding_provider_bounds_response_read_before_buffering() -> None:
+    read_sizes: list[int] = []
+
+    class OversizedResponse(Response):
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return b"x" * size
+
+    provider = HTTPEmbeddingProvider(
+        endpoint="https://embeddings.example.test/v1/embeddings",
+        model="multilingual-semantic-v1",
+        dimension=4,
+        transport=lambda _request, _timeout: OversizedResponse({}),
+    )
+
+    with pytest.raises(EmbeddingResponseError, match="too large"):
+        provider.embed("query", purpose="query")
+
+    assert read_sizes == [EMBEDDING_MAX_RESPONSE_BYTES + 1]
 
 
 def test_http_embedding_provider_uses_semantic_endpoint_without_leaking_key() -> None:
@@ -244,7 +266,15 @@ def test_real_qdrant_uses_injected_semantic_provider_for_document_and_query() ->
     }
 
     upsert = client.upsert_index_payload({"qdrant_payload": qdrant_payload})
-    search = client.search_index_payload(qdrant_payload, query="报价冲突", top_k=3)
+    search = client.search_index_payload(
+        {
+            **qdrant_payload,
+            "embedding_space_fingerprint": upsert.details["embedding_space_fingerprint"],
+            "_authorized_point_ids": upsert.details["point_ids"],
+        },
+        query="报价冲突",
+        top_k=3,
+    )
 
     assert upsert.status == "success"
     assert upsert.details["semantic_embedding"] is True

@@ -25,6 +25,7 @@ from app.core.errors import ApiError
 from app.schemas import EvalRunRequest, RunCompletionReceiptRequest, parse_payload
 from app.services import adapters as adapter_module
 from app.services.adapters import (
+    MAX_QDRANT_RESPONSE_BYTES,
     AdapterRegistry,
     RealDagsterClient,
     RealExternalCallbackClient,
@@ -691,6 +692,9 @@ def test_real_qdrant_adapter_builds_collection_and_upserts_point_without_network
 
 
 def test_real_qdrant_adapter_searches_with_scope_filter_without_network():
+    point_001 = "11111111-1111-4111-8111-111111111111"
+    point_002 = "22222222-2222-4222-8222-222222222222"
+
     class StubRealQdrantIndexClient(RealQdrantIndexClient):
         def __init__(self) -> None:
             super().__init__(base_url="http://qdrant.example.test", vector_size=8)
@@ -701,7 +705,7 @@ def test_real_qdrant_adapter_searches_with_scope_filter_without_network():
             return {
                 "result": [
                     {
-                        "id": "point_001",
+                        "id": point_001,
                         "score": 0.91,
                         "payload": {
                             "tenant_id": "aurora_auto",
@@ -720,6 +724,8 @@ def test_real_qdrant_adapter_searches_with_scope_filter_without_network():
             "project_id": "sales_qa",
             "collection": "knowledge_chunks_test",
             "knowledge_index_id": "ki_001",
+            "embedding_space_fingerprint": client.embedding_space_fingerprint,
+            "_authorized_point_ids": [point_001, point_002],
         },
         query="报价金额冲突处理 SOP",
         top_k=3,
@@ -727,7 +733,7 @@ def test_real_qdrant_adapter_searches_with_scope_filter_without_network():
 
     assert result["mode"] == "real_qdrant"
     assert result["collection"] == "knowledge_chunks_test"
-    assert result["points"][0]["id"] == "point_001"
+    assert result["points"][0]["id"] == point_001
     assert client.calls[0][0:2] == (
         "POST",
         "/collections/knowledge_chunks_test/points/search",
@@ -741,6 +747,11 @@ def test_real_qdrant_adapter_searches_with_scope_filter_without_network():
         {"key": "tenant_id", "match": {"value": "aurora_auto"}},
         {"key": "project_id", "match": {"value": "sales_qa"}},
         {"key": "knowledge_index_id", "match": {"value": "ki_001"}},
+        {
+            "key": "embedding_space_fingerprint",
+            "match": {"value": client.embedding_space_fingerprint},
+        },
+        {"has_id": [point_001, point_002]},
     ]
 
 
@@ -754,8 +765,9 @@ def test_real_qdrant_adapter_sends_configured_api_key(monkeypatch):
         def __exit__(self, *_args):
             return False
 
-        def read(self) -> bytes:
-            return b'{"result":[]}'
+        def read(self, size: int = -1) -> bytes:
+            captured["read_size"] = size
+            return b'{"result":[]}'[:size]
 
     def fake_urlopen(request, timeout):
         captured["request"] = request
@@ -775,6 +787,8 @@ def test_real_qdrant_adapter_sends_configured_api_key(monkeypatch):
             "project_id": "sales_qa",
             "collection": "knowledge_chunks_test",
             "knowledge_index_id": "ki_001",
+            "embedding_space_fingerprint": client.embedding_space_fingerprint,
+            "_authorized_point_ids": ["11111111-1111-4111-8111-111111111111"],
         },
         query="报价金额冲突处理 SOP",
         top_k=3,
@@ -783,6 +797,33 @@ def test_real_qdrant_adapter_sends_configured_api_key(monkeypatch):
     request = captured["request"]
     assert request.get_header("Api-key") == "qdrant-test-key"
     assert captured["timeout"] == 5
+    assert captured["read_size"] == MAX_QDRANT_RESPONSE_BYTES + 1
+
+
+def test_real_qdrant_adapter_rejects_oversized_response_before_buffering(monkeypatch):
+    read_sizes: list[int] = []
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def read(self, size: int = -1) -> bytes:
+            read_sizes.append(size)
+            return b"x" * size
+
+    monkeypatch.setattr(adapter_module, "urlopen", lambda *_args, **_kwargs: Response())
+    client = RealQdrantIndexClient(
+        base_url="http://qdrant.example.test",
+        vector_size=8,
+    )
+
+    with pytest.raises(ValueError, match="response is too large"):
+        client._request("GET", "/collections/knowledge_chunks_test")
+
+    assert read_sizes == [MAX_QDRANT_RESPONSE_BYTES + 1]
 
 
 def test_real_dagster_adapter_posts_graphql_run_request_without_network():

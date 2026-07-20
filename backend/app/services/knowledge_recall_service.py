@@ -8,9 +8,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
+from app.core.embeddings import EMBEDDING_SPACE_FINGERPRINT_FIELD, EmbeddingConfigurationError
 from app.core.errors import ApiError
 from app.models import RunRecord
-from app.services.adapters import RealQdrantIndexClient
+from app.services.adapters import (
+    QDRANT_AUTHORIZED_POINT_IDS_FIELD,
+    RealQdrantIndexClient,
+    configured_real_qdrant_embedding_space_fingerprint,
+    real_qdrant_filter_reference,
+    validate_real_qdrant_authorized_point_ids,
+)
 
 QDRANT_RECORDED_AUTHORITY_FIELDS = (
     "tenant_id",
@@ -24,9 +31,13 @@ QDRANT_RECORDED_AUTHORITY_FIELDS = (
     "asset_key",
     "version",
     "business_ref",
+    EMBEDDING_SPACE_FINGERPRINT_FIELD,
 )
 QDRANT_CURRENT_AUTHORITY_FIELDS = tuple(
     field for field in QDRANT_RECORDED_AUTHORITY_FIELDS if field != "trace_id"
+)
+QDRANT_SQL_AUTHORITY_FIELDS = tuple(
+    field for field in QDRANT_CURRENT_AUTHORITY_FIELDS if field != "business_ref"
 )
 
 
@@ -40,7 +51,46 @@ def recall_knowledge_index(
     top_k: int,
 ) -> dict[str, Any]:
     if os.environ.get("AURIS_QDRANT_ADAPTER", "").lower() == "real":
-        raw = recall_from_real_qdrant(qdrant_payload, query=query, top_k=top_k)
+        try:
+            current_fingerprint = configured_real_qdrant_embedding_space_fingerprint()
+        except (EmbeddingConfigurationError, ValueError) as exc:
+            raise ApiError(
+                "KNOWLEDGE_RECALL_CONFIGURATION_INVALID",
+                "知识召回向量空间配置无效",
+                503,
+                details=[{"code": exc.__class__.__name__}],
+                retryable=False,
+            ) from exc
+        current_payload = {
+            **qdrant_payload,
+            EMBEDDING_SPACE_FINGERPRINT_FIELD: current_fingerprint,
+        }
+        authoritative_points = qdrant_dispatch_authority(
+            session,
+            ctx,
+            knowledge_index_id=knowledge_index_id,
+            current_payload=current_payload,
+        )
+        collection = str(current_payload["collection"])
+        if not authoritative_points:
+            return recall_payload(
+                ctx,
+                knowledge_index_id=knowledge_index_id,
+                query=query,
+                top_k=top_k,
+                hits=[],
+                mode="real_qdrant_authority_empty",
+                collection=collection,
+                filter_ref=real_qdrant_filter_reference(
+                    current_payload,
+                    authorized_point_count=0,
+                ),
+            )
+        search_payload = {
+            **current_payload,
+            QDRANT_AUTHORIZED_POINT_IDS_FIELD: sorted(authoritative_points),
+        }
+        raw = recall_from_real_qdrant(search_payload, query=query, top_k=top_k)
         points = raw.get("points") if isinstance(raw, dict) else None
         if not isinstance(points, list):
             raise ApiError(
@@ -49,12 +99,6 @@ def recall_knowledge_index(
                 502,
                 retryable=True,
             )
-        authoritative_points = qdrant_dispatch_authority(
-            session,
-            ctx,
-            knowledge_index_id=knowledge_index_id,
-            collection=str(qdrant_payload["collection"]),
-        )
         scope_violations = [
             violation
             for point in points
@@ -63,9 +107,9 @@ def recall_knowledge_index(
                     point,
                     ctx=ctx,
                     knowledge_index_id=knowledge_index_id,
-                    collection=str(qdrant_payload["collection"]),
+                    collection=collection,
                     authoritative_points=authoritative_points,
-                    current_payload=qdrant_payload,
+                    current_payload=current_payload,
                 )
             )
         ]
@@ -95,7 +139,10 @@ def recall_knowledge_index(
             hits=hits,
             mode=raw["mode"],
             collection=raw["collection"],
-            filter_ref=raw["filter"],
+            filter_ref=real_qdrant_filter_reference(
+                current_payload,
+                authorized_point_count=len(authoritative_points),
+            ),
         )
 
     hits = recall_from_local_dispatches(
@@ -126,42 +173,64 @@ def qdrant_dispatch_authority(
     ctx: RequestContext,
     *,
     knowledge_index_id: str,
-    collection: str,
+    current_payload: dict[str, Any],
 ) -> dict[str, dict[str, Any]]:
-    authority: dict[str, dict[str, Any]] = {}
+    dispatch_json = RunRecord.payload["dispatch"]
+    details_json = dispatch_json["details"]
+    payload_json = details_json["qdrant_payload"]
+    statement = select(RunRecord).where(
+        RunRecord.tenant_id == ctx.tenant_id,
+        RunRecord.project_id == ctx.project_id,
+        RunRecord.status == "success",
+        RunRecord.run_type.in_(("knowledge_build", "knowledge_sync")),
+        dispatch_json["adapter"].as_string() == "qdrant",
+        details_json["mode"].as_string() == "real",
+    )
+    for field in QDRANT_SQL_AUTHORITY_FIELDS:
+        expected = current_payload.get(field)
+        if expected is None:
+            return {}
+        statement = statement.where(payload_json[field].as_string() == str(expected))
     records = session.scalars(
-        select(RunRecord)
-        .where(
-            RunRecord.tenant_id == ctx.tenant_id,
-            RunRecord.project_id == ctx.project_id,
-            RunRecord.status == "success",
-            RunRecord.run_type.in_(("knowledge_build", "knowledge_sync")),
-        )
-        .order_by(RunRecord.updated_at.desc(), RunRecord.run_id.desc())
-        .limit(500)
+        statement.order_by(RunRecord.updated_at.desc(), RunRecord.run_id.desc()).limit(500)
     )
     for record in records:
         dispatch = record.payload.get("dispatch") if isinstance(record.payload, dict) else None
         if not isinstance(dispatch, dict) or dispatch.get("adapter") != "qdrant":
             continue
         details = dispatch.get("details")
-        if not isinstance(details, dict):
+        if not isinstance(details, dict) or details.get("mode") != "real":
             continue
         payload = details.get("qdrant_payload")
         point_ids = details.get("point_ids")
         if not isinstance(payload, dict) or not isinstance(point_ids, list):
             continue
-        if payload.get("collection") != collection:
+        if details.get(EMBEDDING_SPACE_FINGERPRINT_FIELD) != payload.get(
+            EMBEDDING_SPACE_FINGERPRINT_FIELD
+        ) or payload.get(EMBEDDING_SPACE_FINGERPRINT_FIELD) != current_payload.get(
+            EMBEDDING_SPACE_FINGERPRINT_FIELD
+        ):
             continue
         if payload.get("knowledge_index_id") != knowledge_index_id:
             continue
         if payload.get("tenant_id") != ctx.tenant_id or payload.get("project_id") != ctx.project_id:
             continue
-        for point_id in point_ids:
-            normalized_point_id = str(point_id or "")
-            if normalized_point_id and normalized_point_id not in authority:
-                authority[normalized_point_id] = payload
-    return authority
+        if _authority_mismatches(
+            payload,
+            current_payload,
+            fields=QDRANT_CURRENT_AUTHORITY_FIELDS,
+        ):
+            continue
+        try:
+            normalized_point_ids = validate_real_qdrant_authorized_point_ids(
+                {QDRANT_AUTHORIZED_POINT_IDS_FIELD: point_ids}
+            )
+        except ValueError:
+            continue
+        if not normalized_point_ids:
+            continue
+        return {point_id: payload for point_id in normalized_point_ids}
+    return {}
 
 
 def recall_from_real_qdrant(
@@ -176,7 +245,7 @@ def recall_from_real_qdrant(
             "KNOWLEDGE_RECALL_FAILED",
             "知识召回查询失败",
             502,
-            details=[{"message": str(exc), "code": exc.__class__.__name__}],
+            details=[{"code": exc.__class__.__name__}],
             retryable=True,
         ) from exc
 

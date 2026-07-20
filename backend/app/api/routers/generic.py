@@ -49,8 +49,58 @@ from app.services.resource_service import (
     upsert_idempotent_json_resource,
 )
 from app.services.run_service import complete_run_from_receipt, create_run, get_run, retry_run
+from app.services.scene_profile_service import bind_active_scene_profile_lock
 
 router = APIRouter(tags=["generic"])
+
+SCENE_LOCK_EXEMPT_EXPORT_MODULES = frozenset({"tenants", "projects", "settings"})
+
+
+def prepare_export_payload(session: SessionDep, ctx: ContextDep, payload: object) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise ApiError("EXPORT_REQUEST_INVALID", "导出请求必须是 JSON 对象", 422)
+    target = payload.get("target")
+    module_key = payload.get("module_key")
+    object_id = payload.get("object_id")
+    governance_module_export = (
+        target == "module_view"
+        and isinstance(module_key, str)
+        and module_key in SCENE_LOCK_EXEMPT_EXPORT_MODULES
+        and isinstance(object_id, str)
+        and object_id.startswith(f"{module_key}:")
+    )
+    if governance_module_export:
+        return payload
+    return bind_active_scene_profile_lock(session, ctx, payload)
+
+
+def prepare_connector_payload(
+    session: SessionDep,
+    ctx: ContextDep,
+    payload: dict[str, Any],
+    *,
+    existing_payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    prepared = bind_active_scene_profile_lock(session, ctx, payload)
+    target_asset_key = prepared.get(
+        "target_asset_key",
+        (existing_payload or {}).get("target_asset_key"),
+    )
+    if target_asset_key is None:
+        return prepared
+    if not isinstance(target_asset_key, str) or not target_asset_key.strip():
+        raise ApiError(
+            "CONNECTOR_TARGET_ASSET_INVALID",
+            "连接器目标必须是当前项目已登记的数据资产",
+            422,
+        )
+    target_asset_key = target_asset_key.strip()
+    target_asset = get_resource(session, ctx, "data_assets", target_asset_key)
+    if target_asset.data.get("asset_key") != target_asset_key:
+        raise ApiError("NOT_FOUND", f"data_assets 不存在：{target_asset_key}", 404)
+    if "target_asset_key" in prepared:
+        prepared["target_asset_key"] = target_asset_key
+    return prepared
 
 
 def _require_unique_project_members(members: object) -> None:
@@ -567,12 +617,25 @@ async def post_connectors(request: Request, session: SessionDep, ctx: ContextDep
         "connectors",
         key_prefix="connector",
         status="draft",
+        prepare_payload=lambda payload: prepare_connector_payload(session, ctx, payload),
     )
 
 
 @router.patch("/connectors/{id}")
 async def patch_connectors_by_id(id: str, request: Request, session: SessionDep, ctx: ContextDep):
-    return await patch_idempotent_json_resource(session, ctx, request, "connectors", id)
+    return await patch_idempotent_json_resource(
+        session,
+        ctx,
+        request,
+        "connectors",
+        id,
+        prepare_payload=lambda resource, payload: prepare_connector_payload(
+            session,
+            ctx,
+            payload,
+            existing_payload=resource.data,
+        ),
+    )
 
 
 @router.post("/platform-connections/{connection_id}/session", status_code=201)
@@ -1042,13 +1105,14 @@ async def patch_work_items_by_id(id: str, request: Request, session: SessionDep,
 @router.post("/exports", status_code=202)
 async def post_exports(request: Request, session: SessionDep, ctx: ContextDep):
     require_any_role(ctx, ("project_admin",), "exports.create")
+    body = prepare_export_payload(session, ctx, await request.json())
     return await create_run(
         session,
         ctx,
         request,
         run_type="export",
         event_type="export.requested",
-        payload=await request.json(),
+        payload=body,
         status="pending",
     )
 

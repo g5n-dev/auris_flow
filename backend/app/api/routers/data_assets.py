@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Request
 from sqlalchemy import select
 
@@ -23,12 +25,123 @@ from app.services.resource_service import (
     status_counts,
 )
 from app.services.run_service import create_run
+from app.services.scene_profile_service import bind_active_scene_profile_lock
 
 router = APIRouter(tags=["data-assets"])
 
 
 def asset_with_trace(asset: dict, trace_id: str) -> dict:
     return {"trace_id": asset.get("trace_id", trace_id), **asset}
+
+
+def _retry_selector(
+    value: object,
+    *,
+    field: str,
+    allow_empty: bool,
+) -> list[str]:
+    if not isinstance(value, list):
+        raise ApiError(
+            "ASSET_CHECK_RETRY_REQUEST_INVALID",
+            f"{field} 必须是字符串数组",
+            422,
+        )
+    normalized: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip() or item.strip() in normalized:
+            raise ApiError(
+                "ASSET_CHECK_RETRY_REQUEST_INVALID",
+                f"{field} 必须是非空且不重复的字符串数组",
+                422,
+            )
+        normalized.append(item.strip())
+    if not allow_empty and not normalized:
+        raise ApiError(
+            "ASSET_CHECK_RETRY_REQUEST_INVALID",
+            f"{field} 不能为空",
+            422,
+        )
+    return normalized
+
+
+def prepare_asset_check_retry_payload(
+    asset: dict[str, Any],
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    failed_checks: dict[str, list[str]] = {}
+    raw_checks = asset.get("checks")
+    if isinstance(raw_checks, list):
+        for raw_check in raw_checks:
+            if not isinstance(raw_check, dict):
+                continue
+            check_id = raw_check.get("check_id")
+            status = raw_check.get("status")
+            raw_partitions = raw_check.get("failed_partitions")
+            partitions = (
+                [
+                    partition.strip()
+                    for partition in raw_partitions
+                    if isinstance(partition, str) and partition.strip()
+                ]
+                if isinstance(raw_partitions, list)
+                else []
+            )
+            failed = isinstance(status, str) and status.strip().lower() in {
+                "error",
+                "failed",
+                "failure",
+            }
+            if isinstance(check_id, str) and check_id.strip() and (failed or partitions):
+                failed_checks[check_id.strip()] = list(dict.fromkeys(partitions))
+
+    if not failed_checks:
+        raise ApiError(
+            "ASSET_CHECK_RETRY_NOT_REQUIRED",
+            "当前资产没有可重跑的权威失败校验",
+            409,
+        )
+
+    requested_check_ids = (
+        _retry_selector(
+            payload["failed_check_ids"],
+            field="failed_check_ids",
+            allow_empty=False,
+        )
+        if "failed_check_ids" in payload
+        else list(failed_checks)
+    )
+    if any(check_id not in failed_checks for check_id in requested_check_ids):
+        raise ApiError(
+            "ASSET_CHECK_RETRY_SCOPE_INVALID",
+            "重跑范围包含当前资产不存在或未失败的校验",
+            409,
+        )
+
+    allowed_partitions = list(
+        dict.fromkeys(
+            partition for check_id in requested_check_ids for partition in failed_checks[check_id]
+        )
+    )
+    requested_partitions = (
+        _retry_selector(
+            payload["failed_partitions"],
+            field="failed_partitions",
+            allow_empty=True,
+        )
+        if "failed_partitions" in payload
+        else allowed_partitions
+    )
+    if any(partition not in allowed_partitions for partition in requested_partitions):
+        raise ApiError(
+            "ASSET_CHECK_RETRY_SCOPE_INVALID",
+            "重跑范围包含不属于所选失败校验的分区",
+            409,
+        )
+    return {
+        **payload,
+        "failed_check_ids": requested_check_ids,
+        "failed_partitions": requested_partitions,
+    }
 
 
 @router.get("/data-assets/recent")
@@ -422,6 +535,7 @@ async def post_data_asset_backfills(
         raise ApiError("BACKFILL_REQUEST_INVALID", "回填请求必须是 JSON 对象", 422)
     decoded = decode_asset_key(asset_key)
     get_resource(session, ctx, "data_assets", decoded)
+    body = bind_active_scene_profile_lock(session, ctx, body)
     impact_scope = body.get("impact_scope")
     affected_objects: list[dict[str, str]] = [{"type": "data_asset", "id": decoded}]
     run_trace_id: str | None = None
@@ -459,8 +573,18 @@ async def post_data_asset_backfills(
 async def post_data_asset_checks_retry(
     asset_key: str, request: Request, session: SessionDep, ctx: ContextDep
 ):
+    require_any_role(
+        ctx,
+        ("project_admin", "asset_manager", "model_engineer"),
+        "data_assets.checks_retry",
+    )
     body = await request.json()
+    if not isinstance(body, dict):
+        raise ApiError("ASSET_CHECK_RETRY_REQUEST_INVALID", "质量重跑请求必须是 JSON 对象", 422)
     decoded = decode_asset_key(asset_key)
+    asset_resource = get_resource(session, ctx, "data_assets", decoded)
+    body = bind_active_scene_profile_lock(session, ctx, body)
+    body = prepare_asset_check_retry_payload(asset_resource.data, body)
     return await create_run(
         session,
         ctx,

@@ -10,7 +10,9 @@ import pytest
 from authlib.jose import JsonWebKey, JsonWebToken  # type: ignore[import-untyped]
 
 from app.core.oidc import (
+    HTTPXOIDCTransport,
     OIDCConfigurationError,
+    OIDCIDTokenValidator,
     OIDCProviderConfig,
     OIDCProviderUnavailableError,
     OIDCTokenValidationError,
@@ -19,6 +21,7 @@ from app.core.oidc import (
 
 ISSUER = "https://identity.example.test/realms/auris"
 AUDIENCE = "auris-flow-api"
+CLIENT_ID = "auris-flow-web"
 DISCOVERY_URL = f"{ISSUER}/.well-known/openid-configuration"
 JWKS_URL = "https://identity.example.test/realms/auris/protocol/openid-connect/certs"
 NOW = 1_750_000_000
@@ -36,9 +39,17 @@ class StubTransport:
     def __init__(self, responses: Mapping[str, list[object]]) -> None:
         self.responses = {url: list(values) for url, values in responses.items()}
         self.calls: list[tuple[str, float]] = []
+        self.maximum_bytes: list[tuple[str, int | None]] = []
 
-    def get_json(self, url: str, *, timeout: float) -> Mapping[str, Any]:
+    def get_json(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        maximum_bytes: int | None = None,
+    ) -> Mapping[str, Any]:
         self.calls.append((url, timeout))
+        self.maximum_bytes.append((url, maximum_bytes))
         responses = self.responses.get(url)
         if not responses:
             raise RuntimeError("unexpected network request")
@@ -139,6 +150,22 @@ def _validator(
     )
 
 
+def _id_token_validator(transport: StubTransport) -> OIDCIDTokenValidator:
+    return OIDCIDTokenValidator(
+        OIDCProviderConfig(
+            issuer=ISSUER,
+            audience=CLIENT_ID,
+            discovery_url=DISCOVERY_URL,
+            jwks_cache_ttl_seconds=300,
+            clock_skew_seconds=30,
+            http_timeout_seconds=2.5,
+        ),
+        client_id=CLIENT_ID,
+        transport=transport,
+        clock=MutableClock(),
+    )
+
+
 @pytest.mark.parametrize("audience", [AUDIENCE, ["another-api", AUDIENCE]])
 def test_validates_rs256_token_with_string_or_array_audience(
     rsa_key_a: Any,
@@ -154,6 +181,118 @@ def test_validates_rs256_token_with_string_or_array_audience(
     assert AUDIENCE in validated.audiences
     assert validated.expires_at == NOW + 300
     assert validated.claims["email"] == "operator@example.test"
+
+
+def test_validator_uses_separate_response_limits_for_discovery_and_jwks(
+    rsa_key_a: Any,
+) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+
+    _validator(transport).validate(_rs256_token(rsa_key_a, kid="key-a"))
+
+    assert transport.maximum_bytes == [
+        (DISCOVERY_URL, 128 * 1024),
+        (JWKS_URL, 512 * 1024),
+    ]
+
+
+def test_default_transport_stops_before_buffering_an_oversized_json_document(
+    monkeypatch,
+) -> None:
+    canary = b"sensitive-tail-must-not-be-consumed"
+
+    class GuardedResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self) -> None:
+            self.chunks_seen = 0
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def iter_bytes(self):
+            for chunk in (b'{"x":"12', b'3456789"}', canary):
+                self.chunks_seen += 1
+                yield chunk
+
+    class ResponseContext:
+        def __init__(self, response: GuardedResponse) -> None:
+            self.response = response
+
+        def __enter__(self) -> GuardedResponse:
+            return self.response
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    response = GuardedResponse()
+    seen: dict[str, object] = {}
+
+    def fake_stream(method: str, url: str, **kwargs: object) -> ResponseContext:
+        seen.update(method=method, url=url, **kwargs)
+        return ResponseContext(response)
+
+    def forbidden_get(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("OIDC transport must not use buffering httpx.get")
+
+    monkeypatch.setattr("app.core.oidc.httpx.stream", fake_stream)
+    monkeypatch.setattr("app.core.oidc.httpx.get", forbidden_get)
+
+    with pytest.raises(OIDCProviderUnavailableError) as captured:
+        HTTPXOIDCTransport().get_json(DISCOVERY_URL, timeout=2.5, maximum_bytes=8)
+
+    assert response.chunks_seen == 2
+    assert seen["method"] == "GET"
+    assert seen["follow_redirects"] is False
+    assert canary.decode() not in str(captured.value)
+
+
+def test_id_token_accepts_client_id_audience_without_azp_for_single_audience(
+    rsa_key_a: Any,
+) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    token = _rs256_token(rsa_key_a, kid="key-a", claims=_claims(aud=CLIENT_ID))
+
+    validated = _id_token_validator(transport).validate(token)
+
+    assert validated.audiences == (CLIENT_ID,)
+
+
+def test_id_token_requires_matching_azp_for_multiple_audiences(rsa_key_a: Any) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    token = _rs256_token(
+        rsa_key_a,
+        kid="key-a",
+        claims=_claims(aud=[CLIENT_ID, AUDIENCE], azp=CLIENT_ID),
+    )
+
+    validated = _id_token_validator(transport).validate(token)
+
+    assert validated.audiences == (CLIENT_ID, AUDIENCE)
+
+
+@pytest.mark.parametrize("azp", [None, "other-client"])
+def test_id_token_rejects_missing_or_wrong_azp_for_multiple_audiences(
+    rsa_key_a: Any,
+    azp: str | None,
+) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    claims = _claims(aud=[CLIENT_ID, AUDIENCE])
+    if azp is not None:
+        claims["azp"] = azp
+    token = _rs256_token(rsa_key_a, kid="key-a", claims=claims)
+
+    with pytest.raises(OIDCTokenValidationError):
+        _id_token_validator(transport).validate(token)
+
+
+def test_id_token_rejects_api_audience_when_client_id_is_absent(rsa_key_a: Any) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    token = _rs256_token(rsa_key_a, kid="key-a", claims=_claims(aud=AUDIENCE))
+
+    with pytest.raises(OIDCTokenValidationError):
+        _id_token_validator(transport).validate(token)
 
 
 @pytest.mark.parametrize(

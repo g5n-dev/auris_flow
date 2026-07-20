@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hmac
+import json
 import math
 import time
 from collections.abc import Callable, Mapping
@@ -12,9 +14,13 @@ from urllib.parse import urlparse
 import httpx
 from authlib.jose import JsonWebKey, JsonWebToken  # type: ignore[import-untyped]
 
+from app.core.oidc_http import OIDCHTTPResponseLimitError, read_bounded_httpx_body
+
 _ALGORITHM = "RS256"
 _MAX_JWKS_KEYS = 100
 _MAX_TOKEN_BYTES = 16 * 1024
+_MAX_DISCOVERY_RESPONSE_BYTES = 128 * 1024
+_MAX_JWKS_RESPONSE_BYTES = 512 * 1024
 _PRIVATE_RSA_PARAMETERS = frozenset({"d", "p", "q", "dp", "dq", "qi", "oth"})
 
 
@@ -91,19 +97,38 @@ class OIDCValidatedClaims:
 
 
 class OIDCHttpTransport(Protocol):
-    def get_json(self, url: str, *, timeout: float) -> Mapping[str, Any]:
+    def get_json(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        maximum_bytes: int,
+    ) -> Mapping[str, Any]:
         """Fetch a JSON object without following redirects."""
 
 
 class HTTPXOIDCTransport:
     """Small default transport; callers can inject a managed client adapter instead."""
 
-    def get_json(self, url: str, *, timeout: float) -> Mapping[str, Any]:
+    def get_json(
+        self,
+        url: str,
+        *,
+        timeout: float,
+        maximum_bytes: int,
+    ) -> Mapping[str, Any]:
         try:
-            response = httpx.get(url, timeout=timeout, follow_redirects=False)
-            response.raise_for_status()
-            payload = response.json()
-        except (httpx.HTTPError, ValueError):
+            with httpx.stream(
+                "GET",
+                url,
+                headers={"Accept": "application/json"},
+                timeout=timeout,
+                follow_redirects=False,
+            ) as response:
+                response.raise_for_status()
+                body = read_bounded_httpx_body(response, maximum_bytes=maximum_bytes)
+            payload = json.loads(body)
+        except (httpx.HTTPError, OIDCHTTPResponseLimitError, UnicodeError, ValueError):
             raise OIDCProviderUnavailableError from None
         if not isinstance(payload, Mapping):
             raise OIDCConfigurationError
@@ -229,7 +254,10 @@ class OIDCTokenValidator:
         if not force_refresh and self._jwks is not None and self._jwks.expires_at > now:
             return self._jwks.keys
         jwks_uri = self._get_jwks_uri(now)
-        document = self._fetch_json(jwks_uri)
+        document = self._fetch_json(
+            jwks_uri,
+            maximum_bytes=_MAX_JWKS_RESPONSE_BYTES,
+        )
         keys = _import_jwks(document)
         self._jwks = _JwksCache(
             keys=MappingProxyType(keys),
@@ -243,7 +271,10 @@ class OIDCTokenValidator:
         discovery_url = self.config.discovery_url
         if discovery_url is None:  # Guaranteed by OIDCProviderConfig.__post_init__.
             raise OIDCConfigurationError
-        document = self._fetch_json(discovery_url)
+        document = self._fetch_json(
+            discovery_url,
+            maximum_bytes=_MAX_DISCOVERY_RESPONSE_BYTES,
+        )
         if document.get("issuer") != self.config.issuer:
             raise OIDCConfigurationError
         jwks_uri = document.get("jwks_uri")
@@ -258,11 +289,12 @@ class OIDCTokenValidator:
         )
         return jwks_uri
 
-    def _fetch_json(self, url: str) -> Mapping[str, Any]:
+    def _fetch_json(self, url: str, *, maximum_bytes: int) -> Mapping[str, Any]:
         try:
             document = self._transport.get_json(
                 url,
                 timeout=float(self.config.http_timeout_seconds),
+                maximum_bytes=maximum_bytes,
             )
         except OIDCError:
             raise
@@ -271,6 +303,46 @@ class OIDCTokenValidator:
         if not isinstance(document, Mapping):
             raise OIDCConfigurationError
         return document
+
+
+class OIDCIDTokenValidator(OIDCTokenValidator):
+    """Validate browser ID tokens against the OAuth client, including ``azp``."""
+
+    def __init__(
+        self,
+        config: OIDCProviderConfig,
+        *,
+        client_id: str,
+        transport: OIDCHttpTransport | None = None,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        if (
+            not isinstance(client_id, str)
+            or not client_id
+            or client_id != client_id.strip()
+            or len(client_id) > 512
+            or config.audience != client_id
+        ):
+            raise OIDCConfigurationError
+        self.client_id = client_id
+        super().__init__(config, transport=transport, clock=clock)
+
+    def _build_validated_claims(self, claims: Mapping[str, Any]) -> OIDCValidatedClaims:
+        validated = super()._build_validated_claims(claims)
+        authorized_party = claims.get("azp")
+        if len(validated.audiences) > 1:
+            if not isinstance(authorized_party, str) or not hmac.compare_digest(
+                authorized_party.encode("utf-8"), self.client_id.encode("utf-8")
+            ):
+                raise OIDCTokenValidationError
+        elif authorized_party is not None and (
+            not isinstance(authorized_party, str)
+            or not hmac.compare_digest(
+                authorized_party.encode("utf-8"), self.client_id.encode("utf-8")
+            )
+        ):
+            raise OIDCTokenValidationError
+        return validated
 
 
 def _import_jwks(document: Mapping[str, Any]) -> dict[str, Any]:

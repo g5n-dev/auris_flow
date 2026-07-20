@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
@@ -36,6 +37,44 @@ from app.workers.outbox_worker import process_aggregate_events, process_once
 
 TEST_COMPLETION_HMAC_VALUE = "auris-test-completion-secret-32chars-minimum"
 TEST_COMPLETION_KEY_ID = "auris-test-completion"
+
+
+def _record_real_qdrant_dispatch(
+    run_id: str,
+    *,
+    point_seed: str | None = None,
+) -> tuple[str, dict[str, object]]:
+    from app.services.adapters import configured_real_qdrant_embedding_space_fingerprint
+
+    point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, f"auris-test:{point_seed or run_id}"))
+    embedding_space_fingerprint = configured_real_qdrant_embedding_space_fingerprint()
+    with SessionLocal.begin() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        dispatch = run.payload.get("dispatch")
+        assert isinstance(dispatch, dict)
+        details = dispatch.get("details")
+        assert isinstance(details, dict)
+        qdrant_payload = details.get("qdrant_payload")
+        assert isinstance(qdrant_payload, dict)
+        recorded_payload = {
+            **qdrant_payload,
+            "embedding_space_fingerprint": embedding_space_fingerprint,
+        }
+        run.payload = {
+            **run.payload,
+            "dispatch": {
+                **dispatch,
+                "details": {
+                    **details,
+                    "mode": "real",
+                    "point_ids": [point_id],
+                    "embedding_space_fingerprint": embedding_space_fingerprint,
+                    "qdrant_payload": recorded_payload,
+                },
+            },
+        }
+    return point_id, recorded_payload
 
 
 def _release_second_admin_token() -> str:
@@ -709,12 +748,60 @@ def test_knowledge_recall_rejects_scope_override(client, auth_headers):
     assert response.json()["error"]["code"] == "KNOWLEDGE_RECALL_SCOPE_FORBIDDEN"
 
 
+def test_real_knowledge_recall_ignores_local_receipts_and_short_circuits(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    from app.services import knowledge_recall_service
+
+    build = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+        json={"reason": "recall-local-receipt-is-not-authority"},
+        headers={**auth_headers, "Idempotency-Key": "qdrant-recall-local-receipt"},
+    )
+    assert build.status_code == 202
+    assert process_once() == 1
+
+    def unexpected_real_recall(*_args, **_kwargs):
+        raise AssertionError("empty real authority must not call Qdrant")
+
+    monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
+    monkeypatch.setattr(
+        knowledge_recall_service,
+        "recall_from_real_qdrant",
+        unexpected_real_recall,
+    )
+
+    response = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/recall",
+        json={"query": "报价金额冲突处理 SOP", "top_k": 3},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["mode"] == "real_qdrant_authority_empty"
+    assert data["hit_count"] == 0
+    assert data["filter"]["authorized_point_count"] == 0
+    assert "has_id" not in data["filter"]
+
+
 def test_real_knowledge_recall_rejects_cross_project_point(
     client,
     auth_headers,
     monkeypatch,
 ):
     from app.services import knowledge_recall_service
+
+    build = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+        json={"reason": "recall-cross-project-defense"},
+        headers={**auth_headers, "Idempotency-Key": "qdrant-recall-cross-project"},
+    )
+    assert build.status_code == 202
+    assert process_once() == 1
+    _record_real_qdrant_dispatch(build.json()["data"]["run_id"])
 
     monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
     monkeypatch.setattr(
@@ -730,7 +817,7 @@ def test_real_knowledge_recall_rejects_cross_project_point(
             },
             "points": [
                 {
-                    "id": "cross-project-point",
+                    "id": "99999999-9999-4999-8999-999999999999",
                     "score": 0.99,
                     "payload": {
                         "tenant_id": "aurora_auto",
@@ -770,12 +857,7 @@ def test_real_knowledge_recall_uses_mysql_dispatch_as_evidence_authority(
     assert build.status_code == 202
     assert process_once() == 1
     run_id = build.json()["data"]["run_id"]
-    with SessionLocal() as session:
-        run = session.get(RunRecord, run_id)
-        assert run is not None
-        details = run.payload["dispatch"]["details"]
-        point_id = details["point_ids"][0]
-        recorded_payload = details["qdrant_payload"]
+    point_id, recorded_payload = _record_real_qdrant_dispatch(run_id)
 
     tampered_payload = {
         **recorded_payload,
@@ -815,7 +897,253 @@ def test_real_knowledge_recall_uses_mysql_dispatch_as_evidence_authority(
     assert "forged-connector" not in response.text
 
 
-def test_real_knowledge_recall_rejects_stale_mysql_dispatch_version(
+def test_real_knowledge_recall_limits_search_to_mysql_dispatch_point_ids(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    from app.services import knowledge_recall_service
+
+    build = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+        json={"reason": "recall-authority-filter"},
+        headers={**auth_headers, "Idempotency-Key": "qdrant-recall-authority-filter"},
+    )
+    assert build.status_code == 202
+    assert process_once() == 1
+    point_id, recorded_payload = _record_real_qdrant_dispatch(build.json()["data"]["run_id"])
+
+    with SessionLocal.begin() as session:
+        session.add_all(
+            [
+                RunRecord(
+                    run_id=f"zz_qdrant_other_index_{index:03d}",
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    run_type="knowledge_build",
+                    status="success",
+                    trace_id=f"trace_qdrant_other_index_{index:03d}",
+                    payload={
+                        "dispatch": {
+                            "adapter": "qdrant",
+                            "details": {
+                                "mode": "real",
+                                "point_ids": [
+                                    str(
+                                        uuid.uuid5(
+                                            uuid.NAMESPACE_URL,
+                                            f"auris-test:other-index:{index}",
+                                        )
+                                    )
+                                ],
+                                "qdrant_payload": {
+                                    **recorded_payload,
+                                    "knowledge_index_id": f"ki_other_{index:03d}",
+                                },
+                            },
+                        }
+                    },
+                )
+                for index in range(501)
+            ]
+        )
+        session.add(
+            RunRecord(
+                run_id="zz_qdrant_invalid_real_point",
+                tenant_id="aurora_auto",
+                project_id="sales_qa",
+                run_type="knowledge_build",
+                status="success",
+                trace_id="trace_qdrant_invalid_real_point",
+                payload={
+                    "dispatch": {
+                        "adapter": "qdrant",
+                        "details": {
+                            "mode": "real",
+                            "point_ids": ["qdrant_point_local_receipt"],
+                            "qdrant_payload": recorded_payload,
+                        },
+                    }
+                },
+            )
+        )
+
+    observed: dict[str, object] = {}
+
+    def fake_recall(qdrant_payload, *, query, top_k):
+        observed.update(payload=qdrant_payload, query=query, top_k=top_k)
+        return {
+            "mode": "real_qdrant",
+            "collection": "knowledge_chunks",
+            "filter": {"has_id": qdrant_payload.get("_authorized_point_ids")},
+            "points": [{"id": point_id, "score": 0.99, "payload": recorded_payload}],
+        }
+
+    monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
+    monkeypatch.setattr(
+        knowledge_recall_service,
+        "recall_from_real_qdrant",
+        fake_recall,
+    )
+
+    response = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/recall",
+        json={"query": "报价金额冲突处理 SOP", "top_k": 3},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    assert observed["payload"]["_authorized_point_ids"] == [point_id]
+    assert observed["query"] == "报价金额冲突处理 SOP"
+    assert observed["top_k"] == 3
+
+
+def test_real_knowledge_recall_authorizes_only_the_latest_valid_dispatch_point_set(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    from app.services import knowledge_recall_service
+
+    build = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+        json={"reason": "recall-latest-authority"},
+        headers={**auth_headers, "Idempotency-Key": "qdrant-recall-latest-authority"},
+    )
+    assert build.status_code == 202
+    assert process_once() == 1
+    stale_point_id, recorded_payload = _record_real_qdrant_dispatch(build.json()["data"]["run_id"])
+    latest_point_id = str(uuid.uuid5(uuid.NAMESPACE_URL, "auris-test:latest-authority"))
+    latest_payload = {**recorded_payload, "trace_id": "trace_qdrant_latest_authority"}
+    with SessionLocal.begin() as session:
+        session.add(
+            RunRecord(
+                run_id="zz_qdrant_latest_authority",
+                tenant_id="aurora_auto",
+                project_id="sales_qa",
+                run_type="knowledge_sync",
+                status="success",
+                trace_id="trace_qdrant_latest_authority",
+                updated_at=datetime.now(UTC) + timedelta(seconds=5),
+                payload={
+                    "dispatch": {
+                        "adapter": "qdrant",
+                        "details": {
+                            "mode": "real",
+                            "point_ids": [latest_point_id, latest_point_id],
+                            "embedding_space_fingerprint": latest_payload[
+                                "embedding_space_fingerprint"
+                            ],
+                            "qdrant_payload": latest_payload,
+                        },
+                    }
+                },
+            )
+        )
+
+    observed: dict[str, object] = {}
+
+    def fake_recall(qdrant_payload, *, query, top_k):
+        observed.update(payload=qdrant_payload, query=query, top_k=top_k)
+        return {
+            "mode": "real_qdrant",
+            "collection": "knowledge_chunks",
+            "filter": {
+                "has_id": [latest_point_id, stale_point_id],
+                "tenant_id": "aurora_auto",
+            },
+            "points": [
+                {
+                    "id": latest_point_id,
+                    "score": 0.99,
+                    "payload": latest_payload,
+                }
+            ],
+        }
+
+    monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
+    monkeypatch.setattr(
+        knowledge_recall_service,
+        "recall_from_real_qdrant",
+        fake_recall,
+    )
+
+    response = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/recall",
+        json={"query": "报价金额冲突处理 SOP", "top_k": 3},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert observed["payload"]["_authorized_point_ids"] == [latest_point_id]
+    assert data["hits"][0]["point_id"] == latest_point_id
+    assert data["filter"]["authorized_point_count"] == 1
+    assert latest_point_id not in json.dumps(data["filter"])
+    assert stale_point_id not in json.dumps(data["filter"])
+
+
+def test_real_knowledge_recall_rejects_dispatch_from_a_stale_embedding_space(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    from app.services import knowledge_recall_service
+
+    build = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+        json={"reason": "recall-stale-embedding-space"},
+        headers={**auth_headers, "Idempotency-Key": "qdrant-recall-stale-embedding-space"},
+    )
+    assert build.status_code == 202
+    assert process_once() == 1
+    run_id = build.json()["data"]["run_id"]
+    _record_real_qdrant_dispatch(run_id)
+    with SessionLocal.begin() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        dispatch = run.payload["dispatch"]
+        details = dispatch["details"]
+        run.payload = {
+            **run.payload,
+            "dispatch": {
+                **dispatch,
+                "details": {
+                    **details,
+                    "embedding_space_fingerprint": "0" * 64,
+                    "qdrant_payload": {
+                        **details["qdrant_payload"],
+                        "embedding_space_fingerprint": "0" * 64,
+                    },
+                },
+            },
+        }
+
+    def unexpected_real_recall(*_args, **_kwargs):
+        raise AssertionError("stale embedding authority must not call Qdrant")
+
+    monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
+    monkeypatch.setattr(
+        knowledge_recall_service,
+        "recall_from_real_qdrant",
+        unexpected_real_recall,
+    )
+
+    response = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/recall",
+        json={"query": "报价金额冲突处理 SOP", "top_k": 3},
+        headers=auth_headers,
+    )
+
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["mode"] == "real_qdrant_authority_empty"
+    assert data["hit_count"] == 0
+    assert data["filter"]["authorized_point_count"] == 0
+    assert "has_id" not in data["filter"]
+
+
+def test_real_knowledge_recall_filters_stale_dispatch_when_current_version_exists(
     client,
     auth_headers,
     monkeypatch,
@@ -829,9 +1157,8 @@ def test_real_knowledge_recall_rejects_stale_mysql_dispatch_version(
     )
     assert build.status_code == 202
     assert process_once() == 1
-    run_id = build.json()["data"]["run_id"]
+    stale_point_id, _stale_payload = _record_real_qdrant_dispatch(build.json()["data"]["run_id"])
     with SessionLocal.begin() as session:
-        run = session.get(RunRecord, run_id)
         index = session.scalar(
             select(JsonResource).where(
                 JsonResource.collection == "knowledge_indexes",
@@ -840,26 +1167,44 @@ def test_real_knowledge_recall_rejects_stale_mysql_dispatch_version(
                 JsonResource.project_id == "sales_qa",
             )
         )
-        assert run is not None and index is not None
-        details = run.payload["dispatch"]["details"]
-        point_id = details["point_ids"][0]
-        recorded_payload = details["qdrant_payload"]
+        assert index is not None
         index.data = {**index.data, "version": "kb-index-v3.3"}
+
+    current_build = client.post(
+        "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+        json={"reason": "recall-current-version"},
+        headers={**auth_headers, "Idempotency-Key": "qdrant-recall-current-version"},
+    )
+    assert current_build.status_code == 202
+    assert process_once() == 1
+    current_point_id, current_payload = _record_real_qdrant_dispatch(
+        current_build.json()["data"]["run_id"]
+    )
+    assert current_point_id != stale_point_id
+    assert current_payload["version"] == "kb-index-v3.3"
+
+    observed: dict[str, object] = {}
+
+    def fake_recall(qdrant_payload, *, query, top_k):
+        observed.update(payload=qdrant_payload, query=query, top_k=top_k)
+        return {
+            "mode": "real_qdrant",
+            "collection": "knowledge_chunks",
+            "filter": {"has_id": qdrant_payload.get("_authorized_point_ids")},
+            "points": [
+                {
+                    "id": current_point_id,
+                    "score": 0.99,
+                    "payload": current_payload,
+                }
+            ],
+        }
 
     monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
     monkeypatch.setattr(
         knowledge_recall_service,
         "recall_from_real_qdrant",
-        lambda *_args, **_kwargs: {
-            "mode": "real_qdrant",
-            "collection": "knowledge_chunks",
-            "filter": {
-                "tenant_id": "aurora_auto",
-                "project_id": "sales_qa",
-                "knowledge_index_id": "ki_sales_policy_v1",
-            },
-            "points": [{"id": point_id, "score": 0.99, "payload": recorded_payload}],
-        },
+        fake_recall,
     )
 
     response = client.post(
@@ -868,10 +1213,12 @@ def test_real_knowledge_recall_rejects_stale_mysql_dispatch_version(
         headers=auth_headers,
     )
 
-    assert response.status_code == 502
-    detail = response.json()["error"]["details"][0]
-    assert detail["code"] == "POINT_VERSION_STALE"
-    assert detail["fields"] == ["version"]
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["hit_count"] == 1
+    assert data["hits"][0]["point_id"] == current_point_id
+    assert observed["payload"]["_authorized_point_ids"] == [current_point_id]
+    assert stale_point_id not in observed["payload"]["_authorized_point_ids"]
 
 
 def test_outbox_worker_indexes_approved_voiceprint_enrollment(client, auth_headers):

@@ -117,6 +117,10 @@ class OidcIdentity(Base, TimestampMixin):
 class OidcAuthorizationState(Base, TimestampMixin):
     __tablename__ = "oidc_authorization_states"
     __table_args__ = (
+        UniqueConstraint(
+            "transaction_sha256",
+            name="uq_oidc_authorization_states_transaction",
+        ),
         CheckConstraint(
             "expires_at > issued_at",
             name="ck_oidc_authorization_states_expiry",
@@ -126,9 +130,16 @@ class OidcAuthorizationState(Base, TimestampMixin):
             name="ck_oidc_authorization_states_consumed",
         ),
         Index("ix_oidc_authorization_states_expiry", "expires_at", "consumed_at"),
+        Index(
+            "ix_oidc_authorization_states_transaction_pending",
+            "transaction_sha256",
+            "consumed_at",
+            "expires_at",
+        ),
     )
 
     state_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    transaction_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     nonce: Mapped[str] = mapped_column(String(128), nullable=False)
     code_verifier: Mapped[str] = mapped_column(String(128), nullable=False)
     return_path: Mapped[str] = mapped_column(String(1024), nullable=False, default="/")

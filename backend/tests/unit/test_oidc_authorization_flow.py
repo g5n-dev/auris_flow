@@ -15,6 +15,7 @@ from app.core.oidc import (
     OIDCValidatedClaims,
 )
 from app.core.oidc_flow import (
+    HTTPXOIDCFlowTransport,
     OIDCAuthorizationDeniedError,
     OIDCAuthorizationFlow,
     OIDCAuthorizationResponseError,
@@ -435,6 +436,114 @@ def test_http_response_repr_does_not_render_token_body() -> None:
 
     assert canary_value not in repr(response)
     assert "<redacted" in repr(response)
+
+
+def test_default_transport_bounds_discovery_before_the_full_response_is_buffered(
+    monkeypatch,
+) -> None:
+    canary = b"discovery-sensitive-tail-must-not-be-consumed"
+
+    class GuardedResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self) -> None:
+            self.chunks_seen = 0
+
+        def iter_bytes(self):
+            for chunk in (b"d" * (128 * 1024), b"!", canary):
+                self.chunks_seen += 1
+                yield chunk
+
+    class ResponseContext:
+        def __init__(self, response: GuardedResponse) -> None:
+            self.response = response
+
+        def __enter__(self) -> GuardedResponse:
+            return self.response
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    response = GuardedResponse()
+    seen: dict[str, object] = {}
+
+    def fake_stream(method: str, url: str, **kwargs: object) -> ResponseContext:
+        seen.update(method=method, url=url, **kwargs)
+        return ResponseContext(response)
+
+    def forbidden_get(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("OIDC flow transport must not use buffering httpx.get")
+
+    monkeypatch.setattr("app.core.oidc_flow.httpx.stream", fake_stream)
+    monkeypatch.setattr("app.core.oidc_flow.httpx.get", forbidden_get)
+
+    with pytest.raises(OIDCDiscoveryError) as captured:
+        HTTPXOIDCFlowTransport().get(DISCOVERY_URL, timeout=2.5)
+
+    assert response.chunks_seen == 2
+    assert seen["method"] == "GET"
+    assert seen["follow_redirects"] is False
+    assert canary.decode() not in str(captured.value)
+
+
+def test_default_transport_bounds_token_response_and_redacts_client_credentials(
+    monkeypatch,
+) -> None:
+    opaque_client_value = "client-secret-must-never-leak"
+    canary = b"token-sensitive-tail-must-not-be-consumed"
+
+    class GuardedResponse:
+        status_code = 200
+        headers = {"content-type": "application/json"}
+
+        def __init__(self) -> None:
+            self.chunks_seen = 0
+
+        def iter_bytes(self):
+            for chunk in (b"t" * (128 * 1024), b"!", canary):
+                self.chunks_seen += 1
+                yield chunk
+
+    class ResponseContext:
+        def __init__(self, response: GuardedResponse) -> None:
+            self.response = response
+
+        def __enter__(self) -> GuardedResponse:
+            return self.response
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    response = GuardedResponse()
+    seen: dict[str, object] = {}
+
+    def fake_stream(method: str, url: str, **kwargs: object) -> ResponseContext:
+        seen.update(method=method, url=url, **kwargs)
+        return ResponseContext(response)
+
+    def forbidden_post(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("OIDC flow transport must not use buffering httpx.post")
+
+    monkeypatch.setattr("app.core.oidc_flow.httpx.stream", fake_stream)
+    monkeypatch.setattr("app.core.oidc_flow.httpx.post", forbidden_post)
+
+    with pytest.raises(OIDCTokenResponseError) as captured:
+        HTTPXOIDCFlowTransport().post_form(
+            TOKEN_ENDPOINT,
+            form={"grant_type": "authorization_code", "code": "sensitive-code"},
+            client_authentication=OIDCClientAuthentication(
+                client_id="auris-flow-web",
+                client_secret=opaque_client_value,
+            ),
+            timeout=2.5,
+        )
+
+    assert response.chunks_seen == 2
+    assert seen["method"] == "POST"
+    assert seen["follow_redirects"] is False
+    assert opaque_client_value not in str(captured.value)
+    assert canary.decode() not in str(captured.value)
 
 
 def test_rejects_nonce_mismatch_after_signed_token_validation() -> None:

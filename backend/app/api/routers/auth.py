@@ -31,9 +31,9 @@ from app.core.errors import ApiError
 from app.core.oidc import (
     OIDCConfigurationError,
     OIDCError,
+    OIDCIDTokenValidator,
     OIDCProviderConfig,
     OIDCProviderUnavailableError,
-    OIDCTokenValidator,
 )
 from app.core.oidc_flow import (
     OIDCAuthorizationDeniedError,
@@ -44,6 +44,11 @@ from app.core.oidc_state import (
     consume_authorization_state,
     delete_consumed_authorization_state,
     store_authorization_state,
+)
+from app.core.oidc_transaction import (
+    authorization_transaction_cookie_name,
+    authorization_transaction_secret,
+    set_authorization_transaction_cookie,
 )
 from app.core.response import envelope
 from app.models import AuthSession, User
@@ -93,7 +98,18 @@ def get_oidc_authorization_flow() -> OIDCAuthorizationFlow:
         clock_skew_seconds=settings.oidc_clock_skew_seconds,
         http_timeout_seconds=settings.oidc_http_timeout_seconds,
     )
-    validator = OIDCTokenValidator(provider)
+    id_token_provider = OIDCProviderConfig(
+        issuer=settings.oidc_issuer,
+        audience=settings.oidc_client_id,
+        discovery_url=settings.oidc_discovery_url or None,
+        jwks_cache_ttl_seconds=settings.oidc_jwks_cache_ttl_seconds,
+        clock_skew_seconds=settings.oidc_clock_skew_seconds,
+        http_timeout_seconds=settings.oidc_http_timeout_seconds,
+    )
+    validator = OIDCIDTokenValidator(
+        id_token_provider,
+        client_id=settings.oidc_client_id,
+    )
     return OIDCAuthorizationFlow(
         OIDCClientConfig(
             provider=provider,
@@ -196,16 +212,27 @@ def oidc_login(
         authorization = get_oidc_authorization_flow().create_authorization_request()
     except OIDCError as error:
         raise _translate_oidc_error(error) from None
+    transaction_cookie_name = authorization_transaction_cookie_name(settings.app_env)
+    transaction_secret = authorization_transaction_secret(
+        request.cookies.get(transaction_cookie_name)
+    )
     store_authorization_state(
         session,
         state=authorization.state,
         nonce=authorization.nonce,
         code_verifier=authorization.code_verifier,
+        transaction_secret=transaction_secret,
         ttl_seconds=settings.oidc_authorization_state_ttl_seconds,
         return_path=return_path,
     )
     session.commit()
     response = RedirectResponse(authorization.authorization_url, status_code=303)
+    set_authorization_transaction_cookie(
+        response,
+        app_env=settings.app_env,
+        transaction_secret=transaction_secret,
+        max_age=settings.oidc_authorization_state_ttl_seconds,
+    )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return response
@@ -221,7 +248,13 @@ def oidc_callback(request: Request, session: SessionDep) -> RedirectResponse:
     except UnicodeDecodeError:
         raise ApiError("OIDC_STATE_INVALID", "OIDC 登录状态无效", 400) from None
     state = _callback_state(raw_query)
-    consumed = consume_authorization_state(session, state=state)
+    consumed = consume_authorization_state(
+        session,
+        state=state,
+        transaction_secret=request.cookies.get(
+            authorization_transaction_cookie_name(settings.app_env)
+        ),
+    )
     # Consume before any network request so a code/state pair can never be retried.
     session.commit()
     try:

@@ -18,7 +18,7 @@ from http.client import HTTPConnection, HTTPSConnection
 from typing import Any, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlparse
-from urllib.request import Request, urlopen
+from urllib.request import Request
 
 from app.core.callback_signature import (
     CallbackKeyBinding,
@@ -30,11 +30,15 @@ from app.core.callback_signature import (
     sign_callback,
 )
 from app.core.embeddings import (
+    EMBEDDING_DOCUMENT_SOURCE_PRECEDENCE,
+    EMBEDDING_SPACE_FINGERPRINT_FIELD,
     EmbeddingConfigurationError,
     EmbeddingProvider,
     EmbeddingResponseError,
     build_embedding_provider,
+    embedding_space_v1_fingerprint,
 )
+from app.core.http_transport import open_url_no_redirect as urlopen
 from app.core.observability import (
     current_trace_context,
     record_safe_http_status,
@@ -222,6 +226,63 @@ def _qdrant_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+QDRANT_AUTHORIZED_POINT_IDS_FIELD = "_authorized_point_ids"
+QDRANT_AUTHORIZED_POINT_IDS_LIMIT = 1024
+QDRANT_DISTANCE = "Cosine"
+
+
+def normalize_real_qdrant_point_id(value: object) -> str | None:
+    """Accept only the canonical UUID form emitted by the real adapter."""
+
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return None
+    return value if str(parsed) == value else None
+
+
+def validate_real_qdrant_authorized_point_ids(qdrant_payload: dict[str, Any]) -> list[str]:
+    if QDRANT_AUTHORIZED_POINT_IDS_FIELD not in qdrant_payload:
+        raise ValueError("Qdrant authorized point ids are required")
+    raw_point_ids = qdrant_payload[QDRANT_AUTHORIZED_POINT_IDS_FIELD]
+    if not isinstance(raw_point_ids, list):
+        raise ValueError("Qdrant authorized point ids are invalid")
+    if len(raw_point_ids) > QDRANT_AUTHORIZED_POINT_IDS_LIMIT:
+        raise ValueError("Qdrant authorized point ids exceed limit")
+    normalized_point_ids: set[str] = set()
+    for point_id in raw_point_ids:
+        normalized = normalize_real_qdrant_point_id(point_id)
+        if normalized is None:
+            raise ValueError("Qdrant authorized point ids are invalid")
+        normalized_point_ids.add(normalized)
+    return sorted(normalized_point_ids)
+
+
+def configured_real_qdrant_embedding_space_fingerprint() -> str:
+    try:
+        vector_size = int(os.environ.get("QDRANT_VECTOR_SIZE", "8"))
+    except ValueError:
+        raise EmbeddingConfigurationError("QDRANT_VECTOR_SIZE must be an integer") from None
+    provider = build_embedding_provider(dimension=vector_size)
+    return embedding_space_v1_fingerprint(provider, distance=QDRANT_DISTANCE)
+
+
+def real_qdrant_filter_reference(
+    qdrant_payload: dict[str, Any],
+    *,
+    authorized_point_count: int,
+) -> dict[str, Any]:
+    return {
+        "tenant_id": qdrant_payload.get("tenant_id"),
+        "project_id": qdrant_payload.get("project_id"),
+        "knowledge_index_id": qdrant_payload.get("knowledge_index_id"),
+        EMBEDDING_SPACE_FINGERPRINT_FIELD: qdrant_payload.get(EMBEDDING_SPACE_FINGERPRINT_FIELD),
+        "authorized_point_count": authorized_point_count,
+    }
+
+
 def _validate_qdrant_payload(qdrant_payload: dict[str, Any]) -> list[str]:
     required_fields = (
         "tenant_id",
@@ -257,7 +318,7 @@ def _embedding_document_text(
     provider: EmbeddingProvider,
 ) -> str:
     for source in (payload, qdrant_payload):
-        for key in ("embedding_text", "document_text", "content", "text"):
+        for key in EMBEDDING_DOCUMENT_SOURCE_PRECEDENCE:
             value = source.get(key)
             if isinstance(value, str) and value.strip():
                 return value.strip()
@@ -1426,7 +1487,17 @@ class RealObjectStorageClient:
         )
 
     def head_object(self, bucket: str, object_key: str) -> dict[str, Any]:
-        return self._request("HEAD", f"/{bucket}/{object_key}")
+        # S3-compatible providers return their validated SHA-256 only when
+        # checksum mode is requested. This header is signed and does not trust
+        # caller-controlled x-amz-meta-* values.
+        extra_headers = (
+            {"x-amz-checksum-mode": "ENABLED"} if self.provider in {"minio", "s3"} else None
+        )
+        return self._request(
+            "HEAD",
+            f"/{bucket}/{object_key}",
+            extra_headers=extra_headers,
+        )
 
     def head_bucket(
         self,
@@ -1978,6 +2049,9 @@ class LocalQdrantIndexClient:
         )
 
 
+MAX_QDRANT_RESPONSE_BYTES = 4 * 1024 * 1024
+
+
 class RealQdrantIndexClient:
     def __init__(
         self,
@@ -1996,6 +2070,11 @@ class RealQdrantIndexClient:
         if self.embedding_provider.dimension != configured_size:
             raise EmbeddingConfigurationError("QDRANT_VECTOR_SIZE must match EMBEDDING_DIMENSION")
         self.vector_size = self.embedding_provider.dimension
+        self.distance = QDRANT_DISTANCE
+        self.embedding_space_fingerprint = embedding_space_v1_fingerprint(
+            self.embedding_provider,
+            distance=self.distance,
+        )
         self.api_key = api_key or os.environ.get("QDRANT_API_KEY")
 
     def upsert_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
@@ -2020,6 +2099,10 @@ class RealQdrantIndexClient:
             "version",
             "collection",
         )
+        recorded_qdrant_payload = {
+            **qdrant_payload,
+            EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
+        }
         try:
             document_text = _embedding_document_text(
                 payload,
@@ -2036,7 +2119,7 @@ class RealQdrantIndexClient:
                         {
                             "id": point_id,
                             "vector": vector,
-                            "payload": qdrant_payload,
+                            "payload": recorded_qdrant_payload,
                         }
                     ]
                 },
@@ -2052,6 +2135,7 @@ class RealQdrantIndexClient:
                     "collection": collection,
                     "embedding_provider": self.embedding_provider.provider_name,
                     "embedding_model": self.embedding_provider.model_name,
+                    EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
                 },
                 error_code="EMBEDDING_GENERATION_FAILED",
                 error_message=str(exc),
@@ -2082,12 +2166,13 @@ class RealQdrantIndexClient:
                 "source_id": qdrant_payload.get("source_id"),
                 "point_ids": [point_id],
                 "point_count": 1,
-                "qdrant_payload": qdrant_payload,
+                "qdrant_payload": recorded_qdrant_payload,
                 "qdrant_url": self.base_url,
                 "vector_size": self.vector_size,
                 "embedding_provider": self.embedding_provider.provider_name,
                 "embedding_model": self.embedding_provider.model_name,
                 "semantic_embedding": self.embedding_provider.is_semantic,
+                EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
                 "operation_id": result.get("operation_id"),
                 "upsert_status": result.get("status") or upsert_response.get("status"),
             },
@@ -2096,18 +2181,34 @@ class RealQdrantIndexClient:
     def search_index_payload(
         self, qdrant_payload: dict[str, Any], *, query: str, top_k: int
     ) -> dict[str, Any]:
+        authorized_point_ids = validate_real_qdrant_authorized_point_ids(qdrant_payload)
+        if (
+            qdrant_payload.get(EMBEDDING_SPACE_FINGERPRINT_FIELD)
+            != self.embedding_space_fingerprint
+        ):
+            raise ValueError("Qdrant embedding space fingerprint does not match")
         collection = str(qdrant_payload["collection"])
+        filter_reference = real_qdrant_filter_reference(
+            qdrant_payload,
+            authorized_point_count=len(authorized_point_ids),
+        )
+        if not authorized_point_ids:
+            return {
+                "mode": "real_qdrant_authority_empty",
+                "collection": collection,
+                "qdrant_url": self.base_url,
+                "points": [],
+                "filter": filter_reference,
+                "vector_size": self.vector_size,
+                "embedding_provider": self.embedding_provider.provider_name,
+                "embedding_model": self.embedding_provider.model_name,
+                "semantic_embedding": self.embedding_provider.is_semantic,
+                EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
+            }
         filter_must: list[dict[str, Any]] = [
             {"key": "tenant_id", "match": {"value": qdrant_payload["tenant_id"]}},
             {"key": "project_id", "match": {"value": qdrant_payload["project_id"]}},
         ]
-        search_payload = {
-            "vector": self.embedding_provider.embed(query, purpose="query"),
-            "limit": top_k,
-            "with_payload": True,
-            "with_vector": False,
-            "filter": {"must": filter_must},
-        }
         if qdrant_payload.get("knowledge_index_id"):
             filter_must.append(
                 {
@@ -2115,6 +2216,22 @@ class RealQdrantIndexClient:
                     "match": {"value": qdrant_payload["knowledge_index_id"]},
                 }
             )
+        filter_must.extend(
+            [
+                {
+                    "key": EMBEDDING_SPACE_FINGERPRINT_FIELD,
+                    "match": {"value": self.embedding_space_fingerprint},
+                },
+                {"has_id": authorized_point_ids},
+            ]
+        )
+        search_payload = {
+            "vector": self.embedding_provider.embed(query, purpose="query"),
+            "limit": top_k,
+            "with_payload": True,
+            "with_vector": False,
+            "filter": {"must": filter_must},
+        }
         result = self._request("POST", f"/collections/{collection}/points/search", search_payload)
         points = result.get("result") if isinstance(result, dict) else []
         return {
@@ -2122,11 +2239,12 @@ class RealQdrantIndexClient:
             "collection": collection,
             "qdrant_url": self.base_url,
             "points": points if isinstance(points, list) else [],
-            "filter": search_payload["filter"],
+            "filter": filter_reference,
             "vector_size": self.vector_size,
             "embedding_provider": self.embedding_provider.provider_name,
             "embedding_model": self.embedding_provider.model_name,
             "semantic_embedding": self.embedding_provider.is_semantic,
+            EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
         }
 
     def reconcile_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
@@ -2147,6 +2265,10 @@ class RealQdrantIndexClient:
             "version",
             "collection",
         )
+        recorded_qdrant_payload = {
+            **qdrant_payload,
+            EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
+        }
         try:
             response = self._request(
                 "GET", f"/collections/{collection}/points/{quote(point_id, safe='')}"
@@ -2192,7 +2314,8 @@ class RealQdrantIndexClient:
                 "point_id": point_id,
                 "point_ids": [point_id],
                 "point_count": 1,
-                "qdrant_payload": qdrant_payload,
+                "qdrant_payload": recorded_qdrant_payload,
+                EMBEDDING_SPACE_FINGERPRINT_FIELD: self.embedding_space_fingerprint,
             },
         )
 
@@ -2206,7 +2329,7 @@ class RealQdrantIndexClient:
         self._request(
             "PUT",
             f"/collections/{collection}",
-            {"vectors": {"size": self.vector_size, "distance": "Cosine"}},
+            {"vectors": {"size": self.vector_size, "distance": self.distance}},
         )
 
     def _request(
@@ -2223,7 +2346,10 @@ class RealQdrantIndexClient:
             headers=headers,
         )
         with urlopen(request, timeout=5) as response:
-            raw = response.read().decode("utf-8")
+            raw_bytes = response.read(MAX_QDRANT_RESPONSE_BYTES + 1)
+        if len(raw_bytes) > MAX_QDRANT_RESPONSE_BYTES:
+            raise ValueError("qdrant response is too large")
+        raw = raw_bytes.decode("utf-8")
         return json.loads(raw) if raw else {}
 
 

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import struct
 from email.message import Message
 from io import BytesIO
 from typing import Any
@@ -15,7 +17,9 @@ from starlette.types import Scope
 
 from app.api.routers import audio_sessions as audio_sessions_router
 from app.core.config import get_settings
+from app.core.database import SessionLocal
 from app.core.errors import ApiError
+from app.models import StorageObject
 from app.services import adapters as storage_adapters
 
 PROVIDER_CASES = (
@@ -25,6 +29,14 @@ PROVIDER_CASES = (
     ("oss", "https://oss.example.test", "virtual", "ossv4"),
 )
 PROVIDERS = tuple(case[0] for case in PROVIDER_CASES)
+
+
+def _mark_storage_object_verified(storage_object_id: str) -> None:
+    with SessionLocal.begin() as session:
+        storage_object = session.get(StorageObject, storage_object_id)
+        assert storage_object is not None
+        storage_object.status = "verified"
+        storage_object.payload = {**storage_object.payload, "status": "verified"}
 
 
 def test_production_audio_storage_never_falls_back_to_synthetic_audio(
@@ -421,7 +433,7 @@ def test_bff_closes_upstream_object_stream_when_consumer_stops(
             "content_type": "audio/wav",
             "content_length": 100_000,
             "etag": "stream-etag",
-            "status": "registered",
+            "status": "verified",
         },
     }
     response = audio_sessions_router._object_storage_audio_response(
@@ -518,7 +530,7 @@ def test_bff_fails_closed_when_upstream_audio_stream_ends_early(
             "content_type": "audio/wav",
             "content_length": 13,
             "etag": "truncated-etag",
-            "status": "registered",
+            "status": "verified",
         },
     }
     response = audio_sessions_router._object_storage_audio_response(
@@ -609,7 +621,7 @@ def test_audio_range_preserves_provider_416_content_range(
             "content_type": "audio/wav",
             "content_length": 100,
             "etag": "registered-etag",
-            "status": "registered",
+            "status": "verified",
         },
     }
 
@@ -840,12 +852,36 @@ class _ProviderRangeClient:
 class _VersionedRegistrationClient:
     def __init__(self) -> None:
         self.etag = "provider-etag-v1"
+        data = b"\x00\x00" * 28
+        self.body = b"".join(
+            [
+                b"RIFF",
+                struct.pack("<I", 36 + len(data)),
+                b"WAVEfmt ",
+                struct.pack("<IHHIIHH", 16, 1, 1, 16_000, 32_000, 2, 16),
+                b"data",
+                struct.pack("<I", len(data)),
+                data,
+            ]
+        )
+        assert len(self.body) == 100
+        self.checksum_sha256 = hashlib.sha256(self.body).hexdigest()
+        self.expose_checksum = True
+        self.full_get_etag: str | None = None
+        self.open_calls: list[tuple[str | None, str | None]] = []
 
     def allows_bucket(self, bucket: str) -> bool:
         return bucket == "minio-audio"
 
     def head_object(self, _bucket: str, _object_key: str) -> dict[str, Any]:
-        return {"content_length": "100", "etag": self.etag}
+        result = {
+            "content_length": "100",
+            "content_type": "audio/wav",
+            "etag": self.etag,
+        }
+        if self.expose_checksum:
+            result["checksum_sha256"] = self.checksum_sha256
+        return result
 
     def open_object(
         self,
@@ -855,14 +891,25 @@ class _VersionedRegistrationClient:
         byte_range: str | None = None,
         if_match: str | None = None,
     ) -> dict[str, Any]:
-        assert byte_range == "bytes=0-12"
         assert if_match == '"provider-etag-v1"'
-        body = b"x" * 13
+        self.open_calls.append((byte_range, if_match))
+        if byte_range is None:
+            body = self.body
+            status = 200
+            content_range = None
+            response_etag = self.full_get_etag or self.etag
+        else:
+            assert byte_range.startswith("bytes=0-")
+            range_end = int(byte_range.partition("-")[2])
+            body = self.body[: range_end + 1]
+            status = 206
+            content_range = f"bytes 0-{range_end}/{len(self.body)}"
+            response_etag = self.etag
         return {
-            "status": 206,
-            "etag": self.etag,
+            "status": status,
+            "etag": response_etag,
             "content_length": str(len(body)),
-            "content_range": "bytes 0-12/100",
+            "content_range": content_range,
             "content_type": "audio/wav",
             "stream": BytesIO(body),
         }
@@ -895,12 +942,13 @@ def test_registration_persists_provider_etag_and_rejects_replaced_same_size_obje
             ),
             "content_type": "audio/wav",
             "content_length": 100,
-            "checksum_sha256": "d" * 64,
+            "checksum_sha256": provider_client.checksum_sha256,
         },
         headers={**auth_headers, "Idempotency-Key": "register-provider-etag-binding"},
     )
     assert registration.status_code == 200, registration.text
     assert registration.json()["data"]["storage_object"]["etag"] == "provider-etag-v1"
+    assert registration.json()["data"]["storage_object"]["status"] == "verified"
 
     grant = client.post(
         "/api/v1/audio-sessions/S20250526-000128/playback-grants",
@@ -915,6 +963,150 @@ def test_registration_persists_provider_etag_and_rejects_replaced_same_size_obje
     )
     assert stale.status_code == 412, stale.text
     assert stale.json()["error"]["code"] == "AUDIO_OBJECT_VERSION_CHANGED"
+
+
+def test_real_registration_streams_version_bound_sha256_when_head_checksum_is_missing(
+    client: Any,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_client = _VersionedRegistrationClient()
+    provider_client.expose_checksum = False
+    monkeypatch.setattr(audio_sessions_router, "MAX_WAV_PROBE_BYTES", 64)
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: provider_client,
+    )
+    monkeypatch.setattr(audio_sessions_router.settings, "auris_object_storage_adapter", "real")
+
+    response = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_stream_verified_checksum",
+            "provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": ("tenants/aurora_auto/projects/sales_qa/audio/raw/stream-checksum.wav"),
+            "content_type": "audio/wav",
+            "content_length": len(provider_client.body),
+            "checksum_sha256": provider_client.checksum_sha256,
+        },
+        headers={**auth_headers, "Idempotency-Key": "unit-test-stream-checksum"},
+    )
+
+    assert response.status_code == 200, response.text
+    verification = response.json()["data"]["storage_object"]["verification"]
+    assert verification["checksum_sha256"] == provider_client.checksum_sha256
+    assert verification["checksum_method"] == "versioned_full_stream"
+    assert provider_client.open_calls == [
+        ("bytes=0-63", '"provider-etag-v1"'),
+        (None, '"provider-etag-v1"'),
+    ]
+
+
+def test_real_registration_does_not_trust_declared_checksum_when_head_has_none(
+    client: Any,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_client = _VersionedRegistrationClient()
+    provider_client.expose_checksum = False
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: provider_client,
+    )
+    monkeypatch.setattr(audio_sessions_router.settings, "auris_object_storage_adapter", "real")
+
+    response = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_untrusted_declared_checksum",
+            "provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": (
+                "tenants/aurora_auto/projects/sales_qa/audio/raw/untrusted-checksum.wav"
+            ),
+            "content_type": "audio/wav",
+            "content_length": len(provider_client.body),
+            "checksum_sha256": "0" * 64,
+        },
+        headers={**auth_headers, "Idempotency-Key": "unit-test-untrusted-checksum"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "AUDIO_OBJECT_CHECKSUM_MISMATCH"
+
+
+def test_real_registration_rejects_etag_change_during_checksum_stream(
+    client: Any,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_client = _VersionedRegistrationClient()
+    provider_client.expose_checksum = False
+    provider_client.full_get_etag = "provider-etag-v2"
+    monkeypatch.setattr(audio_sessions_router, "MAX_WAV_PROBE_BYTES", 64)
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: provider_client,
+    )
+    monkeypatch.setattr(audio_sessions_router.settings, "auris_object_storage_adapter", "real")
+
+    response = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_changed_during_checksum",
+            "provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": ("tenants/aurora_auto/projects/sales_qa/audio/raw/changed-checksum.wav"),
+            "content_type": "audio/wav",
+            "content_length": len(provider_client.body),
+            "checksum_sha256": provider_client.checksum_sha256,
+        },
+        headers={**auth_headers, "Idempotency-Key": "unit-test-changed-checksum"},
+    )
+
+    assert response.status_code == 412, response.text
+    assert response.json()["error"]["code"] == "AUDIO_OBJECT_VERSION_CHANGED"
+
+
+def test_real_registration_rejects_non_wav_content(
+    client: Any,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_client = _VersionedRegistrationClient()
+    provider_client.body = b"x" * 100
+    provider_client.checksum_sha256 = hashlib.sha256(provider_client.body).hexdigest()
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: provider_client,
+    )
+    monkeypatch.setattr(
+        audio_sessions_router.settings,
+        "auris_object_storage_adapter",
+        "real",
+    )
+
+    response = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_rejected_invalid_wav",
+            "provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": ("tenants/aurora_auto/projects/sales_qa/audio/raw/invalid-wav.wav"),
+            "content_type": "audio/wav",
+            "content_length": 100,
+            "checksum_sha256": provider_client.checksum_sha256,
+        },
+        headers={**auth_headers, "Idempotency-Key": "reject-real-audio-invalid-wav"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "AUDIO_OBJECT_WAV_INVALID"
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -945,6 +1137,7 @@ def test_audio_range_route_uses_registered_provider_and_preserves_upstream_parti
         },
     )
     assert registration.status_code == 200
+    _mark_storage_object_verified(f"sto_provider_range_{provider}")
 
     grant = client.post(
         "/api/v1/audio-sessions/S20250526-000128/playback-grants",

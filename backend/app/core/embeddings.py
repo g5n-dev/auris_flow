@@ -9,12 +9,24 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request
 
+from app.core.http_transport import open_url_no_redirect
 from app.core.secrets import is_production_environment, load_secret_file
 
 EmbeddingPurpose = Literal["document", "query"]
 EmbeddingTransport = Callable[[Request, float], object]
+EMBEDDING_SPACE_VERSION = "auris.embedding-space.v1"
+EMBEDDING_SPACE_FINGERPRINT_FIELD = "embedding_space_fingerprint"
+EMBEDDING_INPUT_NORMALIZATION_V1 = "trim-nonempty-utf8-v1"
+EMBEDDING_MAX_INPUT_BYTES = 2 * 1024 * 1024
+EMBEDDING_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+EMBEDDING_DOCUMENT_SOURCE_PRECEDENCE = (
+    "embedding_text",
+    "document_text",
+    "content",
+    "text",
+)
 
 
 class EmbeddingConfigurationError(ValueError):
@@ -41,15 +53,52 @@ class EmbeddingProvider(Protocol):
     def embed(self, text: str, *, purpose: EmbeddingPurpose) -> list[float]: ...
 
 
-class _RejectEmbeddingRedirects(HTTPRedirectHandler):
-    def redirect_request(self, *_args: object, **_kwargs: object) -> None:
-        """Refuse redirects so bearer credentials never cross an origin boundary."""
+def embedding_space_v1_contract(
+    provider: EmbeddingProvider,
+    *,
+    distance: str,
+) -> dict[str, object]:
+    """Return the endpoint- and credential-independent vector compatibility contract."""
 
-        return None
+    _validate_dimension(provider.dimension)
+    return {
+        "version": EMBEDDING_SPACE_VERSION,
+        "provider": provider.provider_name,
+        "model": provider.model_name,
+        "dimension": provider.dimension,
+        "semantic": provider.is_semantic,
+        "distance": distance,
+        "query_contract": {
+            "purpose": "query",
+            "normalization": EMBEDDING_INPUT_NORMALIZATION_V1,
+            "max_input_bytes": EMBEDDING_MAX_INPUT_BYTES,
+        },
+        "document_contract": {
+            "purpose": "document",
+            "normalization": EMBEDDING_INPUT_NORMALIZATION_V1,
+            "max_input_bytes": EMBEDDING_MAX_INPUT_BYTES,
+            "source_precedence": list(EMBEDDING_DOCUMENT_SOURCE_PRECEDENCE),
+        },
+    }
+
+
+def embedding_space_v1_fingerprint(
+    provider: EmbeddingProvider,
+    *,
+    distance: str,
+) -> str:
+    contract = embedding_space_v1_contract(provider, distance=distance)
+    encoded = json.dumps(
+        contract,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _urlopen_transport(request: Request, timeout: float) -> object:
-    return build_opener(_RejectEmbeddingRedirects()).open(request, timeout=timeout)
+    return open_url_no_redirect(request, timeout)
 
 
 @dataclass(frozen=True)
@@ -120,12 +169,12 @@ class HTTPEmbeddingProvider:
         try:
             response = self.transport(request, self.timeout_seconds)
             with cast(HTTPResponse, response) as opened:
-                raw = opened.read()
+                raw = opened.read(EMBEDDING_MAX_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             raise EmbeddingResponseError(f"embedding provider returned HTTP {exc.code}") from None
         except (OSError, URLError, TimeoutError, ValueError, TypeError):
             raise EmbeddingResponseError("embedding provider request failed") from None
-        if len(raw) > 16 * 1024 * 1024:
+        if len(raw) > EMBEDDING_MAX_RESPONSE_BYTES:
             raise EmbeddingResponseError("embedding provider response is too large")
         try:
             payload = json.loads(raw.decode("utf-8"))
@@ -139,7 +188,7 @@ class HTTPResponse(Protocol):
 
     def __exit__(self, *args: object) -> object: ...
 
-    def read(self) -> bytes: ...
+    def read(self, size: int = -1) -> bytes: ...
 
 
 def _validate_dimension(value: int) -> None:
@@ -151,7 +200,7 @@ def _validate_text(value: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EmbeddingResponseError("embedding input must be non-empty text")
     normalized = value.strip()
-    if len(normalized.encode("utf-8")) > 2 * 1024 * 1024:
+    if len(normalized.encode("utf-8")) > EMBEDDING_MAX_INPUT_BYTES:
         raise EmbeddingResponseError("embedding input exceeds the maximum size")
     return normalized
 

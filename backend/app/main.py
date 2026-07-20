@@ -10,7 +10,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from urllib.error import HTTPError, URLError
 from urllib.request import Request as UrlRequest
-from urllib.request import urlopen
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -50,10 +49,12 @@ from app.core.auth import get_auth_provider
 from app.core.config import _csv_items, get_settings, is_production_environment
 from app.core.database import SessionLocal, engine
 from app.core.errors import ApiError
+from app.core.http_transport import open_url_no_redirect as urlopen
 from app.core.logging import configure_logging, get_logger, log_event
 from app.core.metrics import is_metrics_client_allowed, metrics
 from app.core.observability import annotate_current_span, configure_observability
 from app.core.oidc import OIDCError
+from app.core.oidc_transaction import clear_authorization_transaction_cookie
 from app.core.rate_limit import build_rate_limiter
 from app.services.adapters import object_storage_client_for_provider
 
@@ -229,6 +230,10 @@ async def request_logging_middleware(
                 error_type=exc.__class__.__name__,
             )
             raise
+    if request.url.path == f"{settings.api_prefix}/auth/oidc/callback":
+        clear_authorization_transaction_cookie(response, app_env=settings.app_env)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
     duration_ms = round((time.perf_counter() - started) * 1000, 2)
     route = request.scope.get("route")
     metrics.observe_http(
@@ -305,7 +310,12 @@ async def handle_unexpected_error(request: Request, exc: Exception) -> JSONRespo
         request_id=getattr(request.state, "request_id", None),
         trace_id=getattr(request.state, "trace_id", None),
     )
-    return JSONResponse(status_code=500, content=error_payload(request, api_error))
+    response = JSONResponse(status_code=500, content=error_payload(request, api_error))
+    if request.url.path == f"{settings.api_prefix}/auth/oidc/callback":
+        clear_authorization_transaction_cookie(response, app_env=settings.app_env)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 
 @app.get("/healthz")

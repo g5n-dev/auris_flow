@@ -415,7 +415,9 @@ class AudioRecordingObjectRequest(BaseModel):
     bucket: str = Field(min_length=3, max_length=255, pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]+$")
     object_key: str = Field(min_length=1, max_length=1024)
     content_type: Literal["audio/wav", "audio/x-wav"] = "audio/wav"
-    content_length: int = Field(ge=44, le=5 * 1024**4)
+    # Five GiB, not five TiB: registration verification must remain bounded on
+    # the supported single-host production baseline.
+    content_length: int = Field(ge=44, le=5 * 1024**3)
     checksum_sha256: str = Field(pattern=r"^[0-9a-fA-F]{64}$")
     etag: str | None = Field(default=None, max_length=255)
 

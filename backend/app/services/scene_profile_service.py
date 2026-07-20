@@ -1265,6 +1265,52 @@ def assert_active_scene_profile_binding(
     return binding
 
 
+def bind_active_scene_profile_lock(
+    session: Session,
+    ctx: RequestContext,
+    payload: dict[str, Any],
+    *,
+    environment: str = "production",
+) -> dict[str, Any]:
+    """Validate and capture the canonical project SceneProfile snapshot.
+
+    Project-scoped writes must not trust a browser-supplied Scene lock.  A
+    caller may omit the lock and let the BFF capture the active immutable
+    snapshot, but any supplied component must match exactly.  The canonical
+    values are always written to the persisted resource/run and its Outbox
+    event so asynchronous processing cannot silently switch scene versions.
+    """
+
+    binding = assert_active_scene_profile_binding(session, ctx, environment=environment)
+    canonical = {
+        "scene_profile_id": binding.scene_profile_id,
+        "scene_profile_version_id": binding.scene_profile_version_id,
+        "scene_profile_snapshot_sha256": binding.manifest_sha256,
+    }
+    mismatch_errors = {
+        "scene_profile_id": (
+            "SCENE_PROFILE_ID_MISMATCH",
+            "请求锁定的场景 Profile 与当前项目不一致",
+        ),
+        "scene_profile_version_id": (
+            "SCENE_PROFILE_VERSION_MISMATCH",
+            "请求锁定的场景版本与当前项目不一致",
+        ),
+        "scene_profile_snapshot_sha256": (
+            "SCENE_PROFILE_SNAPSHOT_MISMATCH",
+            "请求锁定的场景快照已漂移",
+        ),
+    }
+    for field, expected in canonical.items():
+        if field not in payload:
+            continue
+        supplied = payload[field]
+        if not isinstance(supplied, str) or supplied != expected:
+            code, message = mismatch_errors[field]
+            raise ApiError(code, message, 409)
+    return {**payload, **canonical}
+
+
 def assert_scene_profile_snapshot(
     session: Session,
     ctx: RequestContext,

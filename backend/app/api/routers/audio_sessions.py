@@ -6,9 +6,9 @@ import struct
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from functools import lru_cache
+from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import urlopen
 
 from fastapi import APIRouter, Request
 from fastapi.responses import Response, StreamingResponse
@@ -20,6 +20,7 @@ from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.audio_playback import create_audio_playback_grant
 from app.core.config import get_settings
 from app.core.errors import ApiError
+from app.core.http_transport import open_url_no_redirect as urlopen
 from app.core.logging import get_logger, log_event
 from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
@@ -46,6 +47,12 @@ from app.services.asr_annotation_correction_service import (
     record_asr_annotation_correction,
 )
 from app.services.audio_intelligence_service import audio_intelligence_output_assets
+from app.services.audio_object_verification import (
+    MAX_WAV_PROBE_BYTES,
+    require_streamed_checksum_size,
+    stream_verified_sha256,
+    verify_remote_audio_object,
+)
 from app.services.audio_playback_service import (
     AUDIO_PLAYBACK_READ_ROLES,
     authorize_audio_playback_grant,
@@ -409,6 +416,56 @@ def _storage_object_data(storage_object: StorageObject) -> dict[str, Any]:
     }
 
 
+def _require_immutable_storage_object_registration(
+    existing: StorageObject | None,
+    *,
+    tenant_id: str,
+    project_id: str,
+    source_type: str,
+    source_id: str,
+    provider: str,
+    bucket: str,
+    object_key: str,
+    content_type: str,
+    size_bytes: int,
+    content_sha256: str,
+    etag: str | None,
+) -> None:
+    if existing is None:
+        return
+    if existing.tenant_id != tenant_id or existing.project_id != project_id:
+        raise ApiError("STORAGE_OBJECT_ID_CONFLICT", "对象标识已被其他作用域占用", 409)
+    if existing.source_type != source_type or existing.source_id != source_id:
+        raise ApiError(
+            "STORAGE_OBJECT_SOURCE_CONFLICT",
+            "对象标识已绑定到其他业务来源，请为新来源使用新的对象标识",
+            409,
+        )
+
+    requested_identity: dict[str, str | int | None] = {
+        "provider": provider,
+        "bucket": bucket,
+        "object_key": object_key,
+        "content_type": content_type,
+        "size_bytes": size_bytes,
+        "content_sha256": content_sha256,
+        "etag": etag,
+    }
+    changed_fields = [
+        field
+        for field, requested_value in requested_identity.items()
+        if (stored_value := getattr(existing, field)) is not None
+        and stored_value != requested_value
+    ]
+    if changed_fields:
+        raise ApiError(
+            "STORAGE_OBJECT_IDENTITY_CONFLICT",
+            "对象标识对应的存储定位或内容版本不可变，请为新版本使用新的对象标识",
+            409,
+            details=[{"field": field} for field in changed_fields],
+        )
+
+
 def _storage_response_headers(recording: dict) -> dict[str, str]:
     raw = recording.get("storage_object")
     storage = raw if isinstance(raw, dict) else {}
@@ -537,6 +594,180 @@ def _open_object_with_if_match(
     )
 
 
+def _read_versioned_wav_probe(
+    client: Any,
+    bucket: str,
+    object_key: str,
+    *,
+    content_length: int,
+    registered_etag: str,
+) -> bytes:
+    probe_length = min(content_length, MAX_WAV_PROBE_BYTES)
+    try:
+        result = _open_object_with_if_match(
+            client,
+            bucket,
+            object_key,
+            byte_range=f"bytes=0-{probe_length - 1}",
+            registered_etag=registered_etag,
+        )
+    except HTTPError as exc:
+        if exc.code in {412, 416}:
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_CHANGED",
+                "录音对象在验证期间发生变化",
+                412,
+                retryable=False,
+            ) from exc
+        raise
+    try:
+        status = int(result.get("status") or 0)
+        if status == 412:
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_CHANGED",
+                "录音对象在验证期间发生变化",
+                412,
+                retryable=False,
+            )
+        if status != 206:
+            raise ApiError(
+                "AUDIO_OBJECT_RANGE_UNSUPPORTED",
+                "对象存储未按范围返回 WAV 验证数据",
+                502,
+                retryable=True,
+            )
+        response_etag = _strong_etag_opaque(result.get("etag"))
+        if response_etag is None or response_etag != registered_etag:
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_CHANGED",
+                "录音对象在验证期间发生变化",
+                412,
+                retryable=False,
+            )
+        stream = result.get("stream")
+        if stream is not None and callable(getattr(stream, "read", None)):
+            body = stream.read(probe_length + 1)
+        else:
+            body = result.get("body")
+        if not isinstance(body, bytes) or len(body) != probe_length:
+            raise ApiError(
+                "AUDIO_OBJECT_VERIFY_FAILED",
+                "对象存储返回的 WAV 验证数据不完整",
+                502,
+                retryable=True,
+            )
+        return body
+    finally:
+        _close_object_stream(result)
+
+
+def _read_versioned_object_sha256(
+    client: Any,
+    bucket: str,
+    object_key: str,
+    *,
+    content_length: int,
+    content_type: str,
+    registered_etag: str,
+) -> str:
+    require_streamed_checksum_size(content_length)
+    try:
+        result = _open_object_with_if_match(
+            client,
+            bucket,
+            object_key,
+            byte_range=None,
+            registered_etag=registered_etag,
+        )
+    except HTTPError as exc:
+        if exc.code == 412:
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_CHANGED",
+                "录音对象在完整性校验期间发生变化",
+                412,
+                retryable=False,
+            ) from exc
+        raise ApiError(
+            "AUDIO_OBJECT_VERIFY_FAILED",
+            "无法读取录音对象进行完整性校验",
+            502,
+            retryable=True,
+        ) from exc
+    except (OSError, URLError, TimeoutError) as exc:
+        raise ApiError(
+            "AUDIO_OBJECT_VERIFY_FAILED",
+            "无法读取录音对象进行完整性校验",
+            502,
+            retryable=True,
+        ) from exc
+
+    try:
+        status = int(result.get("status") or 0)
+        if status == 412:
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_CHANGED",
+                "录音对象在完整性校验期间发生变化",
+                412,
+                retryable=False,
+            )
+        if status != 200:
+            raise ApiError(
+                "AUDIO_OBJECT_VERIFY_FAILED",
+                "对象存储未返回完整的录音对象",
+                502,
+                retryable=True,
+            )
+        response_etag = _strong_etag_opaque(result.get("etag"))
+        if response_etag is None or response_etag != registered_etag:
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_CHANGED",
+                "录音对象在完整性校验期间发生变化",
+                412,
+                retryable=False,
+            )
+        try:
+            response_length = int(result.get("content_length") or -1)
+        except (TypeError, ValueError) as exc:
+            raise ApiError(
+                "AUDIO_OBJECT_VERIFY_FAILED",
+                "对象存储未返回有效的录音长度",
+                502,
+                retryable=True,
+            ) from exc
+        if response_length != content_length:
+            raise ApiError(
+                "AUDIO_OBJECT_SIZE_MISMATCH",
+                "完整性校验读取的录音长度与 HEAD 元数据不一致",
+                409,
+                retryable=False,
+            )
+        response_type = str(result.get("content_type") or "").partition(";")[0].strip().lower()
+        expected_type = content_type.partition(";")[0].strip().lower()
+        if response_type != expected_type:
+            raise ApiError(
+                "AUDIO_OBJECT_CONTENT_TYPE_MISMATCH",
+                "完整性校验读取的录音类型与 HEAD 元数据不一致",
+                409,
+                retryable=False,
+            )
+        if result.get("content_range") not in {None, ""}:
+            raise ApiError(
+                "AUDIO_OBJECT_VERIFY_FAILED",
+                "对象存储在完整读取时意外返回了范围响应",
+                502,
+                retryable=True,
+            )
+        stream = result.get("stream")
+        if stream is None:
+            body = result.get("body")
+            if isinstance(body, bytes):
+                stream = BytesIO(body)
+                result = {**result, "stream": stream}
+        return stream_verified_sha256(stream, expected_size=content_length)
+    finally:
+        _close_object_stream(result)
+
+
 def _parse_byte_range(range_header: str | None, total: int) -> tuple[int, int, bool] | None:
     if total <= 0:
         return None
@@ -621,7 +852,7 @@ def _object_storage_audio_response(
 ) -> Response:
     raw_storage = recording.get("storage_object")
     storage = raw_storage if isinstance(raw_storage, dict) else {}
-    if storage.get("status") not in {"registered", "verified", "active"}:
+    if storage.get("status") not in {"verified", "active"}:
         raise ApiError(
             "AUDIO_OBJECT_NOT_READY",
             "录音对象尚未完成登记验证，暂不可播放",
@@ -853,15 +1084,86 @@ def _object_storage_audio_response(
 @router.get("/audio-sessions/aggregations")
 def get_audio_sessions_aggregations(session: SessionDep, ctx: ContextDep):
     sessions = list_resource_data(session, ctx, "audio_sessions")
-    return collection_envelope(
-        [
+    requested_asset_keys = {
+        asset_key
+        for audio_session in sessions
+        if isinstance((asset_key := audio_session.get("target_asset_key")), str)
+        and asset_key.strip()
+    }
+    registered_asset_keys: set[str] = set()
+    for asset_key in requested_asset_keys:
+        try:
+            registered_asset = get_resource(session, ctx, "data_assets", asset_key)
+        except ApiError as exc:
+            if exc.code == "NOT_FOUND":
+                continue
+            raise
+        if registered_asset.data.get("asset_key") == asset_key:
+            registered_asset_keys.add(asset_key)
+    connector_blocked_reason = "当前会话未绑定本租户项目内已登记的数据资产"
+    unknown_group_key = "unknown / started_at-missing-or-invalid"
+    grouped_sessions: dict[str, list[dict[str, Any]]] = {}
+    for audio_session in sessions:
+        requested_asset_key = audio_session.get("target_asset_key")
+        target_asset_key = (
+            requested_asset_key
+            if isinstance(requested_asset_key, str) and requested_asset_key in registered_asset_keys
+            else None
+        )
+        projected_session = {
+            **audio_session,
+            "target_asset_key": target_asset_key,
+            "connector_import": {
+                "enabled": target_asset_key is not None,
+                "blocked_reason": (
+                    None if target_asset_key is not None else connector_blocked_reason
+                ),
+            },
+        }
+        started_at = audio_session.get("started_at")
+        group_key = unknown_group_key
+        if isinstance(started_at, str):
+            try:
+                started_hour = datetime.fromisoformat(started_at.replace("Z", "+00:00")).replace(
+                    minute=0, second=0, microsecond=0
+                )
+            except ValueError:
+                pass
+            else:
+                group_key = (
+                    f"{started_hour:%Y-%m-%d} / {started_hour:%H}:00-"
+                    f"{(started_hour.hour + 1) % 24:02d}:00"
+                )
+        grouped_sessions.setdefault(group_key, []).append(projected_session)
+
+    aggregation_groups = []
+    for group_key in sorted(
+        grouped_sessions,
+        key=lambda value: (value == unknown_group_key, value),
+    ):
+        children = grouped_sessions[group_key]
+        child_statuses = {
+            status
+            for child in children
+            if isinstance((status := child.get("status")), str) and status.strip()
+        }
+        group_status = (
+            next(iter(child_statuses))
+            if len(child_statuses) == 1
+            else "mixed"
+            if child_statuses
+            else "unknown"
+        )
+        aggregation_groups.append(
             {
-                "group_key": "2025-05-26 / 12:00-13:00",
-                "count": len(sessions),
-                "status": "pending",
-                "children": sessions,
+                "group_key": group_key,
+                "count": len(children),
+                "status": group_status,
+                "children": children,
             }
-        ],
+        )
+    return collection_envelope(
+        aggregation_groups,
         ctx,
     )
 
@@ -1066,6 +1368,7 @@ async def put_audio_sessions_by_id_recording_object(
 
     storage_verification: dict[str, Any] = {"mode": "declared", "verified": False}
     verified_etag = body.etag.strip('"') if body.etag else None
+    object_status = "registered"
     if _real_object_storage_enabled():
         try:
             provider_client = object_storage_client_for_provider(body.provider)
@@ -1101,14 +1404,15 @@ async def put_audio_sessions_by_id_recording_object(
                 retryable=True,
             ) from exc
         remote_size = int(remote.get("content_length") or 0)
-        remote_etag = str(remote.get("etag") or "").strip('"')
+        remote_etag = _strong_etag_opaque(remote.get("etag"))
         if remote_size != body.content_length:
             raise ApiError(
                 "AUDIO_OBJECT_SIZE_MISMATCH",
                 "登记的录音大小与对象存储元数据不一致",
                 409,
             )
-        if body.etag and remote_etag and body.etag.strip('"').lower() != remote_etag.lower():
+        supplied_etag = _strong_etag_opaque(body.etag) if body.etag else None
+        if supplied_etag and remote_etag and supplied_etag != remote_etag:
             raise ApiError(
                 "AUDIO_OBJECT_ETAG_MISMATCH",
                 "登记的录音 ETag 与对象存储元数据不一致",
@@ -1121,19 +1425,69 @@ async def put_audio_sessions_by_id_recording_object(
                 409,
                 retryable=False,
             )
-        verified_etag = remote_etag
+        wav_probe = _read_versioned_wav_probe(
+            provider_client,
+            body.bucket,
+            body.object_key,
+            content_length=remote_size,
+            registered_etag=remote_etag,
+        )
+        try:
+            verification = verify_remote_audio_object(
+                remote,
+                declared_content_length=body.content_length,
+                declared_sha256=body.checksum_sha256,
+                wav_prefix=wav_probe,
+                declared_content_type=body.content_type,
+            )
+        except ApiError as exc:
+            if exc.code != "AUDIO_OBJECT_CHECKSUM_UNAVAILABLE":
+                raise
+            if len(wav_probe) == remote_size:
+                verified_sha256 = hashlib.sha256(wav_probe).hexdigest()
+                checksum_method = "versioned_range"
+            else:
+                verified_sha256 = _read_versioned_object_sha256(
+                    provider_client,
+                    body.bucket,
+                    body.object_key,
+                    content_length=remote_size,
+                    content_type=body.content_type,
+                    registered_etag=remote_etag,
+                )
+                checksum_method = "versioned_full_stream"
+            verification = verify_remote_audio_object(
+                remote,
+                declared_content_length=body.content_length,
+                declared_sha256=body.checksum_sha256,
+                wav_prefix=wav_probe,
+                declared_content_type=body.content_type,
+                verified_sha256=verified_sha256,
+                verified_checksum_method=checksum_method,
+            )
         storage_verification = {
-            "mode": "provider_head",
-            "verified": True,
-            "content_length": remote_size,
-            "etag": remote_etag or None,
-            "checksum_verified": False,
+            **verification,
+            "etag": remote_etag,
         }
+        verified_etag = remote_etag
+        object_status = "verified"
     storage_data["etag"] = verified_etag
 
     existing = session.get(StorageObject, body.storage_object_id)
-    if existing and (existing.tenant_id != ctx.tenant_id or existing.project_id != ctx.project_id):
-        raise ApiError("STORAGE_OBJECT_ID_CONFLICT", "对象标识已被其他作用域占用", 409)
+    _require_immutable_storage_object_registration(
+        existing,
+        tenant_id=ctx.tenant_id,
+        project_id=ctx.project_id,
+        source_type="audio_recording",
+        source_id=recording_id,
+        provider=body.provider,
+        bucket=body.bucket,
+        object_key=body.object_key,
+        content_type=body.content_type,
+        size_bytes=body.content_length,
+        content_sha256=body.checksum_sha256,
+        etag=verified_etag,
+    )
     object_key_sha256 = hashlib.sha256(body.object_key.encode("utf-8")).hexdigest()
     locator = session.scalar(
         select(StorageObject).where(
@@ -1157,7 +1511,7 @@ async def put_audio_sessions_by_id_recording_object(
         **storage_data,
         "source_type": "audio_recording",
         "source_id": recording_id,
-        "status": "registered",
+        "status": object_status,
         "trace_id": ctx.trace_id,
         "verification": storage_verification,
     }
@@ -1173,7 +1527,7 @@ async def put_audio_sessions_by_id_recording_object(
         target.size_bytes = body.content_length
         target.content_sha256 = body.checksum_sha256
         target.etag = verified_etag
-        target.status = "registered"
+        target.status = object_status
         target.trace_id = ctx.trace_id
         target.payload = object_payload
     else:
@@ -1191,7 +1545,7 @@ async def put_audio_sessions_by_id_recording_object(
             size_bytes=body.content_length,
             content_sha256=body.checksum_sha256,
             etag=verified_etag,
-            status="registered",
+            status=object_status,
             trace_id=ctx.trace_id,
             payload=object_payload,
         )
@@ -1202,7 +1556,7 @@ async def put_audio_sessions_by_id_recording_object(
         strong_recording.tenant_id != ctx.tenant_id or strong_recording.project_id != ctx.project_id
     ):
         raise ApiError("RECORDING_SCOPE_CONFLICT", "录音标识已被其他作用域占用", 409)
-    existing_projection = next(
+    existing_projection: dict[str, Any] = next(
         (
             item
             for item in list_resource_data(session, ctx, "recordings")
@@ -1219,7 +1573,7 @@ async def put_audio_sessions_by_id_recording_object(
         "trace_id": ctx.trace_id,
     }
     if strong_recording:
-        strong_recording.status = "registered"
+        strong_recording.status = object_status
         strong_recording.trace_id = ctx.trace_id
         strong_recording.payload = recording_payload
     else:
@@ -1228,7 +1582,7 @@ async def put_audio_sessions_by_id_recording_object(
                 recording_id=recording_id,
                 tenant_id=ctx.tenant_id,
                 project_id=ctx.project_id,
-                status="registered",
+                status=object_status,
                 trace_id=ctx.trace_id,
                 payload=recording_payload,
             )
@@ -1239,13 +1593,13 @@ async def put_audio_sessions_by_id_recording_object(
         "recordings",
         recording_id,
         recording_payload,
-        status="registered",
+        status=object_status,
         trace_id=ctx.trace_id,
     )
     response_data = {
         "audio_session_id": id,
         "recording_id": recording_id,
-        "status": "registered",
+        "status": object_status,
         "storage_object": object_payload,
         "affected_objects": [
             {"type": "audio_session", "id": id},

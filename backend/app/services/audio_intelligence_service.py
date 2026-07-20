@@ -179,6 +179,23 @@ def validate_scoped_storage_object_reference(
                 }
             ],
         )
+    if (
+        _real_object_storage_enabled()
+        and storage_object.source_type == "audio_recording"
+        and storage_object.status not in {"verified", "active"}
+    ):
+        raise ApiError(
+            "STORAGE_OBJECT_NOT_VERIFIED",
+            f"{purpose} 引用的录音对象尚未完成内容验证",
+            409,
+            details=[
+                {
+                    **details[0],
+                    "status": storage_object.status,
+                    "allowed_statuses": ["active", "verified"],
+                }
+            ],
+        )
 
     missing_fields: list[str] = []
     for field in ("provider", "bucket", "object_key", "object_key_sha256", "content_type"):

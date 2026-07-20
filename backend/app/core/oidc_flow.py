@@ -24,6 +24,7 @@ from app.core.oidc import (
     OIDCTokenValidationError,
     OIDCValidatedClaims,
 )
+from app.core.oidc_http import OIDCHTTPResponseLimitError, read_bounded_httpx_body
 
 _AUTHORIZATION_RESERVED_PARAMETERS = frozenset(
     {
@@ -225,13 +226,17 @@ class HTTPXOIDCFlowTransport:
     """Default network adapter with redirects disabled and non-sensitive failures."""
 
     def get(self, url: str, *, timeout: float) -> OIDCFlowHTTPResponse:
-        response = httpx.get(
-            url,
-            headers={"Accept": "application/json"},
-            timeout=timeout,
-            follow_redirects=False,
-        )
-        return _httpx_response(response)
+        try:
+            with httpx.stream(
+                "GET",
+                url,
+                headers={"Accept": "application/json"},
+                timeout=timeout,
+                follow_redirects=False,
+            ) as response:
+                return _httpx_response(response, maximum_bytes=_MAX_DISCOVERY_BYTES)
+        except OIDCHTTPResponseLimitError:
+            raise OIDCDiscoveryError from None
 
     def post_form(
         self,
@@ -247,15 +252,22 @@ class HTTPXOIDCFlowTransport:
                 client_authentication.client_id,
                 client_authentication.client_secret,
             )
-        response = httpx.post(
-            url,
-            data=form,
-            headers={"Accept": "application/json"},
-            auth=authentication,
-            timeout=timeout,
-            follow_redirects=False,
-        )
-        return _httpx_response(response)
+        try:
+            with httpx.stream(
+                "POST",
+                url,
+                data=form,
+                headers={"Accept": "application/json"},
+                auth=authentication,
+                timeout=timeout,
+                follow_redirects=False,
+            ) as response:
+                return _httpx_response(
+                    response,
+                    maximum_bytes=_MAX_TOKEN_RESPONSE_BYTES,
+                )
+        except OIDCHTTPResponseLimitError:
+            raise OIDCTokenResponseError from None
 
 
 class _SensitiveForm(Mapping[str, str]):
@@ -594,11 +606,15 @@ class OIDCAuthorizationFlow:
             raise OIDCTokenValidationError from None
 
 
-def _httpx_response(response: httpx.Response) -> OIDCFlowHTTPResponse:
+def _httpx_response(
+    response: httpx.Response,
+    *,
+    maximum_bytes: int,
+) -> OIDCFlowHTTPResponse:
     return OIDCFlowHTTPResponse(
         status_code=response.status_code,
         content_type=response.headers.get("content-type", ""),
-        body=response.content,
+        body=read_bounded_httpx_body(response, maximum_bytes=maximum_bytes),
     )
 
 
