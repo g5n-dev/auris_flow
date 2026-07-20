@@ -276,6 +276,8 @@ if [ "${VISUAL_RUNTIME}" = "container" ]; then
   if [ "${UPDATE_BASELINE}" = "1" ]; then
     BASELINE_MOUNT_MODE="rw"
   fi
+  # Playwright clears outputDir before a run. Keep it below the bind-mount root;
+  # removing the mount point itself fails under the container's read-only rootfs.
   docker run --rm \
     --platform linux/amd64 \
     --init \
@@ -290,7 +292,7 @@ if [ "${VISUAL_RUNTIME}" = "container" ]; then
     --env "AURIS_AUDIT_URL=${CONTAINER_UI_URL}" \
     --env AURIS_VISUAL_BASELINE_DIR=/baseline/screenshots \
     --env AURIS_VISUAL_GEOMETRY_PATH=/baseline/geometry.json \
-    --env AURIS_VISUAL_ARTIFACT_DIR=/artifacts \
+    --env AURIS_VISUAL_ARTIFACT_DIR=/artifacts/test-results \
     --env "AURIS_UPDATE_VISUAL_BASELINE=${UPDATE_BASELINE}" \
     --tmpfs /tmp:rw,exec,nosuid,size=1g \
     --ipc=host \

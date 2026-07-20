@@ -1086,6 +1086,16 @@ class VisualShellPolicyIntegrationTests(unittest.TestCase):
         self.assertIn("--require-release-runtime", shell)
         self.assertIn("--runtime-descriptor", shell)
         self.assertNotIn("FROZEN_BASELINE_ROOT", shell)
+        self.assertIn(
+            "--env AURIS_VISUAL_ARTIFACT_DIR=/artifacts/test-results", shell
+        )
+        self.assertIn(
+            '--volume "${CONTAINER_ARTIFACT_DIR}:/artifacts:rw"', shell
+        )
+        self.assertNotRegex(
+            shell,
+            r"--env AURIS_VISUAL_ARTIFACT_DIR=/artifacts\s+\\",
+        )
         self.assertIn('AURIS_VISUAL_RUNTIME: "container"', workflow)
         self.assertIn(
             "oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20",
