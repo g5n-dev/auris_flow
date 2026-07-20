@@ -55,6 +55,8 @@ test("cookie restore, OIDC redirect, CSRF and credential rules are explicit", as
   assert.match(platformBffSource, /!submissionHeaders\.authorization/);
   assert.match(platformBffSource, /submissionHeaders\.cookie\?\.includes\("auris_session="\)/);
   assert.match(platformBffSource, /anonymousSessionProbeFailure/);
+  assert.match(platformBffSource, /loginThroughUi\(reviewerPage, email, \{ homeMode: "demo" \}\)/);
+  assert.match(platformBffSource, /homeMode === "demo" \? "mock" : "none"/);
   assert.doesNotMatch(
     platformBffSource,
     /assert\(\s*(?:grantRequestHeaders|requestHeaders|submissionHeaders)\.authorization\s*&&|(?:grantRequestHeaders|requestHeaders|submissionHeaders|headers\(\))\.authorization\s*===\s*`Bearer/

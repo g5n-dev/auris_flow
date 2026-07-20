@@ -4,6 +4,13 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createServer as createViteServer } from "vite";
 
+import {
+  EXPECTED_ASSET_READ_ABORT_REASON,
+  GOVERNED_ASSET_READ_ACTION_BY_PATH,
+  governedAssetReadTarget,
+  validateExpectedAssetReadCancellations
+} from "../scripts/platform-bff-request-failure-policy.mjs";
+
 const baseUrl = process.env.AURIS_E2E_URL || "http://127.0.0.1:5173/";
 const frontendRoot = new URL("../", import.meta.url).pathname;
 const artifactDir = new URL("./artifacts/", import.meta.url).pathname;
@@ -103,6 +110,42 @@ let adminSessionToken = "";
 let annotatorSessionToken = "";
 let releaseApproverSessionToken = "";
 const writeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const activeGovernedAssetReadActionByPage = new WeakMap();
+const governedAssetReadActions = new Set(Object.values(GOVERNED_ASSET_READ_ACTION_BY_PATH));
+const governedAssetReadEpochHeader = "x-auris-e2e-asset-read-epoch";
+const hotwordGovernanceAssetReadAction =
+  GOVERNED_ASSET_READ_ACTION_BY_PATH[
+    "/api/v1/data-assets/auris%2fmodel%2fasr_transcripts"
+  ];
+const assetQualityChecksReadAction =
+  GOVERNED_ASSET_READ_ACTION_BY_PATH[
+    "/api/v1/data-assets/auris%2flabel%2fevent_tags"
+  ];
+let governedAssetReadEpochSequence = 0;
+
+async function runGovernedAssetReadAction(page, action, operation) {
+  assert(governedAssetReadActions.has(action), "unknown governed asset-read action", { action });
+  assert(!activeGovernedAssetReadActionByPage.has(page), "governed asset-read actions cannot overlap", {
+    action,
+    active: activeGovernedAssetReadActionByPage.get(page)
+  });
+  const generation = {
+    action,
+    actionEpoch: `${runId}:${action}:${++governedAssetReadEpochSequence}`
+  };
+  const { actionEpoch } = generation;
+  activeGovernedAssetReadActionByPage.set(page, generation);
+  try {
+    return await operation();
+  } finally {
+    const active = activeGovernedAssetReadActionByPage.get(page);
+    assert(active?.actionEpoch === actionEpoch, "governed asset-read action epoch drifted", {
+      actionEpoch,
+      active
+    });
+    activeGovernedAssetReadActionByPage.delete(page);
+  }
+}
 
 async function installE2eRequestIsolation(page) {
   await page.route("**/api/v1/**", async (route) => {
@@ -110,6 +153,11 @@ async function installE2eRequestIsolation(page) {
     const method = request.method().toUpperCase();
     const headers = { ...request.headers() };
     const pathname = new URL(request.url()).pathname;
+    const assetReadTarget = governedAssetReadTarget(request.url(), { baseUrl, demoBaseUrl });
+    const assetReadAction = activeGovernedAssetReadActionByPage.get(page);
+    if (assetReadTarget && assetReadAction?.action === assetReadTarget.action) {
+      headers[governedAssetReadEpochHeader] = assetReadAction.actionEpoch;
+    }
     if (writeMethods.has(method)) {
       const existingKey = headers["idempotency-key"] || headers["Idempotency-Key"];
       const baseKey = existingKey || `ui-${method.toLowerCase()}-${pathname}`;
@@ -134,6 +182,40 @@ function assert(condition, message, detail = undefined) {
     if (detail !== undefined) error.detail = detail;
     throw error;
   }
+}
+
+function expectedReadCancellation(request) {
+  const failure = request.failure()?.errorText;
+  const target = governedAssetReadTarget(request.url(), { baseUrl, demoBaseUrl });
+  const headers = request.headers();
+  const actionEpoch = headers[governedAssetReadEpochHeader];
+  if (
+    target &&
+    request.method() === "GET" &&
+    request.resourceType() === "fetch" &&
+    failure === "net::ERR_ABORTED" &&
+    typeof actionEpoch === "string" &&
+    actionEpoch.startsWith(`${runId}:${target.action}:`) &&
+    headers["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
+    headers["x-project-id"] === defaultHeaders["X-Project-Id"]
+  ) {
+    return {
+      method: request.method(),
+      resourceType: request.resourceType(),
+      url: request.url(),
+      origin: target.origin,
+      path: target.path,
+      action: target.action,
+      actionEpoch,
+      scope: {
+        tenantId: headers["x-tenant-id"],
+        projectId: headers["x-project-id"]
+      },
+      failure,
+      reason: EXPECTED_ASSET_READ_ABORT_REASON
+    };
+  }
+  return null;
 }
 
 async function ensureDemoBaseUrl() {
@@ -535,16 +617,33 @@ async function waitForBackendRunStatus(
   });
 }
 
-async function waitForHomeModuleReady(page) {
+async function waitForHomeModuleReady(page, homeMode = "production") {
+  assert(
+    homeMode === "production" || homeMode === "demo",
+    "home projection mode must be production or demo",
+    { homeMode }
+  );
+  const contentSource = homeMode === "demo" ? "mock" : "none";
   await page
     .locator(
-      '[data-testid="module-projection-state"][data-state="synced"][data-source="bff"][data-content-source="none"]'
+      `[data-testid="module-projection-state"][data-state="synced"][data-source="bff"][data-content-source="${contentSource}"]`
     )
     .waitFor({ state: "visible", timeout: 10000 });
   await page.locator('.module-metrics[data-source="bff"]').waitFor({
     state: "visible",
     timeout: 10000
   });
+  if (homeMode === "demo") {
+    await page.locator(".home-dashboard-grid").first().waitFor({
+      state: "visible",
+      timeout: 10000
+    });
+    assert(
+      (await page.getByTestId("module-detail-unavailable").count()) === 0,
+      "demo home projection must render the explicitly marked fixture details"
+    );
+    return;
+  }
   await page
     .getByTestId("module-detail-unavailable")
     .filter({ hasText: "BFF 明细尚未接入" })
@@ -555,7 +654,11 @@ async function waitForHomeModuleReady(page) {
   );
 }
 
-async function loginThroughUi(page, email, expectedHomeProjectionStatus = 200) {
+async function loginThroughUi(
+  page,
+  email,
+  { expectedHomeProjectionStatus = 200, homeMode = "production" } = {}
+) {
   const responsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/v1/auth/dev-login" &&
@@ -586,7 +689,7 @@ async function loginThroughUi(page, email, expectedHomeProjectionStatus = 200) {
       actualStatus: projectionResponse.status()
     }
   );
-  if (expectedHomeProjectionStatus === 200) await waitForHomeModuleReady(page);
+  if (expectedHomeProjectionStatus === 200) await waitForHomeModuleReady(page, homeMode);
   return json.data;
 }
 
@@ -811,6 +914,44 @@ async function runEvaluationPromptUiClosedLoopSmoke(page) {
   };
 }
 
+async function ensureInsightMetricProjection(page, { idempotencyScope, source }) {
+  const currentMetrics = expectEnvelope(
+    await browserApi(page, "/api/v1/insights/metrics?time_range=30d&limit=1"),
+    "read insight metrics before demo UI smoke",
+    200
+  );
+  assert(
+    Array.isArray(currentMetrics.data.items),
+    "insight metric projection must use a collection envelope",
+    currentMetrics
+  );
+  if (currentMetrics.data.items.length > 0) {
+    return { bootstrapped: false };
+  }
+
+  const bootstrapBody = {
+    metric_keys: ["quote_consistency"],
+    time_range: "30d",
+    store_ids: ["极光中心店"],
+    model_version: "v2.3.1",
+    label_version: "v1.8.4",
+    source
+  };
+  const bootstrapMetricRun = expectEnvelope(
+    await browserApi(page, "/api/v1/insights/metric-runs", {
+      method: "POST",
+      body: bootstrapBody,
+      key: `${runId}:${idempotencyScope}`
+    }),
+    "bootstrap insight metric projection for demo UI smoke",
+    202
+  );
+  return {
+    bootstrapped: true,
+    metricRun: await completeMetricRunForUi(page, bootstrapMetricRun, bootstrapBody)
+  };
+}
+
 async function runHotwordGovernanceUiBffSmoke(page) {
   const badcaseId = "A-4107";
   const responseEnvelope = async (response, label, expectedStatus) => {
@@ -822,6 +963,11 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     assert(json?.meta?.trace_id, `${label} is missing meta.trace_id`, json);
     return json;
   };
+
+  await ensureInsightMetricProjection(page, {
+    idempotencyScope: "hotword-projection-bootstrap",
+    source: "ui_e2e_hotword_projection_bootstrap"
+  });
 
   await assertProductionFixtureModuleFailClosed(page, {
     moduleLabel: "洞察",
@@ -1306,7 +1452,9 @@ async function runHotwordGovernanceUiBffSmoke(page) {
   let approvalJson;
   try {
     await modelPage.goto(await ensureDemoBaseUrl(), { waitUntil: "networkidle", timeout: 30000 });
-    const modelSession = await loginThroughUi(modelPage, "model@auris.local", 403);
+    const modelSession = await loginThroughUi(modelPage, "model@auris.local", {
+      expectedHomeProjectionStatus: 403
+    });
     assertModelStartupProbeConsumed();
     assert(modelSession.user.user_id === "u_model_001", "hotword approval actor must be the model engineer", modelSession);
     await clickNav(modelPage, "评测", "评测中心");
@@ -1633,9 +1781,11 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     deepLinkAction: "deep-link"
   };
 
-  await clickNav(page, "资产", "数据资产");
-  await clickModuleTab(page, "资产血缘");
-  await page.locator('[data-testid="hotword-governance-lineage"]').waitFor({ state: "visible", timeout: 10000 });
+  await runGovernedAssetReadAction(page, hotwordGovernanceAssetReadAction, async () => {
+    await clickNav(page, "资产", "数据资产");
+    await clickModuleTab(page, "资产血缘");
+    await page.locator('[data-testid="hotword-governance-lineage"]').waitFor({ state: "visible", timeout: 10000 });
+  });
   const controlledBackfillButton = page.locator('[data-testid="hotword-controlled-backfill"]');
   const openTaskPublishButton = page.locator('[data-testid="hotword-open-task-publish"]');
   await openTaskPublishButton.waitFor({ state: "visible", timeout: 10000 });
@@ -1694,9 +1844,11 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     publishedTaskVersion
   );
 
-  await clickNav(page, "资产", "数据资产");
-  await clickModuleTab(page, "资产血缘");
-  await page.locator('[data-testid="hotword-governance-lineage"]').waitFor({ state: "visible", timeout: 10000 });
+  await runGovernedAssetReadAction(page, hotwordGovernanceAssetReadAction, async () => {
+    await clickNav(page, "资产", "数据资产");
+    await clickModuleTab(page, "资产血缘");
+    await page.locator('[data-testid="hotword-governance-lineage"]').waitFor({ state: "visible", timeout: 10000 });
+  });
   const readyBackfillButton = page.locator('[data-testid="hotword-controlled-backfill"]');
   await waitForEnabled(readyBackfillButton, "hotword controlled backfill button");
   await assertLocatorText(
@@ -2074,7 +2226,7 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
     const assertReviewerStartupProbeConsumed = attachSecondaryPageDiagnostics(reviewerPage, label);
     await installE2eRequestIsolation(reviewerPage);
     await reviewerPage.goto(await ensureDemoBaseUrl(), { waitUntil: "networkidle", timeout: 30000 });
-    await loginThroughUi(reviewerPage, email);
+    await loginThroughUi(reviewerPage, email, { homeMode: "demo" });
     assertReviewerStartupProbeConsumed();
     await clickNav(reviewerPage, "评测", "评测中心");
     await reviewerPage.locator('[data-testid="module-projection-state"][data-content-source="mock"]')
@@ -2116,6 +2268,18 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
           response.request().method() === "POST",
         { timeout: 10000 }
       );
+      const assignmentRefreshPromise = reviewerPage.waitForResponse(
+        (response) => {
+          const url = new URL(response.url());
+          return (
+            url.pathname === "/api/v1/calibration-assignments" &&
+            url.searchParams.get("mine") === "true" &&
+            url.searchParams.get("round_id") === roundId &&
+            response.request().method() === "GET"
+          );
+        },
+        { timeout: 10000 }
+      );
       await card.locator("button.primary").click();
       const response = await responsePromise;
       const json = await response.json().catch(() => ({}));
@@ -2136,6 +2300,29 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
         json?.data
       );
       assert(json?.data?.submission_id && json?.meta?.trace_id, `${label} submission missing id or trace`, json);
+      const responseFinishError = await response.finished();
+      const assignmentRefresh = await assignmentRefreshPromise;
+      const assignmentRefreshJson = await assignmentRefresh.json().catch(() => ({}));
+      const assignmentRefreshFinishError = await assignmentRefresh.finished();
+      const refreshedAssignment = assignmentRefreshJson?.data?.items?.find(
+        (assignment) => assignment.assignment_id === json?.data?.assignment_id
+      );
+      assert(
+        responseFinishError === null &&
+          assignmentRefresh.status() === 200 &&
+          assignmentRefreshFinishError === null &&
+          refreshedAssignment?.status === json?.data?.status &&
+          refreshedAssignment?.resource_version === json?.data?.resource_version,
+        `${label} submission must finish its own sealed-assignment refresh before the reviewer context can close`,
+        {
+          submissionId: json?.data?.submission_id,
+          assignmentId: json?.data?.assignment_id,
+          responseFinishError,
+          refreshStatus: assignmentRefresh.status(),
+          assignmentRefreshFinishError,
+          refreshedAssignment
+        }
+      );
       submissions.push({ id: json.data.submission_id, traceId: json.meta.trace_id });
     }
     const reviewerText = await reviewerWorkspace.innerText();
@@ -2180,17 +2367,46 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
       response.request().method() === "POST",
     { timeout: 10000 }
   );
+  const adjudicationGoldListRefreshPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/gold-set-versions" &&
+      response.request().method() === "GET",
+    { timeout: 10000 }
+  );
   await workspace.locator("button").filter({ hasText: "提交裁决" }).click();
   const adjudicationResponse = await adjudicationResponsePromise;
   const adjudicationJson = await adjudicationResponse.json().catch(() => ({}));
   assert(adjudicationResponse.status() === 201, "calibration conflict adjudication should be immutable", adjudicationJson);
   assert(adjudicationJson?.data?.adjudication_id && adjudicationJson?.meta?.trace_id, "adjudication missing id or trace", adjudicationJson);
+  const adjudicationGoldListRefresh = await adjudicationGoldListRefreshPromise;
+  const adjudicationGoldListRefreshError = await adjudicationGoldListRefresh.finished();
+  assert(
+    adjudicationGoldListRefresh.status() === 200 && adjudicationGoldListRefreshError === null,
+    "adjudication must finish refreshing the prior gold-version list before release",
+    {
+      status: adjudicationGoldListRefresh.status(),
+      finishError: adjudicationGoldListRefreshError,
+      roundId
+    }
+  );
   await workspace.locator(".calibration-status.ready").waitFor({ state: "visible", timeout: 10000 });
 
   const releaseResponsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname.endsWith(`/api/v1/calibration-rounds/${roundId}/gold-releases`) &&
       response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  const releasedRoundRefreshPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === `/api/v1/calibration-rounds/${roundId}` &&
+      response.request().method() === "GET",
+    { timeout: 10000 }
+  );
+  const releasedGoldListRefreshPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/gold-set-versions" &&
+      response.request().method() === "GET",
     { timeout: 10000 }
   );
   const releaseButton = workspace.locator("button").filter({ hasText: "发布新金标版本" });
@@ -2208,6 +2424,20 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
       releaseJson?.meta?.trace_id,
     "calibration gold release is missing immutable version facts",
     releaseJson
+  );
+  const releasedRoundRefresh = await releasedRoundRefreshPromise;
+  const releasedRoundRefreshError = await releasedRoundRefresh.finished();
+  assert(
+    releasedRoundRefresh.status() === 200 && releasedRoundRefreshError === null,
+    "gold release must finish refreshing the governed round before leaving demo mode",
+    { status: releasedRoundRefresh.status(), finishError: releasedRoundRefreshError, roundId }
+  );
+  const releasedGoldListRefresh = await releasedGoldListRefreshPromise;
+  const releasedGoldListRefreshError = await releasedGoldListRefresh.finished();
+  assert(
+    releasedGoldListRefresh.status() === 200 && releasedGoldListRefreshError === null,
+    "gold release must finish refreshing the immutable gold-version list before leaving demo mode",
+    { status: releasedGoldListRefresh.status(), finishError: releasedGoldListRefreshError, roundId }
   );
   await workspace.locator('[data-testid="calibration-gold-receipt"]').waitFor({ state: "visible", timeout: 10000 });
   await assertLocatorText(page, '[data-testid="calibration-gold-receipt"]', releaseJson.data.gold_set_version_id, "gold receipt should expose version id");
@@ -3825,31 +4055,10 @@ async function runEvaluationBadcaseUiClosedLoopSmoke(page) {
 }
 
 async function runInsightReportUiClosedLoopSmoke(page) {
-  const currentMetrics = expectEnvelope(
-    await browserApi(page, "/api/v1/insights/metrics?time_range=30d&limit=1"),
-    "read insight metrics before UI report smoke",
-    200
-  );
-  if (!currentMetrics.data.items.length) {
-    const bootstrapBody = {
-      metric_keys: ["quote_consistency"],
-      time_range: "30d",
-      store_ids: ["极光中心店"],
-      model_version: "v2.3.1",
-      label_version: "v1.8.4",
-      source: "ui_e2e_projection_bootstrap"
-    };
-    const bootstrapMetricRun = expectEnvelope(
-      await browserApi(page, "/api/v1/insights/metric-runs", {
-        method: "POST",
-        body: bootstrapBody,
-        key: `${runId}:insight-projection-bootstrap`
-      }),
-      "bootstrap insight metric projection for UI report smoke",
-      202
-    );
-    await completeMetricRunForUi(page, bootstrapMetricRun, bootstrapBody);
-  }
+  await ensureInsightMetricProjection(page, {
+    idempotencyScope: "insight-projection-bootstrap",
+    source: "ui_e2e_projection_bootstrap"
+  });
   await enterDemoModule(page, "洞察", "业务洞察");
   const metricRunResponsePromise = page.waitForResponse(
     (response) =>
@@ -5502,11 +5711,11 @@ async function runAssetQualityRetryClosedLoopSmoke(page) {
     200
   ).data;
 
+  const checksView = page.getByTestId("asset-checks-authoritative");
   await clickNav(page, "资产", "数据资产");
   await clickModuleTab(page, "资产目录");
   await page.locator(".asset-catalog-card").filter({ hasText: "事件标签资产" }).first().click();
   await clickModuleTab(page, "资产质量");
-  const checksView = page.getByTestId("asset-checks-authoritative");
   await checksView.waitFor({ state: "visible", timeout: 10000 });
   await checksView.filter({ hasText: expectedFailedCheckIds[0] }).waitFor({ state: "visible", timeout: 5000 });
   const retryButton = page.getByTestId("asset-quality-retry");
@@ -5578,6 +5787,10 @@ async function runAssetQualityRetryClosedLoopSmoke(page) {
 async function runAssetExportPackageClosedLoopSmoke(page) {
   await clickNav(page, "资产", "数据资产");
   await clickModuleTab(page, "资产质量");
+  await page.getByTestId("asset-checks-authoritative").waitFor({
+    state: "visible",
+    timeout: 10000
+  });
   const responsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/v1/exports") && response.request().method() === "POST",
     { timeout: 10000 }
@@ -6156,6 +6369,10 @@ const expectedConsoleErrors = [];
 let expectedConsoleFailureBudget = 0;
 const pageErrors = [];
 const requestFailures = [];
+const expectedRequestFailures = [];
+const successfulGovernedAssetReads = [];
+const pendingGovernedAssetReadCompletions = [];
+let governedNetworkEventSequence = 0;
 const failedResponses = [];
 const expectedFailedResponses = [];
 const anonymousSessionProbeFailure = () => ({
@@ -6167,6 +6384,68 @@ const anonymousSessionProbeFailure = () => ({
 });
 const pendingMainExpectedResponses = [anonymousSessionProbeFailure()];
 const pendingMainExpectedConsoleErrors = [anonymousSessionProbeFailure()];
+
+function observeSuccessfulGovernedAssetRead(response, actor = undefined) {
+  const request = response.request();
+  const target = governedAssetReadTarget(response.url(), { baseUrl, demoBaseUrl });
+  const headers = request.headers();
+  const actionEpoch = headers[governedAssetReadEpochHeader];
+  if (
+    !target ||
+    request.method() !== "GET" ||
+    request.resourceType() !== "fetch" ||
+    response.status() !== 200 ||
+    typeof actionEpoch !== "string" ||
+    !actionEpoch.startsWith(`${runId}:${target.action}:`) ||
+    headers["x-tenant-id"] !== defaultHeaders["X-Tenant-Id"] ||
+    headers["x-project-id"] !== defaultHeaders["X-Project-Id"]
+  ) {
+    return;
+  }
+  const eventSequence = ++governedNetworkEventSequence;
+  const completion = response
+    .finished()
+    .then((finishError) => {
+      if (finishError !== null) return;
+      successfulGovernedAssetReads.push({
+        ...(actor ? { actor } : {}),
+        method: request.method(),
+        resourceType: request.resourceType(),
+        url: response.url(),
+        origin: target.origin,
+        path: target.path,
+        action: target.action,
+        actionEpoch,
+        scope: {
+          tenantId: headers["x-tenant-id"],
+          projectId: headers["x-project-id"]
+        },
+        status: response.status(),
+        completed: true,
+        eventSequence
+      });
+    })
+    .catch(() => undefined);
+  pendingGovernedAssetReadCompletions.push(completion);
+}
+
+function bindExpectedAssetReadRecoveries() {
+  return expectedRequestFailures.map((failure) => {
+    const recovery = successfulGovernedAssetReads
+      .filter(
+        (candidate) =>
+          candidate.origin === failure.origin &&
+          candidate.path.toLowerCase() === failure.path.toLowerCase() &&
+          candidate.scope.tenantId === failure.scope.tenantId &&
+          candidate.scope.projectId === failure.scope.projectId &&
+          (candidate.actor ?? null) === (failure.actor ?? null) &&
+          candidate.actionEpoch === failure.actionEpoch &&
+          candidate.eventSequence > failure.eventSequence
+      )
+      .sort((left, right) => left.eventSequence - right.eventSequence)[0];
+    return { ...failure, recovery };
+  });
+}
 
 page.on("console", (message) => {
   if (message.type() !== "error") return;
@@ -6189,6 +6468,14 @@ page.on("pageerror", (error) => {
   pageErrors.push(error.message);
 });
 page.on("requestfailed", (request) => {
+  const expectedCancellation = expectedReadCancellation(request);
+  if (expectedCancellation) {
+    expectedRequestFailures.push({
+      ...expectedCancellation,
+      eventSequence: ++governedNetworkEventSequence
+    });
+    return;
+  }
   requestFailures.push({
     method: request.method(),
     url: request.url(),
@@ -6196,6 +6483,7 @@ page.on("requestfailed", (request) => {
   });
 });
 page.on("response", (response) => {
+  observeSuccessfulGovernedAssetRead(response);
   if (response.status() < 400) return;
   const request = response.request();
   const path = new URL(response.url()).pathname;
@@ -6257,6 +6545,15 @@ function attachSecondaryPageDiagnostics(
     pageErrors.push(`[${label}] ${error.message}`);
   });
   secondaryPage.on("requestfailed", (request) => {
+    const expectedCancellation = expectedReadCancellation(request);
+    if (expectedCancellation) {
+      expectedRequestFailures.push({
+        actor: label,
+        ...expectedCancellation,
+        eventSequence: ++governedNetworkEventSequence
+      });
+      return;
+    }
     requestFailures.push({
       actor: label,
       method: request.method(),
@@ -6265,6 +6562,7 @@ function attachSecondaryPageDiagnostics(
     });
   });
   secondaryPage.on("response", (response) => {
+    observeSuccessfulGovernedAssetRead(response, label);
     if (response.status() < 400) return;
     const request = response.request();
     const path = new URL(response.url()).pathname;
@@ -6395,25 +6693,32 @@ try {
     { uiKnowledgeRun, uiKnowledgeRunDetail }
   );
 
-  const uiAssetBackfill = await runUiWriteMutation(page, {
-    moduleLabel: "资产",
-    expectedText: "数据资产",
-    apiPath: "/api/v1/data-assets/",
-    label: "assets module"
-  });
-  const uiAssetBackfillId = uiAssetBackfill.data.run_id || uiAssetBackfill.data.id;
-  const uiAssetBackfillDetail = expectEnvelope(
-    await browserApi(page, `/api/v1/task-runs/${uiAssetBackfillId}`),
-    "fetch UI-created asset backfill run",
-    200
+  const { uiAssetBackfill, uiAssetBackfillId, uiAssetQualityRetry, uiAssetPackageExport } = await runGovernedAssetReadAction(
+    page,
+    assetQualityChecksReadAction,
+    async () => {
+      const uiAssetBackfill = await runUiWriteMutation(page, {
+        moduleLabel: "资产",
+        expectedText: "数据资产",
+        apiPath: "/api/v1/data-assets/",
+        label: "assets module"
+      });
+      const uiAssetBackfillId = uiAssetBackfill.data.run_id || uiAssetBackfill.data.id;
+      const uiAssetBackfillDetail = expectEnvelope(
+        await browserApi(page, `/api/v1/task-runs/${uiAssetBackfillId}`),
+        "fetch UI-created asset backfill run",
+        200
+      );
+      assert(
+        uiAssetBackfillDetail.data.run_id === uiAssetBackfillId,
+        "UI-created asset backfill should create a readable run",
+        { uiAssetBackfill, uiAssetBackfillDetail }
+      );
+      const uiAssetQualityRetry = await runAssetQualityRetryClosedLoopSmoke(page);
+      const uiAssetPackageExport = await runAssetExportPackageClosedLoopSmoke(page);
+      return { uiAssetBackfill, uiAssetBackfillId, uiAssetQualityRetry, uiAssetPackageExport };
+    }
   );
-  assert(
-    uiAssetBackfillDetail.data.run_id === uiAssetBackfillId,
-    "UI-created asset backfill should create a readable run",
-    { uiAssetBackfill, uiAssetBackfillDetail }
-  );
-  const uiAssetQualityRetry = await runAssetQualityRetryClosedLoopSmoke(page);
-  const uiAssetPackageExport = await runAssetExportPackageClosedLoopSmoke(page);
 
   const uiSettingsDraft = await runUiWriteMutation(page, {
     moduleLabel: "设置",
@@ -6957,11 +7262,30 @@ try {
   ];
 
   enterArtifactStage("result:verification");
+  await Promise.all(pendingGovernedAssetReadCompletions);
+  const governedExpectedRequestFailures = bindExpectedAssetReadRecoveries();
+  const expectedCancellationValidation = validateExpectedAssetReadCancellations({
+    baseUrl,
+    demoBaseUrl,
+    runId,
+    expectedRequestFailures: governedExpectedRequestFailures
+  });
+  assert(
+    expectedCancellationValidation.invalidExpectedRequestFailures.length === 0 &&
+      expectedCancellationValidation.policyViolations.length === 0,
+    "expected asset-read cancellations must stay within the governed budget and recover through a later completed 200 read",
+    {
+      ...expectedCancellationValidation,
+      expectedRequestFailures: governedExpectedRequestFailures,
+      successfulGovernedAssetReads
+    }
+  );
   const result = {
     status: "ok",
     stage: "completed",
     runId,
     baseUrl,
+    demoBaseUrl: demoBaseUrl || null,
     startedAt,
     completedAt: new Date().toISOString(),
     executionProfile: {
@@ -7074,6 +7398,7 @@ try {
     expectedConsoleErrors,
     pageErrors,
     requestFailures,
+    expectedRequestFailures: governedExpectedRequestFailures,
     expectedFailedResponses,
     failedResponses,
     unexpectedConsoleErrors: consoleErrors,
@@ -7092,6 +7417,7 @@ try {
     expectedConsoleErrors,
     pageErrors,
     requestFailures,
+    expectedRequestFailures,
     expectedFailedResponses,
     failedResponses
   });

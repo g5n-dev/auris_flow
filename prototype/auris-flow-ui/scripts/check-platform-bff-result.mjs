@@ -1,5 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 
+import { validateExpectedAssetReadCancellations } from "./platform-bff-request-failure-policy.mjs";
+
 const resultPath =
   process.argv[2] ||
   new URL("../e2e/artifacts/platform-bff-result.json", import.meta.url).pathname;
@@ -1008,6 +1010,16 @@ for (const key of ["pageErrors", "requestFailures", "unexpectedConsoleErrors", "
   if (Array.isArray(result[key]) && result[key].length > 0) {
     fail(`platform BFF E2E contains ${key}`, { [key]: result[key] });
   }
+}
+
+const expectedCancellationValidation = validateExpectedAssetReadCancellations(result);
+if (
+  expectedCancellationValidation.invalidExpectedRequestFailures.length ||
+  expectedCancellationValidation.policyViolations.length
+) {
+  fail("platform BFF E2E contains ungoverned expected request cancellations", {
+    ...expectedCancellationValidation
+  });
 }
 
 const failedResponses = Array.isArray(result.failedResponses) ? result.failedResponses : [];

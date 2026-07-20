@@ -39,6 +39,7 @@ test("demo mode 的降级或同步投影明确标记 mock", async () => {
   const { resolveModuleContentSource } = await loadModel();
 
   assert.equal(resolveModuleContentSource({ moduleKey: "settings", projectionStatus: "synced", demoMode: true }), "mock");
+  assert.equal(resolveModuleContentSource({ moduleKey: "home", projectionStatus: "synced", demoMode: true }), "mock");
   assert.equal(resolveModuleContentSource({ moduleKey: "home", projectionStatus: "degraded", demoMode: true }), "mock");
   assert.equal(resolveModuleContentSource({ moduleKey: "home", projectionStatus: "pending", demoMode: true }), "none");
 });
