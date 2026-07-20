@@ -10,6 +10,10 @@ import type { ModuleKey } from "../shared/contracts/navigation";
 import type { ProjectionDisplayState } from "../shared/contracts/modules";
 import type { TopbarContextState } from "../shared/contracts/workspace";
 import { topbarContextToApiContext } from "../shared/runtime/workspaceApiContext";
+import {
+  resolveWorkspaceSceneResolution,
+  type WorkspaceSceneResolution
+} from "./sceneBindingScope";
 
 type ModuleProjectionInput = {
   gateway: Pick<ModuleWorkspaceGateway, "getProjectSceneProfile" | "loadModuleProjection">;
@@ -33,32 +37,41 @@ export function useModuleProjection({
   const [projectionRefreshNonce, setProjectionRefreshNonce] = useState(0);
   const projectionRequestSequence = useRef(0);
   const projectionContext: WorkspaceApiContext = topbarContextToApiContext(topbarContext, currentUser, projectIdByName);
-  const [workspaceSceneBinding, setWorkspaceSceneBinding] = useState<WorkspaceProjectSceneBinding | null>(null);
-  const [workspaceSceneState, setWorkspaceSceneState] = useState<"pending" | "bound" | "unbound" | "error">("pending");
+  const sceneProjectId = String(projectionContext.projectId ?? "").trim();
+  const sceneTenantId = String(projectionContext.tenantId ?? "").trim();
+  const workspaceSceneScopeKey = JSON.stringify([sceneTenantId, sceneProjectId]);
+  const [workspaceSceneResolution, setWorkspaceSceneResolution] = useState<WorkspaceSceneResolution>({
+    scopeKey: "",
+    binding: null,
+    state: "pending"
+  });
 
   useEffect(() => {
-    const projectId = String(projectionContext.projectId ?? "").trim();
-    const tenantId = String(projectionContext.tenantId ?? "").trim();
-    setWorkspaceSceneBinding(null);
-    if (!projectId) {
-      setWorkspaceSceneState("unbound");
+    setWorkspaceSceneResolution({
+      scopeKey: workspaceSceneScopeKey,
+      binding: null,
+      state: sceneProjectId ? "pending" : "unbound"
+    });
+    if (!sceneProjectId) {
       return;
     }
     let disposed = false;
-    setWorkspaceSceneState("pending");
-    void gateway.getProjectSceneProfile(projectId, "production", projectionContext)
+    void gateway.getProjectSceneProfile(sceneProjectId, "production", projectionContext)
       .then((response) => {
         if (disposed) return;
         const binding = response.data;
         if (!binding) {
-          setWorkspaceSceneBinding(null);
-          setWorkspaceSceneState("unbound");
+          setWorkspaceSceneResolution({
+            scopeKey: workspaceSceneScopeKey,
+            binding: null,
+            state: "unbound"
+          });
           return;
         }
         const bindingTenantId = String((binding as WorkspaceProjectSceneBinding & { tenant_id?: string }).tenant_id ?? "").trim();
         if (
-          binding.project_id !== projectId ||
-          (bindingTenantId && bindingTenantId !== tenantId) ||
+          binding.project_id !== sceneProjectId ||
+          (bindingTenantId && bindingTenantId !== sceneTenantId) ||
           binding.environment !== "production" ||
           binding.status !== "active" ||
           binding.version.status !== "published" ||
@@ -68,19 +81,36 @@ export function useModuleProjection({
         ) {
           throw new Error("SCENE_PROFILE_BINDING_DRIFT：返回绑定与当前租户/项目或已发布快照不一致");
         }
-        setWorkspaceSceneBinding(binding);
-        setWorkspaceSceneState("bound");
+        setWorkspaceSceneResolution({
+          scopeKey: workspaceSceneScopeKey,
+          binding,
+          state: "bound"
+        });
       })
       .catch((error) => {
         if (disposed) return;
-        setWorkspaceSceneBinding(null);
         const message = error instanceof Error ? error.message : "";
-        setWorkspaceSceneState(message.includes("没有已激活") || message.includes("SCENE_PROFILE_BINDING") ? "unbound" : "error");
+        setWorkspaceSceneResolution({
+          scopeKey: workspaceSceneScopeKey,
+          binding: null,
+          state: message.includes("没有已激活") || message.includes("SCENE_PROFILE_BINDING_MISSING")
+            ? "unbound"
+            : "error"
+        });
       });
     return () => {
       disposed = true;
     };
-  }, [projectionContext.projectId, projectionContext.tenantId]);
+  }, [workspaceSceneScopeKey, projectionRefreshNonce]);
+
+  const {
+    binding: workspaceSceneBinding,
+    state: workspaceSceneState
+  } = resolveWorkspaceSceneResolution({
+    currentScopeKey: workspaceSceneScopeKey,
+    hasProject: Boolean(sceneProjectId),
+    resolution: workspaceSceneResolution
+  });
 
   const projectionScopeKey = JSON.stringify([
     moduleKey,

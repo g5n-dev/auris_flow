@@ -13,6 +13,7 @@ import {
 import { useState, type ComponentType } from "react";
 
 import type { DataAssetItem } from "../../../shared/contracts/dataAssets";
+import { formatSessionConfidence } from "../dataTruthModel";
 import type { OperationNotice } from "../../../shared/contracts/operations";
 import { eventLinks } from "../../../shared/fixtures/eventLinks";
 
@@ -141,7 +142,7 @@ export function LegacyEventDataPageV2({
                 <span>{item.id}</span>
                 <strong>{item.event}</strong>
                 <em>{item.person}</em>
-                <b>{Math.round(item.confidence * 100)}%</b>
+                <b>{formatSessionConfidence(item.confidence)}</b>
               </button>
             ))}
           </aside>

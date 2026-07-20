@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import type { AssetCatalogRow } from "../../types";
 
 import {
   createAssetLineageEdges,
@@ -9,12 +10,14 @@ import {
 export type AssetLineageMode = "impact" | "backfill" | "runs" | "review";
 
 type UseAssetLineageOptions = {
+  assetRows: AssetCatalogRow[];
   selectedAssetKey?: string;
   onSelect?: (assetKey: string) => void;
   onCreateBackfill?: (assetKey?: string) => void;
 };
 
 export function useAssetLineage({
+  assetRows,
   selectedAssetKey,
   onSelect,
   onCreateBackfill
@@ -22,7 +25,7 @@ export function useAssetLineage({
   const [activeNodeId, setActiveNodeId] = useState<string | null>(null);
   const [lineageMode, setLineageMode] = useState<AssetLineageMode>("impact");
   const [lineageActionNote, setLineageActionNote] = useState("选择血缘节点后，可查看影响范围、创建回填草稿或派发人工复核。");
-  const nodes = useMemo(() => createAssetLineageNodes(), []);
+  const nodes = useMemo(() => createAssetLineageNodes(assetRows), [assetRows]);
   const edges = useMemo(() => createAssetLineageEdges(), []);
   const selectedNode = nodes.find((node) => node.assetKey === selectedAssetKey);
   const activeNode = nodes.find((node) => node.id === activeNodeId) ?? selectedNode ?? nodes[0];

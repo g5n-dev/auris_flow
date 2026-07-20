@@ -19,10 +19,16 @@ import type {
 } from "./types";
 
 export function useHotwordBackfillRecovery(
+  scopeKey: string,
   setRecovery: Dispatch<SetStateAction<HotwordBackfillRecovery>>
 ) {
   useEffect(() => {
     let active = true;
+    setRecovery({
+      scopeKey,
+      status: "loading",
+      reason: "正在读取当前租户项目的已发布词包与权威 ASR 物化。"
+    });
     const sourceAssetKey = "auris/model/asr_transcripts";
     void Promise.all([
       listHotwordPacks(),
@@ -78,7 +84,10 @@ export function useHotwordBackfillRecovery(
           taskVersionId: taskVersionId as string,
           rootTraceId: version.rootTraceId as string,
           sourceAsset: sourceAssetKey,
-          sourceMaterializationId: sourceMaterializationId as string
+          sourceMaterializationId: sourceMaterializationId as string,
+          sourceBadcaseIds: Array.from(new Set(
+            version.items.flatMap((item) => item.sourceBadcaseId ? [item.sourceBadcaseId] : [])
+          )).sort()
         } satisfies HotwordBackfillBinding;
         const taskVersionResponse = await getTaskVersion(binding.taskVersionId);
         const taskVersion = taskVersionResponse.data;
@@ -106,6 +115,7 @@ export function useHotwordBackfillRecovery(
         if (!active) return;
         if (taskStatus !== "published") {
           setRecovery({
+            scopeKey,
             status: "blocked",
             binding,
             reason: `TaskVersion ${binding.taskVersionId} 当前为 ${taskStatus}；请先完成人工发布。`
@@ -113,6 +123,7 @@ export function useHotwordBackfillRecovery(
           return;
         }
         setRecovery({
+          scopeKey,
           status: "ready",
           binding,
           reason: `${binding.hotwordPackVersionId} / ${binding.evalRunId} / ${binding.taskVersionId}`
@@ -121,6 +132,7 @@ export function useHotwordBackfillRecovery(
       .catch((error) => {
         if (!active) return;
         setRecovery({
+          scopeKey,
           status: "blocked",
           reason: error instanceof Error ? error.message : "受控回填绑定恢复失败"
         });
@@ -128,5 +140,5 @@ export function useHotwordBackfillRecovery(
     return () => {
       active = false;
     };
-  }, []);
+  }, [scopeKey, setRecovery]);
 }

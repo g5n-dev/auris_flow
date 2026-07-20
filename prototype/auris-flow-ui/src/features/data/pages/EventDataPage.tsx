@@ -16,6 +16,7 @@ import {
   getHumanReviewTask
 } from "../../../api/client";
 import type { DataAssetItem } from "../../../shared/contracts/dataAssets";
+import { formatSessionConfidence } from "../dataTruthModel";
 import type { OperationStatus } from "../../../shared/contracts/operations";
 import { eventLinks } from "../../../shared/fixtures/eventLinks";
 
@@ -251,7 +252,7 @@ export function EventDataPage({
                 <p>{event.asr}</p>
                 <div>
                   <b>{event.state}</b>
-                  <i>{Math.round(event.confidence * 100)}%</i>
+                  <i>{formatSessionConfidence(event.confidence)}</i>
                 </div>
               </button>
             ))}
@@ -262,7 +263,7 @@ export function EventDataPage({
           <div className={`event-detail-status ${selectedEvent.status}`}>
             <span>当前事件</span>
             <strong>{selectedEvent.id}</strong>
-            <b>{Math.round(selectedEvent.confidence * 100)}%</b>
+            <b>{formatSessionConfidence(selectedEvent.confidence)}</b>
           </div>
           <div className="event-detail-block">
             <span>音频证据</span>

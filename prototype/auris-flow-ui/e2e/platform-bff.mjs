@@ -2,8 +2,10 @@ import { chromium } from "playwright";
 import { createHash, createHmac } from "node:crypto";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { createServer as createViteServer } from "vite";
 
 const baseUrl = process.env.AURIS_E2E_URL || "http://127.0.0.1:5173/";
+const frontendRoot = new URL("../", import.meta.url).pathname;
 const artifactDir = new URL("./artifacts/", import.meta.url).pathname;
 const asyncDispatchTimeoutMs = Math.max(
   1000,
@@ -17,6 +19,8 @@ const observedWorkerDispatches = [];
 const completionReceiptObservations = [];
 const realStackE2e = process.env.AURIS_REAL_STACK_E2E === "1";
 const directBffUrl = process.env.AURIS_E2E_BFF_URL || baseUrl;
+let demoServer = null;
+let demoBaseUrl = process.env.AURIS_E2E_DEMO_URL || "";
 const completionStorageProvider = process.env.OBJECT_STORAGE_PROVIDER || "minio";
 const completionStorageBucket = process.env.OBJECT_STORAGE_BUCKET || "auris-flow-local";
 const objectStorageEndpoint = process.env.OBJECT_STORAGE_ENDPOINT || "http://127.0.0.1:9000";
@@ -130,6 +134,67 @@ function assert(condition, message, detail = undefined) {
     if (detail !== undefined) error.detail = detail;
     throw error;
   }
+}
+
+async function ensureDemoBaseUrl() {
+  if (demoBaseUrl) return demoBaseUrl;
+  process.env.VITE_API_PROXY_TARGET = directBffUrl;
+  demoServer = await createViteServer({
+    root: frontendRoot,
+    logLevel: "error",
+    define: {
+      "import.meta.env.VITE_DEMO_MODE": JSON.stringify("true")
+    },
+    server: {
+      host: "127.0.0.1",
+      port: 0,
+      strictPort: false
+    }
+  });
+  await demoServer.listen();
+  const address = demoServer.httpServer?.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  demoBaseUrl = demoServer.resolvedUrls?.local?.[0] ?? `http://127.0.0.1:${port}/`;
+  return demoBaseUrl;
+}
+
+async function assertProductionFixtureModuleFailClosed(
+  page,
+  { moduleLabel, expectedText, fixtureSelector, actionSelectors = [] }
+) {
+  await clickNav(page, moduleLabel, expectedText);
+  await page.locator('[data-testid="module-projection-state"][data-content-source="none"]')
+    .waitFor({ state: "visible", timeout: 8000 });
+  await page.getByTestId("module-detail-unavailable")
+    .filter({ hasText: "生产 truth 模式不会挂载本地 fixture 或可操作控件" })
+    .waitFor({ state: "visible", timeout: 8000 });
+  assert(
+    await page.locator(fixtureSelector).count() === 0,
+    `production ${moduleLabel} mounted non-authoritative fixture details`
+  );
+  for (const selector of actionSelectors) {
+    assert(
+      await page.locator(selector).count() === 0,
+      `production ${moduleLabel} exposed fixture action ${selector}`
+    );
+  }
+}
+
+async function enterDemoModule(page, moduleLabel, expectedText) {
+  const url = await ensureDemoBaseUrl();
+  const currentOrigin = page.url() ? new URL(page.url()).origin : "";
+  if (currentOrigin !== new URL(url).origin) {
+    await page.goto(url, { waitUntil: "networkidle", timeout: 30000 });
+  }
+  await page.locator(".sidebar-user-main").waitFor({ state: "visible", timeout: 10000 });
+  await clickNav(page, moduleLabel, expectedText);
+  await page.locator('[data-testid="module-projection-state"][data-content-source="mock"]')
+    .waitFor({ state: "visible", timeout: 8000 });
+}
+
+async function returnToProductionUi(page) {
+  await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
+  await page.locator(".sidebar-user-main").waitFor({ state: "visible", timeout: 10000 });
 }
 
 function shortTrace(traceId) {
@@ -471,7 +536,23 @@ async function waitForBackendRunStatus(
 }
 
 async function waitForHomeModuleReady(page) {
-  await page.locator(".home-dashboard-grid").first().waitFor({ state: "visible", timeout: 10000 });
+  await page
+    .locator(
+      '[data-testid="module-projection-state"][data-state="synced"][data-source="bff"][data-content-source="none"]'
+    )
+    .waitFor({ state: "visible", timeout: 10000 });
+  await page.locator('.module-metrics[data-source="bff"]').waitFor({
+    state: "visible",
+    timeout: 10000
+  });
+  await page
+    .getByTestId("module-detail-unavailable")
+    .filter({ hasText: "BFF 明细尚未接入" })
+    .waitFor({ state: "visible", timeout: 10000 });
+  assert(
+    (await page.locator(".home-dashboard-grid").count()) === 0,
+    "truth-mode home projection must not render fixture detail cards"
+  );
 }
 
 async function loginThroughUi(page, email, expectedHomeProjectionStatus = 200) {
@@ -632,11 +713,18 @@ async function runUiWriteMutation(page, { moduleLabel, expectedText, apiPath, la
   await panel.waitFor({ state: "visible", timeout: 8000 });
   await assertBodyText(page, "数据写入边界", `${label} should expose write boundary`);
 
+  if (!["租户", "项目", "设置"].includes(moduleLabel)) {
+    await page
+      .locator('[data-testid="scene-runtime-context"][data-state="bound"]')
+      .waitFor({ state: "visible", timeout: 10000 });
+  }
+  const mutationButton = panel.locator(".module-crud-strip button").first();
+  await mutationButton.click({ trial: true, timeout: 3000 });
   const responsePromise = page.waitForResponse(
     (response) => response.url().includes(apiPath) && response.request().method() === "POST",
     { timeout: 10000 }
   );
-  await panel.locator(".module-crud-strip button").first().click();
+  await mutationButton.click();
   const response = await responsePromise;
   const requestHeaders = response.request().headers();
   assert(
@@ -670,7 +758,13 @@ async function runUiWriteMutation(page, { moduleLabel, expectedText, apiPath, la
 }
 
 async function runEvaluationPromptUiClosedLoopSmoke(page) {
-  await clickNav(page, "评测", "评测中心");
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "评测",
+    expectedText: "评测中心",
+    fixtureSelector: ".eval-grid",
+    actionSelectors: ["button.evaluation-primary-action"]
+  });
+  await enterDemoModule(page, "评测", "评测中心");
   await clickModuleTab(page, "Prompt优化");
   const evalRunResponsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/v1/eval-runs") && response.request().method() === "POST",
@@ -707,11 +801,13 @@ async function runEvaluationPromptUiClosedLoopSmoke(page) {
   assert(feedbackTaskId, "prompt UI feedback task missing id", feedbackJson);
   assert(feedbackJson?.meta?.trace_id, "prompt UI feedback task missing trace", feedbackJson);
   await assertBodyText(page, String(feedbackTaskId), "prompt UI should show feedback task id");
+  await returnToProductionUi(page);
   return {
     evalRunId: evalRunJson.data.run_id || evalRunJson.data.id,
     evalTraceId: evalRunJson.meta.trace_id,
     feedbackTaskId,
-    feedbackTraceId: feedbackJson.meta.trace_id
+    feedbackTraceId: feedbackJson.meta.trace_id,
+    contentSource: "mock"
   };
 }
 
@@ -727,7 +823,13 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     return json;
   };
 
-  await clickNav(page, "洞察", "业务洞察");
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "洞察",
+    expectedText: "业务洞察",
+    fixtureSelector: ".insight-command-shell",
+    actionSelectors: ['[data-testid="hotword-statistics-refresh"]']
+  });
+  await enterDemoModule(page, "洞察", "业务洞察");
   await clickModuleTab(page, "业务大盘");
   await clickModuleTab(page, "模型质量");
   const statisticsPanel = page.locator('[data-testid="hotword-statistics-panel"]');
@@ -1203,11 +1305,13 @@ async function runHotwordGovernanceUiBffSmoke(page) {
   await installE2eRequestIsolation(modelPage);
   let approvalJson;
   try {
-    await modelPage.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
+    await modelPage.goto(await ensureDemoBaseUrl(), { waitUntil: "networkidle", timeout: 30000 });
     const modelSession = await loginThroughUi(modelPage, "model@auris.local", 403);
     assertModelStartupProbeConsumed();
     assert(modelSession.user.user_id === "u_model_001", "hotword approval actor must be the model engineer", modelSession);
     await clickNav(modelPage, "评测", "评测中心");
+    await modelPage.locator('[data-testid="module-projection-state"][data-content-source="mock"]')
+      .waitFor({ state: "visible", timeout: 8000 });
     await clickModuleTab(modelPage, "模型对比");
     await modelPage.locator('[data-testid="model-compare-asr-hotword"]').click();
     const modelApproveButton = modelPage.locator('[data-testid="hotword-model-approve"]');
@@ -1793,8 +1897,10 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     }
   );
 
+  await returnToProductionUi(page);
   return {
     coverageStatus: "verified",
+    contentSource: "mock",
     statistics: {
       httpStatus: statisticsResponse.status(),
       traceId: statisticsJson.meta.trace_id,
@@ -1925,7 +2031,7 @@ async function waitForLocatorCount(locator, expected, message) {
 }
 
 async function runBlindCalibrationUiClosedLoopSmoke(page) {
-  await clickNav(page, "评测", "评测中心");
+  await enterDemoModule(page, "评测", "评测中心");
   await clickModuleTab(page, "人工评测");
   await page.locator(".evaluation-manual-mode-switch button").filter({ hasText: "盲审校准" }).click();
   const workspace = page.locator('[data-testid="calibration-workspace"]');
@@ -1967,10 +2073,12 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
     const reviewerPage = await reviewerContext.newPage();
     const assertReviewerStartupProbeConsumed = attachSecondaryPageDiagnostics(reviewerPage, label);
     await installE2eRequestIsolation(reviewerPage);
-    await reviewerPage.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
+    await reviewerPage.goto(await ensureDemoBaseUrl(), { waitUntil: "networkidle", timeout: 30000 });
     await loginThroughUi(reviewerPage, email);
     assertReviewerStartupProbeConsumed();
     await clickNav(reviewerPage, "评测", "评测中心");
+    await reviewerPage.locator('[data-testid="module-projection-state"][data-content-source="mock"]')
+      .waitFor({ state: "visible", timeout: 8000 });
     await clickModuleTab(reviewerPage, "人工评测");
     await reviewerPage.locator(".evaluation-manual-mode-switch button").filter({ hasText: "盲审校准" }).click();
     const reviewerWorkspace = reviewerPage.locator('[data-testid="calibration-workspace"]');
@@ -2115,6 +2223,7 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
     persistedGold.data
   );
 
+  await returnToProductionUi(page);
   return {
     roundId,
     roundTraceId: createJson.meta.trace_id,
@@ -2126,7 +2235,8 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
     goldVersionNumber: releaseJson.data.version_number,
     goldTraceId: releaseJson.meta.trace_id,
     observedAgreementPpm: releaseJson.data.observed_agreement_ppm,
-    cohenKappaMicros: releaseJson.data.cohen_kappa_micros
+    cohenKappaMicros: releaseJson.data.cohen_kappa_micros,
+    contentSource: "mock"
   };
 }
 
@@ -3630,7 +3740,7 @@ async function runLabelVersionPageUiClosedLoopSmoke(page) {
 }
 
 async function runEvaluationBadcaseUiClosedLoopSmoke(page) {
-  await clickNav(page, "评测", "评测中心");
+  await enterDemoModule(page, "评测", "评测中心");
   await clickModuleTab(page, "自动化评测");
   const evalRunResponsePromise = page.waitForResponse(
     (response) =>
@@ -3699,6 +3809,7 @@ async function runEvaluationBadcaseUiClosedLoopSmoke(page) {
   );
   await assertBodyText(page, String(feedbackTaskId), "evaluation UI should show feedback task id");
   await assertBodyText(page, shortTrace(feedbackJson.meta.trace_id), "evaluation UI should show feedback trace");
+  await returnToProductionUi(page);
   return {
     evalRunId,
     evalTraceId: evalRunJson.meta.trace_id,
@@ -3708,7 +3819,8 @@ async function runEvaluationBadcaseUiClosedLoopSmoke(page) {
     feedbackRunId: feedbackJson.data.run_id || feedbackJson.data.id,
     feedbackTraceId: feedbackJson.meta.trace_id,
     feedbackStatus: feedbackJson.data.status,
-    feedbackRunType: feedbackJson.data.run_type
+    feedbackRunType: feedbackJson.data.run_type,
+    contentSource: "mock"
   };
 }
 
@@ -3738,7 +3850,7 @@ async function runInsightReportUiClosedLoopSmoke(page) {
     );
     await completeMetricRunForUi(page, bootstrapMetricRun, bootstrapBody);
   }
-  await clickNav(page, "洞察", "业务洞察");
+  await enterDemoModule(page, "洞察", "业务洞察");
   const metricRunResponsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname.endsWith("/api/v1/insights/metric-runs") &&
@@ -3858,12 +3970,13 @@ async function runInsightReportUiClosedLoopSmoke(page) {
     status: reportDetail.data.status,
     runType: json.data.run_type,
     adapter: reportCompletion.adapter,
-    metricRun
+    metricRun,
+    contentSource: "mock"
   };
 }
 
 async function runInsightActionUiClosedLoopSmoke(page) {
-  await clickNav(page, "洞察", "业务洞察");
+  await enterDemoModule(page, "洞察", "业务洞察");
   const responsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname.endsWith("/api/v1/insights/actions") &&
@@ -3972,6 +4085,7 @@ async function runInsightActionUiClosedLoopSmoke(page) {
       status: experimentJson.data.status
     };
   }
+  await returnToProductionUi(page);
   return {
     id: actionId,
     traceId: json.meta.trace_id,
@@ -3979,7 +4093,8 @@ async function runInsightActionUiClosedLoopSmoke(page) {
     metricKey: requestBody.metric_key,
     reportId: requestBody.report_id,
     metricResultId: requestBody.metric_result_id,
-    experiment
+    experiment,
+    contentSource: "mock"
   };
 }
 
@@ -4140,15 +4255,74 @@ async function runTenantAsrPullClosedLoopSmoke(page) {
   };
 }
 
+async function runDataSceneProfileFailClosedSmoke(page) {
+  const sceneProfilePattern = /\/api\/v1\/projects\/[^/]+\/scene-profile(?:\?.*)?$/;
+  const unavailableSceneHandler = async (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      data: null,
+      meta: { trace_id: `trace_${runId}_data_scene_unbound` }
+    })
+  });
+  let connectorPostCount = 0;
+  let exportPostCount = 0;
+  const observeProjectWrites = (request) => {
+    if (request.method() !== "POST") return;
+    const pathname = new URL(request.url()).pathname;
+    if (pathname === "/api/v1/connectors") connectorPostCount += 1;
+    if (pathname === "/api/v1/exports") exportPostCount += 1;
+  };
+  await page.route(sceneProfilePattern, unavailableSceneHandler);
+  page.on("request", observeProjectWrites);
+  try {
+    await clickNav(page, "首页", "运营首页");
+    await clickNav(page, "数据", "数据管理");
+    await clickModuleTab(page, "音频数据");
+    await page.locator('[data-testid="scene-runtime-context"][data-state="unbound"]').waitFor({ state: "visible", timeout: 10000 });
+    const connectorButton = page.getByTestId("data-connector-import");
+    const exportButton = page.getByTestId("data-export");
+    assert(await connectorButton.isDisabled(), "data connector must be disabled without an active SceneProfile binding");
+    assert(await exportButton.isDisabled(), "data export must be disabled without an active SceneProfile binding");
+    await page.getByTestId("data-project-write-blocked-reason").waitFor({ state: "visible", timeout: 5000 });
+    await connectorButton.evaluate((element) => { element.disabled = false; element.click(); });
+    await exportButton.evaluate((element) => { element.disabled = false; element.click(); });
+    await page.waitForTimeout(200);
+    assert(connectorPostCount === 0, "data connector operation guard emitted POST without SceneProfile");
+    assert(exportPostCount === 0, "data export operation guard emitted POST without SceneProfile");
+  } finally {
+    page.off("request", observeProjectWrites);
+    await page.unroute(sceneProfilePattern, unavailableSceneHandler);
+    await clickNav(page, "首页", "运营首页");
+    await clickNav(page, "数据", "数据管理");
+    await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({ state: "visible", timeout: 10000 });
+  }
+  return {
+    status: "blocked",
+    reasonCode: "SCENE_PROFILE_BINDING_REQUIRED",
+    connectorPostCount,
+    exportPostCount
+  };
+}
+
 async function runDataConnectorImportClosedLoopSmoke(page) {
   await clickNav(page, "数据", "数据管理");
   await clickModuleTab(page, "音频数据");
+  const activeSceneBinding = expectEnvelope(
+    await browserApi(
+      page,
+      `/api/v1/projects/${encodeURIComponent(defaultHeaders["X-Project-Id"])}/scene-profile?environment=production&allow_missing=false`
+    ),
+    "load active SceneProfile binding before data connector import",
+    200
+  ).data;
   const responsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/v1/connectors") && response.request().method() === "POST",
     { timeout: 10000 }
   );
   await page.locator(".data-reference-head .data-connect-button").filter({ hasText: "连接器导入" }).first().click();
   const response = await responsePromise;
+  const requestPayload = response.request().postDataJSON();
   const requestHeaders = response.request().headers();
   assert(
     requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
@@ -4160,6 +4334,13 @@ async function runDataConnectorImportClosedLoopSmoke(page) {
     requestHeaders["idempotency-key"]?.includes(runId),
     "data connector import should carry current E2E run-scoped idempotency key",
     requestHeaders
+  );
+  assert(
+    requestPayload.scene_profile_id === activeSceneBinding.scene_profile_id &&
+      requestPayload.scene_profile_version_id === activeSceneBinding.scene_profile_version_id &&
+      requestPayload.scene_profile_snapshot_sha256 === activeSceneBinding.manifest_sha256,
+    "data connector import should lock the exact active SceneProfile snapshot",
+    { requestPayload, activeSceneBinding }
   );
   const json = await response.json().catch(() => ({}));
   assert(response.status() === 201, `data connector import expected 201, got ${response.status()}`, json);
@@ -4203,107 +4384,99 @@ async function runDataConnectorImportClosedLoopSmoke(page) {
     id: connectorId,
     traceId: json.meta.trace_id,
     status: json.data.status,
-    targetAssetKey: json.data.target_asset_key
+    targetAssetKey: json.data.target_asset_key,
+    sceneProfileId: requestPayload.scene_profile_id,
+    sceneProfileVersionId: requestPayload.scene_profile_version_id,
+    sceneProfileSnapshotSha256: requestPayload.scene_profile_snapshot_sha256
   };
 }
 
-async function runVoiceprintEnrollmentClosedLoopSmoke(page) {
+async function runDataExportClosedLoopSmoke(page) {
   await clickNav(page, "数据", "数据管理");
-  await clickModuleTab(page, "人物/声纹");
-  const submitButton = page.locator('[data-action-key="voiceprint-enroll-submit"][data-voiceprint-id="VP-A1001"]').first();
-  await submitButton.waitFor({ state: "visible", timeout: 10000 });
-  await assertBodyText(page, "452/512 维", "voiceprint page should render embedding profile before enrollment");
-
+  await clickModuleTab(page, "音频数据");
+  const activeSceneBinding = expectEnvelope(
+    await browserApi(
+      page,
+      `/api/v1/projects/${encodeURIComponent(defaultHeaders["X-Project-Id"])}/scene-profile?environment=production&allow_missing=false`
+    ),
+    "load active SceneProfile binding before data export",
+    200
+  ).data;
   const responsePromise = page.waitForResponse(
-    (response) => response.url().includes("/api/v1/voiceprint-enrollments") && response.request().method() === "POST",
+    (response) => response.url().includes("/api/v1/exports") && response.request().method() === "POST",
     { timeout: 10000 }
   );
-  await submitButton.click();
+  await page.getByTestId("data-export").click();
   const response = await responsePromise;
-  const requestHeaders = response.request().headers();
+  const requestPayload = response.request().postDataJSON();
   assert(
-    requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
-      requestHeaders["x-project-id"] === defaultHeaders["X-Project-Id"],
-    "voiceprint enrollment should carry current tenant/project context headers",
-    requestHeaders
+    requestPayload.scene_profile_id === activeSceneBinding.scene_profile_id &&
+      requestPayload.scene_profile_version_id === activeSceneBinding.scene_profile_version_id &&
+      requestPayload.scene_profile_snapshot_sha256 === activeSceneBinding.manifest_sha256,
+    "data export should lock the exact active SceneProfile snapshot",
+    { requestPayload, activeSceneBinding }
   );
-  assert(
-    requestHeaders["idempotency-key"]?.includes(runId),
-    "voiceprint enrollment should carry current E2E run-scoped idempotency key",
-    requestHeaders
-  );
-
   const json = await response.json().catch(() => ({}));
-  assert(response.status() === 201, `voiceprint enrollment expected 201, got ${response.status()}`, json);
-  const enrollmentId = json?.data?.id;
-  assert(enrollmentId, "voiceprint enrollment response missing id", json);
-  assert(json?.data?.voiceprint_id === "VP-A1001", "voiceprint enrollment should preserve voiceprint id", json);
-  assert(json?.data?.status === "pending_review", "voiceprint enrollment should enter review instead of claiming final enrollment", json);
-  assert(json?.data?.quality_gate?.passed === true, "voiceprint enrollment should carry passed quality gate", json);
-  assert(json?.meta?.trace_id, "voiceprint enrollment missing trace id", json);
+  assert(response.status() === 202, `data export expected 202, got ${response.status()}`, json);
+  const exportRunId = json?.data?.run_id || json?.data?.id;
+  assert(exportRunId, "data export response missing run id", json);
+  assert(json?.meta?.trace_id, "data export response missing trace id", json);
+  await assertLocatorText(page, ".data-operation-toast", exportRunId, "data export should show backend run id");
+  return {
+    id: exportRunId,
+    traceId: json.meta.trace_id,
+    status: json.data.status,
+    runType: json.data.run_type,
+    sceneProfileId: requestPayload.scene_profile_id,
+    sceneProfileVersionId: requestPayload.scene_profile_version_id,
+    sceneProfileSnapshotSha256: requestPayload.scene_profile_snapshot_sha256
+  };
+}
 
-  await assertLocatorText(
-    page,
-    ".voiceprint-enrollment-toast",
-    "声纹入库申请已记录",
-    "voiceprint enrollment should show backend receipt"
-  );
-  await assertLocatorText(page, ".voiceprint-enrollment-toast", enrollmentId, "voiceprint enrollment should show backend id");
-  await assertLocatorText(
-    page,
-    ".voiceprint-enrollment-toast",
-    shortTrace(json.meta.trace_id),
-    "voiceprint enrollment should show backend trace"
-  );
-
-  const detail = expectEnvelope(
-    await browserApi(page, `/api/v1/voiceprint-enrollments/${encodeURIComponent(enrollmentId)}`),
-    "fetch UI-created voiceprint enrollment detail",
-    200
-  );
-  assert(
-    detail.data.id === enrollmentId && detail.data.voiceprint_id === "VP-A1001",
-    "voiceprint enrollment detail should match created object",
-    detail
-  );
-  const list = expectEnvelope(
-    await browserApi(page, "/api/v1/voiceprint-enrollments?voiceprint_id=VP-A1001"),
-    "list UI-created voiceprint enrollments",
-    200
-  );
-  assert(
-    list.data.items.some((item) => item.id === enrollmentId),
-    "UI-created voiceprint enrollment should be listable through BFF",
-    { enrollmentId, list }
-  );
-  const trace = expectEnvelope(
-    await browserApi(page, `/api/v1/traces/${json.meta.trace_id}`),
-    "fetch UI-created voiceprint enrollment trace",
-    200
-  );
-  assert(
-    trace.data.spans.some(
-      (span) => span.kind === "resource" && span.collection === "voiceprint_enrollments" && span.id === enrollmentId
-    ),
-    "voiceprint enrollment trace should include resource span",
-    trace
-  );
-  assert(
-    trace.data.spans.some((span) => span.kind === "audit" && span.object_id === enrollmentId),
-    "voiceprint enrollment trace should include audit span",
-    trace
-  );
-  assert(
-    trace.data.spans.some((span) => span.kind === "outbox" && span.event_type === "voiceprint_enrollments.upserted"),
-    "voiceprint enrollment trace should include outbox span",
-    trace
-  );
+async function runVoiceprintEnrollmentFailClosedSmoke(page) {
+  let enrollmentPostCount = 0;
+  const observeEnrollmentRequest = (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/v1/voiceprint-enrollments"
+    ) {
+      enrollmentPostCount += 1;
+    }
+  };
+  page.on("request", observeEnrollmentRequest);
+  await clickNav(page, "数据", "数据管理");
+  await clickModuleTab(page, "人物/声纹");
+  try {
+    const unavailable = page.getByTestId("data-voiceprint-unavailable");
+    await unavailable.waitFor({ state: "visible", timeout: 10000 });
+    await assertLocatorText(
+      page,
+      '[data-testid="data-voiceprint-unavailable"]',
+      "候选读模型未就绪",
+      "voiceprint truth mode should disclose the missing authoritative candidate model"
+    );
+    assert(
+      (await page.locator('[data-action-key="voiceprint-enroll-submit"]').count()) === 0,
+      "voiceprint truth mode must not render a submit action without an authoritative candidate"
+    );
+    assert(
+      (await page.getByText("VP-A1001", { exact: true }).count()) === 0,
+      "voiceprint truth mode must not render the static VP-A1001 fixture"
+    );
+    const blockedButton = page.getByTestId("voiceprint-enrollment-disabled");
+    await blockedButton.waitFor({ state: "visible", timeout: 10000 });
+    assert(await blockedButton.isDisabled(), "voiceprint enrollment guard must be visibly disabled");
+    await blockedButton.evaluate((element) => element.click());
+    await page.waitForTimeout(150);
+    assert(enrollmentPostCount === 0, "disabled voiceprint enrollment guard emitted a POST");
+  } finally {
+    page.off("request", observeEnrollmentRequest);
+  }
 
   return {
-    id: enrollmentId,
-    voiceprintId: json.data.voiceprint_id,
-    traceId: json.meta.trace_id,
-    status: json.data.status
+    status: "blocked",
+    reasonCode: "VOICEPRINT_CANDIDATE_READ_MODEL_UNAVAILABLE",
+    postCount: enrollmentPostCount
   };
 }
 
@@ -5165,7 +5338,13 @@ async function runKnowledgeAndSettingsClosedLoopSmoke(page) {
   await assertLocatorText(page, ".knowledge-operation-toast", knowledgeIndexJson.data.run_id || knowledgeIndexJson.data.id, "knowledge index build should show backend run id");
   await assertLocatorText(page, ".knowledge-operation-toast", shortTrace(knowledgeIndexJson.meta.trace_id), "knowledge index build should show backend trace");
 
-  await clickNav(page, "设置", "设置");
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "设置",
+    expectedText: "设置",
+    fixtureSelector: ".settings-flow",
+    actionSelectors: ['[data-action-key="settings-provider-test"]']
+  });
+  await enterDemoModule(page, "设置", "设置");
   await page.locator('[data-action-key="settings-provider-test"]').waitFor({ state: "visible", timeout: 8000 });
   const providerTestResponsePromise = page.waitForResponse(
     (response) =>
@@ -5194,6 +5373,8 @@ async function runKnowledgeAndSettingsClosedLoopSmoke(page) {
   await assertLocatorText(page, ".settings-operation-toast", providerTestJson.data.run_id || providerTestJson.data.id, "settings provider test should show backend run id");
   await assertLocatorText(page, ".settings-operation-toast", shortTrace(providerTestJson.meta.trace_id), "settings provider test should show backend trace");
 
+  await returnToProductionUi(page);
+
   return {
     knowledgeSync: {
       id: knowledgeSyncJson.data.run_id || knowledgeSyncJson.data.id,
@@ -5211,19 +5392,36 @@ async function runKnowledgeAndSettingsClosedLoopSmoke(page) {
       id: providerTestJson.data.run_id || providerTestJson.data.id,
       traceId: providerTestJson.meta.trace_id,
       status: providerTestJson.data.status,
-      runType: providerTestJson.data.run_type
+      runType: providerTestJson.data.run_type,
+      contentSource: "mock"
     }
   };
 }
 
 async function runGlobalExportCommandSmoke(page) {
   await clickNav(page, "知识库", "知识库");
+  const activeSceneBinding = expectEnvelope(
+    await browserApi(
+      page,
+      `/api/v1/projects/${encodeURIComponent(defaultHeaders["X-Project-Id"])}/scene-profile?environment=production&allow_missing=false`
+    ),
+    "load active SceneProfile binding before global export",
+    200
+  ).data;
+  assert(
+    activeSceneBinding?.scene_profile_id &&
+      activeSceneBinding?.scene_profile_version_id &&
+      /^[0-9a-f]{64}$/.test(activeSceneBinding?.manifest_sha256 ?? ""),
+    "global export requires an active immutable SceneProfile binding",
+    activeSceneBinding
+  );
   const responsePromise = page.waitForResponse(
     (response) => response.url().includes("/api/v1/exports") && response.request().method() === "POST",
     { timeout: 10000 }
   );
   await page.locator(".module-head .quick-actions button").filter({ hasText: "导出" }).first().click();
   const response = await responsePromise;
+  const requestPayload = response.request().postDataJSON();
   const requestHeaders = response.request().headers();
   assert(
     requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
@@ -5236,6 +5434,13 @@ async function runGlobalExportCommandSmoke(page) {
     requestHeaders["idempotency-key"]?.includes(runId),
     "global export UI should carry current E2E run-scoped idempotency key",
     requestHeaders
+  );
+  assert(
+    requestPayload.scene_profile_id === activeSceneBinding.scene_profile_id &&
+      requestPayload.scene_profile_version_id === activeSceneBinding.scene_profile_version_id &&
+      requestPayload.scene_profile_snapshot_sha256 === activeSceneBinding.manifest_sha256,
+    "global export UI should carry the exact active SceneProfile id/version/snapshot lock",
+    { requestPayload, activeSceneBinding }
   );
 
   const json = await response.json().catch(() => ({}));
@@ -5259,10 +5464,53 @@ async function runGlobalExportCommandSmoke(page) {
 }
 
 async function runAssetQualityRetryClosedLoopSmoke(page) {
+  const assetKey = "auris/label/event_tags";
+  const assetDetail = expectEnvelope(
+    await browserApi(page, `/api/v1/data-assets/${encodeURIComponent(assetKey)}`),
+    "load authoritative asset checks before UI retry",
+    200
+  ).data;
+  assert(assetDetail?.asset_key === assetKey && Array.isArray(assetDetail?.checks), "asset detail must return checks for the selected asset", assetDetail);
+  const authoritativeChecks = assetDetail.checks.map((check) => {
+    assert(
+      check &&
+        typeof check === "object" &&
+        typeof check.check_id === "string" &&
+        check.check_id.trim() &&
+        typeof check.name === "string" &&
+        check.name.trim() &&
+        typeof check.status === "string" &&
+        Array.isArray(check.failed_partitions) &&
+        check.failed_partitions.every((partition) => typeof partition === "string" && partition.trim()),
+      "asset check detail must expose strong id/name/status/failed_partitions",
+      check
+    );
+    return check;
+  });
+  const failedChecks = authoritativeChecks.filter(
+    (check) => ["failed", "error"].includes(check.status.toLowerCase()) || check.failed_partitions.length > 0
+  );
+  const expectedFailedCheckIds = failedChecks.map((check) => check.check_id.trim());
+  const expectedFailedPartitions = [...new Set(failedChecks.flatMap((check) => check.failed_partitions.map((partition) => partition.trim())))];
+  assert(expectedFailedCheckIds.length > 0, "asset quality retry smoke requires authoritative failed checks", assetDetail);
+  const activeSceneBinding = expectEnvelope(
+    await browserApi(
+      page,
+      `/api/v1/projects/${encodeURIComponent(defaultHeaders["X-Project-Id"])}/scene-profile?environment=production&allow_missing=false`
+    ),
+    "load active SceneProfile binding before asset quality retry",
+    200
+  ).data;
+
   await clickNav(page, "资产", "数据资产");
   await clickModuleTab(page, "资产目录");
   await page.locator(".asset-catalog-card").filter({ hasText: "事件标签资产" }).first().click();
   await clickModuleTab(page, "资产质量");
+  const checksView = page.getByTestId("asset-checks-authoritative");
+  await checksView.waitFor({ state: "visible", timeout: 10000 });
+  await checksView.filter({ hasText: expectedFailedCheckIds[0] }).waitFor({ state: "visible", timeout: 5000 });
+  const retryButton = page.getByTestId("asset-quality-retry");
+  assert(await retryButton.isEnabled(), "authoritative failures plus active SceneProfile must enable asset quality retry");
   const responsePromise = page.waitForResponse(
     (response) =>
       response.url().includes("/api/v1/data-assets/") &&
@@ -5270,8 +5518,9 @@ async function runAssetQualityRetryClosedLoopSmoke(page) {
       response.request().method() === "POST",
     { timeout: 10000 }
   );
-  await page.locator(".asset-backfill-actions button").filter({ hasText: "重跑质量校验" }).first().click();
+  await retryButton.click();
   const response = await responsePromise;
+  const requestPayload = response.request().postDataJSON();
   const requestHeaders = response.request().headers();
   assert(
     requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
@@ -5285,12 +5534,32 @@ async function runAssetQualityRetryClosedLoopSmoke(page) {
     "asset quality retry UI should carry current E2E run-scoped idempotency key",
     requestHeaders
   );
+  assert(
+    JSON.stringify(requestPayload.failed_check_ids) === JSON.stringify(expectedFailedCheckIds) &&
+      JSON.stringify(requestPayload.failed_partitions) === JSON.stringify(expectedFailedPartitions),
+    "asset quality retry must submit the authoritative failed check/partition subset at top level",
+    { requestPayload, expectedFailedCheckIds, expectedFailedPartitions }
+  );
+  assert(
+    requestPayload.scene_profile_id === activeSceneBinding.scene_profile_id &&
+      requestPayload.scene_profile_version_id === activeSceneBinding.scene_profile_version_id &&
+      requestPayload.scene_profile_snapshot_sha256 === activeSceneBinding.manifest_sha256,
+    "asset quality retry must lock the exact active SceneProfile snapshot at top level",
+    { requestPayload, activeSceneBinding }
+  );
+  assert(!Object.hasOwn(requestPayload, "payload"), "asset quality retry must not retain the legacy nested payload envelope", requestPayload);
 
   const json = await response.json().catch(() => ({}));
   assert(response.status() === 202, `asset quality retry expected 202, got ${response.status()}`, json);
   assert(json?.data?.run_id || json?.data?.id, "asset quality retry missing backend run id", json);
   assert(json?.data?.status === "pending", "asset quality retry should create pending run", json);
   assert(json?.data?.run_type === "asset_check_retry", "asset quality retry should create asset_check_retry run", json);
+  assert(
+    JSON.stringify(json?.data?.failed_check_ids) === JSON.stringify(expectedFailedCheckIds) &&
+      JSON.stringify(json?.data?.failed_partitions) === JSON.stringify(expectedFailedPartitions),
+    "asset quality retry receipt must preserve the canonical authoritative retry subset",
+    json
+  );
   assert(json?.meta?.trace_id, "asset quality retry missing trace id", json);
   const id = json.data.run_id || json.data.id;
   await assertLocatorText(page, ".asset-operation-toast", "质量校验运行已创建", "asset quality retry should show backend-created receipt");
@@ -5351,7 +5620,7 @@ async function runAssetExportPackageClosedLoopSmoke(page) {
 }
 
 async function runSettingsPublishGateUiClosedLoopSmoke(page) {
-  await clickNav(page, "设置", "设置");
+  await enterDemoModule(page, "设置", "设置");
   await assertBodyText(page, "Policy Guard", "settings page should show policy guard before publish");
   const draftResponsePromise = page.waitForResponse(
     (response) =>
@@ -5430,11 +5699,13 @@ async function runSettingsPublishGateUiClosedLoopSmoke(page) {
   const publishedSetting = await browserApi(page, `/api/v1/settings/${encodeURIComponent(draftRequestBody.setting_id)}`);
   assert(publishedDraft.status === 200 && publishedDraft.json?.data?.status === "published", "approved settings draft should be published", publishedDraft);
   assert(publishedSetting.status === 200 && publishedSetting.json?.data?.status === "active", "approved setting should be active", publishedSetting);
+  await returnToProductionUi(page);
   return {
     id,
     traceId: json.meta.trace_id,
     status: publishedRun.status,
-    runType: json.data.run_type
+    runType: json.data.run_type,
+    contentSource: "mock"
   };
 }
 
@@ -6054,8 +6325,10 @@ try {
   enterArtifactStage("main:platform-ui-bff-smokes");
   const projectCreate = await runProjectCreateClosedLoopSmoke(page);
   const tenantAsrPull = await runTenantAsrPullClosedLoopSmoke(page);
+  const dataSceneProfileGate = await runDataSceneProfileFailClosedSmoke(page);
   const dataConnectorImport = await runDataConnectorImportClosedLoopSmoke(page);
-  const voiceprintEnrollment = await runVoiceprintEnrollmentClosedLoopSmoke(page);
+  const dataExportAction = await runDataExportClosedLoopSmoke(page);
+  const voiceprintEnrollmentGate = await runVoiceprintEnrollmentFailClosedSmoke(page);
   const listeningActions = await runListeningClosedLoopSmoke(page);
   const canvasToolbarActions = await runCanvasToolbarClosedLoopSmoke(page);
   const domainPageActions = await runKnowledgeAndSettingsClosedLoopSmoke(page);
@@ -6452,9 +6725,7 @@ try {
       read: { status: "verified", endpoints: ["/api/v1/audio-sessions/aggregations"] },
       writes: [
         uiWrite("dataConnectorImport", dataConnectorImport.id, dataConnectorImport.traceId),
-        uiWrite("voiceprintEnrollment", voiceprintEnrollment.id, voiceprintEnrollment.traceId, {
-          status: voiceprintEnrollment.status
-        })
+        uiWrite("dataExportAction", dataExportAction.id, dataExportAction.traceId)
       ]
     },
     {
@@ -6738,7 +7009,9 @@ try {
     ],
     projectCreate,
     dataConnectorImport,
-    voiceprintEnrollment,
+    dataExportAction,
+    dataSceneProfileGate,
+    voiceprintEnrollmentGate,
     listeningActions,
     canvasToolbarActions,
     evaluationPromptUi,
@@ -6825,4 +7098,5 @@ try {
   throw error;
 } finally {
   await browser.close();
+  if (demoServer) await demoServer.close();
 }

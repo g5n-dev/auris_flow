@@ -1,5 +1,6 @@
 import { BookOpen, GitBranch, Headphones } from "lucide-react";
 
+import { formatSessionConfidence } from "../dataTruthModel";
 import type { DataWorkspace } from "../useDataWorkspace";
 
 export function DataRelationView({ workspace }: { workspace: DataWorkspace }) {
@@ -57,7 +58,7 @@ export function DataRelationView({ workspace }: { workspace: DataWorkspace }) {
                   <strong>{item.event}</strong>
                   <span>{item.person}</span>
                   <em>{item.audio}</em>
-                  <i>{Math.round(item.confidence * 100)}%</i>
+                  <i>{formatSessionConfidence(item.confidence)}</i>
                 </button>
               ))}
             </aside>
@@ -119,7 +120,7 @@ export function DataRelationView({ workspace }: { workspace: DataWorkspace }) {
               <div className="relation-inspector-block">
                 <span>质量检查</span>
                 <strong>{selectedAsset.assetCheck}</strong>
-                <p>{selectedAssetCatalog.name} · 质量 {selectedAssetCatalog.quality}</p>
+                <p>{selectedAssetCatalog.name} · 质量 {selectedAssetCatalog.quality ?? "未提供"}</p>
               </div>
               <div className="relation-inspector-block">
                 <span>证据与事件数据</span>
@@ -138,7 +139,7 @@ export function DataRelationView({ workspace }: { workspace: DataWorkspace }) {
                   <button key={item.id} type="button" className={item.status} onClick={() => setSelectedAssetId(item.id)}>
                     <b>{item.id}</b>
                     <span>{item.assetCheck}</span>
-                    <em>{item.event} · {Math.round(item.confidence * 100)}%</em>
+                    <em>{item.event} · {formatSessionConfidence(item.confidence)}</em>
                   </button>
                 ))}
               </div>

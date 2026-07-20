@@ -2,11 +2,13 @@ import { BarChart3, BookOpen, Database } from "lucide-react";
 import type { CSSProperties } from "react";
 
 import { PanelHeader } from "../../../shared/ui/PanelHeader";
-import { assetDagsterCompatibilityChecks, assetRows } from "../catalog";
+import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
+import { assetDagsterCompatibilityChecks } from "../catalog";
 import type { AssetsWorkspace } from "../useAssetsWorkspace";
 
 export function AssetCommandPanel({ workspace }: { workspace: AssetsWorkspace }) {
   const {
+    assetRows,
     compatibilityScore,
     compatibleCount,
     createBackfillDraft,
@@ -15,21 +17,32 @@ export function AssetCommandPanel({ workspace }: { workspace: AssetsWorkspace })
     selectedAsset,
     setActiveTab
   } = workspace;
+  const governanceCards = LABEL_DEMO_MODE
+    ? [
+        ["兼容门禁", `${compatibilityScore}%`, `${compatibleCount}/${assetDagsterCompatibilityChecks.length} 通过`, "blue"],
+        ["待人工确认", "2", "覆盖回填 / 人工标注影响", "amber"],
+        ["失败分区", "3", "ASR 转写资产待重跑", "red"],
+        ["最近生成", "12:41", "评测指标资产排队中", "green"]
+      ]
+    : [
+        ["BFF 目录", `${assetRows.length}`, "data-assets/recent", "blue"],
+        ["需关注", `${assetRows.filter((asset) => asset.status !== "已生成").length}`, "按投影 status 汇总", "amber"],
+        ["当前质量", selectedAsset.quality === null ? "未提供" : `${selectedAsset.quality}`, "quality_score", "green"],
+        ["最近生成", selectedAsset.materialization, "latest_materialization_id", "green"]
+      ];
   return (
     <section className="module-panel wide asset-command-panel">
       <PanelHeader title="数据资产中心" subtitle={`${currentTabLabel} / 业务资产语言映射资产 Key、分区、生成记录和回填`} icon={<BookOpen size={16} />} sticky />
       <div className="asset-governance-strip">
-        {[
-          ["兼容门禁", `${compatibilityScore}%`, `${compatibleCount}/${assetDagsterCompatibilityChecks.length} 通过`, "blue"],
-          ["待人工确认", "2", "覆盖回填 / 人工标注影响", "amber"],
-          ["失败分区", "3", "ASR 转写资产待重跑", "red"],
-          ["最近生成", "12:41", "评测指标资产排队中", "green"]
-        ].map(([label, value, meta, tone]) => (
+        {governanceCards.map(([label, value, meta, tone]) => (
           <button
             key={label}
             type="button"
             className={`asset-governance-card ${tone}`}
+            disabled={!LABEL_DEMO_MODE}
+            title={!LABEL_DEMO_MODE ? "最近资产投影摘要，仅供读取" : undefined}
             onClick={() => {
+              if (!LABEL_DEMO_MODE) return;
               if (label === "失败分区") rerunAssetQuality();
               if (label === "兼容门禁") setActiveTab("quality");
               if (label === "待人工确认") createBackfillDraft(selectedAsset.assetKey, "兼容门禁人工确认生成");
@@ -47,6 +60,7 @@ export function AssetCommandPanel({ workspace }: { workspace: AssetsWorkspace })
 
 export function AssetChartPanel({ workspace }: { workspace: AssetsWorkspace }) {
   const {
+    assetRows,
     assetDomainSummary,
     avgAssetQuality,
     createBackfillDraft,
@@ -78,7 +92,7 @@ export function AssetChartPanel({ workspace }: { workspace: AssetsWorkspace }) {
                 <button key={item.domain} type="button" onClick={() => setSelectedAssetKey(firstAsset.assetKey)}>
                   <span>
                     <b>{item.domain}</b>
-                    <em>{item.count} 个 · 均分 {item.avgQuality}</em>
+                    <em>{item.count} 个 · 均分 {item.avgQuality ?? "BFF 未提供"}</em>
                   </span>
                   <i>
                     <strong style={{ width: `${(item.count / maxDomainCount) * 100}%` }} />
@@ -93,7 +107,7 @@ export function AssetChartPanel({ workspace }: { workspace: AssetsWorkspace }) {
         <div className="asset-chart-card asset-quality-trend-card">
           <div className="asset-chart-card-head horizontal sticky-card-head">
             <span>血缘质量链路</span>
-            <strong>{avgAssetQuality} 平均分</strong>
+            <strong>{avgAssetQuality === null ? "BFF 未提供" : `${avgAssetQuality} 平均分`}</strong>
           </div>
           <svg className="asset-quality-line-chart" viewBox={`0 0 ${qualityChart.width} ${qualityChart.height}`} role="img" aria-label="资产血缘质量链路折线图">
             {[0, 1, 2].map((index) => {
@@ -103,6 +117,7 @@ export function AssetChartPanel({ workspace }: { workspace: AssetsWorkspace }) {
             <path d={qualityPath} />
             {assetRows.map((asset, index) => {
               const active = asset.assetKey === selectedAsset.assetKey;
+              if (asset.quality === null) return null;
               return (
                 <g key={asset.assetKey} className={active ? "active" : ""}>
                   <circle cx={qualityX(index)} cy={qualityY(asset.quality)} r={active ? 5 : 4} />
@@ -115,7 +130,7 @@ export function AssetChartPanel({ workspace }: { workspace: AssetsWorkspace }) {
           </svg>
           <div className="asset-quality-current">
             <span>{selectedAsset.name}</span>
-            <strong>{selectedAsset.quality}</strong>
+            <strong>{selectedAsset.quality ?? "未提供"}</strong>
             <em>{selectedAsset.status} · {selectedAsset.freshness}</em>
           </div>
         </div>
@@ -177,7 +192,7 @@ export function AssetChartPanel({ workspace }: { workspace: AssetsWorkspace }) {
 }
 
 export function AssetCatalogPanel({ workspace }: { workspace: AssetsWorkspace }) {
-  const { selectedAsset, setSelectedAssetKey } = workspace;
+  const { assetRows, selectedAsset, setSelectedAssetKey } = workspace;
   return (
     <section className="module-panel wide asset-catalog-panel">
       <PanelHeader title="资产目录" subtitle="租户 / 项目隔离，按数据域、状态、版本和质量分筛选" icon={<Database size={16} />} sticky />
@@ -197,9 +212,9 @@ export function AssetCatalogPanel({ workspace }: { workspace: AssetsWorkspace })
             <code>{asset.assetKey}</code>
             <em>{asset.partition}</em>
             <i>
-              <span style={{ width: `${asset.quality}%` }} />
+              <span style={{ width: `${asset.quality ?? 0}%` }} />
             </i>
-            <small>质量 {asset.quality} · {asset.freshness}</small>
+            <small>质量 {asset.quality ?? "BFF 未提供"} · {asset.freshness}</small>
           </button>
         ))}
       </div>

@@ -3,11 +3,17 @@ import { useState } from "react";
 import type { DataAssetItem } from "../../shared/contracts/dataAssets";
 import type { OperationNotice } from "../../shared/contracts/operations";
 import { dataAssetCatalogRows } from "./catalog";
-import { dataAssets } from "./dataAssets";
 import { createDataOperations } from "./dataOperations";
+import type { DataProjectionAssetItem } from "./dataProjection";
+import { projectTruthAssetCatalog } from "./dataTruthModel";
 import { aggregateMeta } from "./fixtures";
 import { deriveDataRelations } from "./relations";
-import type { DataAggregateKey, DataExportRun, DataModuleProps } from "./types";
+import type { DataAggregateKey, DataExportRun, DataModuleProps, DataSceneProfileLock } from "./types";
+
+type DataWorkspaceInput = DataModuleProps & {
+  dataItems: DataAssetItem[];
+  truthMode: boolean;
+};
 
 export function useDataWorkspace({
   activeTab,
@@ -15,8 +21,12 @@ export function useDataWorkspace({
   selectedAssetId,
   setSelectedAssetId,
   openListeningFromDataAsset,
-  openAssetsFromDataAsset
-}: DataModuleProps) {
+  openAssetsFromDataAsset,
+  dataItems,
+  truthMode,
+  workspaceSceneBinding,
+  workspaceSceneState
+}: DataWorkspaceInput) {
   const [aggregationOrder, setAggregationOrder] = useState<DataAggregateKey[]>(["space", "time", "event", "person"]);
   const [draggedAggregate, setDraggedAggregate] = useState<DataAggregateKey | null>(null);
   const [dragOverAggregate, setDragOverAggregate] = useState<DataAggregateKey | null>(null);
@@ -43,17 +53,19 @@ export function useDataWorkspace({
   });
   const [dataAction, setDataAction] = useState<string | null>(null);
   const [dataExportRun, setDataExportRun] = useState<DataExportRun>(null);
-  const selectedAsset = dataAssets.find((item) => item.id === selectedAssetId) ?? dataAssets[0];
-  const selectedAssetCatalog = dataAssetCatalogRows.find((asset) => asset.assetKey === selectedAsset.assetKey) ?? dataAssetCatalogRows[0];
+  const selectedAsset = dataItems.find((item) => item.id === selectedAssetId) ?? dataItems[0]!;
+  const selectedAssetCatalog = truthMode
+    ? projectTruthAssetCatalog(selectedAsset)
+    : dataAssetCatalogRows.find((asset) => asset.assetKey === selectedAsset.assetKey) ?? dataAssetCatalogRows[0];
   const aggregateKeys = Object.keys(aggregateMeta) as DataAggregateKey[];
-  const visibleDataAssets = dataAssets.filter((item) =>
+  const visibleDataAssets = dataItems.filter((item) =>
     aggregateKeys.every((key) => aggregateFilters[key].length === 0 || aggregateFilters[key].includes(item[key]))
   );
   const pendingDataAssetCount = visibleDataAssets.filter((item) => item.status !== "confirmed").length;
   const isRelationView = activeTab === "relations";
   const aggregateFilterOptions = (Object.keys(aggregateMeta) as DataAggregateKey[]).reduce(
     (options, key) => {
-      const counts = dataAssets.reduce<Map<string, number>>((acc, item) => {
+      const counts = dataItems.reduce<Map<string, number>>((acc, item) => {
         acc.set(item[key], (acc.get(item[key]) ?? 0) + 1);
         return acc;
       }, new Map());
@@ -163,6 +175,42 @@ export function useDataWorkspace({
     openAssetsFromDataAsset
   );
   const relationRepairRows = visibleDataAssets.filter((item) => item.status !== "confirmed");
+  const projectionAsset = selectedAsset as DataProjectionAssetItem;
+  const bindingIsAuthoritative = workspaceSceneState === "bound"
+    && workspaceSceneBinding?.environment === "production"
+    && workspaceSceneBinding.status === "active"
+    && workspaceSceneBinding.version.status === "published"
+    && workspaceSceneBinding.scene_profile_id === workspaceSceneBinding.version.scene_profile_id
+    && workspaceSceneBinding.scene_profile_version_id === workspaceSceneBinding.version.scene_profile_version_id
+    && workspaceSceneBinding.manifest_sha256 === workspaceSceneBinding.version.manifest_sha256
+    && /^[0-9a-f]{64}$/.test(workspaceSceneBinding.manifest_sha256);
+  const sceneProfileLock: DataSceneProfileLock | null = bindingIsAuthoritative && workspaceSceneBinding
+    ? {
+        scene_profile_id: workspaceSceneBinding.scene_profile_id,
+        scene_profile_version_id: workspaceSceneBinding.scene_profile_version_id,
+        scene_profile_snapshot_sha256: workspaceSceneBinding.manifest_sha256
+      }
+    : null;
+  const sceneProfileBlockedReason = workspaceSceneState === "pending"
+    ? "正在读取当前项目的已发布 SceneProfile，项目级写入与导出保持禁用"
+    : workspaceSceneState === "error"
+      ? "SceneProfile 绑定读取失败，项目级写入与导出保持禁用"
+      : workspaceSceneState === "unbound"
+        ? "当前项目未绑定已发布 SceneProfile，项目级写入与导出保持禁用"
+        : "SceneProfile 绑定快照不完整或发生漂移，项目级写入与导出保持禁用";
+  const targetAssetVerified = !truthMode || projectionAsset.connectorImportEnabled === true;
+  const canImportConnector = sceneProfileLock !== null && targetAssetVerified;
+  const connectorImportBlockedReason = !sceneProfileLock
+    ? sceneProfileBlockedReason
+    : targetAssetVerified
+      ? ""
+      : projectionAsset.connectorImportBlockedReason || "当前数据对象未提供可验证的目标资产";
+  const canExportData = sceneProfileLock !== null && Boolean(selectedAsset.assetKey);
+  const dataExportBlockedReason = !sceneProfileLock
+    ? sceneProfileBlockedReason
+    : selectedAsset.assetKey
+      ? ""
+      : "当前数据对象未绑定可验证的目标资产，项目级导出保持禁用";
 
   const operations = createDataOperations({
     activeTab,
@@ -171,6 +219,11 @@ export function useDataWorkspace({
     dataAction,
     dataExportRun,
     isRelationView,
+    canImportConnector,
+    connectorImportBlockedReason,
+    canExportData,
+    dataExportBlockedReason,
+    sceneProfileLock,
     selectedAsset,
     setDataAction,
     setDataExportRun,
@@ -190,6 +243,7 @@ export function useDataWorkspace({
     clearPriorityDragState,
     closedFolders,
     dataAction,
+    dataAssetCount: dataItems.length,
     dataExportRun,
     dataNotice,
     dragOverAggregate,
@@ -201,6 +255,11 @@ export function useDataWorkspace({
     isContractCollapsed,
     isPivotCollapsed,
     isRelationView,
+    canImportConnector,
+    canExportData,
+    canUsePivot: !truthMode,
+    connectorImportBlockedReason,
+    dataExportBlockedReason,
     moveAggregate,
     openAggregateFilterMenu,
     openAssetsFromDataAsset,
@@ -221,8 +280,11 @@ export function useDataWorkspace({
     setIsContractCollapsed,
     setIsPivotCollapsed,
     setSelectedAssetId,
+    sceneProfileLock,
+    sceneProfileBlockedReason,
     toggleAggregateFilterValue,
     toggleFolder,
+    truthMode,
     visibleDataAssets,
     ...selectedAssetRelations,
     ...operations

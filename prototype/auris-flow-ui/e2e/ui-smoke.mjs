@@ -60,6 +60,14 @@ async function expectMetricText(page, text, timeout = 8000) {
   await page.locator(".module-metrics").first().filter({ hasText: text }).waitFor({ state: "visible", timeout });
 }
 
+async function setSceneBindingMode(page, mode) {
+  const status = await page.evaluate(async (nextMode) => {
+    const response = await fetch(`/api/__e2e__/scene-binding-mode?mode=${encodeURIComponent(nextMode)}`);
+    return response.status;
+  }, mode);
+  assert(status === 200, `无法切换 SceneProfile E2E 模式：${mode}`, { status });
+}
+
 async function assertLazyBranchesHealthy(page, context, timeout = 10000) {
   const deadline = Date.now() + timeout;
   while (true) {
@@ -371,6 +379,10 @@ async function runModuleCommandSmoke(page) {
   );
   await clickExactButton(quickActions, "导出");
   const exportResponse = await exportResponsePromise;
+  const exportPayload = exportResponse.request().postDataJSON();
+  assert(exportPayload.scene_profile_id === "scene_ui_smoke_audio", "项目级导出缺少 SceneProfile ID 强引用", exportPayload);
+  assert(exportPayload.scene_profile_version_id === "scenev_ui_smoke_audio_v1", "项目级导出缺少 SceneProfile version ID 强引用", exportPayload);
+  assert(exportPayload.scene_profile_snapshot_sha256 === uiSmokeSceneManifestSha256, "项目级导出缺少 SceneProfile snapshot SHA 强引用", exportPayload);
   const exportJson = await exportResponse.json().catch(() => ({}));
   assert(exportResponse.status() === 202, "global export expected 202", exportJson);
   assert(exportJson?.data?.run_id || exportJson?.data?.id, "global export missing backend run id", exportJson);
@@ -383,8 +395,36 @@ async function runModuleCommandSmoke(page) {
   await expectBodyText(page, "当前操作回执已固定");
 }
 
+async function runSceneProfileExportExemptionSmoke(page, moduleLabel, moduleTitle) {
+  await openModule(page, moduleLabel, moduleTitle);
+  await page.locator('[data-testid="scene-runtime-context"][data-state="error"]').waitFor({
+    state: "visible",
+    timeout: 8000
+  });
+  const exportButton = page.locator(".module-head .quick-actions button").filter({ hasText: "导出" }).first();
+  assert(!(await exportButton.isDisabled()), `${moduleLabel}模块错误继承了项目级 SceneProfile 导出门禁`);
+  const responsePromise = page.waitForResponse(
+    (response) => response.url().includes("/api/v1/exports") && response.request().method() === "POST",
+    { timeout: 10000 }
+  );
+  await exportButton.click();
+  const exportResponse = await responsePromise;
+  const payload = exportResponse.request().postDataJSON();
+  assert(
+    !payload.scene_profile_id && !payload.scene_profile_version_id && !payload.scene_profile_snapshot_sha256,
+    `${moduleLabel}模块的非项目级导出不应伪造 SceneProfile 三元锁`,
+    payload
+  );
+  assert(exportResponse.status() === 202, `${moduleLabel}模块的 SceneProfile 豁免导出未创建运行`);
+  await page.getByLabel("关闭模块操作面板").click();
+}
+
 async function runLabelGovernanceTruthSmoke(page) {
   await openModule(page, "标签", "标签生产治理台");
+  const projectionState = page.locator('[data-testid="module-projection-state"][data-content-source="bff"]');
+  await projectionState.waitFor({ state: "visible", timeout: 5000 });
+  assert(!(await projectionState.innerText()).includes("Mock fixture"), "内部 BFF controller 模块仍被标记为 Mock fixture");
+  await projectionState.filter({ hasText: "模块内部 BFF controller 与真实回执驱动" }).waitFor({ state: "visible", timeout: 5000 });
 
   for (const tab of ["标签体系", "智能抽取", "规则/Prompt", "评测人审", "版本发布"]) {
     await openTab(page, tab);
@@ -836,8 +876,10 @@ async function runModalCloseSmoke(page) {
   await dialog.waitFor({ state: "hidden", timeout: 6000 });
 }
 
-async function runHotwordGovernanceSmoke(page) {
+async function runHotwordGovernanceDemoSmoke(page) {
   await openModule(page, "洞察", "业务洞察");
+  await page.locator('[data-testid="module-projection-state"][data-content-source="mock"]')
+    .waitFor({ state: "visible", timeout: 8000 });
   const insightScope = page.locator(".insight-scope-panel");
   await insightScope.filter({ hasText: "lmb_to_lv_19_20250531" }).waitFor({ state: "visible", timeout: 8000 });
   await insightScope.filter({ hasText: "Generation 42" }).waitFor({ state: "visible", timeout: 8000 });
@@ -1279,10 +1321,13 @@ async function assertProjectionSourceStates(page, failedResponses, browserErrors
 
     const degradedResponse = await openProjectsForScenario("degraded");
     assert(degradedResponse.status() === 503, "degraded projection 场景未返回预期 503");
-    await page.locator('[data-testid="module-projection-state"][data-state="degraded"][data-source="mock"]').waitFor({ state: "visible", timeout: 8000 });
-    await expectBodyText(page, "降级模式 · Mock fixture");
-    await expectBodyText(page, "销售话术质检");
-    assert(await page.locator('.module-metrics[data-source="mock"] .module-metric').filter({ hasText: "Mock fixture" }).count() === 4, "degraded projection 未标明 fixture 指标来源");
+    await page.locator('[data-testid="module-projection-state"][data-state="degraded"][data-source="none"][data-content-source="none"]').waitFor({ state: "visible", timeout: 8000 });
+    await expectBodyText(page, "BFF 投影不可用");
+    await expectBodyText(page, "生产 truth 模式不会回落本地 fixture");
+    await page.getByTestId("module-detail-unavailable").waitFor({ state: "visible", timeout: 5000 });
+    assert(await page.locator(".project-work-card").count() === 0, "truth mode degraded 仍渲染静态项目 fixture");
+    assert((await page.locator('.module-metrics[data-source="pending"] .module-metric').filter({ hasText: "—" }).count()) === 4, "truth mode degraded 未清空 fixture 指标值");
+    assert(await page.getByText("Mock fixture", { exact: false }).count() === 0, "truth mode degraded 仍把 fixture 标记为页面数据源");
 
     const expectedFailureIndex = failedResponses.findIndex(
       (failure) => failure.status === 503 && projectsPattern.test(failure.url)
@@ -1296,6 +1341,267 @@ async function assertProjectionSourceStates(page, failedResponses, browserErrors
     browserErrors.splice(expectedConsoleErrorIndex, 1);
   } finally {
     await page.unroute(projectsPattern, routeHandler);
+  }
+
+  await openModule(page, "首页", "运营首页");
+  const homeProjectionState = page.getByTestId("module-projection-state");
+  await homeProjectionState.waitFor({ state: "visible", timeout: 8000 });
+  const homeProjectionContract = await homeProjectionState.evaluate((element) => ({
+    state: element.getAttribute("data-state"),
+    source: element.getAttribute("data-source"),
+    contentSource: element.getAttribute("data-content-source"),
+    text: element.textContent
+  }));
+  assert(
+    homeProjectionContract.state === "synced" &&
+      homeProjectionContract.source === "bff" &&
+      homeProjectionContract.contentSource === "none",
+    "truth mode 首页投影来源契约异常",
+    homeProjectionContract
+  );
+  await page.getByTestId("module-detail-unavailable").waitFor({ state: "visible", timeout: 5000 });
+  await expectBodyText(page, "BFF 明细尚未接入");
+  assert(await page.getByText("今日处理闭环", { exact: true }).count() === 0, "truth mode synced 未 hydrate 时仍渲染首页 fixture 明细");
+
+  for (const [nav, title, nonAuthoritativeSelector] of [
+    ["洞察", "业务洞察", ".insight-command-shell"],
+    ["评测", "评测中心", ".eval-grid"],
+    ["设置", "设置", ".settings-flow"]
+  ]) {
+    await openModule(page, nav, title);
+    await page.locator('[data-testid="module-projection-state"][data-state="synced"][data-source="bff"][data-content-source="none"]').waitFor({ state: "visible", timeout: 8000 });
+    await page.getByTestId("module-detail-unavailable").filter({ hasText: "生产 truth 模式不会挂载本地 fixture 或可操作控件" }).waitFor({ state: "visible", timeout: 5000 });
+    assert(
+      await page.locator(nonAuthoritativeSelector).count() === 0,
+      `${title} truth mode 仍挂载非权威原型内容或可操作控件`
+    );
+  }
+
+  for (const check of [
+    ["数据", "数据管理", /\/api\/v1\/audio-sessions\/aggregations(?:\?|$)/, ".data-reference-page", "bff"],
+    ["资产", "数据资产", /\/api\/v1\/data-assets\/recent(?:\?|$)/, ".asset-grid", "bff"]
+  ]) {
+    const [nav, title, pattern, fixtureSelector, syncedContentSource] = check;
+    await openModule(page, nav, title);
+    await page.locator(`[data-testid="module-projection-state"][data-state="synced"][data-source="bff"][data-content-source="${syncedContentSource}"]`).waitFor({ state: "visible", timeout: 8000 });
+    await page.locator(fixtureSelector).waitFor({ state: "visible", timeout: 5000 });
+    if (nav === "数据") {
+      await expectBodyText(page, "S-UI-BFF-TRUTH-001");
+      assert(await page.getByText("AF-128", { exact: true }).count() === 0, "数据 BFF 投影混入静态 dataAssets 行");
+      await page.locator(".asset-leaf .leaf-tags").getByText("处理产物未提供", { exact: true }).waitFor({ state: "visible", timeout: 5000 });
+      assert(await page.locator(".asset-leaf > b").filter({ hasText: "未提供" }).count() === 1, "缺失 session confidence 被伪装成数值");
+      assert(await page.locator(".detail-dagster-head > b").filter({ hasText: "未提供" }).count() === 1, "session confidence 被冒充为资产质量");
+      assert(await page.locator(".detail-evidence em").filter({ hasText: /^(VAD|ASR transcript|raw wav|voice_segments)$/ }).count() === 0, "聚合响应未提供处理产物时仍展示 VAD/ASR/raw wav 事实");
+      const connectorButton = page.getByTestId("data-connector-import");
+      assert(!(await connectorButton.isDisabled()), "已验证 target_asset_key 的数据会话未开放连接器导入");
+      await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({ state: "visible", timeout: 8000 });
+
+      let boundConnectorPayload = null;
+      const boundConnectorHandler = async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        boundConnectorPayload = route.request().postDataJSON();
+        return route.fulfill({
+          status: 201,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: { id: "connector-ui-scene-lock", status: "draft", trace_id: "trace_connector_ui_scene_lock" },
+            meta: { trace_id: "trace_connector_ui_scene_lock" }
+          })
+        });
+      };
+      await page.route("**/api/v1/connectors", boundConnectorHandler);
+      try {
+        await connectorButton.click();
+        await page.locator(".data-operation-toast").filter({ hasText: "连接器资源已创建" }).waitFor({ state: "visible", timeout: 5000 });
+      } finally {
+        await page.unroute("**/api/v1/connectors", boundConnectorHandler);
+      }
+      assert(
+        boundConnectorPayload?.scene_profile_id === "scene_ui_smoke_audio" &&
+          boundConnectorPayload?.scene_profile_version_id === "scenev_ui_smoke_audio_v1" &&
+          boundConnectorPayload?.scene_profile_snapshot_sha256 === uiSmokeSceneManifestSha256,
+        "数据连接器写入未锁定当前 SceneProfile 三元快照",
+        boundConnectorPayload
+      );
+
+      let boundDataExportPayload = null;
+      const boundDataExportHandler = async (route) => {
+        if (route.request().method() !== "POST") return route.continue();
+        boundDataExportPayload = route.request().postDataJSON();
+        return route.fulfill({
+          status: 202,
+          contentType: "application/json",
+          body: JSON.stringify({
+            data: { id: "export_data_ui_scene_lock", run_id: "export_data_ui_scene_lock", run_type: "export", status: "pending", trace_id: "trace_data_export_scene_lock" },
+            meta: { trace_id: "trace_data_export_scene_lock" }
+          })
+        });
+      };
+      await page.route("**/api/v1/exports", boundDataExportHandler);
+      try {
+        await page.getByTestId("data-export").click();
+        await page.locator(".data-operation-toast").filter({ hasText: "导出运行已创建" }).waitFor({ state: "visible", timeout: 5000 });
+      } finally {
+        await page.unroute("**/api/v1/exports", boundDataExportHandler);
+      }
+      assert(
+        boundDataExportPayload?.scene_profile_id === "scene_ui_smoke_audio" &&
+          boundDataExportPayload?.scene_profile_version_id === "scenev_ui_smoke_audio_v1" &&
+          boundDataExportPayload?.scene_profile_snapshot_sha256 === uiSmokeSceneManifestSha256,
+        "数据导出未锁定当前 SceneProfile 三元快照",
+        boundDataExportPayload
+      );
+
+      await setSceneBindingMode(page, "unbound");
+      let sceneBlockedConnectorPosts = 0;
+      let sceneBlockedExportPosts = 0;
+      const sceneBlockedObserver = (request) => {
+        const pathname = new URL(request.url()).pathname;
+        if (request.method() === "POST" && pathname === "/api/v1/connectors") sceneBlockedConnectorPosts += 1;
+        if (request.method() === "POST" && pathname === "/api/v1/exports") sceneBlockedExportPosts += 1;
+      };
+      page.on("request", sceneBlockedObserver);
+      try {
+        await openModule(page, "首页", "运营首页");
+        await openModule(page, "数据", "数据管理");
+        await page.locator('[data-testid="scene-runtime-context"][data-state="unbound"]').waitFor({ state: "visible", timeout: 8000 });
+        const sceneBlockedConnector = page.getByTestId("data-connector-import");
+        const sceneBlockedExport = page.getByTestId("data-export");
+        assert(await sceneBlockedConnector.isDisabled(), "SceneProfile 未绑定时数据连接器入口未禁用");
+        assert(await sceneBlockedExport.isDisabled(), "SceneProfile 未绑定时数据导出入口未禁用");
+        await page.getByTestId("data-project-write-blocked-reason").filter({ hasText: "未绑定已发布 SceneProfile" }).waitFor({ state: "visible", timeout: 5000 });
+        await sceneBlockedConnector.evaluate((element) => { element.disabled = false; element.click(); });
+        await sceneBlockedExport.evaluate((element) => { element.disabled = false; element.click(); });
+        await page.waitForTimeout(150);
+        assert(sceneBlockedConnectorPosts === 0, "SceneProfile 未绑定时数据连接器 operation guard 仍发起 POST");
+        assert(sceneBlockedExportPosts === 0, "SceneProfile 未绑定时数据导出 operation guard 仍发起 POST");
+      } finally {
+        page.off("request", sceneBlockedObserver);
+        await setSceneBindingMode(page, "automatic");
+        await openModule(page, "首页", "运营首页");
+        await openModule(page, "数据", "数据管理");
+        await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({ state: "visible", timeout: 8000 });
+      }
+
+      await openTab(page, "人物/声纹");
+      await page.getByTestId("data-voiceprint-unavailable").waitFor({ state: "visible", timeout: 5000 });
+      await expectBodyText(page, "候选读模型未就绪");
+      assert(await page.locator('[data-action-key="voiceprint-enroll-submit"]').count() === 0, "声纹候选读模型未就绪时仍渲染入库提交入口");
+      assert(await page.getByText("VP-A1001", { exact: true }).count() === 0, "声纹 truth 模式泄漏静态 voiceprintRecords");
+      await openTab(page, "音频数据");
+
+      const invalidTargetHandler = async (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          data: {
+            items: [{
+              group_key: "2026-07-20 / 10:00-11:00",
+              count: 1,
+              children: [{
+                audio_session_id: "S-UI-BFF-BLOCKED-001",
+                recording_id: "rec-ui-bff-blocked-001",
+                status: "pending_review",
+                confidence: 0.72,
+                target_asset_key: null,
+                connector_import: {
+                  enabled: false,
+                  blocked_reason: "当前会话未绑定本租户项目内已登记的数据资产"
+                }
+              }]
+            }]
+          },
+          meta: { trace_id: "trace_data_invalid_target" }
+        })
+      });
+      await page.route(pattern, invalidTargetHandler);
+      let connectorPosts = 0;
+      const connectorObserver = (request) => {
+        if (request.method() === "POST" && new URL(request.url()).pathname === "/api/v1/connectors") connectorPosts += 1;
+      };
+      page.on("request", connectorObserver);
+      try {
+        await openModule(page, "首页", "运营首页");
+        await page.locator('button[aria-label="导航：数据"]').first().click();
+        await expectBodyText(page, "数据管理");
+        await page.locator('[data-testid="module-projection-state"][data-state="synced"][data-content-source="bff"]').waitFor({ state: "visible", timeout: 8000 });
+        const blockedConnector = page.getByTestId("data-connector-import");
+        assert(await blockedConnector.isDisabled(), "未验证 target_asset_key 时连接器导入未 fail closed");
+        await page.getByTestId("data-connector-blocked-reason").filter({ hasText: "未绑定本租户项目内已登记的数据资产" }).waitFor({ state: "visible", timeout: 5000 });
+        await blockedConnector.evaluate((element) => { element.disabled = false; element.click(); });
+        await page.waitForTimeout(100);
+        assert(connectorPosts === 0, "未验证 target_asset_key 时仍发起连接器 POST");
+      } finally {
+        page.off("request", connectorObserver);
+        await page.unroute(pattern, invalidTargetHandler);
+      }
+    } else {
+      await page.locator(fixtureSelector).waitFor({ state: "visible", timeout: 5000 });
+      assert(await page.getByText("有效语音片段资产", { exact: true }).count() === 0, "资产 BFF 投影混入静态 catalog 行");
+      await page.getByTestId("asset-runtime-detail-unavailable").waitFor({ state: "visible", timeout: 5000 });
+      assert(await page.getByText("run-asr-20250526-0912", { exact: true }).count() === 0, "资产生产 truth 泄漏静态运行记录");
+      assert(await page.locator(".asset-governance-strip").getByText("失败分区", { exact: true }).count() === 0, "资产生产 truth 泄漏固定失败分区事实");
+
+      await openTab(page, "资产目录");
+      await page.locator(".asset-catalog-card").filter({ hasText: "事件标签资产" }).click();
+
+      await openTab(page, "资产血缘");
+      await page.getByTestId("asset-lineage-authoritative").waitFor({ state: "visible", timeout: 5000 });
+      await expectBodyText(page, "mat-ui-lineage-1");
+      assert(await page.locator(".asset-lineage-graph").count() === 0, "资产生产 truth 接入 lineage API 后仍渲染静态血缘图");
+
+      await openTab(page, "资产质量");
+      await page.getByTestId("asset-checks-authoritative").waitFor({ state: "visible", timeout: 5000 });
+      await expectBodyText(page, "check-event-schema");
+      const qualityRetry = page.getByTestId("asset-quality-retry");
+      assert(!(await qualityRetry.isDisabled()), "权威失败 checks 与 Scene lock 都就绪时质量重跑仍永久禁用");
+      const retryResponsePromise = page.waitForResponse(
+        (response) => response.url().endsWith("/checks/retry") && response.request().method() === "POST"
+      );
+      await qualityRetry.click();
+      const retryResponse = await retryResponsePromise;
+      assert(retryResponse.status() === 202, "质量重跑未返回 202", { status: retryResponse.status() });
+      const retryRequest = assetCheckRetryRequests.at(-1);
+      assert(
+        JSON.stringify(retryRequest?.payload?.failed_check_ids) === JSON.stringify(["check-event-schema", "check-event-lineage"]) &&
+          JSON.stringify(retryRequest?.payload?.failed_partitions) === JSON.stringify(["2026-07-20/store-a", "2026-07-20/store-b"]),
+        "质量重跑未发送权威失败 check ID/partition 子集",
+        retryRequest
+      );
+      assert(
+        retryRequest?.payload?.scene_profile_id === "scene_ui_smoke_audio" &&
+          retryRequest?.payload?.scene_profile_version_id === "scenev_ui_smoke_audio_v1" &&
+          retryRequest?.payload?.scene_profile_snapshot_sha256 === uiSmokeSceneManifestSha256,
+        "质量重跑未在顶层锁定当前 SceneProfile 三元快照",
+        retryRequest
+      );
+      assert(!("payload" in retryRequest.payload), "质量重跑仍把选择器和 Scene lock 嵌套进旧 payload 字段", retryRequest);
+      assert(await page.locator(".asset-quality-grid").getByText("96%", { exact: true }).count() === 0, "资产生产 truth 泄漏固定质量百分比");
+
+      await openTab(page, "数据回填");
+      await page.getByTestId("asset-backfill-blocked-reason").waitFor({ state: "visible", timeout: 5000 });
+      await page.locator(".asset-backfill-panel .asset-backfill-actions").getByRole("button", { name: "创建回填草稿", exact: true }).click();
+      const backfillSubmit = page.getByTestId("asset-backfill-submit");
+      assert(await backfillSubmit.isDisabled(), "资产生产 truth 缺少权威 partition_key 时仍允许提交回填");
+      assert((await page.locator(".asset-backfill-draft strong").innerText()).startsWith("UI-DRAFT-"), "本地回填草稿被伪装成服务端回执 ID");
+      await openTab(page, "资产目录");
+    }
+
+    const emptyHandler = async (route) => route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ data: { items: [] }, meta: { trace_id: `trace_${nav}_empty` } })
+    });
+    await page.route(pattern, emptyHandler);
+    try {
+      await openModule(page, "首页", "运营首页");
+      await page.locator(`button[aria-label="导航：${nav}"]`).first().click();
+      await expectBodyText(page, title);
+      await page.locator('[data-testid="module-projection-state"][data-state="empty"][data-source="bff"][data-content-source="none"]').waitFor({ state: "visible", timeout: 8000 });
+      assert(await page.locator(fixtureSelector).count() === 0, `${title} empty truth 投影仍回落静态 fixture`);
+    } finally {
+      await page.unroute(pattern, emptyHandler);
+    }
   }
 }
 
@@ -1320,7 +1626,25 @@ const projectionFixtures = {
   "/api/v1/projects": { data: { items: [{ id: "sales_qa", name: "销售话术质检" }] } },
   "/api/v1/task-versions": { data: { items: [{ id: "task_version_v3", status: "draft" }] } },
   "/api/v1/audio-sessions/aggregations": {
-    data: { items: [{ id: "people", total: 3 }, { id: "events", total: 46 }] }
+    data: {
+      items: [{
+        group_key: "2026-07-20 / 10:00-11:00",
+        count: 1,
+        status: "pending",
+        children: [{
+          audio_session_id: "S-UI-BFF-TRUTH-001",
+          recording_id: "rec-ui-bff-truth-001",
+          store_id: "store-ui-bff-001",
+          primary_employee_id: "employee-ui-bff-001",
+          started_at: "2026-07-20T10:00:00+08:00",
+          ended_at: "2026-07-20T10:03:06+08:00",
+          status: "pending_review",
+          target_asset_key: "auris/audio/raw_recordings",
+          connector_import: { enabled: true, blocked_reason: null },
+          trace_id: "trace_ui_bff_truth_001"
+        }]
+      }]
+    }
   },
   "/api/v1/audio-sessions": {
     data: {
@@ -1393,13 +1717,37 @@ const projectionFixtures = {
   },
   "/api/v1/eval-runs": { data: { items: [{ id: "eval_run_seed", status: "success" }] } },
   "/api/v1/data-assets/recent": {
-    data: { items: [{ id: "asset_event_tags", asset_key: "auris/label/event_tags" }] }
+    data: { items: [
+      { id: "asset_raw", asset_key: "auris/audio/raw_recordings", display_name: "原始音频资产", domain: "audio", status: "success", quality_score: 92, freshness: "15 分钟内", owner: "asset_manager" },
+      { id: "asset_asr", asset_key: "auris/model/asr_transcripts", display_name: "ASR 转写资产", domain: "audio", status: "warning", quality_score: 88, freshness: "20 分钟内", owner: "model_engineer", latest_partition_key: "2026-07-20/store-a", latest_materialization_id: "mat_asr_20250526_122300", upstream: ["auris/audio/raw_recordings"], downstream: ["auris/label/event_tags", "auris/eval/quality_metrics"] },
+      { id: "asset_event_tags", asset_key: "auris/label/event_tags", display_name: "事件标签资产", domain: "label", status: "risk", quality_score: 86, freshness: "45 分钟内", owner: "label_governor", latest_materialization_id: "mat_label_20250526_122300", upstream: ["auris/audio/raw_recordings"], downstream: ["auris/eval/quality_metrics"] }
+    ] }
   },
   "/api/v1/settings": { data: { items: [{ id: "model_provider", status: "enabled" }] } }
 };
 
+const authoritativeAssetCheckFixtures = {
+  "auris/audio/raw_recordings": {
+    display_name: "原始音频资产",
+    checks: [{ check_id: "check-raw-access", name: "URL 可访问", status: "passed", failed_partitions: [] }]
+  },
+  "auris/model/asr_transcripts": {
+    display_name: "ASR 转写资产",
+    checks: [{ check_id: "check-asr-empty-rate", name: "空转写率", status: "failed", failed_partitions: ["2026-07-20/store-a"] }]
+  },
+  "auris/label/event_tags": {
+    display_name: "事件标签资产",
+    checks: [
+      { check_id: "check-event-schema", name: "Schema 稳定性", status: "failed", failed_partitions: ["2026-07-20/store-a"] },
+      { check_id: "check-event-freshness", name: "新鲜度", status: "passed", failed_partitions: [] },
+      { check_id: "check-event-lineage", name: "血缘完整性", status: "passed", failed_partitions: ["2026-07-20/store-b"] }
+    ]
+  }
+};
+
 const projectionHits = new Set();
 let exportRequests = 0;
+const exportPayloads = [];
 let authLoginRequests = 0;
 let authLogoutRequests = 0;
 const authEmails = [];
@@ -1417,6 +1765,7 @@ const hotwordBadcaseReadRequests = [];
 const taskWriteRequests = [];
 const taskReleaseRequests = [];
 const assetBackfillRequests = [];
+const assetCheckRetryRequests = [];
 const labelReviewRequests = [];
 const labelReviewTasks = new Map();
 for (const task of projectionFixtures["/api/v1/human-review-tasks"].data.items) {
@@ -1522,6 +1871,8 @@ const manualLabelFactId = "label-fact-manual-ui-1";
 const manualLabelRequests = [];
 let manualLabelDraftCreated = false;
 let manualLabelRebaseConfirmed = false;
+let sceneBindingFailuresRemaining = 2;
+let sceneBindingMode = "automatic";
 let labelExtractionRunId = "";
 let labelAggregationRunId = "label-aggregation-ui-1";
 let labelStrongVersionId = "";
@@ -1553,6 +1904,9 @@ let taskVersionPublishPollRequests = 0;
 let badcaseResourceVersion = 3;
 let candidateItemResourceVersion = 1;
 let candidateItemAliases = ["星越 L"];
+let candidateItemSourceBadcaseId = null;
+let candidateItemSourceType = "seed";
+let candidateItemWeight = 80;
 const smokeSessionToken = "auris.v1.ui-smoke.server-issued";
 const smokeCsrfToken = "ui-smoke-csrf-token";
 const uiSmokeSceneManifestSha256 = "4c15a212be8c1ebc466e1c8845412737d8be38df85980a057dbccf489303581f";
@@ -1650,9 +2004,9 @@ const inheritedHotwordItem = () => ({
   normalized_term: "星越l",
   aliases: candidateItemAliases,
   category: "vehicle-model",
-  weight: 80,
-  source_badcase_id: null,
-  source_type: "seed",
+  weight: candidateItemWeight,
+  source_badcase_id: candidateItemSourceBadcaseId,
+  source_type: candidateItemSourceType,
   resource_version: candidateItemResourceVersion
 });
 
@@ -1687,6 +2041,18 @@ const bffStub = createHttpServer((request, response) => {
     return;
   }
   const path = request.url?.split("?")[0] ?? "";
+  if (path === "/api/__e2e__/scene-binding-mode" && request.method === "GET") {
+    const mode = new URL(request.url ?? "", "http://127.0.0.1").searchParams.get("mode") ?? "";
+    if (!["automatic", "error", "unbound", "delayed-bound"].includes(mode)) {
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "INVALID_SCENE_BINDING_MODE", message: mode } }));
+      return;
+    }
+    sceneBindingMode = mode;
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({ data: { mode: sceneBindingMode } }));
+    return;
+  }
   if (path === "/api/v1/auth/dev-login" && request.method === "POST") {
     let body = "";
     request.on("data", (chunk) => {
@@ -1882,23 +2248,49 @@ const bffStub = createHttpServer((request, response) => {
   }
   const sceneProfileBindingMatch = path.match(/^\/api\/v1\/projects\/([^/]+)\/scene-profile$/);
   if (sceneProfileBindingMatch && request.method === "GET") {
+    if (sceneBindingMode === "error" || (sceneBindingMode === "automatic" && sceneBindingFailuresRemaining > 0)) {
+      if (sceneBindingMode === "automatic") sceneBindingFailuresRemaining -= 1;
+      response.writeHead(503, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        error: {
+          code: "SCENE_PROFILE_BINDING_TEMPORARILY_UNAVAILABLE",
+          message: "场景绑定服务暂时不可用"
+        }
+      }));
+      return;
+    }
+    if (sceneBindingMode === "unbound") {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: null,
+        meta: { trace_id: "trace_ui_smoke_scene_profile_unbound", request_id: "ui-smoke-scene-profile-unbound" }
+      }));
+      return;
+    }
     const projectId = decodeURIComponent(sceneProfileBindingMatch[1]);
-    response.writeHead(200, { "Content-Type": "application/json" });
-    response.end(JSON.stringify({
-      data: {
-        binding_id: `sceneb_ui_smoke_${projectId}_production`,
-        project_id: projectId,
-        environment: "production",
-        scene_profile_id: "scene_ui_smoke_audio",
-        scene_profile_version_id: "scenev_ui_smoke_audio_v1",
-        manifest_sha256: uiSmokeSceneManifestSha256,
-        status: "active",
-        resource_version: 1,
-        trace_id: "trace_ui_smoke_scene_profile",
-        version: uiSmokeSceneProfileVersion()
-      },
-      meta: { trace_id: "trace_ui_smoke_scene_profile", request_id: "ui-smoke-scene-profile" }
-    }));
+    const sendBoundScene = () => {
+      response.writeHead(200, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: {
+          binding_id: `sceneb_ui_smoke_${projectId}_production`,
+          project_id: projectId,
+          environment: "production",
+          scene_profile_id: "scene_ui_smoke_audio",
+          scene_profile_version_id: "scenev_ui_smoke_audio_v1",
+          manifest_sha256: uiSmokeSceneManifestSha256,
+          status: "active",
+          resource_version: 1,
+          trace_id: "trace_ui_smoke_scene_profile",
+          version: uiSmokeSceneProfileVersion()
+        },
+        meta: { trace_id: "trace_ui_smoke_scene_profile", request_id: "ui-smoke-scene-profile" }
+      }));
+    };
+    if (sceneBindingMode === "delayed-bound") {
+      setTimeout(sendBoundScene, 750);
+      return;
+    }
+    sendBoundScene();
     return;
   }
   if (path === "/api/v1/label-extraction-runs" && request.method === "POST") {
@@ -3647,6 +4039,9 @@ const bffStub = createHttpServer((request, response) => {
         candidatePublishRunId = null;
         candidateItemResourceVersion = 1;
         candidateItemAliases = ["星越 L"];
+        candidateItemSourceBadcaseId = null;
+        candidateItemSourceType = "seed";
+        candidateItemWeight = 80;
       } else if (isItemPatch) {
         if (payload.expected_resource_version !== candidateItemResourceVersion) {
           response.writeHead(409, { "Content-Type": "application/json" });
@@ -3654,6 +4049,9 @@ const bffStub = createHttpServer((request, response) => {
           return;
         }
         candidateItemAliases = Array.isArray(payload.aliases) ? payload.aliases : candidateItemAliases;
+        candidateItemSourceBadcaseId = typeof payload.source_badcase_id === "string" ? payload.source_badcase_id : candidateItemSourceBadcaseId;
+        candidateItemSourceType = typeof payload.source_type === "string" ? payload.source_type : candidateItemSourceType;
+        candidateItemWeight = typeof payload.weight === "number" ? payload.weight : candidateItemWeight;
         candidateItemResourceVersion += 1;
         candidateResourceVersion += 1;
       } else if (isItemCreate) {
@@ -3859,6 +4257,66 @@ const bffStub = createHttpServer((request, response) => {
     });
     return;
   }
+  const decodedLineagePath = decodeURIComponent(path);
+  if (
+    decodedLineagePath.startsWith("/api/v1/data-assets/") &&
+    decodedLineagePath.endsWith("/lineage") &&
+    request.method === "GET"
+  ) {
+    const assetKey = decodedLineagePath.slice("/api/v1/data-assets/".length, -"/lineage".length);
+    const upstreamAssetKey = assetKey === "auris/audio/raw_recordings"
+      ? "external/pbx-recordings"
+      : "auris/audio/raw_recordings";
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: {
+        asset: {
+          asset_key: assetKey,
+          display_name: assetKey.split("/").slice(-1)[0],
+          trace_id: "trace-ui-lineage-asset"
+        },
+        nodes: [
+          { asset_key: upstreamAssetKey, label: "权威上游资产", node_type: "asset", direction: "upstream", trace_id: "trace-ui-lineage-upstream" },
+          { asset_key: assetKey, label: "当前权威资产", node_type: "asset", direction: "current", trace_id: "trace-ui-lineage-asset" },
+          { asset_key: "mat-ui-lineage-1", label: "mat-ui-lineage-1", node_type: "materialization", direction: "runtime", run_id: "run-ui-lineage-1", trace_id: "trace-ui-lineage-materialization" }
+        ],
+        edges: [
+          { edge_id: "edge-ui-upstream", from: upstreamAssetKey, to: assetKey, direction: "upstream", lineage_source: "data_asset_projection", trace_id: "trace-ui-lineage-upstream" },
+          { edge_id: "edge-ui-materialization", from: "mat-ui-lineage-1", to: assetKey, direction: "materialized", lineage_source: "asset_materialization", materialization_id: "mat-ui-lineage-1", trace_id: "trace-ui-lineage-materialization" }
+        ],
+        materializations: [{
+          materialization_id: "mat-ui-lineage-1",
+          asset_key: assetKey,
+          run_id: "run-ui-lineage-1",
+          partition_key: "2026-07-20 / 10:00-11:00",
+          status: "success",
+          trace_id: "trace-ui-lineage-materialization"
+        }]
+      },
+      meta: { trace_id: "trace-ui-lineage", request_id: "ui-smoke-lineage" }
+    }));
+    return;
+  }
+  const decodedAssetDetailPath = decodeURIComponent(path);
+  const assetDetailPrefix = "/api/v1/data-assets/";
+  const assetDetailKey = decodedAssetDetailPath.startsWith(assetDetailPrefix)
+    ? decodedAssetDetailPath.slice(assetDetailPrefix.length)
+    : "";
+  if (
+    request.method === "GET" &&
+    Object.prototype.hasOwnProperty.call(authoritativeAssetCheckFixtures, assetDetailKey)
+  ) {
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: {
+        asset_key: assetDetailKey,
+        ...authoritativeAssetCheckFixtures[assetDetailKey],
+        trace_id: `trace-ui-checks-${assetDetailKey.replaceAll("/", "-")}`
+      },
+      meta: { trace_id: "trace-ui-asset-checks", request_id: "ui-smoke-asset-checks" }
+    }));
+    return;
+  }
   if (
     decodeURIComponent(path) === "/api/v1/data-assets/auris/model/asr_transcripts/materializations" &&
     request.method === "GET"
@@ -3901,6 +4359,29 @@ const bffStub = createHttpServer((request, response) => {
     });
     return;
   }
+  if (path.startsWith("/api/v1/data-assets/") && path.endsWith("/checks/retry") && request.method === "POST") {
+    let body = "";
+    request.on("data", (chunk) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      const payload = body ? JSON.parse(body) : {};
+      assetCheckRetryRequests.push({ path, method: request.method, payload });
+      response.writeHead(202, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({
+        data: {
+          id: "asset-check-retry-ui-1",
+          run_id: "asset-check-retry-ui-1",
+          run_type: "asset_check_retry",
+          status: "pending",
+          asset_key: "auris/label/event_tags",
+          trace_id: "trace_asset_check_retry_ui"
+        },
+        meta: { trace_id: "trace_asset_check_retry_ui", request_id: "ui-smoke-asset-check-retry" }
+      }));
+    });
+    return;
+  }
   if (path === "/api/v1/runs/asset-backfill-hotword-ui-1" && request.method === "GET") {
     assetBackfillPollRequests += 1;
     const complete = assetBackfillPollRequests >= 2;
@@ -3927,6 +4408,7 @@ const bffStub = createHttpServer((request, response) => {
     request.on("end", () => {
       exportRequests += 1;
       const payload = body ? JSON.parse(body) : {};
+      exportPayloads.push(payload);
       const runId = `export_ui_smoke_${exportRequests}`;
       response.writeHead(202, { "Content-Type": "application/json" });
       response.end(
@@ -4016,6 +4498,25 @@ const actualPort =
   typeof serverAddress === "object" && serverAddress !== null ? serverAddress.port : port;
 const baseUrl = server.resolvedUrls?.local?.[0] ?? `http://127.0.0.1:${actualPort}/`;
 
+const demoServer = await createServer({
+  root,
+  logLevel: "error",
+  define: {
+    "import.meta.env.VITE_DEMO_MODE": JSON.stringify("true")
+  },
+  server: {
+    host: "127.0.0.1",
+    port: 0,
+    strictPort: false
+  }
+});
+
+await demoServer.listen();
+const demoServerAddress = demoServer.httpServer?.address();
+const demoPort =
+  typeof demoServerAddress === "object" && demoServerAddress !== null ? demoServerAddress.port : 0;
+const demoBaseUrl = demoServer.resolvedUrls?.local?.[0] ?? `http://127.0.0.1:${demoPort}/`;
+
 const browser = await chromium.launch({ headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
 const browserErrors = [];
@@ -4036,8 +4537,18 @@ page.on("console", (message) => {
   if (message.type() === "error") browserErrors.push(message.text());
 });
 page.on("requestfailed", (request) => {
+  const failure = request.failure()?.errorText ?? "unknown request failure";
+  const pathname = new URL(request.url()).pathname;
+  if (
+    failure === "net::ERR_ABORTED" &&
+    request.method() === "GET" &&
+    pathname.startsWith("/api/v1/data-assets/")
+  ) {
+    // 资产或项目 scope 切换会主动取消旧详情/血缘读取；这是防 stale 的成功路径。
+    return;
+  }
   requestFailures.push({
-    error: request.failure()?.errorText ?? "unknown request failure",
+    error: failure,
     method: request.method(),
     url: request.url()
   });
@@ -4070,6 +4581,97 @@ try {
   }
   await expectBodyText(page, "运营首页");
 
+  await page.locator('[data-testid="scene-runtime-context"][data-state="error"]').waitFor({
+    state: "visible",
+    timeout: 8000
+  });
+  const blockedSceneExport = page.locator(".quick-actions button").filter({ hasText: "导出" }).first();
+  assert(await blockedSceneExport.isDisabled(), "SceneProfile 读取失败时项目级导出按钮未禁用");
+  assert(
+    (await blockedSceneExport.getAttribute("title"))?.includes("SceneProfile"),
+    "SceneProfile 读取失败时项目级导出按钮未提供明确原因"
+  );
+  const exportsBeforeBlockedClick = exportRequests;
+  await blockedSceneExport.evaluate((element) => element.click());
+  await page.waitForTimeout(100);
+  assert(exportRequests === exportsBeforeBlockedClick, "SceneProfile 读取失败时项目级导出仍发起 POST");
+  await expectBodyText(page, "项目级写入与导出");
+  await page.locator(".quick-actions button").filter({ hasText: "写入" }).first().click();
+  const blockedSceneWrite = page.locator(".module-command-panel .module-crud-strip button").first();
+  assert(await blockedSceneWrite.isDisabled(), "SceneProfile 读取失败时项目级写按钮未禁用");
+  await expectBodyText(page, "SceneProfile 绑定读取失败");
+  await page.getByRole("button", { name: "重试场景绑定", exact: true }).click();
+  await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({
+    state: "visible",
+    timeout: 8000
+  });
+  await blockedSceneWrite.click({ trial: true, timeout: 3000 });
+  await page.locator(".quick-actions button").filter({ hasText: "写入" }).first().click();
+
+  await setSceneBindingMode(page, "unbound");
+  await openModule(page, "知识库", "知识库");
+  await page.locator('[data-testid="scene-runtime-context"][data-state="unbound"]').waitFor({ state: "visible", timeout: 8000 });
+  const unboundExport = page.locator(".module-head .quick-actions button").filter({ hasText: "导出" }).first();
+  assert(await unboundExport.isDisabled(), "SceneProfile 未绑定时项目级导出按钮未禁用");
+  assert((await unboundExport.getAttribute("title"))?.includes("尚未绑定"), "SceneProfile 未绑定时导出按钮缺少明确原因");
+  const exportsBeforeUnboundClick = exportRequests;
+  await unboundExport.evaluate((element) => element.click());
+  await page.waitForTimeout(100);
+  assert(exportRequests === exportsBeforeUnboundClick, "SceneProfile 未绑定时项目级导出仍发起 POST");
+  await expectBodyText(page, "当前项目未绑定生产场景；项目级写入与导出保持禁用");
+
+  await openModule(page, "资产", "数据资产");
+  await openTab(page, "资产质量");
+  const unboundAssetExport = page.getByTestId("asset-package-export");
+  await unboundAssetExport.waitFor({ state: "visible", timeout: 8000 });
+  assert(await unboundAssetExport.isDisabled(), "Assets 内部导出绕过了 SceneProfile 未绑定门禁");
+  assert(
+    (await unboundAssetExport.getAttribute("title"))?.includes("未绑定"),
+    "Assets 内部导出未显示 SceneProfile 阻断原因"
+  );
+  const exportsBeforeUnboundAssetClick = exportRequests;
+  await unboundAssetExport.evaluate((element) => element.click());
+  await page.waitForTimeout(100);
+  assert(
+    exportRequests === exportsBeforeUnboundAssetClick,
+    "SceneProfile 未绑定时 Assets 内部导出仍发起 POST"
+  );
+
+  await setSceneBindingMode(page, "delayed-bound");
+  await page.locator('button[aria-label="导航：数据"]').first().click();
+  await expectBodyText(page, "数据管理");
+  await page.locator('[data-testid="scene-runtime-context"][data-state="pending"]').waitFor({ state: "visible", timeout: 3000 });
+  const pendingExport = page.locator(".module-head .quick-actions button").filter({ hasText: "导出" }).first();
+  assert(await pendingExport.isDisabled(), "SceneProfile 读取中时项目级导出按钮未禁用");
+  assert((await pendingExport.getAttribute("title"))?.includes("正在读取"), "SceneProfile 读取中时导出按钮缺少明确原因");
+  const exportsBeforePendingClick = exportRequests;
+  await pendingExport.evaluate((element) => element.click());
+  await page.waitForTimeout(100);
+  assert(exportRequests === exportsBeforePendingClick, "SceneProfile 读取中时项目级导出仍发起 POST");
+  await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({ state: "visible", timeout: 5000 });
+
+  await setSceneBindingMode(page, "error");
+  await runSceneProfileExportExemptionSmoke(page, "租户", "租户管理");
+  await runSceneProfileExportExemptionSmoke(page, "项目", "项目管理");
+  await runSceneProfileExportExemptionSmoke(page, "设置", "设置");
+  await setSceneBindingMode(page, "automatic");
+  await openModule(page, "首页", "运营首页");
+  await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({ state: "visible", timeout: 8000 });
+  const expectedSceneFailures = failedResponses.filter(
+    (failure) => failure.status === 503 && failure.url.includes("/scene-profile")
+  );
+  assert(expectedSceneFailures.length >= 1, "SceneProfile 瞬时失败响应未被观测");
+  for (let index = failedResponses.length - 1; index >= 0; index -= 1) {
+    if (failedResponses[index].status === 503 && failedResponses[index].url.includes("/scene-profile")) {
+      failedResponses.splice(index, 1);
+    }
+  }
+  for (let index = browserErrors.length - 1; index >= 0; index -= 1) {
+    if (browserErrors[index].includes("503") && browserErrors[index].includes("Service Unavailable")) {
+      browserErrors.splice(index, 1);
+    }
+  }
+
   const visited = [];
   for (const check of moduleChecks) {
     await openModule(page, check.nav, check.title);
@@ -4091,7 +4693,11 @@ try {
   await runManualLabelVersionWorkflowSmoke(page, failedResponses, browserErrors, requestFailures);
   await assertProjectionSourceStates(page, failedResponses, browserErrors);
   await runLabelGovernanceTruthSmoke(page);
-  await runHotwordGovernanceSmoke(page);
+  await page.goto(demoBaseUrl, { waitUntil: "networkidle", timeout: 30000 });
+  await expectBodyText(page, "运营首页");
+  await runHotwordGovernanceDemoSmoke(page);
+  await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 30000 });
+  await expectBodyText(page, "运营首页");
   await runModalCloseSmoke(page);
   await runModuleCommandSmoke(page);
   assert(browserErrors.length === 0, "浏览器控制台存在错误", { browserErrors, failedResponses });
@@ -4104,7 +4710,7 @@ try {
     missingProjectionHits,
     projectionHits: [...projectionHits]
   });
-  assert(exportRequests === 1, "UI smoke 未通过全局导出创建后端导出运行", { exportRequests });
+  assert(exportRequests === 4, "UI smoke 未覆盖三类治理豁免导出与一个 SceneProfile 锁定导出", { exportRequests, exportPayloads });
   assert(authLoginRequests === 2, "UI smoke 未完成模型负责人到项目管理员的分权登录", { authLoginRequests });
   assert(authEmails.join(",") === "model@auris.local,demo.operator@auris.local", "UI smoke 登录身份顺序不符合审批 RBAC", { authEmails });
   assert(expectedInitialAuthResponseFailures === 1, "UI smoke 启动时匿名会话探测应且仅应失败一次", { expectedInitialAuthResponseFailures });
@@ -4434,6 +5040,13 @@ try {
   assert(hotwordBackfillWrite?.payload?.impact_scope?.source_asset === "auris/model/asr_transcripts" && hotwordBackfillWrite.payload.impact_scope.source_materialization_id === "mat_asr_20250526_122300", "热词回填缺少源资产或权威物化记录", hotwordBackfillWrite);
   assert(hotwordBackfillWrite?.payload?.impact_scope?.materialization_id === "mat_asr_20250526_122300", "热词回填仍在使用静态 MAT 物化 ID", hotwordBackfillWrite);
   assert(hotwordBackfillWrite?.payload?.impact_scope?.root_trace_id === "trace_hotword_pack_auto_sales" && hotwordBackfillWrite?.payload?.impact_scope?.overwrite_history === false, "热词回填未携带后端根 Trace 或错误允许覆盖历史资产", hotwordBackfillWrite);
+  assert(
+    hotwordBackfillWrite?.payload?.scene_profile_id === "scene_ui_smoke_audio" &&
+      hotwordBackfillWrite?.payload?.scene_profile_version_id === "scenev_ui_smoke_audio_v1" &&
+      hotwordBackfillWrite?.payload?.scene_profile_snapshot_sha256 === uiSmokeSceneManifestSha256,
+    "Assets 内部受控回填缺少当前已发布 SceneProfile 三元锁",
+    hotwordBackfillWrite
+  );
   await page.locator("button.sidebar-user-logout").click();
   await page.getByRole("button", { name: "登录" }).waitFor({ state: "visible", timeout: 10000 });
   assert(authLogoutRequests === 2, "UI smoke 两次退出登录未撤销服务端会话", { authLogoutRequests });
@@ -4451,6 +5064,7 @@ try {
   );
 } finally {
   await browser.close();
+  await demoServer.close();
   await server.close();
   await new Promise((resolve) => bffStub.close(resolve));
 }

@@ -147,6 +147,11 @@ export type WorkspacePlatformMutationReceipt = {
   raw: Record<string, unknown>;
 };
 
+export type WorkspaceWriteRequestOptions = {
+  idempotencyKey?: string;
+  correlationId?: string;
+};
+
 export interface ModuleWorkspaceGateway {
   getProjectSceneProfile(
     projectId: string,
@@ -163,6 +168,7 @@ export interface ModuleWorkspaceGateway {
   getBackendRun(runId: string): Promise<WorkspaceApiEnvelope<WorkspaceBackendActionReceipt>>;
   createPlatformMutation(
     moduleKey: Exclude<ModuleKey, "listening">,
-    payload: Record<string, unknown>
+    payload: Record<string, unknown>,
+    options?: WorkspaceWriteRequestOptions
   ): Promise<WorkspaceApiEnvelope<WorkspacePlatformMutationReceipt>>;
 }

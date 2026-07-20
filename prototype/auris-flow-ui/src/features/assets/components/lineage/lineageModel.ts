@@ -1,4 +1,4 @@
-import { assetRows } from "../../catalog";
+import type { AssetCatalogRow } from "../../types";
 
 export type AssetLineageNode = {
   id: string;
@@ -21,7 +21,7 @@ export type AssetLineageEdge = {
   dashed?: boolean;
 };
 
-export function createAssetLineageNodes(): AssetLineageNode[] {
+export function createAssetLineageNodes(assetRows: AssetCatalogRow[]): AssetLineageNode[] {
   const findAsset = (assetKey: string) => assetRows.find((asset) => asset.assetKey === assetKey);
   return [
     {
@@ -42,7 +42,7 @@ export function createAssetLineageNodes(): AssetLineageNode[] {
       meta: "daily/store/hour",
       status: findAsset("auris/audio/raw_recordings")?.status ?? "已生成",
       dagster: "音频外部数据源",
-      quality: findAsset("auris/audio/raw_recordings")?.quality,
+      quality: findAsset("auris/audio/raw_recordings")?.quality ?? undefined,
       x: 226,
       y: 56,
       tone: "audio",
@@ -55,7 +55,7 @@ export function createAssetLineageNodes(): AssetLineageNode[] {
       meta: "VAD / 静音跳过 / SNR",
       status: findAsset("auris/audio/voice_segments")?.status ?? "已生成",
       dagster: "Asset + DynamicPartitions",
-      quality: findAsset("auris/audio/voice_segments")?.quality,
+      quality: findAsset("auris/audio/voice_segments")?.quality ?? undefined,
       x: 428,
       y: 56,
       tone: "audio",
@@ -80,7 +80,7 @@ export function createAssetLineageNodes(): AssetLineageNode[] {
       meta: "ASR v2.3.1 / RetryPolicy",
       status: findAsset("auris/model/asr_transcripts")?.status ?? "部分失败",
       dagster: "Asset + RetryPolicy",
-      quality: findAsset("auris/model/asr_transcripts")?.quality,
+      quality: findAsset("auris/model/asr_transcripts")?.quality ?? undefined,
       x: 630,
       y: 56,
       tone: "model",
@@ -93,7 +93,7 @@ export function createAssetLineageNodes(): AssetLineageNode[] {
       meta: "报价单 / 试驾单 / 订单",
       status: findAsset("auris/events/document_links")?.status ?? "已生成",
       dagster: "External Asset Ingest",
-      quality: findAsset("auris/events/document_links")?.quality,
+      quality: findAsset("auris/events/document_links")?.quality ?? undefined,
       x: 630,
       y: 192,
       tone: "event",
@@ -106,7 +106,7 @@ export function createAssetLineageNodes(): AssetLineageNode[] {
       meta: "标签 v1.8.4 / Human Gate",
       status: findAsset("auris/label/event_tags")?.status ?? "待回填",
       dagster: "MultiAsset + HumanReview",
-      quality: findAsset("auris/label/event_tags")?.quality,
+      quality: findAsset("auris/label/event_tags")?.quality ?? undefined,
       x: 832,
       y: 56,
       tone: "label",
@@ -152,7 +152,7 @@ export function createAssetLineageNodes(): AssetLineageNode[] {
       meta: "模型质量 / AB 实验 / 洞察",
       status: findAsset("auris/eval/quality_metrics")?.status ?? "已生成",
       dagster: "AssetCheck + Report",
-      quality: findAsset("auris/eval/quality_metrics")?.quality,
+      quality: findAsset("auris/eval/quality_metrics")?.quality ?? undefined,
       x: 1236,
       y: 56,
       tone: "quality",

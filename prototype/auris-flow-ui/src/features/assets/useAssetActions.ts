@@ -10,7 +10,9 @@ import {
   backendRunSucceeded,
   operationStatusFromBackendRun
 } from "../../shared/runtime/backendRunStatus";
-import { assetRows } from "./catalog";
+import { LABEL_DEMO_MODE } from "../../shared/runtime/demoMode";
+import type { ProjectSceneLock } from "../../shared/runtime/projectSceneLock";
+import type { FailedAssetCheckSelection } from "./authoritativeAssetChecks";
 import type {
   AssetActionState,
   AssetBackfillDraft,
@@ -20,16 +22,34 @@ import type {
 } from "./types";
 
 type UseAssetActionsOptions = AssetActionState & {
+  assetRows: AssetCatalogRow[];
+  backfillReady: boolean;
+  backfillBlockedReason: string;
   selectedAsset: AssetCatalogRow;
   currentDraft: AssetBackfillDraft | null;
   hotwordBackfillRecovery: HotwordBackfillRecovery;
+  qualityRetryBlockedReason: string;
+  qualityRetryReady: boolean;
+  qualityRetrySelection: FailedAssetCheckSelection | null;
+  readScopeKey: string;
+  sceneProfileBlockedReason: string;
+  sceneProfileLock: ProjectSceneLock | null;
   setSelectedAssetKey: (assetKey: string) => void;
 };
 
 export function useAssetActions({
   assetAction,
+  assetRows,
+  backfillReady,
+  backfillBlockedReason,
   currentDraft,
   hotwordBackfillRecovery,
+  qualityRetryBlockedReason,
+  qualityRetryReady,
+  qualityRetrySelection,
+  readScopeKey,
+  sceneProfileBlockedReason,
+  sceneProfileLock,
   selectedAsset,
   setAssetAction,
   setAssetNotice,
@@ -44,9 +64,12 @@ export function useAssetActions({
     const targetAsset = assetRows.find((asset) => asset.assetKey === assetKey) ?? selectedAsset;
     setSelectedAssetKey(targetAsset.assetKey);
     setBackfillDraft({
+      scopeKey: readScopeKey,
       assetKey: targetAsset.assetKey,
       assetName: targetAsset.name,
-      draftId: `BF-${targetAsset.materialization.split("-").slice(-2).join("-")}`,
+      draftId: LABEL_DEMO_MODE
+        ? `BF-${targetAsset.materialization.split("-").slice(-2).join("-")}`
+        : `UI-DRAFT-${crypto.randomUUID()}`,
       reason,
       status: "草稿",
       rootTraceId: context.rootTraceId,
@@ -54,14 +77,22 @@ export function useAssetActions({
     });
     setAssetNotice({
       status: "success",
-      title: "回填草稿已生成",
-      detail: `${targetAsset.name} 已生成回填草稿，提交前不会影响已确认资产。`
+      title: "UI 回填草稿已生成",
+      detail: `${targetAsset.name} 已生成本地 UI 草稿；这不是服务端回执，提交前不会影响已确认资产。`
     });
   };
 
   const submitBackfillDraft = async () => {
     if (!currentDraft || assetAction === "backfill") return;
     const targetAsset = assetRows.find((asset) => asset.assetKey === currentDraft.assetKey) ?? selectedAsset;
+    if (!sceneProfileLock || !backfillReady || targetAsset.partition === "BFF 未提供") {
+      setAssetNotice({
+        status: "error",
+        title: "受控回填提交已阻断",
+        detail: `${backfillBlockedReason || "项目写入上下文未就绪"}；UI 草稿保留，未发送回填请求。`
+      });
+      return;
+    }
     if (currentDraft.reason.includes("ASR 热词") && !currentDraft.hotwordBinding) {
       setAssetNotice({
         status: "error",
@@ -79,13 +110,16 @@ export function useAssetActions({
     try {
       const receipt = await createPlatformMutation("assets", {
         action: "提交受控资产回填",
+        ...sceneProfileLock,
         asset_key: currentDraft.assetKey,
         partition_key: targetAsset.partition,
         reason: currentDraft.reason,
         impact_scope: {
           scope: "current_project",
-          draft_id: currentDraft.draftId,
-          materialization_id: currentDraft.hotwordBinding?.sourceMaterializationId ?? targetAsset.materialization,
+          ui_draft_id: currentDraft.draftId,
+          ...((currentDraft.hotwordBinding?.sourceMaterializationId || targetAsset.materialization !== "尚无生成记录") ? {
+            materialization_id: currentDraft.hotwordBinding?.sourceMaterializationId ?? targetAsset.materialization
+          } : {}),
           downstream_assets: targetAsset.downstream,
           root_trace_id: currentDraft.rootTraceId,
           overwrite_history: false,
@@ -155,6 +189,14 @@ export function useAssetActions({
 
   const rerunAssetQuality = async () => {
     if (assetAction === "quality") return;
+    if (!sceneProfileLock || !qualityRetryReady || !qualityRetrySelection) {
+      setAssetNotice({
+        status: "error",
+        title: "质量校验重跑已阻断",
+        detail: `${qualityRetryBlockedReason || sceneProfileBlockedReason || "权威失败 checks 未就绪"}；未创建运行。`
+      });
+      return;
+    }
     setAssetAction("quality");
     setAssetNotice({
       status: "pending",
@@ -164,11 +206,11 @@ export function useAssetActions({
     try {
       const receipt = await createPlatformMutation("assets", {
         action: "重跑质量校验",
+        ...sceneProfileLock,
         target: { asset_key: selectedAsset.assetKey },
         reason: `${selectedAsset.name} 质量门禁重跑`,
-        check_keys: ["freshness", "lineage_integrity", "schema_stability"],
-        partition_key: selectedAsset.partition,
-        materialization_id: selectedAsset.materialization
+        failed_check_ids: qualityRetrySelection.failedCheckIds,
+        failed_partitions: qualityRetrySelection.failedPartitions
       });
       setAssetAction(null);
       setAssetNotice({
@@ -190,6 +232,14 @@ export function useAssetActions({
 
   const exportAssetPackage = async () => {
     if (assetAction === "export") return;
+    if (!sceneProfileLock) {
+      setAssetNotice({
+        status: "error",
+        title: "资产包导出已阻断",
+        detail: `${sceneProfileBlockedReason}；未创建导出运行。`
+      });
+      return;
+    }
     setAssetAction("export");
     setAssetNotice({
       status: "pending",
@@ -200,7 +250,8 @@ export function useAssetActions({
       const receipt = await createExportRun({
         target: "data_asset",
         object_id: selectedAsset.assetKey,
-        source: "ui_asset_package"
+        source: "ui_asset_package",
+        ...sceneProfileLock
       });
       setAssetAction(null);
       setAssetNotice({

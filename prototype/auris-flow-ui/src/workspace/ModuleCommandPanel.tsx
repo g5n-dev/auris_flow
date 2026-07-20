@@ -29,6 +29,7 @@ export function ModuleCommandPanel({
   navigateToTarget,
   scopeContext,
   sceneBinding,
+  sceneState,
   close
 }: {
   config: ModuleConfig;
@@ -52,6 +53,7 @@ export function ModuleCommandPanel({
   navigateToTarget: (target: ModuleDeepLink) => void;
   scopeContext: TopbarContextState;
   sceneBinding: WorkspaceProjectSceneBinding | null;
+  sceneState: "pending" | "bound" | "unbound" | "error";
   close: () => void;
 }) {
   const normalizedQuery = query.trim().toLowerCase();
@@ -59,6 +61,19 @@ export function ModuleCommandPanel({
     !normalizedQuery || `${item.label} ${item.meta}`.toLowerCase().includes(normalizedQuery)
   );
   const activeFilterMeta = interaction.filters.find((filter) => filter.label === activeFilter) ?? interaction.filters[0];
+  const sceneBindingRequired = !["tenants", "projects", "settings"].includes(moduleKey);
+  const writeBlockedByScene = sceneBindingRequired && (!sceneBinding || sceneState !== "bound");
+  const writeBlockedReason = sceneState === "pending"
+    ? "正在读取当前项目的已发布 SceneProfile，加载完成后写入会自动恢复。"
+    : sceneState === "error"
+      ? "SceneProfile 绑定读取失败，写入暂不可用；请点击上方“重试场景绑定”。"
+      : "当前项目尚未绑定已发布 SceneProfile；请前往项目管理完成发布与绑定。";
+  const exportBlockedByScene = sceneBindingRequired && (!sceneBinding || sceneState !== "bound");
+  const exportBlockedReason = sceneState === "pending"
+    ? "正在读取当前项目的已发布 SceneProfile，加载完成后项目级导出会自动恢复。"
+    : sceneState === "error"
+      ? "SceneProfile 绑定读取失败，项目级导出暂不可用；请重试场景绑定。"
+      : "当前项目尚未绑定已发布 SceneProfile；项目级导出已阻断，请先完成发布与绑定。";
 
   const commandTitle = mode === "search" ? "模块搜索" : mode === "filter" ? "模块筛选" : mode === "write" ? "创建 / 修改数据" : "导出回执";
   const latestMutation = mutationRecords[0];
@@ -190,6 +205,15 @@ export function ModuleCommandPanel({
           </section>
 
           <section className="module-write-actions" aria-label="可创建或修改的数据">
+            {writeBlockedByScene && (
+              <div className="module-write-gaps" data-testid="scene-profile-write-blocked">
+                <span>当前不可用</span>
+                <p>
+                  <AlertTriangle size={12} />
+                  {writeBlockedReason}
+                </p>
+              </div>
+            )}
             <div className="module-write-stage-strip">
               {writeStages.map(([stage, detail], index) => (
                 <button key={stage} type="button" className={latestMutation && index <= (latestMutation.status === "已提交" ? 4 : latestMutation.status === "待审批" ? 2 : latestMutation.status === "校验中" ? 1 : 0) ? "active" : ""}>
@@ -200,7 +224,13 @@ export function ModuleCommandPanel({
             </div>
             <div className="module-crud-strip" aria-label="当前模块可执行动作">
               {interaction.crud.map((item) => (
-                <button key={`${item.action}-${item.target}`} type="button" onClick={() => createMutationRecord(item)}>
+                <button
+                  key={`${item.action}-${item.target}`}
+                  type="button"
+                  disabled={writeBlockedByScene}
+                  title={writeBlockedByScene ? writeBlockedReason : undefined}
+                  onClick={() => createMutationRecord(item)}
+                >
                   <Plus size={13} />
                   <span>{item.action}</span>
                   <strong>{item.target}</strong>
@@ -255,6 +285,15 @@ export function ModuleCommandPanel({
 
       {mode === "export" && (
         <div className="module-command-export">
+          {exportBlockedByScene && (
+            <div className="module-write-gaps" data-testid="scene-profile-export-blocked">
+              <span>当前不可用</span>
+              <p>
+                <AlertTriangle size={12} />
+                {exportBlockedReason}
+              </p>
+            </div>
+          )}
           <div className="module-export-card">
             <Download size={16} />
             <div>

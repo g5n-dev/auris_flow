@@ -2,13 +2,14 @@ import type { Dispatch, SetStateAction } from "react";
 
 import type { ModuleDeepLink } from "../../shared/contracts/navigation";
 import type { OperationNotice } from "../../shared/contracts/operations";
+import type { WorkspaceProjectSceneBinding } from "../../shared/contracts/moduleWorkspaceGateway";
 
 export type AssetCatalogRow = {
   name: string;
   domain: string;
   status: string;
   version: string;
-  quality: number;
+  quality: number | null;
   assetKey: string;
   definition: string;
   partition: string;
@@ -42,15 +43,18 @@ export type HotwordBackfillBinding = {
   rootTraceId: string;
   sourceAsset: string;
   sourceMaterializationId: string;
+  sourceBadcaseIds: string[];
 };
 
 export type HotwordBackfillRecovery = {
+  scopeKey: string;
   status: "loading" | "ready" | "blocked";
   binding?: HotwordBackfillBinding;
   reason: string;
 };
 
 export type AssetBackfillDraft = {
+  scopeKey: string;
   assetKey: string;
   assetName: string;
   draftId: string;
@@ -66,6 +70,10 @@ export type AssetsModuleProps = {
   selectedAssetKey: string;
   setSelectedAssetKey: (assetKey: string) => void;
   navigateToTarget: (target: ModuleDeepLink) => void;
+  projectionItems?: unknown[];
+  readScopeKey: string;
+  workspaceSceneBinding: WorkspaceProjectSceneBinding | null;
+  workspaceSceneState: "pending" | "bound" | "unbound" | "error";
 };
 
 export type AssetActionState = {

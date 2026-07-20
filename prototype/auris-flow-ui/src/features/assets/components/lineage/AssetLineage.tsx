@@ -1,17 +1,20 @@
 import { AssetLineageCanvas } from "./AssetLineageCanvas";
 import { AssetLineageModePanel } from "./AssetLineageModePanel";
 import { useAssetLineage } from "./useAssetLineage";
+import type { AssetCatalogRow } from "../../types";
 
 export function AssetLineage({
+  assetRows,
   selectedAssetKey,
   onSelect,
   onCreateBackfill
 }: {
+  assetRows: AssetCatalogRow[];
   selectedAssetKey?: string;
   onSelect?: (assetKey: string) => void;
   onCreateBackfill?: (assetKey?: string) => void;
 }) {
-  const workspace = useAssetLineage({ selectedAssetKey, onSelect, onCreateBackfill });
+  const workspace = useAssetLineage({ assetRows, selectedAssetKey, onSelect, onCreateBackfill });
   const {
     actionButtons,
     activeNode,

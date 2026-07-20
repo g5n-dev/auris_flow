@@ -45,6 +45,8 @@ export type MockMutationKind = "create" | "update" | "review" | "route";
 
 export type MockMutationRecord = {
   id: string;
+  scopeKey: string;
+  idempotencyKey: string;
   moduleKey: Exclude<ModuleKey, "listening">;
   moduleTitle: string;
   action: string;

@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 
 import { aggregateMeta } from "../fixtures";
+import { formatSessionConfidence } from "../dataTruthModel";
 import type { DataAggregateKey } from "../types";
 import type { DataWorkspace } from "../useDataWorkspace";
 
@@ -45,6 +46,7 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
     setSelectedAssetId,
     toggleAggregateFilterValue,
     toggleFolder,
+    truthMode,
     visibleDataAssets
   } = workspace;
   return (
@@ -291,11 +293,14 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
                                             <small>{item.assetKey} · {item.assetCheck}</small>
                                           </div>
                                           <div className="leaf-tags">
-                                            <em>VAD</em>
-                                            <em>ASR</em>
+                                            {truthMode
+                                              ? item.processingProducts?.length
+                                                ? item.processingProducts.map((product) => <em key={product}>{product}</em>)
+                                                : <em>处理产物未提供</em>
+                                              : <><em>VAD</em><em>ASR</em></>}
                                             <em>{item.status === "confirmed" ? "已入库" : item.status === "pending" ? "待复核" : "风险"}</em>
                                           </div>
-                                          <b>{Math.round(item.confidence * 100)}%</b>
+                                          <b>{formatSessionConfidence(item.confidence)}</b>
                                         </button>
                                       ))}
                                     </div>
@@ -315,7 +320,7 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
             <div className={`detail-status ${selectedAsset.status}`}>
               <span>当前音频资产</span>
               <strong>{selectedAsset.audio}</strong>
-              <b>{Math.round(selectedAsset.confidence * 100)}%</b>
+              <b>{formatSessionConfidence(selectedAsset.confidence)}</b>
             </div>
             <div className="detail-path">
               {aggregationOrder.map((key) => (
@@ -326,12 +331,14 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
               ))}
             </div>
             <div className="detail-evidence">
-              <strong>录音切片 / {selectedAsset.id}</strong>
+              <strong>{truthMode ? "音频会话" : "录音切片"} / {selectedAsset.id}</strong>
               <p>{selectedAsset.duration} · {selectedAsset.event} · {selectedAsset.assetCheck}</p>
               <div>
-                <em>raw wav</em>
-                <em>voice_segments</em>
-                <em>ASR transcript</em>
+                {truthMode
+                  ? selectedAsset.processingProducts?.length
+                    ? selectedAsset.processingProducts.map((product) => <em key={product}>{product}</em>)
+                    : <em>处理产物未提供</em>
+                  : <><em>raw wav</em><em>voice_segments</em><em>ASR transcript</em></>}
               </div>
             </div>
             <div className="detail-docs">
@@ -344,7 +351,7 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
               <div className="detail-dagster-head">
                 <span>关联数据资产</span>
                 <strong>{selectedAssetCatalog.name}</strong>
-                <b>{selectedAssetCatalog.quality}</b>
+                <b>{selectedAssetCatalog.quality ?? "未提供"}</b>
               </div>
               <div className="detail-dagster-grid">
                 <span>

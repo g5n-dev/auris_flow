@@ -9,6 +9,11 @@ import type { TopbarContextState } from "../shared/contracts/workspace";
 import { backendRunStatusLabel, operationStatusFromBackendRun } from "../shared/runtime/backendRunStatus";
 import { refreshBackendRunReceipt } from "./backendRunReceipt";
 import { buildMockMutationRecord } from "./moduleWorkspaceCatalog";
+import {
+  createModuleMutationIntentIdempotencyKey,
+  mutationWriteOptions,
+  recordsForMutationScope
+} from "./moduleMutationScope";
 
 type ModuleCommandsInput = {
   gateway: Pick<ModuleWorkspaceGateway, "createExportRun" | "createPlatformMutation" | "getBackendRun">;
@@ -19,6 +24,8 @@ type ModuleCommandsInput = {
   topbarContext: TopbarContextState;
   selectedAssetKey: string;
   workspaceSceneBinding: WorkspaceProjectSceneBinding | null;
+  workspaceSceneState: "pending" | "bound" | "unbound" | "error";
+  mutationScopeKey: string;
 };
 
 export function useModuleCommands({
@@ -29,7 +36,9 @@ export function useModuleCommands({
   interaction,
   topbarContext,
   selectedAssetKey,
-  workspaceSceneBinding
+  workspaceSceneBinding,
+  workspaceSceneState,
+  mutationScopeKey
 }: ModuleCommandsInput) {
   const [commandMode, setCommandMode] = useState<ModuleCommandMode | null>(null);
   const [moduleQuery, setModuleQuery] = useState("");
@@ -38,13 +47,27 @@ export function useModuleCommands({
   const [commandStatus, setCommandStatus] = useState<OperationStatus>("idle");
   const [exportReceipt, setExportReceipt] = useState("");
   const [mutationRecords, setMutationRecords] = useState<MockMutationRecord[]>([]);
+  const currentMutationRecords = recordsForMutationScope(mutationRecords, mutationScopeKey);
   const activeSceneManifest = workspaceSceneBinding?.version.manifest ?? null;
   const activeFilterMeta = interaction.filters.find((filter) => filter.label === activeFilter) ?? interaction.filters[0];
+  const sceneBindingRequired = !["tenants", "projects", "settings"].includes(moduleKey);
+  const exportBlockedByScene = sceneBindingRequired && (!workspaceSceneBinding || workspaceSceneState !== "bound");
+  const exportBlockedReason = workspaceSceneState === "pending"
+    ? "正在读取当前项目的已发布 SceneProfile，加载完成后项目级导出会自动恢复。"
+    : workspaceSceneState === "error"
+      ? "SceneProfile 绑定读取失败，项目级导出暂不可用；请重试场景绑定。"
+      : "当前项目尚未绑定已发布 SceneProfile；项目级导出已阻断，请先完成发布与绑定。";
 
   const toggleCommandMode = (mode: ModuleCommandMode) => {
     const isClosing = commandMode === mode;
     setCommandMode(isClosing ? null : mode);
     if (isClosing || mode !== "export") return;
+    if (exportBlockedByScene) {
+      setCommandStatus("error");
+      setExportReceipt(`${interaction.exportName} 未创建导出运行`);
+      setCommandFeedback(exportBlockedReason);
+      return;
+    }
     const generatedAt = new Date().toLocaleTimeString("zh-CN", {
       hour: "2-digit",
       minute: "2-digit",
@@ -63,7 +86,14 @@ export function useModuleCommands({
       active_tab: activeTab,
       filter: activeFilterMeta?.label ?? "全部",
       filter_result: exportScope,
-      context: topbarContext
+      context: topbarContext,
+      ...(sceneBindingRequired && workspaceSceneBinding
+        ? {
+            scene_profile_id: workspaceSceneBinding.scene_profile_id,
+            scene_profile_version_id: workspaceSceneBinding.scene_profile_version_id,
+            scene_profile_snapshot_sha256: workspaceSceneBinding.manifest_sha256
+          }
+        : {})
     };
     setCommandStatus("pending");
     setExportReceipt(`${interaction.exportName} 正在请求后端导出 · ${generatedAt}`);
@@ -90,6 +120,11 @@ export function useModuleCommands({
   };
 
   const submitMutationRecord = async (record: MockMutationRecord) => {
+    if (record.scopeKey !== mutationScopeKey) {
+      setCommandStatus("error");
+      setCommandFeedback("写入记录属于其他租户或项目，已阻断跨 scope 重试。");
+      return;
+    }
     if (!workspaceSceneBinding && !["tenants", "projects", "settings"].includes(moduleKey)) {
       setCommandStatus("error");
       setCommandFeedback("当前项目尚未绑定已发布 SceneProfile，已阻断项目级写入；请先在项目管理完成校验、独立复核、发布和绑定。");
@@ -132,7 +167,7 @@ export function useModuleCommands({
               source: "ui_module_command"
             }
           : {})
-      });
+      }, mutationWriteOptions(record));
       const traceId = receipt.meta?.trace_id ?? receipt.data.trace_id ?? "trace_pending";
       setCommandStatus("success");
       setMutationRecords((current) => current.map((currentRecord) => currentRecord.id === record.id
@@ -164,12 +199,18 @@ export function useModuleCommands({
   };
 
   const createMutationRecord = (item: ModuleInteractionModel["crud"][number]) => {
-    const record = buildMockMutationRecord(moduleKey, config, item);
+    const record = buildMockMutationRecord(
+      moduleKey,
+      config,
+      item,
+      mutationScopeKey,
+      createModuleMutationIntentIdempotencyKey(`module_write_${moduleKey}`)
+    );
     setMutationRecords((current) => [record, ...current].slice(0, 12));
     void submitMutationRecord(record);
   };
   const retryMutationRecord = (id: string) => {
-    const record = mutationRecords.find((item) => item.id === id);
+    const record = currentMutationRecords.find((item) => item.id === id);
     if (!record || record.status !== "失败") return;
     setMutationRecords((current) => current.map((item) => item.id === id ? { ...item, status: "校验中" } : item));
     void submitMutationRecord({ ...record, status: "校验中" });
@@ -182,7 +223,9 @@ export function useModuleCommands({
     commandMode,
     commandStatus,
     createMutationRecord,
-    currentMutationRecords: mutationRecords.filter((record) => record.moduleKey === moduleKey),
+    currentMutationRecords: currentMutationRecords.filter((record) => record.moduleKey === moduleKey),
+    exportBlockedByScene,
+    exportBlockedReason,
     exportReceipt,
     moduleQuery,
     retryMutationRecord,

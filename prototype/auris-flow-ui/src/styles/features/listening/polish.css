@@ -940,6 +940,21 @@
   white-space: nowrap;
 }
 
+.scene-runtime-context > button {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  min-height: 26px;
+  padding: 0 9px;
+  border: 1px solid #ffcf8b;
+  border-radius: 4px;
+  color: #ad6800;
+  background: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
 .scene-runtime-context.is-bound {
   border-color: #b7ebd0;
   background: #f2fff8;
@@ -1941,11 +1956,25 @@
 
 .module-command-results button:hover,
 .module-filter-options button:hover,
-.module-crud-strip button:hover,
+.module-crud-strip button:not(:disabled):hover,
 .module-command-head button:hover {
   border-color: #165dff !important;
   color: #165dff;
   background: #f2f7ff !important;
+}
+
+.module-crud-strip button:disabled {
+  cursor: not-allowed;
+  border-color: #e5e6eb !important;
+  color: #86909c;
+  background: #f7f8fa !important;
+  opacity: 0.72;
+}
+
+.module-crud-strip button:disabled svg,
+.module-crud-strip button:disabled span,
+.module-crud-strip button:disabled strong {
+  color: #86909c;
 }
 
 .module-command-empty {

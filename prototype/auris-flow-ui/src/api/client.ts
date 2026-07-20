@@ -1015,6 +1015,42 @@ function payloadString(payload: Record<string, unknown>, key: string, fallback: 
   return typeof value === "string" && value.trim() ? value : fallback;
 }
 
+function requiredUniqueStringArray(
+  payload: Record<string, unknown>,
+  key: string,
+  options: { allowEmpty?: boolean } = {}
+) {
+  const value = payload[key];
+  if (!Array.isArray(value)) throw new Error(`${key} 必须是字符串数组`);
+  const normalized = value.map((item) => typeof item === "string" ? item.trim() : "");
+  if (
+    normalized.some((item) => !item)
+    || new Set(normalized).size !== normalized.length
+    || (!options.allowEmpty && normalized.length === 0)
+  ) {
+    throw new Error(`${key} 必须是${options.allowEmpty ? "可为空但" : "非空且"}不重复的字符串数组`);
+  }
+  return normalized;
+}
+
+function requiredProjectSceneLock(payload: Record<string, unknown>) {
+  const sceneProfileId = payloadString(payload, "scene_profile_id", "");
+  const sceneProfileVersionId = payloadString(payload, "scene_profile_version_id", "");
+  const sceneProfileSnapshotSha256 = payloadString(payload, "scene_profile_snapshot_sha256", "");
+  if (
+    !sceneProfileId
+    || !sceneProfileVersionId
+    || !/^[0-9a-f]{64}$/.test(sceneProfileSnapshotSha256)
+  ) {
+    throw new Error("项目级写入必须锁定已发布 SceneProfile 的 ID、version ID 与 snapshot SHA-256");
+  }
+  return {
+    scene_profile_id: sceneProfileId,
+    scene_profile_version_id: sceneProfileVersionId,
+    scene_profile_snapshot_sha256: sceneProfileSnapshotSha256
+  };
+}
+
 export function normalizeActionReceipt(data: Record<string, unknown>, metaTraceId?: string): BackendActionReceipt {
   const affectedObjects = Array.isArray(data.affected_objects)
     ? data.affected_objects.filter(
@@ -1247,7 +1283,11 @@ export async function createConnectorResource(
   payload: ConnectorCreatePayload,
   options?: WriteRequestOptions
 ): Promise<ApiEnvelope<BackendActionReceipt>> {
-  return createBackendAction("/v1/connectors", "connector_create", payload as Record<string, unknown>, options);
+  const body = {
+    ...payload,
+    ...requiredProjectSceneLock(payload as Record<string, unknown>)
+  };
+  return createBackendAction("/v1/connectors", "connector_create", body, options);
 }
 
 export async function createInsightMetricRun(
@@ -1476,16 +1516,20 @@ export async function createPlatformMutation(
     }
     const assetKey = encodeURIComponent(selectedAssetKey);
     const requestedImpactScope = payload.impact_scope;
+    const sceneProfileLock = requiredProjectSceneLock(payload);
     const body = isQualityRetry
       ? {
           source: "ui_asset_quality",
           reason: payloadString(payload, "reason", action),
           impact_scope: "current_project",
-          payload
+          ...sceneProfileLock,
+          failed_check_ids: requiredUniqueStringArray(payload, "failed_check_ids"),
+          failed_partitions: requiredUniqueStringArray(payload, "failed_partitions", { allowEmpty: true })
         }
       : {
           partition_key: payloadString(payload, "partition_key", "current_project"),
           reason: payloadString(payload, "reason", action),
+          ...sceneProfileLock,
           impact_scope: requestedImpactScope && typeof requestedImpactScope === "object" && !Array.isArray(requestedImpactScope)
             ? requestedImpactScope
             : { scope: "current_project", overwrite_history: false }

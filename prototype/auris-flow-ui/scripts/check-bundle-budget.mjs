@@ -100,6 +100,23 @@ const cssAssets = productionAssets.filter((asset) => asset.type === "css");
 const jsonAssets = productionAssets.filter((asset) => asset.type === "json");
 const totalJs = sumAssets(jsAssets);
 const totalAssets = sumAssets(productionAssets);
+const auditedCandidate = frontendBundleBudgetPolicy.auditedCandidate?.totals;
+assertBudget(Boolean(auditedCandidate), "AUDITED_CANDIDATE_MISSING", {
+  schemaVersion: frontendBundleBudgetPolicy.schemaVersion
+});
+if (auditedCandidate) {
+  const actualCandidateTotals = {
+    jsRawBytes: totalJs.rawBytes,
+    jsBrotliBytes: totalJs.brotliBytes,
+    allRawBytes: totalAssets.rawBytes,
+    allBrotliBytes: totalAssets.brotliBytes
+  };
+  assertBudget(
+    JSON.stringify(actualCandidateTotals) === JSON.stringify(auditedCandidate),
+    "AUDITED_CANDIDATE_DRIFT",
+    { actual: actualCandidateTotals, expected: auditedCandidate }
+  );
+}
 
 const jsonEntries = Object.entries(manifest).filter(([key, value]) => key.endsWith(".json") && value.file?.endsWith(".json"));
 const catalogEntries = jsonEntries.filter(([key]) => /^src\/catalogs\/production\/(?:module|static)-catalog\.json$/.test(key));

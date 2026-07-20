@@ -704,25 +704,44 @@ if (
   !result.dataConnectorImport?.id ||
   !result.dataConnectorImport?.traceId ||
   !result.dataConnectorImport?.status ||
-  !result.dataConnectorImport?.targetAssetKey
+  !result.dataConnectorImport?.targetAssetKey ||
+  !result.dataConnectorImport?.sceneProfileId ||
+  !result.dataConnectorImport?.sceneProfileVersionId ||
+  !/^[0-9a-f]{64}$/.test(result.dataConnectorImport?.sceneProfileSnapshotSha256 ?? "")
 ) {
-  fail("platform BFF E2E dataConnectorImport is missing id, traceId, status, or targetAssetKey", {
+  fail("platform BFF E2E dataConnectorImport is missing its resource receipt or immutable SceneProfile lock", {
     value: result.dataConnectorImport
   });
 }
 if (
-  !result.voiceprintEnrollment?.id ||
-  !result.voiceprintEnrollment?.voiceprintId ||
-  !result.voiceprintEnrollment?.traceId ||
-  !result.voiceprintEnrollment?.status
+  !result.dataExportAction?.id ||
+  !result.dataExportAction?.traceId ||
+  !result.dataExportAction?.status ||
+  !result.dataExportAction?.sceneProfileId ||
+  !result.dataExportAction?.sceneProfileVersionId ||
+  !/^[0-9a-f]{64}$/.test(result.dataExportAction?.sceneProfileSnapshotSha256 ?? "")
 ) {
-  fail("platform BFF E2E voiceprintEnrollment is missing id, voiceprintId, traceId, or status", {
-    value: result.voiceprintEnrollment
+  fail("platform BFF E2E dataExportAction is missing its run receipt or immutable SceneProfile lock", {
+    value: result.dataExportAction
   });
 }
-if (result.voiceprintEnrollment.status !== "pending_review") {
-  fail("platform BFF E2E voiceprintEnrollment should be pending_review, not final enrolled", {
-    value: result.voiceprintEnrollment
+if (
+  result.dataSceneProfileGate?.status !== "blocked" ||
+  result.dataSceneProfileGate?.reasonCode !== "SCENE_PROFILE_BINDING_REQUIRED" ||
+  result.dataSceneProfileGate?.connectorPostCount !== 0 ||
+  result.dataSceneProfileGate?.exportPostCount !== 0
+) {
+  fail("platform BFF E2E Data writes must fail closed without an active SceneProfile binding", {
+    value: result.dataSceneProfileGate
+  });
+}
+if (
+  result.voiceprintEnrollmentGate?.status !== "blocked" ||
+  result.voiceprintEnrollmentGate?.reasonCode !== "VOICEPRINT_CANDIDATE_READ_MODEL_UNAVAILABLE" ||
+  result.voiceprintEnrollmentGate?.postCount !== 0
+) {
+  fail("platform BFF E2E must fail closed while the authoritative voiceprint candidate read model is unavailable", {
+    value: result.voiceprintEnrollmentGate
   });
 }
 if (!result.insightReport?.runId) {
@@ -1006,7 +1025,9 @@ console.log(
       checkedObjects: ["labelVersion", "evalRun", "feedbackTask", "insightAction", "insightReport"],
       checkedProjectCreate: "projectCreate",
       checkedDataConnectorImport: "dataConnectorImport",
-      checkedVoiceprintEnrollment: "voiceprintEnrollment",
+      checkedDataExportAction: "dataExportAction",
+      checkedDataSceneProfileGate: "dataSceneProfileGate",
+      checkedVoiceprintEnrollmentGate: "voiceprintEnrollmentGate",
       checkedListeningActions: ["boundary", "eventLink", "annotation", "decision", "appeal", "asrHotwordCorrection"],
       checkedListeningRecording: "playback-grant -> headerless media Range",
       checkedEvaluationPromptUi: "evaluationPromptUi",

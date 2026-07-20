@@ -7,7 +7,7 @@ export type DataAssetItem = {
   tags: string[];
   audio: string;
   duration: string;
-  confidence: number;
+  confidence: number | null;
   status: "confirmed" | "pending" | "risk";
   docs: string[];
   assetKey: string;
@@ -19,4 +19,5 @@ export type DataAssetItem = {
   downstreamAssets: string[];
   assetCheck: string;
   bffEndpoint: string;
+  processingProducts?: string[];
 };

@@ -1,10 +1,12 @@
 import { useMemo } from "react";
 import type { ModuleCommandMode, ModuleScopeShortcut } from "../shared/contracts/application";
 import type { ModuleMetric, ProjectionMetricSource } from "../shared/contracts/modules";
+import { LABEL_DEMO_MODE } from "../shared/runtime/demoMode";
 import { ModuleWorkspaceView } from "./ModuleWorkspaceView";
 import type { ModuleWorkspaceProps } from "./moduleWorkspaceContracts";
 import { buildScopeShortcuts, moduleConfigs, moduleInteractionModels } from "./moduleWorkspaceCatalog";
 import { deriveProjectionMetrics } from "./projectionMetrics";
+import { resolveModuleContentSource } from "./moduleContentSource";
 import { sceneAwareModuleConfig } from "./sceneAwareModuleConfig";
 import { useModuleCommands } from "./useModuleCommands";
 import { useModuleProjection } from "./useModuleProjection";
@@ -47,7 +49,12 @@ export function ModuleWorkspace(props: ModuleWorkspaceProps) {
     interaction,
     topbarContext,
     selectedAssetKey,
-    workspaceSceneBinding: projection.workspaceSceneBinding
+    workspaceSceneBinding: projection.workspaceSceneBinding,
+    workspaceSceneState: projection.workspaceSceneState,
+    mutationScopeKey: JSON.stringify([
+      String(projection.projectionContext.tenantId ?? ""),
+      String(projection.projectionContext.projectId ?? "")
+    ])
   });
   const scopeShortcuts = useMemo(() => buildScopeShortcuts(config), [config]);
   const dataTabMetricOverrides: Partial<Record<string, ModuleMetric[]>> = {
@@ -73,25 +80,32 @@ export function ModuleWorkspace(props: ModuleWorkspaceProps) {
   const baseMetrics = moduleKey === "data"
     ? dataTabMetricOverrides[navigation.activeTab] ?? config.metrics
     : config.metrics;
-  const activeMetrics = deriveProjectionMetrics(
-    moduleKey,
-    baseMetrics,
-    projection.projectionReceipt,
-    projection.projectionStatus
-  );
+  const truthProjectionUnavailable = !LABEL_DEMO_MODE && projection.projectionStatus === "degraded";
+  const activeMetrics = truthProjectionUnavailable
+    ? baseMetrics.map((metric) => ({
+        ...metric,
+        value: "—",
+        delta: "BFF 投影不可用 · 未使用本地 fixture"
+      }))
+    : deriveProjectionMetrics(
+        moduleKey,
+        baseMetrics,
+        projection.projectionReceipt,
+        projection.projectionStatus
+      );
   const projectionMetricSource: ProjectionMetricSource = projection.projectionStatus === "synced"
     ? "bff"
     : projection.projectionStatus === "empty"
       ? "bff-empty"
       : projection.projectionStatus === "degraded"
-        ? "mock"
+        ? LABEL_DEMO_MODE ? "mock" : "pending"
         : "pending";
   const projectionListHydrated = moduleKey === "tenants" || moduleKey === "projects" || moduleKey === "knowledge";
-  const projectionContentSource: "bff" | "mock" | "none" = projection.projectionStatus === "synced" && projectionListHydrated
-    ? "bff"
-    : projection.projectionStatus === "degraded" || projection.projectionStatus === "synced"
-      ? "mock"
-      : "none";
+  const projectionContentSource = resolveModuleContentSource({
+    moduleKey,
+    projectionStatus: projection.projectionStatus,
+    demoMode: LABEL_DEMO_MODE
+  });
   const pageClassName = [
     "module-page",
     moduleKey === "home" ? "home-module-page" : "",

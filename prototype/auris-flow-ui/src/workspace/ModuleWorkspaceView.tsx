@@ -1,4 +1,4 @@
-import { ChevronDown, Database, Download, ListFilter, Plus, Search, ShieldCheck, Sparkles } from "lucide-react";
+import { ChevronDown, Database, Download, ListFilter, Plus, RefreshCw, Search, ShieldCheck, Sparkles } from "lucide-react";
 import { Suspense } from "react";
 import type { ModuleCommandMode, ModuleScopeShortcut } from "../shared/contracts/application";
 import type { ModuleInteractionModel } from "../shared/contracts/moduleInteractions";
@@ -15,6 +15,7 @@ import { InsightsModuleOutlet } from "./InsightsModuleOutlet";
 import { KnowledgeModule, KnowledgeModuleLoadBoundary } from "./KnowledgeModuleOutlet";
 import { LabelsModuleOutlet } from "./LabelsModuleOutlet";
 import { ModuleCommandPanel } from "./ModuleCommandPanel";
+import { resolveModuleDetailVisibility } from "./moduleContentSource";
 import { ProjectsModuleOutlet } from "./ProjectsModuleOutlet";
 import { SettingsModuleOutlet } from "./SettingsModuleOutlet";
 import { TenantsModuleOutlet } from "./TenantsModuleOutlet";
@@ -24,6 +25,8 @@ import type { ModuleWorkspaceNavigation } from "./useModuleWorkspaceNavigation";
 import type { ModuleWorkspaceProps } from "./moduleWorkspaceContracts";
 import { getModuleTitle, moduleWriteArchitectures } from "./moduleWorkspaceCatalog";
 import { routeHomeMetric } from "./projectionMetrics";
+
+const PROJECT_SCENE_BLOCKED = "项目级写入与导出保持禁用。";
 
 type ModuleWorkspaceViewProps = {
   workspace: ModuleWorkspaceProps;
@@ -84,6 +87,8 @@ export function ModuleWorkspaceView({
     commandStatus,
     createMutationRecord,
     currentMutationRecords,
+    exportBlockedByScene,
+    exportBlockedReason,
     exportReceipt,
     moduleQuery,
     retryMutationRecord,
@@ -103,6 +108,17 @@ export function ModuleWorkspaceView({
     workspaceSceneState
   } = projection;
   const activeSceneManifest = workspaceSceneBinding?.version.manifest ?? null;
+  const sceneBindingRequired = !["tenants", "projects", "settings"].includes(moduleKey);
+  const sceneExportReasonId = `${moduleKey}-scene-profile-export-reason`;
+  const {
+    renderDetails: renderModuleDetails,
+    detailsUnavailable: moduleDetailsUnavailable
+  } = resolveModuleDetailVisibility({
+    moduleKey,
+    projectionStatus,
+    contentSource: projectionContentSource,
+    demoMode: LABEL_DEMO_MODE
+  });
 
   return (
     <div className={pageClassName}>
@@ -164,7 +180,14 @@ export function ModuleWorkspaceView({
             <Plus size={15} />
             写入
           </button>
-          <button className={commandMode === "export" ? "active" : ""} aria-expanded={commandMode === "export"} onClick={() => toggleCommandMode("export")}>
+          <button
+            className={commandMode === "export" ? "active" : ""}
+            aria-expanded={commandMode === "export"}
+            aria-describedby={exportBlockedByScene ? sceneExportReasonId : undefined}
+            disabled={exportBlockedByScene}
+            title={exportBlockedByScene ? exportBlockedReason : undefined}
+            onClick={() => toggleCommandMode("export")}
+          >
             <Download size={15} />
             导出
           </button>
@@ -194,6 +217,7 @@ export function ModuleWorkspaceView({
           navigateToTarget={navigateToTarget}
           scopeContext={topbarContext}
           sceneBinding={workspaceSceneBinding}
+          sceneState={workspaceSceneState}
           close={closeCommandPanel}
         />
       )}
@@ -232,7 +256,7 @@ export function ModuleWorkspaceView({
         aria-live="polite"
         data-testid="module-projection-state"
         data-state={projectionStatus}
-        data-source={projectionStatus === "synced" || projectionStatus === "empty" ? "bff" : projectionStatus === "degraded" ? "mock" : "none"}
+        data-source={projectionStatus === "synced" || projectionStatus === "empty" ? "bff" : projectionStatus === "degraded" && LABEL_DEMO_MODE ? "mock" : "none"}
         data-content-source={projectionContentSource}
       >
         <strong>
@@ -242,15 +266,23 @@ export function ModuleWorkspaceView({
               ? "顶部指标投影已同步"
               : projectionStatus === "empty"
                 ? "BFF 投影为空"
-                : "降级模式 · Mock fixture"}
+                : LABEL_DEMO_MODE ? "降级模式 · Mock fixture" : "BFF 投影不可用"}
         </strong>
         <span>
           {projectionStatus === "synced" && projectionReceipt
-            ? `${projectionReceipt.route} · ${projectionReceipt.summary}${projectionReceipt.trace_id ? ` · ${projectionReceipt.trace_id}` : ""} · ${projectionListHydrated ? "指标与主列表来源：BFF。" : "顶部指标来源：BFF；交互明细为 Mock fixture，不计入同步结果。"}`
+            ? `${projectionReceipt.route} · ${projectionReceipt.summary}${projectionReceipt.trace_id ? ` · ${projectionReceipt.trace_id}` : ""} · ${projectionListHydrated
+                ? "指标与主列表来源：BFF。"
+                : projectionContentSource === "bff"
+                  ? "模块内部 BFF controller 与真实回执驱动。"
+                  : projectionContentSource === "mock"
+                    ? "BFF 指标；fixture 仅演示。"
+                    : "BFF 明细尚未接入；未用本地 fixture。"}`
             : projectionStatus === "empty" && projectionReceipt
               ? `${projectionReceipt.route} · ${projectionReceipt.summary}${projectionReceipt.trace_id ? ` · ${projectionReceipt.trace_id}` : ""} · 不回落本地 fixture。`
               : projectionStatus === "degraded"
-                ? `${projectionError || "后端不可用"} · 指标与列表来自本地 Mock fixture，不代表同步成功。`
+                ? LABEL_DEMO_MODE
+                  ? `${projectionError || "后端不可用"} · 本地 Mock fixture，仅用于演示。`
+                  : `${projectionError || "后端不可用"} · 生产 truth 模式不会回落本地 fixture。`
                 : `${config.title} 正在读取当前租户、项目与业务日期的指标投影。`}
         </span>
         {projectionStatus === "degraded" && (
@@ -275,10 +307,26 @@ export function ModuleWorkspaceView({
           <>
             <code>{workspaceSceneBinding.version.version}</code>
             <code title={workspaceSceneBinding.manifest_sha256}>{workspaceSceneBinding.manifest_sha256.slice(0, 12)}</code>
-            <em>{activeSceneManifest?.scene_key} · 所有运行和写入必须锁定此快照</em>
+            <em>{activeSceneManifest?.scene_key} · 项目级运行/写入/导出锁定此快照</em>
           </>
         ) : (
-          <em>{workspaceSceneState === "error" ? "场景绑定读取失败；不会使用汽车演示默认值。" : "生产写入不会回落到任何行业默认配置。"}</em>
+          <>
+            <em id={sceneExportReasonId}>
+              {sceneBindingRequired
+                ? workspaceSceneState === "pending"
+                  ? `正在读取场景绑定；${PROJECT_SCENE_BLOCKED}`
+                  : workspaceSceneState === "error"
+                    ? `场景绑定读取失败；${PROJECT_SCENE_BLOCKED}`
+                    : `当前项目未绑定生产场景；${PROJECT_SCENE_BLOCKED}`
+                : "非项目级操作仍受权限、审计与幂等约束。"}
+            </em>
+            {workspaceSceneState === "error" && (
+              <button type="button" onClick={retryProjection}>
+                <RefreshCw size={12} />
+                重试场景绑定
+              </button>
+            )}
+          </>
         )}
       </section>
 
@@ -294,10 +342,21 @@ export function ModuleWorkspaceView({
           <span>后端已成功返回空集合；页面不会用本地 fixture 填充指标或列表。</span>
         </section>
       )}
-      {projectionStatus === "empty" && moduleKey === "insights" && activeTab !== "quality" && (
+      {LABEL_DEMO_MODE && projectionStatus === "empty" && moduleKey === "insights" && activeTab !== "quality" && (
         <InsightsModuleOutlet mode="empty" activeTab={activeTab} />
       )}
-      {(projectionStatus === "synced" || projectionStatus === "degraded" || (projectionStatus === "empty" && moduleKey === "insights" && activeTab === "quality")) && (
+      {moduleDetailsUnavailable && (
+        <section className="module-panel wide tenant-empty-state" data-testid="module-detail-unavailable" role="status">
+          <Database size={22} />
+          <strong>{projectionStatus === "degraded" ? "BFF 投影不可用" : "BFF 明细尚未接入"}</strong>
+          <span>
+            {projectionStatus === "degraded"
+              ? `${projectionError || "后端不可用"}；未展示本地 fixture。`
+              : `${config.title}：BFF 摘要已同步，但权威明细尚未接入；生产 truth 模式不会挂载本地 fixture 或可操作控件。`}
+          </span>
+        </section>
+      )}
+      {renderModuleDetails && (
         <>
           {moduleKey === "home" && <HomeModuleOutlet setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} activeTab={activeTab} />}
           {moduleKey === "tenants" && <TenantsModuleOutlet activeTab={activeTab} setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} currentUser={currentUser} projectionItems={projectionStatus === "synced" ? projectionItems : undefined} projectionSource={projectionStatus === "synced" ? "bff" : "mock"} />}
@@ -331,6 +390,10 @@ export function ModuleWorkspaceView({
               setSelectedAssetId={setSelectedDataAssetId}
               openListeningFromDataAsset={openListeningFromDataAsset}
               openAssetsFromDataAsset={openAssetsFromDataAsset}
+              projectionItems={projectionStatus === "synced" ? projectionItems : undefined}
+              projectionSource={projectionStatus === "synced" ? "bff" : "mock"}
+              workspaceSceneBinding={workspaceSceneBinding}
+              workspaceSceneState={workspaceSceneState}
             />
           )}
           {moduleKey === "knowledge" && (
@@ -359,7 +422,19 @@ export function ModuleWorkspaceView({
           {moduleKey === "labels" && <LabelsModuleOutlet activeTab={activeTab} setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} focus={deepLink} />}
           {moduleKey === "insights" && <InsightsModuleOutlet mode="full" activeTab={activeTab} setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} topbarContext={topbarContext} metricProjectionItems={projectionStatus === "synced" ? projectionItems : undefined} />}
           {moduleKey === "evaluation" && <EvaluationModuleOutlet activeTab={activeTab} setActiveTab={setActiveTab} setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} focus={deepLink} currentUser={currentUser} />}
-          {moduleKey === "assets" && <AssetsModuleOutlet activeTab={activeTab} setActiveTab={setActiveTab} selectedAssetKey={selectedAssetKey} setSelectedAssetKey={setSelectedAssetKey} navigateToTarget={navigateToTarget} />}
+          {moduleKey === "assets" && (
+            <AssetsModuleOutlet
+              activeTab={activeTab}
+              setActiveTab={setActiveTab}
+              selectedAssetKey={selectedAssetKey}
+              setSelectedAssetKey={setSelectedAssetKey}
+              navigateToTarget={navigateToTarget}
+              projectionItems={projectionItems}
+              readScopeKey={JSON.stringify([String(projectionContext.tenantId ?? ""), String(projectionContext.projectId ?? "")])}
+              workspaceSceneBinding={workspaceSceneBinding}
+              workspaceSceneState={workspaceSceneState}
+            />
+          )}
           {moduleKey === "settings" && <SettingsModuleOutlet activeTab={activeTab} setActiveTab={setActiveTab} currentUser={currentUser} />}
         </>
       )}

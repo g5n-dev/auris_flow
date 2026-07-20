@@ -103,7 +103,9 @@ export function getInitialMutationStatus(kind: MockMutationKind): MockMutationSt
 export function buildMockMutationRecord(
   moduleKey: Exclude<ModuleKey, "listening">,
   config: ModuleConfig,
-  item: ModuleInteractionModel["crud"][number]
+  item: ModuleInteractionModel["crud"][number],
+  scopeKey: string,
+  idempotencyKey: string
 ): MockMutationRecord {
   const architecture = moduleWriteArchitectures[moduleKey];
   const kind = getMutationKind(item.action);
@@ -111,6 +113,8 @@ export function buildMockMutationRecord(
   const id = `${moduleKey}-${kind}-${Date.now().toString(36)}`;
   return {
     id,
+    scopeKey,
+    idempotencyKey,
     moduleKey,
     moduleTitle: config.title,
     action: item.action,

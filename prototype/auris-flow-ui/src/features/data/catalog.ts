@@ -2,7 +2,7 @@ import staticCatalog from "../../modules/staticCatalog";
 
 export type DataAssetCatalogRow = {
   name: string;
-  quality: number;
+  quality: number | null;
   assetKey: string;
 };
 

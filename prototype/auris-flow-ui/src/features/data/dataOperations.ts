@@ -17,7 +17,7 @@ import {
   operationStatusFromBackendRun
 } from "../../shared/runtime/backendRunStatus";
 import { aggregateMeta } from "./fixtures";
-import type { DataAggregateKey, DataExportRun } from "./types";
+import type { DataAggregateKey, DataExportRun, DataSceneProfileLock } from "./types";
 
 type Setter<T> = Dispatch<SetStateAction<T>>;
 
@@ -28,6 +28,11 @@ type DataOperationsInput = {
   dataAction: string | null;
   dataExportRun: DataExportRun;
   isRelationView: boolean;
+  canImportConnector: boolean;
+  connectorImportBlockedReason: string;
+  canExportData: boolean;
+  dataExportBlockedReason: string;
+  sceneProfileLock: DataSceneProfileLock | null;
   selectedAsset: DataAssetItem;
   setDataAction: Setter<string | null>;
   setDataExportRun: Setter<DataExportRun>;
@@ -40,6 +45,14 @@ const dataShortTrace = (trace?: string) => trace ? trace.slice(0, 12) : "no-trac
 export function createDataOperations(input: DataOperationsInput) {
   const openConnectorImport = async () => {
     if (input.dataAction === "connector-import") return;
+    if (!input.sceneProfileLock || !input.canImportConnector) {
+      input.setDataNotice({
+        status: "error",
+        title: "连接器导入已禁用",
+        detail: input.connectorImportBlockedReason || "当前数据对象没有经过服务端验证的目标资产。"
+      });
+      return;
+    }
     const connectorId = `ui_connector_${Date.now().toString(36)}`;
     const connectorPayload = {
       connector_id: connectorId,
@@ -49,7 +62,8 @@ export function createDataOperations(input: DataOperationsInput) {
       sync_mode: "manual",
       target_asset_key: input.selectedAsset.assetKey,
       source: "data_module_connector_import",
-      selected_asset_id: input.selectedAsset.id
+      selected_asset_id: input.selectedAsset.id,
+      ...input.sceneProfileLock
     };
     input.setDataAction("connector-import");
     input.setDataNotice({
@@ -77,6 +91,14 @@ export function createDataOperations(input: DataOperationsInput) {
 
   const exportDataAssets = async () => {
     if (input.dataAction === "export") return;
+    if (!input.sceneProfileLock || !input.canExportData) {
+      input.setDataNotice({
+        status: "error",
+        title: "数据导出已禁用",
+        detail: input.dataExportBlockedReason || "当前项目缺少可验证的 SceneProfile 快照。"
+      });
+      return;
+    }
     input.setDataAction("export");
     input.setDataNotice({
       status: "pending",
@@ -88,7 +110,10 @@ export function createDataOperations(input: DataOperationsInput) {
       if (input.dataExportRun && backendRunFailed(input.dataExportRun.status)) {
         const retried = await retryBackendRun(input.dataExportRun.id, {
           reason: "数据管理导出失败后由用户重试",
-          payload_overrides: { selected_asset_ids: input.visibleDataAssets.map((asset) => asset.id) }
+          payload_overrides: {
+            selected_asset_ids: input.visibleDataAssets.map((asset) => asset.id),
+            ...input.sceneProfileLock
+          }
         });
         receipt = retried.data;
       } else if (input.dataExportRun && !backendRunSucceeded(input.dataExportRun.status)) {
@@ -101,7 +126,8 @@ export function createDataOperations(input: DataOperationsInput) {
           source: "data_module",
           selected_asset_ids: input.visibleDataAssets.map((asset) => asset.id),
           aggregation_order: input.aggregationOrder,
-          filters: input.aggregateFilters
+          filters: input.aggregateFilters,
+          ...input.sceneProfileLock
         });
         receipt = created.data;
       }
