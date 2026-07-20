@@ -62,10 +62,15 @@ if [ "${AURIS_RELEASE_CHECK:-0}" = "1" ]; then
   uv run --frozen --all-extras --project production/dagster mypy production/dagster/src
   "${PYTHON_BIN}" scripts/scan_secrets.py --history
   "${PYTHON_BIN}" scripts/check_platform_readiness.py --release
-  "${PYTHON_BIN}" -m pip_audit --local --strict --skip-editable --progress-spinner off
   release_audit_dir="$(mktemp -d "${TMPDIR:-/tmp}/auris-flow-release-audit.XXXXXX")"
   trap 'rm -rf -- "${release_audit_dir}"' EXIT
-  uv export --quiet --frozen --no-dev --no-emit-project \
+  uv export --quiet --frozen --no-dev --no-emit-project --no-header \
+    --format requirements.txt --project backend \
+    --output-file "${release_audit_dir}/backend-runtime-requirements.txt"
+  "${PYTHON_BIN}" -m pip_audit --strict --require-hashes --disable-pip \
+    --requirement "${release_audit_dir}/backend-runtime-requirements.txt" \
+    --progress-spinner off
+  uv export --quiet --frozen --no-dev --no-emit-project --no-header \
     --format requirements.txt --project production/dagster \
     --output-file "${release_audit_dir}/dagster-runtime-requirements.txt"
   "${PYTHON_BIN}" -m pip_audit --strict --require-hashes --disable-pip \

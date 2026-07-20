@@ -10,9 +10,8 @@
 ## Local
 
 ```bash
-python3 -m venv .venv
+uv sync --frozen --all-extras --python 3.12
 source .venv/bin/activate
-python -m pip install -e ".[dev]"
 docker compose -f ../docker/local/docker-compose.yml up -d mysql redis minio qdrant
 cp .env.example .env
 alembic upgrade head
@@ -20,6 +19,10 @@ python -m app.seed local_demo
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --no-access-log
 python -m app.workers.outbox_worker
 ```
+
+上述命令以已提交的 `uv.lock` 为准，并要求 `uv 0.10.0`。手工执行
+`pip install -e ".[dev]"` 会解析当时最新的兼容版本，只用于依赖前向兼容探测，不属于干净克隆
+或 release 复现证据；权威复现入口是仓库根目录的 `bash scripts/verify_clean_clone.sh`。
 
 ### Generic OIDC / browser session baseline
 

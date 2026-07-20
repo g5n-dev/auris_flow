@@ -33,6 +33,13 @@ bash scripts/verify_all.sh
 - 后端 smoke 通过。
 - 前端 `npm run build` 通过。
 
+涉及依赖、迁移、构建或发布树的变更，还必须从清洁且已提交的 HEAD 运行锁定复现门禁；
+`verify_all.sh` 复用当前工作区环境，不能替代该证明：
+
+```bash
+bash scripts/verify_clean_clone.sh
+```
+
 涉及 production/release 的变更还应按风险运行：
 
 ```bash

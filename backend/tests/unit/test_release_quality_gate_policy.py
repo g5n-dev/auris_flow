@@ -47,6 +47,33 @@ def test_release_mode_runs_production_compose_and_dagster_quality_gates() -> Non
         assert command in release_block
 
 
+def test_release_mode_audits_hashed_locked_runtime_graphs() -> None:
+    script = VERIFY_ALL.read_text(encoding="utf-8")
+    release_block = _release_block(script)
+
+    assert "--local" not in release_block
+    assert "--skip-editable" not in release_block
+    assert "--project backend" in release_block
+    assert "backend-runtime-requirements.txt" in release_block
+    assert "--project production/dagster" in release_block
+    assert "dagster-runtime-requirements.txt" in release_block
+    assert release_block.count("--no-header") == 2
+    assert release_block.count("--strict --require-hashes --disable-pip") == 2
+    backend_export = release_block.index(
+        '--output-file "${release_audit_dir}/backend-runtime-requirements.txt"'
+    )
+    backend_audit = release_block.index(
+        '--requirement "${release_audit_dir}/backend-runtime-requirements.txt"'
+    )
+    dagster_export = release_block.index(
+        '--output-file "${release_audit_dir}/dagster-runtime-requirements.txt"'
+    )
+    dagster_audit = release_block.index(
+        '--requirement "${release_audit_dir}/dagster-runtime-requirements.txt"'
+    )
+    assert backend_export < backend_audit < dagster_export < dagster_audit
+
+
 def test_regular_python_quality_gate_covers_production_policy_tests() -> None:
     script = VERIFY_ALL.read_text(encoding="utf-8")
 
@@ -77,6 +104,9 @@ def test_readiness_contract_requires_every_production_release_gate() -> None:
         "mypy production/dagster/src",
         "ruff format --check backend scripts production/tests",
         "ruff check backend scripts production/tests",
+        "backend-runtime-requirements.txt",
+        "dagster-runtime-requirements.txt",
+        "--strict --require-hashes --disable-pip",
         "bash scripts/verify_production_path.sh",
         "bash scripts/verify_production_mysql_migrations.sh",
     ):
@@ -89,6 +119,10 @@ def test_readiness_contract_requires_every_production_release_gate() -> None:
             assert pattern in required_patterns
 
     for path in (
+        "backend/pyproject.toml",
+        "backend/uv.lock",
+        "prototype/auris-flow-ui/package.json",
+        "prototype/auris-flow-ui/package-lock.json",
         "scripts/verify_production_path.sh",
         "scripts/verify_production_path_gate.py",
         "production/tests/production-path-gate.compose.yaml",

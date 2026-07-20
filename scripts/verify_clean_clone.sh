@@ -108,6 +108,9 @@ export UV_LINK_MODE=copy
 # from the caller's checkout. Each project must use the environment uv creates
 # inside this clone.
 unset PYTHONPATH PYTHONHOME VIRTUAL_ENV UV_PROJECT_ENVIRONMENT NODE_PATH
+unset PYTEST_ADDOPTS PYTEST_PLUGINS PYTEST_DISABLE_PLUGIN_AUTOLOAD
+unset COVERAGE_PROCESS_START COV_CORE_SOURCE COV_CORE_CONFIG COV_CORE_DATAFILE
+unset COV_CORE_BRANCH COV_CORE_CONTEXT NODE_OPTIONS
 
 echo "Cloning committed source ${SOURCE_COMMIT} without local hard links..."
 git clone --quiet --no-local --no-checkout -- "${SOURCE_ROOT}" "${clone_root}"
@@ -218,6 +221,22 @@ else
   echo "Clean-clone functional gate checked base readiness; strict release authority remains a separate fail-closed gate."
 fi
 
+echo "Running repository static analysis and script policy tests..."
+"${backend_python}" -m ruff format --check backend scripts production/tests
+"${backend_python}" -m ruff check backend scripts production/tests
+"${backend_python}" -m mypy \
+  backend/app \
+  backend/scripts/verify_migrations.py \
+  scripts/check_platform_readiness.py \
+  scripts/finalize_release_evidence.py \
+  scripts/generate_supply_chain_evidence.py \
+  scripts/verify_real_dagster.py
+MYPYPATH=backend "${backend_python}" -m mypy \
+  scripts/verify_product_dagster_path.py \
+  scripts/verify_release_authorization.py \
+  scripts/verify_visual_baseline.py
+"${backend_python}" -m unittest discover -s scripts/tests -p 'test_*.py'
+
 echo "Verifying migrations, backend compilation, tests and application smoke..."
 "${backend_python}" backend/scripts/verify_migrations.py
 "${backend_python}" -m compileall -q backend/app
@@ -231,6 +250,8 @@ uv run --frozen --all-extras --project production/dagster \
   pytest production/dagster/tests
 
 echo "Building the frontend production bundle from npm lock data..."
+npm run architecture:test --prefix prototype/auris-flow-ui
+npm run architecture:final --prefix prototype/auris-flow-ui
 npm run build --prefix prototype/auris-flow-ui
 npm run bundle:check --prefix prototype/auris-flow-ui
 
@@ -295,9 +316,11 @@ payload = {
     },
     "verified_steps": [
         "locked-dependency-install",
+        "static-analysis-and-script-policy-tests",
         "database-migrations",
         "backend-tests-and-smoke",
         "dagster-tests",
+        "frontend-architecture-tests",
         "frontend-build-and-bundle-policy",
         f"{readiness_scope}-readiness",
         "secret-history-scan",

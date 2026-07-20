@@ -40,6 +40,11 @@ AGENTS.md                 后续 agent / 协作者的工程边界和验证要求
 
 ## Local Development
 
+仓库的可复现工具链基线是 Python 3.12、`uv 0.10.0`、Node.js 22 和已提交的
+`backend/uv.lock`、`production/dagster/uv.lock`、`package-lock.json`。下面默认使用锁定安装；
+`pip install -e ".[dev]"` 或 `npm install` 只适合作为“最新兼容依赖”探测，不能作为 P0
+干净克隆或正式发行证据。
+
 一键启动本地开发栈：
 
 ```bash
@@ -52,9 +57,8 @@ bash scripts/dev_up.sh
 
 ```bash
 cd backend
-python3 -m venv .venv
+uv sync --frozen --all-extras --python 3.12
 source .venv/bin/activate
-python -m pip install -e ".[dev]"
 cp .env.example .env
 ```
 
@@ -78,7 +82,7 @@ python -m app.workers.outbox_worker
 
 ```bash
 cd prototype/auris-flow-ui
-npm install
+npm ci --ignore-scripts
 npm run dev
 ```
 
@@ -139,7 +143,7 @@ Collector、Tempo、Prometheus 与 Grafana，并明确不提供节点 HA 或自�
 
 ## Verification
 
-仓库级验证入口：
+普通工作区验证入口：
 
 ```bash
 bash scripts/verify_fast.sh
@@ -150,6 +154,16 @@ bash scripts/verify_fast.sh
 ```bash
 PYTHON=/absolute/path/to/python bash scripts/verify_fast.sh
 ```
+
+该入口会复用现有 `.venv` 和 `node_modules`，因此是开发反馈门禁，不是干净克隆证明。
+P0 锁定源码复现必须从清洁 HEAD 运行：
+
+```bash
+bash scripts/verify_clean_clone.sh
+```
+
+该脚本用 `git clone --no-local` 重建 Git 对象，在克隆内执行两套 `uv sync --frozen`、
+`npm ci`、静态分析、迁移、后端/Dagster 测试、前端架构与生产构建，并拒绝任何未跟踪源码依赖。
 
 当前脚本覆盖：
 
@@ -202,7 +216,7 @@ bash scripts/visual_regression.sh
 
 视觉比较只在真实通过后写入 `build/release-evidence/visual-regression.json`，并包含 `status=ok`、当前 release `source_commit`、生成基线的 `baseline_source_commit`、OCI digest、runner digest、`signature_identity`、固定 GitHub OIDC issuer 以及 `scenario_count=passed=76`。严格 release 每次都会在下载前对锁定 digest 重新执行 Cosign 验签，不能依赖 promotion 时的一次性结果。基线 commit 必须是 release commit 的祖先，两者之间任何前端、后端 seed/runtime 或视觉 runner 输入变化都会使证据失效；非视觉文档修改不会被误称为基线来自当前 commit。`PENDING`、签名/identity 不可信、下载失败、哈希漂移或截图差异时不会保留伪成功 evidence。
 
-严格开源发布验证还会强制运行 UI/BFF E2E、前端视觉布局审计、真实依赖栈 E2E、真实 Dagster Compose 门禁、产品级 BFF→Outbox Worker→真实 Dagster→状态同步/签名回写/安全取消门禁、前端 `npm audit --audit-level=high` 和后端 `pip-audit backend`。如果只运行 `AURIS_RELEASE_CHECK=1 bash scripts/verify_all.sh` 而未开启 `AURIS_RUN_E2E=1`，脚本会直接失败，避免发布前漏掉浏览器/BFF 链路。`bash scripts/verify_release.sh` 会依次调用 `bash scripts/verify_real_stack.sh`、`bash scripts/verify_real_dagster.sh` 与 `bash scripts/verify_product_dagster_path.sh`；第一个验证 MySQL/Redis/MinIO/Qdrant 的开发真实依赖栈（其中 Dagster 仍是协议 fake），第二个验证真实 Dagster 引擎协议，第三个证明产品业务链路确实经过 BFF、Worker 和真实 Dagster，而不是只测底层 GraphQL。该入口拒绝 `AURIS_SKIP_REAL_STACK_E2E=1`、`AURIS_SKIP_REAL_DAGSTER=1` 和 `AURIS_SKIP_PRODUCT_DAGSTER_GATE=1`。所有门禁证据必须绑定同一干净 HEAD，最终由 `scripts/finalize_release_evidence.py` 校验并生成带逐文件 SHA-256 的 `build/release-evidence/release-gate-manifest.json`；缺失、陈旧、路径泄漏、非 Compose 证据或来源 commit 不一致均 fail closed。Docker 受限时请改跑 `bash scripts/verify_fast.sh` 或 `AURIS_RUN_E2E=1 bash scripts/verify_all.sh`，但不能把结果作为公开发布候选。
+严格开源发布验证还会强制运行 UI/BFF E2E、前端视觉布局审计、真实依赖栈 E2E、真实 Dagster Compose 门禁、产品级 BFF→Outbox Worker→真实 Dagster→状态同步/签名回写/安全取消门禁、前端 `npm audit --audit-level=high`，以及对 `backend/uv.lock` 和 Dagster lock 导出的带哈希运行时依赖图执行严格 `pip-audit`。如果只运行 `AURIS_RELEASE_CHECK=1 bash scripts/verify_all.sh` 而未开启 `AURIS_RUN_E2E=1`，脚本会直接失败，避免发布前漏掉浏览器/BFF 链路。`bash scripts/verify_release.sh` 会依次调用 `bash scripts/verify_real_stack.sh`、`bash scripts/verify_real_dagster.sh` 与 `bash scripts/verify_product_dagster_path.sh`；第一个验证 MySQL/Redis/MinIO/Qdrant 的开发真实依赖栈（其中 Dagster 仍是协议 fake），第二个验证真实 Dagster 引擎协议，第三个证明产品业务链路确实经过 BFF、Worker 和真实 Dagster，而不是只测底层 GraphQL。该入口拒绝 `AURIS_SKIP_REAL_STACK_E2E=1`、`AURIS_SKIP_REAL_DAGSTER=1` 和 `AURIS_SKIP_PRODUCT_DAGSTER_GATE=1`。所有门禁证据必须绑定同一干净 HEAD，最终由 `scripts/finalize_release_evidence.py` 校验并生成带逐文件 SHA-256 的 `build/release-evidence/release-gate-manifest.json`；缺失、陈旧、路径泄漏、非 Compose 证据或来源 commit 不一致均 fail closed。Docker 受限时请改跑 `bash scripts/verify_fast.sh` 或 `AURIS_RUN_E2E=1 bash scripts/verify_all.sh`，但不能把结果作为公开发布候选。
 
 ### Public Open-Source Release Check
 

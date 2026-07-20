@@ -19,7 +19,7 @@
 - [ ] Backend tests pass with coverage at or above the configured threshold.
 - [ ] UI/BFF E2E reports no `consoleErrors`, `pageErrors`, `requestFailures`, or `failedResponses`.
 - [ ] `npm audit --prefix prototype/auris-flow-ui --audit-level=high --omit=dev` reports no high vulnerabilities.
-- [ ] `python3 -m pip_audit backend --progress-spinner off` reports no known vulnerabilities.
+- [ ] The strict gate audits the hashed runtime graphs exported from both Python lockfiles and reports no known vulnerabilities.
 - [ ] `python3 scripts/scan_secrets.py` reports `secret scan ok`.
 
 ## Data And Interaction Chain

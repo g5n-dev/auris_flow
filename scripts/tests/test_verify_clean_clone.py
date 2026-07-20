@@ -189,6 +189,10 @@ class CleanCloneGateTests(unittest.TestCase):
         self.assertEqual("ok", evidence["status"])
         self.assertEqual(self.commit, evidence["source_commit"])
         self.assertEqual("functional-locked-source", evidence["reproducibility_scope"])
+        self.assertIn(
+            "static-analysis-and-script-policy-tests", evidence["verified_steps"]
+        )
+        self.assertIn("frontend-architecture-tests", evidence["verified_steps"])
 
         command_log = self.command_log.read_text(encoding="utf-8")
         for required_invocation in (
@@ -196,10 +200,16 @@ class CleanCloneGateTests(unittest.TestCase):
             "uv:sync --frozen --all-extras --project backend --python 3.12",
             "uv:lock --check --project production/dagster",
             "uv:sync --frozen --all-extras --project production/dagster --python 3.12",
+            "python:-m ruff format --check backend scripts production/tests",
+            "python:-m ruff check backend scripts production/tests",
+            "python:-m mypy backend/app backend/scripts/verify_migrations.py",
+            "python:-m unittest discover -s scripts/tests -p test_*.py",
             "python:backend/scripts/verify_migrations.py",
             "python:-m pytest backend/tests/unit backend/tests/contract backend/tests/integration",
             "python:backend/scripts/smoke_backend.py",
             "npm:ci --ignore-scripts --prefix prototype/auris-flow-ui",
+            "npm:run architecture:test --prefix prototype/auris-flow-ui",
+            "npm:run architecture:final --prefix prototype/auris-flow-ui",
             "npm:run build --prefix prototype/auris-flow-ui",
             "npm:run bundle:check --prefix prototype/auris-flow-ui",
         ):
