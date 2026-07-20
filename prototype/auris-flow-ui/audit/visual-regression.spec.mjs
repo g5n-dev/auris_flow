@@ -188,7 +188,12 @@ test("所有业务模块与 tab 保持像素和关键几何等价", async ({ pag
       }
     }
   );
-  expect(visualSessionResponse.ok(), "视觉回归无法建立服务端开发会话").toBeTruthy();
+  if (!visualSessionResponse.ok()) {
+    const responseBody = (await visualSessionResponse.text()).slice(0, 1_000);
+    throw new Error(
+      `视觉回归无法建立服务端开发会话：HTTP ${visualSessionResponse.status()} ${responseBody}`
+    );
+  }
   const visualSessionCookie = (await page.context().cookies(baseUrl)).find(
     (cookie) => cookie.name === "auris_session"
   );

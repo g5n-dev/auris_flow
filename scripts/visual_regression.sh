@@ -146,6 +146,7 @@ RUNTIME_DESCRIPTOR="${TMP_DIR}/visual-runtime.json"
 CONTAINER_ARTIFACT_DIR="${TMP_DIR}/container-artifacts"
 RUNNER_IMAGE_TAG=""
 CONTAINER_UI_URL=""
+ALLOW_DOCKER_HOST_PREVIEW="0"
 DOCKER_NETWORK_ARGS=()
 
 if [ "${VISUAL_RUNTIME}" = "container" ]; then
@@ -161,6 +162,7 @@ if [ "${VISUAL_RUNTIME}" = "container" ]; then
     Darwin)
       DOCKER_NETWORK_ARGS=(--add-host host.docker.internal:host-gateway)
       CONTAINER_UI_URL="http://host.docker.internal:${UI_PORT}/"
+      ALLOW_DOCKER_HOST_PREVIEW="1"
       ;;
     *)
       echo "Pinned visual verification supports Linux and macOS Docker hosts only." >&2
@@ -259,7 +261,8 @@ wait_for_url "${BFF_URL}/healthz" "BFF" "${TMP_DIR}/bff.log"
 npm --prefix "${UI_ROOT}" run build >/dev/null
 (
   cd "${UI_ROOT}"
-  VITE_API_PROXY_TARGET="${BFF_URL}" npm exec vite -- preview \
+  AURIS_ALLOW_DOCKER_HOST_PREVIEW="${ALLOW_DOCKER_HOST_PREVIEW}" \
+    VITE_API_PROXY_TARGET="${BFF_URL}" npm exec vite -- preview \
     --host 127.0.0.1 --port "${UI_PORT}" --strictPort >"${TMP_DIR}/preview.log" 2>&1
 ) &
 UI_PID=$!

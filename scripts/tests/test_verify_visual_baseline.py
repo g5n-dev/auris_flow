@@ -1069,6 +1069,9 @@ class VisualShellPolicyIntegrationTests(unittest.TestCase):
         contract = release_runtime_contract()
         dockerfile = (root / "production/visual/Dockerfile").read_text(encoding="utf-8")
         shell = (root / "scripts/visual_regression.sh").read_text(encoding="utf-8")
+        vite_config = (root / "prototype/auris-flow-ui/vite.config.ts").read_text(
+            encoding="utf-8"
+        )
         workflow = (root / ".github/workflows/verify.yml").read_text(encoding="utf-8")
         readiness = (root / "scripts/check_platform_readiness.py").read_text(
             encoding="utf-8"
@@ -1096,6 +1099,17 @@ class VisualShellPolicyIntegrationTests(unittest.TestCase):
             shell,
             r"--env AURIS_VISUAL_ARTIFACT_DIR=/artifacts\s+\\",
         )
+        self.assertIn('ALLOW_DOCKER_HOST_PREVIEW="1"', shell)
+        self.assertIn(
+            'AURIS_ALLOW_DOCKER_HOST_PREVIEW="${ALLOW_DOCKER_HOST_PREVIEW}"',
+            shell,
+        )
+        self.assertIn(
+            'process.env.AURIS_ALLOW_DOCKER_HOST_PREVIEW === "1"', vite_config
+        )
+        self.assertIn('["host.docker.internal"]', vite_config)
+        self.assertIn("allowedHosts: previewAllowedHosts", vite_config)
+        self.assertNotIn("allowedHosts: true", vite_config)
         self.assertIn('AURIS_VISUAL_RUNTIME: "container"', workflow)
         self.assertIn(
             "oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20",
@@ -1132,7 +1146,7 @@ class VisualShellPolicyIntegrationTests(unittest.TestCase):
         self.assertIn('"production/visual/visual-baseline.lock.json"', readiness)
         self.assertIn('"production/visual/seed-overlay.json"', readiness)
 
-    def test_repository_starts_with_an_explicit_pending_lock_and_promotion_gate(
+    def test_repository_lock_and_two_stage_promotion_gate_are_valid(
         self,
     ) -> None:
         root = Path(__file__).resolve().parents[2]
@@ -1141,8 +1155,11 @@ class VisualShellPolicyIntegrationTests(unittest.TestCase):
         promotion_workflow = root / ".github/workflows/visual-baseline-promotion.yml"
         build_workflow = root / ".github/workflows/visual-baseline-build.yml"
 
-        failures = validate_visual_baseline_lock(lock_path, require_approved=True)
-        self.assertTrue(any("PENDING" in failure for failure in failures), failures)
+        # The repository lock may be PENDING before promotion or a contract-bound
+        # APPROVED lock afterward. Both must keep the regular test suite green;
+        # release readiness separately requires APPROVED and fails closed.
+        failures = validate_visual_baseline_lock(lock_path)
+        self.assertEqual([], failures)
         promotion = promotion_script.read_text(encoding="utf-8")
         self.assertIn("promote-oci", promotion)
         self.assertIn("--signature-identity", promotion)

@@ -24,6 +24,9 @@ const sharedRuntimeModules = new Set([
   "src/shared/ui/LazyBranchBoundary.tsx",
   "src/shared/ui/PanelHeader.tsx"
 ]);
+const previewAllowedHosts = process.env.AURIS_ALLOW_DOCKER_HOST_PREVIEW === "1"
+  ? ["host.docker.internal"]
+  : [];
 
 export default defineConfig({
   plugins: [
@@ -74,5 +77,8 @@ export default defineConfig({
         changeOrigin: true
       }
     }
+  },
+  preview: {
+    allowedHosts: previewAllowedHosts
   }
 });

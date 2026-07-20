@@ -74,6 +74,10 @@ test("cookie restore, OIDC redirect, CSRF and credential rules are explicit", as
   assert.match(visualRegressionSource, /page\.request\.post\([\s\S]{0,180}\/api\/v1\/auth\/dev-login/);
   assert.doesNotMatch(visualRegressionSource, /getByRole\("button",\s*\{\s*name:\s*"演示账号"/);
   assert.match(viteConfigSource, /"\/readyz"\s*:\s*\{/);
+  assert.match(viteConfigSource, /AURIS_ALLOW_DOCKER_HOST_PREVIEW\s*===\s*"1"/);
+  assert.match(viteConfigSource, /\["host\.docker\.internal"\]/);
+  assert.match(viteConfigSource, /allowedHosts:\s*previewAllowedHosts/);
+  assert.doesNotMatch(viteConfigSource, /allowedHosts:\s*true/);
   assert.match(previewSmokeSource, /path === "\/readyz"/);
   assert.match(previewSmokeSource, /"\/readyz"\s*:\s*\{\s*target:\s*proxyTarget/);
 });
