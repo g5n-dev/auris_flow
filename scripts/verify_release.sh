@@ -97,6 +97,7 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 2
 fi
 
+bash scripts/verify_production_mysql_migrations.sh
 bash scripts/verify_real_stack.sh
 bash scripts/verify_real_dagster.sh
 bash scripts/verify_product_dagster_path.sh

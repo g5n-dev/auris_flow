@@ -28,6 +28,9 @@ MinIO 保存权威对象；Redis 当前承担固定窗口限流和运行辅助�
   `127.0.0.1:13000`；不得把它们改成公网监听。
 - DNS 的 `AURIS_PUBLIC_HOST` 必须解析到该宿主机。出站网络至少允许企业 IdP、语义 embedding
   endpoint、外部回调目标、镜像仓库和时间同步服务。
+- `AURIS_EDGE_INTERNAL_IP` 必须是 `AURIS_INTERNAL_SUBNET` 内未占用的固定地址。BFF 只信任该
+  精确地址提供的代理头；edge 会用真实 socket peer 覆盖用户提交的 `X-Forwarded-For`，不得把
+  Uvicorn 信任范围扩大为 `*` 或整个用户可达网络。
 
 容量必须按真实音频保留期、对象版本、MySQL 增长、Qdrant 向量维度，以及当前 Tempo 7 天、
 Prometheus 30 天的配置保留期重新测算；修改保留期后必须重新做容量与磁盘告警演练。上述硬件只是
@@ -80,6 +83,8 @@ bash production/scripts/init-secrets.sh
 - `AURIS_PUBLIC_HOST`：不带 scheme/path 的公开 FQDN。
 - `AURIS_EXTERNAL_CALLBACK_URL` 与 `AURIS_EXTERNAL_CALLBACK_HOST`：必须相互匹配且使用 HTTPS。
 - `AURIS_EMBEDDING_ENDPOINT`、`AURIS_EMBEDDING_MODEL`、`AURIS_EMBEDDING_DIMENSION`。
+- `AURIS_INTERNAL_SUBNET` 与 `AURIS_EDGE_INTERNAL_IP`：两者必须匹配且不得与宿主机/VPN 网段冲突；
+  修改后必须重新渲染 Compose 并执行生产策略门禁。
 - 所有应用和上游镜像引用；正式版本必须是发布清单给出的 digest。
 - `AURIS_OTEL_TRACE_SAMPLE_RATIO`（默认 0.1）与所需的内部 metrics CIDR。
 
@@ -107,6 +112,19 @@ identity 验证 metadata，再校验包内 schema、commit、Compose、image loc
 
 生产配置会 fail closed：开发认证、demo/弱密码、通配 CORS/TrustedHost、local/fake adapter、
 非严格依赖检查、缺失 OIDC/真实存储/回调配置和生产确定性 embedding 均不被接受。
+
+`GET /api/v1/audio-playback` 的短期 grant 位于 query string，以兼容浏览器原生媒体 Range 请求；
+edge 对该精确 location 关闭 access log，BFF 结构化 HTTP 日志也只记录 path、不记录 query。不要在
+上游负载均衡、WAF、APM 或故障工单中重新记录完整 URL；需要排障时使用 request/trace ID 和服务端
+审计中的 grant nonce。
+
+MySQL 8.4 默认启用 binary log；本项目的不可变事实约束需要 Alembic 创建 `TRIGGER`。Compose
+因此显式固定 `log_bin_trust_function_creators=1`，但 bootstrap 会先撤销历史宽授权，再只给
+`auris_migration` 当前 schema 所需的 DDL/DML、`REFERENCES` 与 `TRIGGER`；runtime 没有
+`TRIGGER`，并清除两个业务账号遗留的 MySQL role membership；Keycloak/Dagster 只管理各自
+schema，所有业务账号均没有全局 `SUPER`。不得靠临时全局提权后把迁移结果
+记为生产通过，也不得把 migration URL 提供给 BFF/Worker。变更此策略时必须用原 production
+Compose、`auris_migration` 身份重新执行完整迁移循环并检查 `SHOW GRANTS`。
 
 ## OIDC 配置与身份预置
 
@@ -159,8 +177,44 @@ docker compose \
 docker compose \
   --project-directory production \
   --env-file production/.env \
-  -f production/compose.yaml up -d --wait
+  -f production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  mysql redis minio qdrant tempo node-exporter
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps db-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps minio-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps migrate
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  keycloak otel-collector
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps identity-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
+
+`db-bootstrap`、`minio-bootstrap`、`migrate` 与 `identity-bootstrap` 是必须成功退出的 one-shot；
+不要把它们混入 detached `up --wait`。每个阶段失败都应停止上线并查看该阶段日志。
 
 检查状态和公开入口：
 

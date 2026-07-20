@@ -23,7 +23,7 @@ from typing import Any
 
 
 SCHEMA_VERSION = "auris-flow.backup-manifest/v2"
-RELEASE_METADATA_SCHEMA = "auris.release-deployment-metadata.v2"
+RELEASE_METADATA_SCHEMA = "auris.release-deployment-metadata.v3"
 IMAGE_LOCK_SCHEMA = "auris.release-image-lock.v1"
 REQUIRED_AUTHORITIES = ("mysql", "minio")
 MANIFEST_NAME = "manifest.json"
@@ -39,6 +39,7 @@ BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
 IMAGE_REFERENCE_RE = re.compile(r"^[^\s@$]+(?::[^\s@]+)?@sha256:[0-9a-f]{64}$")
 SNAPSHOT_MARKER = ".auris-flow-restore-snapshot"
 SNAPSHOT_MARKER_VALUE = "auris-flow.restore-snapshot.v1\n"
+RELEASE_MEMBER_MODES = frozenset({"0600", "0644", "0755"})
 
 
 class ManifestError(ValueError):
@@ -292,6 +293,7 @@ def _validate_release_metadata(value: Any) -> dict[str, Any]:
         "image_lock",
         "restore_policy",
         "images",
+        "members",
     }
     if not isinstance(value, dict) or set(value) != required:
         raise ManifestError("release metadata has missing or unexpected fields")
@@ -337,6 +339,61 @@ def _validate_release_metadata(value: Any) -> dict[str, Any]:
         if ":" not in tagged or tagged.rsplit(":", 1)[1].casefold() == "latest":
             raise ManifestError("release metadata image tag is missing or mutable")
         images[service] = reference
+    raw_members = value.get("members")
+    if not isinstance(raw_members, list) or not raw_members:
+        raise ManifestError("release metadata members must be a non-empty list")
+    members: list[dict[str, str]] = []
+    member_paths: set[str] = set()
+    for raw_member in raw_members:
+        if not isinstance(raw_member, dict) or set(raw_member) != {
+            "path",
+            "sha256",
+            "type",
+            "mode",
+        }:
+            raise ManifestError("release metadata member is invalid")
+        raw_path = raw_member.get("path")
+        if (
+            not isinstance(raw_path, str)
+            or not raw_path
+            or raw_path != raw_path.strip()
+            or "\\" in raw_path
+            or any(ord(character) < 32 for character in raw_path)
+        ):
+            raise ManifestError("release metadata member path is unsafe")
+        path = PurePosixPath(raw_path)
+        if (
+            path.is_absolute()
+            or path.as_posix() != raw_path
+            or any(part in {"", ".", ".."} for part in path.parts)
+            or raw_path
+            in {
+                "production/release-metadata.json",
+                "production/release-metadata.sigstore.json",
+            }
+        ):
+            raise ManifestError("release metadata member path is unsafe")
+        if raw_path in member_paths:
+            raise ManifestError("release metadata member path is duplicated")
+        member_paths.add(raw_path)
+        digest = raw_member.get("sha256")
+        if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
+            raise ManifestError("release metadata member sha256 is invalid")
+        if raw_member.get("type") != "regular-file":
+            raise ManifestError("release metadata member type is invalid")
+        mode = raw_member.get("mode")
+        if not isinstance(mode, str) or mode not in RELEASE_MEMBER_MODES:
+            raise ManifestError("release metadata member mode is invalid")
+        members.append(
+            {
+                "path": raw_path,
+                "sha256": digest,
+                "type": "regular-file",
+                "mode": mode,
+            }
+        )
+    if [member["path"] for member in members] != sorted(member_paths):
+        raise ManifestError("release metadata members must be sorted")
     return {
         "schema_version": RELEASE_METADATA_SCHEMA,
         "release_tag": release_tag,
@@ -345,6 +402,7 @@ def _validate_release_metadata(value: Any) -> dict[str, Any]:
         "image_lock": bindings["image_lock"],
         "restore_policy": bindings["restore_policy"],
         "images": images,
+        "members": members,
     }
 
 

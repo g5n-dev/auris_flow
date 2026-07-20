@@ -28,12 +28,14 @@ RUNTIME_DRIVER = ROOT / "scripts" / "verify_production_path_runtime.py"
 EVIDENCE_PATH = ROOT / "build" / "release-evidence" / "production-path-gate.json"
 CONTRACT_SCHEMA = "auris.production-path-gate-contract.v1"
 EVIDENCE_SCHEMA = "auris.production-path-gate.v1"
-# Deliberately false until the runtime driver binds raw OIDC, adapter and OTel
-# proofs to the sanitized evidence envelope.  Flipping only the YAML contract
-# or adding a file named like the driver must never activate release evidence.
+# This assertion is reviewable source, not a runtime shortcut: activation also
+# requires every checked-in runtime source below, a ready Compose contract and a
+# complete raw-proof/recovery envelope whose canonical hashes are recomputed.
 RAW_PROOF_BINDING_IMPLEMENTED = False
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+OTEL_TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
+BUSINESS_TRACE_ID_PATTERN = re.compile(r"^trace_[A-Za-z0-9._:-]{8,120}$")
 REQUIRED_BASE_SERVICES = frozenset(
     {
         "bff",
@@ -70,6 +72,83 @@ REQUIRED_TRACE_COMPONENTS = frozenset(
         "qdrant",
         "external_callback",
         "otel",
+    }
+)
+REQUIRED_RUNTIME_SOURCES = (
+    "scripts/verify_production_path_runtime.py",
+    "production/tests/production_path_verifier.py",
+    "production/tests/production_gate_support.py",
+    "production/tests/production-path-keycloak-realm.template.json",
+)
+REQUIRED_OPERATION_TRACES = frozenset(
+    {"oidc", "dagster", "object_storage", "qdrant", "external_callback"}
+)
+REQUIRED_RAW_PROOFS = frozenset(
+    {
+        "oidc_discovery",
+        "oidc_jwks",
+        "oidc_code_exchange",
+        "browser_session",
+        "mysql_authority",
+        "dagster_graphql",
+        "dagster_completion",
+        "embedding_https",
+        "qdrant_point",
+        "qdrant_recall",
+        "minio_object",
+        "callback_delivery",
+        "callback_replay",
+        "tempo_trace",
+        "mysql_restart",
+        "worker_crash",
+        "duplicate_delivery",
+        "callback_timeout",
+        "qdrant_outage",
+        "redis_outage",
+    }
+)
+RAW_PROOF_SOURCES = frozenset(
+    {
+        "bff-response",
+        "compose-runtime",
+        "dagster-graphql",
+        "https-response",
+        "minio-s3",
+        "mysql",
+        "qdrant-http",
+        "tempo-http",
+    }
+)
+RAW_PROOF_SOURCE_BY_ID = {
+    "oidc_discovery": "https-response",
+    "oidc_jwks": "https-response",
+    "oidc_code_exchange": "mysql",
+    "browser_session": "mysql",
+    "mysql_authority": "mysql",
+    "dagster_graphql": "dagster-graphql",
+    "dagster_completion": "mysql",
+    "embedding_https": "https-response",
+    "qdrant_point": "qdrant-http",
+    "qdrant_recall": "bff-response",
+    "minio_object": "minio-s3",
+    "callback_delivery": "https-response",
+    "callback_replay": "https-response",
+    "tempo_trace": "tempo-http",
+    "mysql_restart": "compose-runtime",
+    "worker_crash": "compose-runtime",
+    "duplicate_delivery": "mysql",
+    "callback_timeout": "mysql",
+    "qdrant_outage": "compose-runtime",
+    "redis_outage": "compose-runtime",
+}
+REQUIRED_RECOVERY_CASES = frozenset(
+    {
+        "mysql_restart",
+        "worker_crash",
+        "duplicate_delivery",
+        "callback_timeout",
+        "qdrant_outage",
+        "redis_outage",
     }
 )
 
@@ -133,6 +212,12 @@ def _require_service_hardening(
         errors.append(f"{service_name}: read_only must be true")
     if service.get("cap_drop") != ["ALL"]:
         errors.append(f"{service_name}: cap_drop must contain only ALL")
+    security_opt = _string_set(service.get("security_opt"))
+    if security_opt != {"no-new-privileges:true"}:
+        errors.append(f"{service_name}: no-new-privileges must be enabled")
+    user = str(service.get("user") or "").strip().lower()
+    if not user or user in {"0", "0:0", "root", "root:root"}:
+        errors.append(f"{service_name}: an explicit non-root user is required")
     if service.get("privileged") is True or service.get("network_mode") == "host":
         errors.append(f"{service_name}: privileged or host networking is forbidden")
 
@@ -256,18 +341,457 @@ def _require_boolean(
 
 
 def _validate_adapter_trace(
-    adapter: dict[str, Any], *, label: str, trace_id: object, errors: list[str]
+    adapter: dict[str, Any], *, label: str, expected_trace_id: object, errors: list[str]
 ) -> None:
     if adapter.get("mode") != "real":
         errors.append(f"{label}: adapter mode must be real")
-    if adapter.get("trace_id") != trace_id:
-        errors.append("all production path proofs must bind to the same trace_id")
+    if adapter.get("trace_id") != expected_trace_id:
+        errors.append(f"{label}: adapter trace_id must match its operation trace")
+
+
+def _canonical_sha256(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _positive_int(value: object, *, minimum: int = 1) -> bool:
+    return not isinstance(value, bool) and isinstance(value, int) and value >= minimum
+
+
+def _nonempty_strings(value: object) -> list[str]:
+    if not isinstance(value, list) or not value:
+        return []
+    if any(not isinstance(item, str) or not item for item in value):
+        return []
+    return value
+
+
+def _validate_proof_facts(
+    proof_id: str,
+    facts: dict[str, Any],
+    *,
+    payload: dict[str, Any],
+    errors: list[str],
+) -> None:
+    """Validate concrete observations; a boolean-only claim is never evidence."""
+
+    label = f"raw proof {proof_id} capture facts"
+
+    def require(condition: bool, message: str) -> None:
+        if not condition:
+            errors.append(f"{label}: {message}")
+
+    trace = _mapping(payload.get("trace"))
+    operation_traces = _mapping(trace.get("operation_trace_ids"))
+    scope = ("aurora_auto", "sales_qa")
+    if proof_id == "oidc_discovery":
+        require(facts.get("http_status") == 200, "discovery HTTP status must be 200")
+        require(_https_url(facts.get("issuer")), "issuer must be an HTTPS URL")
+        for field in (
+            "authorization_endpoint_scheme",
+            "token_endpoint_scheme",
+            "jwks_uri_scheme",
+        ):
+            require(facts.get(field) == "https", f"{field} must be https")
+    elif proof_id == "oidc_jwks":
+        require(facts.get("http_status") == 200, "JWKS HTTP status must be 200")
+        require(
+            bool(_nonempty_strings(facts.get("rsa_signing_key_ids"))),
+            "at least one RSA signing key id is required",
+        )
+    elif proof_id == "oidc_code_exchange":
+        require(
+            facts.get("grant_type") == "authorization_code", "grant type is invalid"
+        )
+        require(facts.get("pkce_method") == "S256", "PKCE method is invalid")
+        require(
+            facts.get("consumed_state_count") == 1, "one consumed state is required"
+        )
+        require(
+            facts.get("browser_session_count") == 1, "one browser session is required"
+        )
+        require(
+            facts.get("trace_id") == operation_traces.get("oidc"),
+            "OIDC trace binding is invalid",
+        )
+    elif proof_id == "browser_session":
+        require(
+            facts.get("cookie_name") == "__Host-auris_session", "cookie name is invalid"
+        )
+        require(facts.get("cookie_secure") is True, "Secure cookie flag is required")
+        require(
+            facts.get("cookie_http_only") is True, "HttpOnly cookie flag is required"
+        )
+        require(facts.get("provider") == "oidc_session", "session provider is invalid")
+        require(
+            facts.get("active_session_count") == 1, "one active session is required"
+        )
+        require(
+            bool(
+                SHA256_PATTERN.fullmatch(str(facts.get("session_token_sha256") or ""))
+            ),
+            "opaque session token hash is invalid",
+        )
+        require(
+            facts.get("trace_id") == operation_traces.get("oidc"),
+            "browser session trace binding is invalid",
+        )
+    elif proof_id == "mysql_authority":
+        require(
+            (facts.get("tenant_id"), facts.get("project_id")) == scope,
+            "authoritative scope is invalid",
+        )
+        run_ids = _nonempty_strings(facts.get("authoritative_run_ids"))
+        require(bool(run_ids), "authoritative run ids are required")
+        require(
+            facts.get("authoritative_run_count") == len(run_ids),
+            "authoritative run count does not match run ids",
+        )
+        require(
+            _positive_int(facts.get("processed_outbox_count")),
+            "processed outbox count must be positive",
+        )
+    elif proof_id == "dagster_graphql":
+        require(
+            facts.get("graphql_operation") == "pipelineRunOrError",
+            "GraphQL operation is invalid",
+        )
+        require(
+            facts.get("response_typename") == "Run", "Dagster response type is invalid"
+        )
+        require(
+            isinstance(facts.get("dagster_run_id"), str)
+            and bool(facts.get("dagster_run_id")),
+            "Dagster run id is required",
+        )
+        require(
+            facts.get("dagster_status") == "SUCCESS", "Dagster run is not successful"
+        )
+        require(
+            facts.get("trace_id") == operation_traces.get("dagster"),
+            "Dagster trace binding is invalid",
+        )
+    elif proof_id == "dagster_completion":
+        require(facts.get("receipt_count") == 1, "one completion receipt is required")
+        require(
+            facts.get("processing_state") == "completed", "receipt is not completed"
+        )
+        require(
+            facts.get("completion_status") == "success", "completion status is invalid"
+        )
+        require(
+            facts.get("signature_mode") == "hmac-sha256-v2", "signature mode is invalid"
+        )
+        require(
+            isinstance(facts.get("signature_key_id"), str)
+            and bool(facts.get("signature_key_id")),
+            "signature key id is required",
+        )
+        require(
+            facts.get("run_trace_id") == operation_traces.get("dagster"),
+            "completion trace binding is invalid",
+        )
+    elif proof_id == "embedding_https":
+        require(facts.get("transport") == "https", "embedding transport is not HTTPS")
+        require(facts.get("tls_verified") is True, "embedding TLS was not verified")
+        require(
+            facts.get("provider") == "reference-semantic-protocol",
+            "embedding provider is invalid",
+        )
+        require(
+            isinstance(facts.get("model"), str) and bool(facts.get("model")),
+            "embedding model id is required",
+        )
+        require(
+            _positive_int(facts.get("request_count"), minimum=2),
+            "two embedding calls are required",
+        )
+        require(
+            set(_nonempty_strings(facts.get("purposes"))) == {"document", "query"},
+            "document and query purposes are required",
+        )
+        require(_positive_int(facts.get("dimension")), "embedding dimension is invalid")
+        require(
+            facts.get("reference_protocol_only") is True,
+            "protocol-only marker is required",
+        )
+        require(
+            facts.get("model_quality_certified") is False,
+            "model quality must not be certified",
+        )
+    elif proof_id == "qdrant_point":
+        require(facts.get("http_status") == 200, "Qdrant point HTTP status must be 200")
+        require(
+            all(
+                isinstance(facts.get(field), str) and facts.get(field)
+                for field in ("collection", "point_id")
+            ),
+            "collection and point id are required",
+        )
+        require(facts.get("point_count") == 1, "exactly one point must be observed")
+        require(
+            (facts.get("tenant_id"), facts.get("project_id")) == scope,
+            "Qdrant scope is invalid",
+        )
+        require(
+            facts.get("trace_id") == operation_traces.get("qdrant"),
+            "Qdrant trace binding is invalid",
+        )
+        require(
+            _positive_int(facts.get("vector_dimension")), "vector dimension is invalid"
+        )
+    elif proof_id == "qdrant_recall":
+        point_ids = _nonempty_strings(facts.get("point_ids"))
+        require(facts.get("http_status") == 200, "recall HTTP status must be 200")
+        require(bool(point_ids), "authorized recalled point ids are required")
+        require(
+            facts.get("authorized_hit_count") == len(point_ids),
+            "recall count does not match point ids",
+        )
+        require(
+            facts.get("trace_id") == operation_traces.get("qdrant"),
+            "recall trace binding is invalid",
+        )
+    elif proof_id == "minio_object":
+        require(facts.get("bucket") == "auris-flow", "MinIO bucket is invalid")
+        require(
+            isinstance(facts.get("object_key"), str) and bool(facts.get("object_key")),
+            "object key is required",
+        )
+        require(facts.get("http_status") == 200, "MinIO GET status must be 200")
+        expected_hash = str(facts.get("expected_content_sha256") or "")
+        observed_hash = str(facts.get("observed_content_sha256") or "")
+        require(
+            bool(SHA256_PATTERN.fullmatch(expected_hash)),
+            "expected content hash is invalid",
+        )
+        require(
+            expected_hash == observed_hash, "stored object content hash does not match"
+        )
+        require(_positive_int(facts.get("content_length")), "stored object is empty")
+        require(
+            facts.get("trace_id") == operation_traces.get("object_storage"),
+            "object trace binding is invalid",
+        )
+    elif proof_id == "callback_delivery":
+        require(facts.get("transport") == "https", "callback transport is not HTTPS")
+        require(facts.get("tls_verified") is True, "callback TLS was not verified")
+        require(
+            facts.get("signature_mode") == "hmac-sha256-v2",
+            "callback signature mode is invalid",
+        )
+        require(
+            facts.get("signature_verified") is True,
+            "callback signature is not verified",
+        )
+        require(
+            facts.get("verified_receipt_count") == 1, "one callback receipt is required"
+        )
+        require(
+            isinstance(facts.get("receipt_id"), str) and bool(facts.get("receipt_id")),
+            "callback receipt id is required",
+        )
+        require(
+            facts.get("trace_id") == operation_traces.get("external_callback"),
+            "callback trace binding is invalid",
+        )
+    elif proof_id == "callback_replay":
+        require(facts.get("http_status") == 409, "replay must return HTTP 409")
+        require(
+            facts.get("error_code") == "CALLBACK_SIGNATURE_REPLAYED",
+            "replay error code is invalid",
+        )
+        require(
+            facts.get("replay_rejected") is True, "callback replay was not rejected"
+        )
+    elif proof_id == "tempo_trace":
+        require(facts.get("http_status") == 200, "Tempo trace HTTP status must be 200")
+        require(
+            facts.get("otel_trace_id") == trace.get("otel_trace_id"),
+            "Tempo trace id is invalid",
+        )
+        require(
+            {"auris-flow-bff", "auris-flow-worker", "auris-flow-dagster-code"}.issubset(
+                set(_nonempty_strings(facts.get("services")))
+            ),
+            "Tempo trace does not include BFF, Worker and Dagster code",
+        )
+    elif proof_id == "mysql_restart":
+        require(
+            bool(SHA256_PATTERN.fullmatch(str(facts.get("container_id_sha256") or ""))),
+            "container id hash is invalid",
+        )
+        require(
+            facts.get("started_at_before") != facts.get("started_at_after"),
+            "restart timestamps did not change",
+        )
+        require(facts.get("ready_status_after") == 200, "readiness did not recover")
+        require(
+            _positive_int(facts.get("authoritative_run_count_before"))
+            and facts.get("authoritative_run_count_before")
+            == facts.get("authoritative_run_count_after"),
+            "authoritative MySQL run count changed across restart",
+        )
+    elif proof_id == "worker_crash":
+        require(
+            bool(SHA256_PATTERN.fullmatch(str(facts.get("container_id_sha256") or ""))),
+            "container id hash is invalid",
+        )
+        require(
+            facts.get("started_at_before") != facts.get("started_at_after"),
+            "worker restart timestamps did not change",
+        )
+        require(_positive_int(facts.get("event_id")), "outbox event id is invalid")
+        require(
+            facts.get("event_status_before") == "pending",
+            "event was not pending while Worker was down",
+        )
+        require(
+            facts.get("event_status_after") == "processed",
+            "event was not processed after Worker restart",
+        )
+        require(
+            facts.get("remote_run_count") == 1,
+            "worker crash produced duplicate remote runs",
+        )
+    elif proof_id == "duplicate_delivery":
+        require(_positive_int(facts.get("event_id")), "outbox event id is invalid")
+        require(
+            _positive_int(facts.get("delivery_attempt_count"), minimum=2),
+            "multiple delivery attempts were not observed",
+        )
+        require(
+            facts.get("dispatch_attempt_count") == 1,
+            "exactly one dispatch attempt is required",
+        )
+        require(
+            facts.get("reconcile_attempt_count") == 1,
+            "exactly one reconciliation attempt is required",
+        )
+        require(facts.get("remote_receipt_count") == 1, "remote receipt was duplicated")
+        require(
+            facts.get("business_outcome_count") == 1, "business outcome was duplicated"
+        )
+    elif proof_id == "callback_timeout":
+        require(_positive_int(facts.get("event_id")), "outbox event id is invalid")
+        require(
+            facts.get("first_attempt_status") == "outcome_unknown",
+            "timeout did not create an unknown outcome",
+        )
+        require(
+            facts.get("final_attempt_status") == "success", "callback did not recover"
+        )
+        require(
+            facts.get("final_delivery_mode") == "reconcile",
+            "callback was not reconciled",
+        )
+        require(
+            facts.get("remote_receipt_count") == 1,
+            "callback reconciliation duplicated the receipt",
+        )
+    elif proof_id in {"qdrant_outage", "redis_outage"}:
+        require(
+            facts.get("ready_status_during") == 503,
+            "readiness did not fail during outage",
+        )
+        require(
+            facts.get("ready_status_after") == 200,
+            "readiness did not recover after outage",
+        )
+        require(
+            _positive_int(facts.get("authoritative_run_count_before"))
+            and facts.get("authoritative_run_count_before")
+            == facts.get("authoritative_run_count_after"),
+            "MySQL authority changed during dependency outage",
+        )
+        if proof_id == "qdrant_outage":
+            require(
+                isinstance(facts.get("point_id"), str) and bool(facts.get("point_id")),
+                "preserved point id is required",
+            )
+            require(
+                facts.get("point_present_after") is True,
+                "Qdrant point was not recovered",
+            )
+
+
+def _validate_raw_proofs(payload: dict[str, Any], errors: list[str]) -> set[str]:
+    raw = _mapping(payload.get("raw_proofs"))
+    if raw.get("schema_version") != "auris.production-path.raw-proofs.v1":
+        errors.append("raw proofs schema_version is invalid")
+    records = _mapping(raw.get("records"))
+    record_names = set(records)
+    if record_names != REQUIRED_RAW_PROOFS:
+        errors.append(
+            "raw proofs inventory must exactly match the production path contract"
+        )
+    for proof_id, value in records.items():
+        proof = _mapping(value)
+        label = f"raw proof {proof_id}"
+        expected_source = RAW_PROOF_SOURCE_BY_ID.get(proof_id)
+        if (
+            proof.get("source") not in RAW_PROOF_SOURCES
+            or proof.get("source") != expected_source
+        ):
+            errors.append(f"{label}: source is invalid for this proof")
+        if proof.get("media_type") != "application/json":
+            errors.append(f"{label}: media_type must be application/json")
+        capture = _mapping(proof.get("capture"))
+        if capture.get("schema_version") != "auris.production-path.capture.v1":
+            errors.append(f"{label}: capture schema_version is invalid")
+        if (
+            capture.get("proof_id") != proof_id
+            or capture.get("source") != expected_source
+        ):
+            errors.append(f"{label}: capture identity does not match its record")
+        if proof.get("capture_sha256") != _canonical_sha256(capture):
+            errors.append(f"{label}: capture_sha256 does not match embedded capture")
+        facts = _mapping(proof.get("facts"))
+        if not facts:
+            errors.append(f"{label}: sanitized facts are required")
+        if capture.get("observations") != facts:
+            errors.append(
+                f"{label}: facts must be derived exactly from capture observations"
+            )
+        if proof.get("facts_sha256") != _canonical_sha256(facts):
+            errors.append(f"{label}: facts_sha256 does not match sanitized facts")
+        if proof_id in REQUIRED_RAW_PROOFS:
+            _validate_proof_facts(proof_id, facts, payload=payload, errors=errors)
+    if raw.get("bundle_sha256") != _canonical_sha256(records):
+        errors.append("raw proofs bundle_sha256 does not match the proof records")
+    return record_names
+
+
+def _validate_recovery_matrix(
+    payload: dict[str, Any], *, proof_ids: set[str], errors: list[str]
+) -> None:
+    recovery = _mapping(payload.get("recovery"))
+    if set(recovery) != REQUIRED_RECOVERY_CASES:
+        errors.append("recovery matrix must exactly match the required fault cases")
+    for case_name, value in recovery.items():
+        case = _mapping(value)
+        label = f"recovery {case_name}"
+        for field in (
+            "proven",
+            "authority_consistent",
+            "no_duplicate_business_outcome",
+        ):
+            _require_boolean(case, field, label=label, errors=errors)
+        raw_proof_ids = _string_set(case.get("raw_proof_ids"))
+        if not raw_proof_ids or case_name not in raw_proof_ids:
+            errors.append(f"{label}: its named raw proof is required")
+        if not raw_proof_ids.issubset(proof_ids):
+            errors.append(f"{label}: references unknown raw proof ids")
 
 
 def _runtime_activation_errors(root: Path) -> list[str]:
     errors: list[str] = []
     contract_path = root / "production" / "tests" / "production-path-gate.compose.yaml"
-    driver_path = root / "scripts" / "verify_production_path_runtime.py"
     try:
         contract_document = _load_yaml(contract_path)
     except ValueError:
@@ -280,8 +804,10 @@ def _runtime_activation_errors(root: Path) -> list[str]:
             errors.append("production path checked-in contract status is not ready")
         elif validate_gate_compose(contract_document):
             errors.append("production path checked-in ready contract is invalid")
-    if not driver_path.is_file() or driver_path.is_symlink():
-        errors.append("production path runtime driver is not implemented")
+    for relative in REQUIRED_RUNTIME_SOURCES:
+        source = root / relative
+        if not source.is_file() or source.is_symlink():
+            errors.append(f"production path runtime source is missing: {relative}")
     if not RAW_PROOF_BINDING_IMPLEMENTED:
         errors.append("production path raw runtime proof binding is not implemented")
     return errors
@@ -342,10 +868,37 @@ def validate_evidence(
             + ", ".join(missing_services)
         )
 
+    runtime_sources = _mapping(payload.get("runtime_sources"))
+    if set(runtime_sources) != set(REQUIRED_RUNTIME_SOURCES):
+        errors.append(
+            "runtime source hash inventory must exactly match the production path contract"
+        )
+    for relative in REQUIRED_RUNTIME_SOURCES:
+        path = root / relative
+        if not path.is_file() or path.is_symlink():
+            continue
+        if runtime_sources.get(relative) != _sha256_file(path):
+            errors.append(
+                f"runtime source hash does not match checked-in input: {relative}"
+            )
+
     trace = _mapping(payload.get("trace"))
-    trace_id = trace.get("trace_id")
-    if not isinstance(trace_id, str) or not trace_id.startswith("trace_"):
-        errors.append("production path evidence requires a server trace_id")
+    primary_trace_id = trace.get("primary_business_trace_id")
+    otel_trace_id = trace.get("otel_trace_id")
+    if not BUSINESS_TRACE_ID_PATTERN.fullmatch(str(primary_trace_id or "")):
+        errors.append(
+            "production path evidence requires a primary server business trace_id"
+        )
+    if not OTEL_TRACE_ID_PATTERN.fullmatch(str(otel_trace_id or "")):
+        errors.append("production path evidence requires an exact OTel trace id")
+    operation_traces = _mapping(trace.get("operation_trace_ids"))
+    if set(operation_traces) != REQUIRED_OPERATION_TRACES:
+        errors.append("production path evidence requires every operation trace id")
+    for operation, operation_trace_id in operation_traces.items():
+        if not BUSINESS_TRACE_ID_PATTERN.fullmatch(str(operation_trace_id or "")):
+            errors.append(f"operation trace id is invalid: {operation}")
+    if operation_traces.get("dagster") != primary_trace_id:
+        errors.append("primary business trace must be the real Dagster operation trace")
     linked_components = trace.get("linked_components")
     linked_set = _string_set(linked_components)
     missing_components = sorted(REQUIRED_TRACE_COMPONENTS - linked_set)
@@ -372,12 +925,17 @@ def validate_evidence(
         _require_boolean(identity, field, label="identity", errors=errors)
     if identity.get("dev_auth_enabled") is not False:
         errors.append("identity proof must show dev auth disabled")
-    if identity.get("trace_id") != trace_id:
-        errors.append("all production path proofs must bind to the same trace_id")
+    if identity.get("trace_id") != operation_traces.get("oidc"):
+        errors.append("identity proof must bind to the OIDC operation trace")
 
     adapters = _mapping(payload.get("adapters"))
     dagster = _mapping(adapters.get("dagster"))
-    _validate_adapter_trace(dagster, label="dagster", trace_id=trace_id, errors=errors)
+    _validate_adapter_trace(
+        dagster,
+        label="dagster",
+        expected_trace_id=operation_traces.get("dagster"),
+        errors=errors,
+    )
     _require_boolean(dagster, "submitted", label="dagster", errors=errors)
     _require_boolean(
         dagster,
@@ -390,7 +948,7 @@ def validate_evidence(
     _validate_adapter_trace(
         object_storage,
         label="object storage",
-        trace_id=trace_id,
+        expected_trace_id=operation_traces.get("object_storage"),
         errors=errors,
     )
     if object_storage.get("provider") != "minio":
@@ -403,19 +961,30 @@ def validate_evidence(
     )
 
     qdrant = _mapping(adapters.get("qdrant"))
-    _validate_adapter_trace(qdrant, label="qdrant", trace_id=trace_id, errors=errors)
+    _validate_adapter_trace(
+        qdrant,
+        label="qdrant",
+        expected_trace_id=operation_traces.get("qdrant"),
+        errors=errors,
+    )
     if qdrant.get("embedding_provider") != "http":
         errors.append("Qdrant proof must use the HTTP embedding provider")
     if qdrant.get("embedding_transport") != "https":
         errors.append("Qdrant HTTP embedding transport must use HTTPS")
     for field in ("semantic_embedding", "point_verified", "recall_verified"):
         _require_boolean(qdrant, field, label="qdrant", errors=errors)
+    if qdrant.get("reference_protocol_only") is not True:
+        errors.append("Qdrant proof must identify the gate embedding as protocol-only")
+    if qdrant.get("model_quality_certified") is not False:
+        errors.append(
+            "production path gate must not claim embedding model quality certification"
+        )
 
     callback = _mapping(adapters.get("external_callback"))
     _validate_adapter_trace(
         callback,
         label="external callback",
-        trace_id=trace_id,
+        expected_trace_id=operation_traces.get("external_callback"),
         errors=errors,
     )
     if callback.get("transport") != "https":
@@ -435,8 +1004,10 @@ def validate_evidence(
         label="observability collector",
         errors=errors,
     )
-    if observability.get("trace_id") != trace_id:
-        errors.append("all production path proofs must bind to the same trace_id")
+    if observability.get("business_trace_id") != primary_trace_id:
+        errors.append("observability proof must bind the primary business trace")
+    if observability.get("otel_trace_id") != otel_trace_id:
+        errors.append("observability proof must bind the primary OTel trace")
     observed_services = observability.get("services")
     observed_set = _string_set(observed_services)
     required_observed = {
@@ -448,6 +1019,9 @@ def validate_evidence(
         errors.append(
             "cross-service OTel trace must include BFF, Worker and Dagster code"
         )
+
+    raw_proof_ids = _validate_raw_proofs(payload, errors)
+    _validate_recovery_matrix(payload, proof_ids=raw_proof_ids, errors=errors)
 
     serialized = json.dumps(payload, ensure_ascii=True, sort_keys=True).lower()
     for marker in (

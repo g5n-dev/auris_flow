@@ -110,8 +110,9 @@ services:
     secrets: !override []
     ports:
       - "127.0.0.1:${AURIS_DAGSTER_GATE_CALLBACK_PORT}:8080"
-    networks:
+    networks: !override
       - internal
+      - dagster-gate-host
     healthcheck:
       test:
         - CMD
@@ -149,6 +150,9 @@ services:
       - dagster_gate_secrets:/run/secrets:ro
     ports:
       - "127.0.0.1:${AURIS_DAGSTER_GATE_PORT}:3000"
+    networks: !override
+      - internal
+      - dagster-gate-host
 
   dagster-daemon:
     secrets: !override []
@@ -157,3 +161,9 @@ services:
 
 volumes:
   dagster_gate_secrets:
+
+networks:
+  dagster-gate-host:
+    driver: bridge
+    internal: false
+    attachable: false

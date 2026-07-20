@@ -12,6 +12,8 @@ from datetime import date
 from pathlib import Path
 from typing import Literal, TypedDict
 
+import yaml  # type: ignore[import-untyped]
+
 SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
@@ -166,7 +168,7 @@ CHECKS: tuple[Check, ...] = (
     ),
     Check(
         key="one_command_quality_gate",
-        title="一键质量门禁",
+        title="正式发布 gate 已接线且 fail-closed",
         paths=(
             "scripts/verify_all.sh",
             "scripts/verify_fast.sh",
@@ -179,6 +181,9 @@ CHECKS: tuple[Check, ...] = (
             "scripts/verify_product_dagster_path.py",
             "scripts/verify_production_path.sh",
             "scripts/verify_production_path_gate.py",
+            "scripts/verify_production_mysql_migrations.sh",
+            "backend/scripts/verify_mysql_migration_security.py",
+            "production/tests/test_mysql_migration_security.py",
             "scripts/verify_clean_clone.sh",
             "scripts/verify_release_authorization.py",
             "scripts/finalize_release_evidence.py",
@@ -224,6 +229,7 @@ CHECKS: tuple[Check, ...] = (
                 "bash scripts/verify_real_dagster.sh",
                 "bash scripts/verify_product_dagster_path.sh",
                 "bash scripts/verify_production_path.sh",
+                "bash scripts/verify_production_mysql_migrations.sh",
                 "AURIS_SKIP_REAL_DAGSTER=1 is not allowed",
                 "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
                 "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
@@ -236,11 +242,6 @@ CHECKS: tuple[Check, ...] = (
                 "scripts/verify_production_path_gate.py",
                 "scripts/verify_production_path_runtime.py",
                 "build/release-evidence/production-path-gate.json",
-            ),
-            "production/tests/production-path-gate.compose.yaml": (
-                "status: blocked",
-                "OIDC Authorization Code + PKCE",
-                "cross-service OTel trace",
             ),
             "scripts/check_real_stack_artifact.sh": (
                 "real_qdrant",
@@ -263,7 +264,10 @@ CHECKS: tuple[Check, ...] = (
                 "npm --prefix prototype/auris-flow-ui run audit:capture",
             ),
         },
-        rationale="开源平台不能依赖口头验收；必须有可重复的一键验证入口。",
+        rationale=(
+            "这里验证 P0 正式发布 gate 的可执行接线和 fail-closed 约束；"
+            "允许 P2 生产路径蓝图保持 blocked，不代表 P2 运行态已经 ready。"
+        ),
     ),
     Check(
         key="backend_contract_package",
@@ -383,7 +387,12 @@ CHECKS: tuple[Check, ...] = (
             "backend/app/api/routers/labels.py",
             "backend/app/api/routers/insights.py",
             "prototype/auris-flow-ui/src/api/client.ts",
-            "prototype/auris-flow-ui/src/App.tsx",
+            "prototype/auris-flow-ui/src/workspace/ModuleWorkspace.tsx",
+            "prototype/auris-flow-ui/src/workspace/moduleWorkspaceCatalog.ts",
+            "prototype/auris-flow-ui/src/features/labels/LabelsModule.tsx",
+            "prototype/auris-flow-ui/src/features/evaluation/EvaluationModule.tsx",
+            "prototype/auris-flow-ui/src/features/insights/InsightsModule.tsx",
+            "prototype/auris-flow-ui/src/catalogs/module-catalog.json",
             "prototype/auris-flow-ui/e2e/platform-bff.mjs",
             "prototype/auris-flow-ui/e2e/ui-smoke.mjs",
             "prototype/auris-flow-ui/audit/capture-audit.mjs",
@@ -413,6 +422,16 @@ CHECKS: tuple[Check, ...] = (
                 "/v1/label-versions",
                 "/v1/eval-runs",
                 "/v1/insights/actions",
+            ),
+            "prototype/auris-flow-ui/src/workspace/ModuleWorkspace.tsx": (
+                "ModuleWorkspaceView",
+                "useModuleCommands",
+                "useModuleProjection",
+            ),
+            "prototype/auris-flow-ui/src/workspace/moduleWorkspaceCatalog.ts": (
+                "moduleConfigs",
+                "moduleInteractionModels",
+                "staticCatalog",
             ),
             "prototype/auris-flow-ui/e2e/platform-bff.mjs": (
                 "/api/v1/label-versions",
@@ -1031,6 +1050,7 @@ def run_release_checks() -> list[ReadinessResult]:
             verification_failures.append(
                 f"scripts/verify_release.sh missing release gate: {pattern}"
             )
+    verification_failures.extend(validate_release_gate_wiring())
     if (
         "exit 0" in release_verify_text
         and "AURIS_SKIP_REAL_STACK_E2E" in release_verify_text
@@ -1163,6 +1183,128 @@ def read_text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def validate_release_gate_wiring(root: Path = ROOT) -> list[str]:
+    """Require a real top-level production-path command, not a comment or echo."""
+
+    path = root / "scripts" / "verify_release.sh"
+    if not path.is_file():
+        return ["scripts/verify_release.sh is missing"]
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        return [f"scripts/verify_release.sh is unreadable: {error}"]
+
+    expected = "bash scripts/verify_production_path.sh"
+    executable_lines = [
+        index for index, line in enumerate(lines) if line.strip() == expected
+    ]
+    if len(executable_lines) != 1:
+        return [
+            "scripts/verify_release.sh must execute exactly one top-level "
+            f"{expected} command"
+        ]
+    return []
+
+
+def validate_production_path_readiness_contract(root: Path = ROOT) -> list[str]:
+    """Validate the checked-in gate surface without claiming runtime success."""
+
+    path = root / "production" / "tests" / "production-path-gate.compose.yaml"
+    if not path.is_file():
+        return []
+    try:
+        document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as error:
+        return [f"production path gate contract is unreadable: {error}"]
+    if not isinstance(document, dict):
+        return ["production path gate contract must be a YAML object"]
+
+    failures: list[str] = []
+    contract = document.get("x-auris-production-path-gate")
+    if not isinstance(contract, dict):
+        return ["production path gate contract metadata is missing"]
+    expected_metadata = {
+        "schema_version": "auris.production-path-gate-contract.v1",
+        "source_compose": "production/compose.yaml",
+        "runtime_driver": "scripts/verify_production_path_runtime.py",
+    }
+    for metadata_field, expected in expected_metadata.items():
+        if contract.get(metadata_field) != expected:
+            failures.append(f"production path gate {metadata_field} must be {expected}")
+    status = contract.get("status")
+    if status not in {"blocked", "ready"}:
+        failures.append("production path gate status must be blocked or ready")
+    missing_capabilities = contract.get("missing_capabilities")
+    if status == "blocked" and (
+        not isinstance(missing_capabilities, list)
+        or not missing_capabilities
+        or any(
+            not isinstance(item, str) or not item.strip()
+            for item in missing_capabilities
+        )
+    ):
+        failures.append(
+            "blocked production path gate must name concrete missing capabilities"
+        )
+    if status == "ready" and missing_capabilities not in (None, []):
+        failures.append("ready production path gate cannot retain missing capabilities")
+    if set(contract.get("required_external_stubs") or []) != {
+        "production-gate-embedding",
+        "production-gate-callback",
+    }:
+        failures.append(
+            "production path gate must require both hardened HTTPS test endpoints"
+        )
+
+    services = document.get("services")
+    services = services if isinstance(services, dict) else {}
+    for service_name in (
+        "production-gate-embedding",
+        "production-gate-callback",
+        "production-path-verifier",
+    ):
+        service = services.get(service_name)
+        if not isinstance(service, dict):
+            failures.append(f"production path gate service is missing: {service_name}")
+            continue
+        security_opt = service.get("security_opt")
+        user = str(service.get("user") or "").strip().lower()
+        if (
+            service.get("read_only") is not True
+            or service.get("cap_drop") != ["ALL"]
+            or security_opt != ["no-new-privileges:true"]
+            or not user
+            or user in {"0", "0:0", "root", "root:root"}
+        ):
+            failures.append(
+                f"production path gate service is not hardened: {service_name}"
+            )
+    for service_name in ("bff", "worker"):
+        service = services.get(service_name)
+        environment = service.get("environment") if isinstance(service, dict) else None
+        if not isinstance(environment, dict):
+            failures.append(
+                f"production path gate environment is missing: {service_name}"
+            )
+            continue
+        expected_environment = {
+            "AUTH_PROVIDER": "oidc",
+            "ALLOW_DEV_AUTH": "false",
+            "AURIS_DAGSTER_ADAPTER": "real",
+            "AURIS_OBJECT_STORAGE_ADAPTER": "real",
+            "AURIS_QDRANT_ADAPTER": "real",
+            "AURIS_EXTERNAL_CALLBACK_ADAPTER": "real",
+            "AURIS_EMBEDDING_PROVIDER": "http",
+            "OTEL_ENABLED": "true",
+        }
+        for environment_field, expected in expected_environment.items():
+            if environment.get(environment_field) != expected:
+                failures.append(
+                    f"production path gate {service_name}.{environment_field} must be {expected}"
+                )
+    return failures
+
+
 def run_checks() -> list[ReadinessResult]:
     results: list[ReadinessResult] = []
     for check in CHECKS:
@@ -1178,6 +1320,9 @@ def run_checks() -> list[ReadinessResult]:
             for pattern in patterns:
                 if pattern not in text:
                     failures.append(f"{path} missing pattern: {pattern}")
+        if check.key == "one_command_quality_gate":
+            failures.extend(validate_release_gate_wiring())
+            failures.extend(validate_production_path_readiness_contract())
         results.append(
             {
                 "key": check.key,

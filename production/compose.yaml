@@ -90,6 +90,11 @@ services:
   mysql:
     <<: *service-security
     image: ${MYSQL_IMAGE:-mysql:8.4.5}
+    # The official entrypoint starts as root to initialize/chown the named
+    # volume, then drops to mysql. Keep the global drop-all baseline and add
+    # only the capabilities required to traverse/chown the image data paths and
+    # perform that uid/gid transition.
+    cap_add: [CHOWN, DAC_OVERRIDE, SETGID, SETUID]
     environment:
       MYSQL_ROOT_PASSWORD_FILE: /run/secrets/mysql_root_password
     command:
@@ -100,6 +105,7 @@ services:
       - --skip-name-resolve
       - --slow-query-log=1
       - --long-query-time=1
+      - --log-bin-trust-function-creators=1
     secrets:
       - mysql_root_password
     volumes:
@@ -403,7 +409,16 @@ services:
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
-    command: [uvicorn, app.main:app, --host, 0.0.0.0, --port, "8000", --proxy-headers, --forwarded-allow-ips, "*"]
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --proxy-headers
+      - --forwarded-allow-ips
+      - ${AURIS_EDGE_INTERNAL_IP:-172.31.48.10}
     environment:
       <<: *app-environment
       WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-2}
@@ -648,6 +663,7 @@ services:
       internal:
         aliases:
           - ${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
+        ipv4_address: ${AURIS_EDGE_INTERNAL_IP:-172.31.48.10}
       edge: {}
     healthcheck:
       test: [CMD-SHELL, "wget -q -O /dev/null http://127.0.0.1:8080/healthz"]
@@ -759,3 +775,6 @@ networks:
     driver: bridge
   internal:
     internal: true
+    ipam:
+      config:
+        - subnet: ${AURIS_INTERNAL_SUBNET:-172.31.48.0/24}

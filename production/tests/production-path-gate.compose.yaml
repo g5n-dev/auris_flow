@@ -1,6 +1,6 @@
-# This is a machine-readable fail-closed contract, not a runnable success gate.
-# It intentionally contributes no services until one runtime driver can prove the
-# complete production path and resilience matrix in the same isolated Compose project.
+# Runnable gate blueprint, not release evidence.  The contract remains blocked
+# until the checked-in verifier/driver passes the full isolated Compose run and
+# the capture-bound evidence validator accepts the resulting artifact.
 x-auris-production-path-gate:
   schema_version: auris.production-path-gate-contract.v1
   status: blocked
@@ -10,15 +10,276 @@ x-auris-production-path-gate:
     - production-gate-embedding
     - production-gate-callback
   missing_capabilities:
-    - OIDC Authorization Code + PKCE through Keycloak discovery, JWKS and token exchange
-    - HTTPS semantic embedding provider request followed by real Qdrant point and recall proof
-    - signed HTTPS external callback with replay rejection and receipt reconciliation
-    - real MinIO object write/read bound to the same business trace
-    - cross-service OTel trace exported by BFF, Worker and Dagster through the Collector
-    - commit-bound runtime driver that emits one non-forgeable production Compose artifact
-    - MySQL restart and Worker crash recovery proof
-    - duplicate delivery proof without duplicate business outcomes
-    - callback timeout recovery and reconciliation proof
-    - Qdrant and Redis transient-outage recovery proof
+    - production path runtime driver and in-container verifier sources are not implemented
+    - the isolated production Compose path has not passed the real Compose diagnostic
+    - raw recovery proofs have not yet been bound to one clean source commit
 
-services: {}
+x-production-gate-app-environment: &production-gate-app-environment
+  APP_ENV: prod
+  AUTH_PROVIDER: oidc
+  ALLOW_DEV_AUTH: "false"
+  AURIS_DAGSTER_ADAPTER: real
+  AURIS_OBJECT_STORAGE_ADAPTER: real
+  AURIS_QDRANT_ADAPTER: real
+  AURIS_EXTERNAL_CALLBACK_ADAPTER: real
+  AURIS_EMBEDDING_PROVIDER: http
+  EMBEDDING_ENDPOINT: https://embedding.production-gate.invalid:8443/v1/embeddings
+  EMBEDDING_MODEL: auris-production-gate-reference-semantic-v1
+  EMBEDDING_DIMENSION: "8"
+  QDRANT_VECTOR_SIZE: "8"
+  EXTERNAL_CALLBACK_URL: https://callback.production-gate.invalid:8443/callbacks/platform
+  EXTERNAL_CALLBACK_ALLOWED_HOSTS: callback.production-gate.invalid
+  OIDC_ISSUER: https://auris-production-gate.invalid/realms/auris-flow
+  OIDC_DISCOVERY_URL: https://auris-production-gate.invalid/realms/auris-flow/.well-known/openid-configuration
+  OIDC_CLIENT_ID: auris-flow-web
+  OIDC_AUDIENCE: auris-flow-api
+  OIDC_REDIRECT_URI: https://auris-production-gate.invalid/api/v1/auth/oidc/callback
+  OIDC_SCOPES: openid profile email
+  CORS_ALLOWED_ORIGINS: https://auris-production-gate.invalid
+  TRUSTED_HOSTS: auris-production-gate.invalid,bff
+  OTEL_ENABLED: "true"
+  OTEL_TRACE_SAMPLE_RATIO: "1"
+  OTEL_EXPORT_TIMEOUT_SECONDS: "3"
+  OUTBOX_RETRY_BASE_SECONDS: "1"
+  OUTBOX_RETRY_MAX_SECONDS: "2"
+  OUTBOX_RETRY_JITTER_SECONDS: "0"
+  SSL_CERT_FILE: /run/auris-gate-ca/ca.pem
+
+services:
+  keycloak:
+    configs:
+      - source: production_gate_keycloak_realm_template
+        target: /opt/auris/auris-flow-realm.template.json
+        mode: 0444
+
+  production-path-seed:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    restart: "no"
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command: [python, -m, app.seed, local_demo]
+    environment:
+      APP_ENV: bootstrap
+      DATABASE_URL_FILE: /run/secrets/runtime_database_url
+    secrets:
+      - runtime_database_url
+    volumes:
+      - ../doc/backend-spec/seed-fixture-v0.1.json:/doc/backend-spec/seed-fixture-v0.1.json:ro
+    networks:
+      - internal
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  identity-bootstrap:
+    depends_on:
+      production-path-seed:
+        condition: service_completed_successfully
+
+  bff:
+    environment:
+      <<: *production-gate-app-environment
+      OTEL_SERVICE_NAME: auris-flow-bff
+      WEB_CONCURRENCY: "1"
+    volumes:
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/ca.pem:/run/auris-gate-ca/ca.pem:ro
+    networks:
+      - internal
+      - app-egress
+      - production-gate-callback
+
+  worker:
+    environment:
+      <<: *production-gate-app-environment
+      OTEL_SERVICE_NAME: auris-flow-worker
+      AURIS_OUTBOX_WORKER_LIMIT: "50"
+      AURIS_OUTBOX_POLL_INTERVAL_SECONDS: "0.25"
+      AURIS_OUTBOX_MAX_IDLE_WAIT_SECONDS: "1"
+      AURIS_OUTBOX_HEARTBEAT_INTERVAL_SECONDS: "5"
+    volumes:
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/ca.pem:/run/auris-gate-ca/ca.pem:ro
+    networks:
+      - internal
+      - app-egress
+      - production-gate-callback
+
+  dagster-code:
+    environment:
+      OTEL_TRACE_SAMPLE_RATIO: "1"
+      OTEL_EXPORT_TIMEOUT_SECONDS: "3"
+
+  production-gate-embedding:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/production_gate_support.py
+      - embedding
+      - --listen
+      - 0.0.0.0
+      - --port
+      - "8443"
+    environment:
+      AURIS_GATE_CERT_FILE: /run/auris-gate-tls/fullchain.pem
+      AURIS_GATE_KEY_FILE: /run/auris-gate-tls/privkey.pem
+      AURIS_GATE_CONTROL_SECRET_FILE: /run/auris-gate/control-secret
+      EMBEDDING_API_KEY_FILE: /run/secrets/embedding_api_key
+      EMBEDDING_MODEL: auris-production-gate-reference-semantic-v1
+      EMBEDDING_DIMENSION: "8"
+    secrets:
+      - embedding_api_key
+    volumes:
+      - ./tests/production_gate_support.py:/opt/auris-gate/production_gate_support.py:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}:/run/auris-gate-tls:ro
+      - ${AURIS_PRODUCTION_GATE_CONTROL_SECRET:?set AURIS_PRODUCTION_GATE_CONTROL_SECRET}:/run/auris-gate/control-secret:ro
+    networks:
+      internal:
+        aliases:
+          - embedding.production-gate.invalid
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /opt/auris-gate/production_gate_support.py
+        - healthcheck
+        - --url
+        - https://127.0.0.1:8443/healthz
+        - --ca-file
+        - /run/auris-gate-tls/ca.pem
+        - --server-name
+        - embedding.production-gate.invalid
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  production-gate-callback:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/production_gate_support.py
+      - callback
+      - --listen
+      - 0.0.0.0
+      - --port
+      - "8443"
+    environment:
+      AURIS_GATE_CERT_FILE: /run/auris-gate-tls/fullchain.pem
+      AURIS_GATE_KEY_FILE: /run/auris-gate-tls/privkey.pem
+      AURIS_GATE_CONTROL_SECRET_FILE: /run/auris-gate/control-secret
+      EXTERNAL_CALLBACK_KEY_BINDINGS_FILE: /run/secrets/external_callback_key_bindings
+      EXTERNAL_CALLBACK_ACTIVE_KEY_ID: callback-v1
+    secrets:
+      - external_callback_key_bindings
+    volumes:
+      - ./tests/production_gate_support.py:/opt/auris-gate/production_gate_support.py:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}:/run/auris-gate-tls:ro
+      - ${AURIS_PRODUCTION_GATE_CONTROL_SECRET:?set AURIS_PRODUCTION_GATE_CONTROL_SECRET}:/run/auris-gate/control-secret:ro
+    networks:
+      production-gate-callback:
+        ipv4_address: 11.250.0.2
+        aliases:
+          - callback.production-gate.invalid
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - /opt/auris-gate/production_gate_support.py
+        - healthcheck
+        - --url
+        - https://127.0.0.1:8443/healthz
+        - --ca-file
+        - /run/auris-gate-tls/ca.pem
+        - --server-name
+        - callback.production-gate.invalid
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  production-path-verifier:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    init: true
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/production_path_verifier.py
+      - --phase
+      - ${AURIS_PRODUCTION_GATE_PHASE:?set AURIS_PRODUCTION_GATE_PHASE}
+      - --artifact-dir
+      - /artifacts
+      - --run-suffix
+      - ${AURIS_PRODUCTION_GATE_RUN_SUFFIX:?set AURIS_PRODUCTION_GATE_RUN_SUFFIX}
+    environment:
+      APP_ENV: bootstrap
+      DATABASE_URL_FILE: /run/secrets/runtime_database_url
+      OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      OBJECT_STORAGE_BUCKET: auris-flow
+      OBJECT_STORAGE_PROVIDER: minio
+      OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/object_storage_access_key
+      OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+      SSL_CERT_FILE: /run/auris-gate-tls/ca.pem
+      AURIS_GATE_PUBLIC_URL: https://auris-production-gate.invalid
+      AURIS_GATE_CALLBACK_URL: https://callback.production-gate.invalid:8443
+      AURIS_GATE_EMBEDDING_URL: https://embedding.production-gate.invalid:8443
+      AURIS_GATE_CONTROL_SECRET_FILE: /run/auris-gate/control-secret
+      AURIS_GATE_BOOTSTRAP_PASSWORD_FILE: /run/secrets/keycloak_bootstrap_operator_password
+      AURIS_GATE_TEMPO_URL: http://tempo:3200
+      AURIS_GATE_SOURCE_COMMIT: ${AURIS_PRODUCTION_GATE_SOURCE_COMMIT:?set AURIS_PRODUCTION_GATE_SOURCE_COMMIT}
+      AURIS_GATE_DEPENDENCY: ${AURIS_PRODUCTION_GATE_DEPENDENCY:-none}
+    secrets:
+      - runtime_database_url
+      - object_storage_access_key
+      - object_storage_secret_key
+      - qdrant_api_key
+      - keycloak_bootstrap_operator_password
+    volumes:
+      - ./tests/production_path_verifier.py:/opt/auris-gate/production_path_verifier.py:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/ca.pem:/run/auris-gate-tls/ca.pem:ro
+      - ${AURIS_PRODUCTION_GATE_CONTROL_SECRET:?set AURIS_PRODUCTION_GATE_CONTROL_SECRET}:/run/auris-gate/control-secret:ro
+      - ${AURIS_PRODUCTION_GATE_ARTIFACT_DIR:?set AURIS_PRODUCTION_GATE_ARTIFACT_DIR}:/artifacts
+    networks:
+      - internal
+      - production-gate-callback
+
+configs:
+  production_gate_keycloak_realm_template:
+    file: ./tests/production-path-keycloak-realm.template.json
+
+networks:
+  production-gate-callback:
+    driver: bridge
+    internal: true
+    attachable: false
+    ipam:
+      config:
+        - subnet: 11.250.0.0/29

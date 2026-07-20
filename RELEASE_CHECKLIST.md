@@ -7,7 +7,8 @@ external repository controls, clean-host installation, or recovery drill below.
 ## P0 — Trusted Release Tree
 
 - [ ] Run `python3 scripts/check_platform_readiness.py --release` and confirm
-  `open_source_release_readiness: 12/12 passed` against the exact staged candidate.
+  `open_source_release_readiness: 12/12 passed` against the exact clean, committed
+  candidate HEAD; staged-only content is not release evidence.
 - [ ] Run `bash scripts/verify_release.sh`; do not use any skip flag for the real-stack,
   real-Dagster, product-Dagster, browser, visual, migration, audit, or security gates.
 - [ ] Confirm `build/release-evidence/release-gate-manifest.json` is produced only after
@@ -67,9 +68,12 @@ external repository controls, clean-host installation, or recovery drill below.
   first-party containers must be non-root, and services must retain read-only filesystem,
   dropped capabilities, health checks, internal networking, and persistent volumes where
   applicable.
-- [ ] Start the single-host Linux candidate with `docker compose up -d --wait` and
-  confirm public `/healthz` reports liveness while public `/readyz` returns 200 only when
-  OIDC, MySQL, Redis, MinIO, Qdrant, and real Dagster are ready.
+- [ ] Start the single-host Linux candidate with the phased command sequence in
+  `production/README.md`: long-lived dependencies use bounded detached wait, while
+  `db-bootstrap`, `minio-bootstrap`, `migrate`, and `identity-bootstrap` run as foreground
+  one-shots and must each exit zero. Then confirm public `/healthz` reports liveness while
+  public `/readyz` returns 200 only when OIDC, MySQL, Redis, MinIO, Qdrant, and real
+  Dagster are ready.
 - [ ] Run the production E2E using the real Dagster code server/webserver/daemon, semantic
   embedding provider, Qdrant, object storage, Worker, Outbox, and signed callback. A
   protocol fake or deterministic test vector is not production evidence.

@@ -44,8 +44,12 @@ python3 scripts/release_bundle.py verify --bundle-root . --verify-signature
 校验器先以固定的官方 tag workflow identity 验证
 `production/release-metadata.sigstore.json`，再检查 metadata schema、release tag、完整 source commit、
 Compose SHA-256、image-lock SHA-256、恢复兼容策略 SHA-256，以及 Compose 中每个服务与 image lock
-的精确 digest 映射。任一文件缺失、篡改、包含 `build:`、使用可变镜像或出现路径逃逸都会
-fail closed。当前首发策略没有前序 release，因此跨 commit 恢复默认被拒绝。
+的精确 digest 映射。v3 metadata 的 `members` 还逐项绑定部署 tar 内每个普通文件的规范相对路径、
+SHA-256、文件类型和精确 mode；metadata 本体因不能自哈希、外置 Sigstore bundle 因独立发布而是
+仅有的两个保留路径。校验器会另外固定 metadata 为 `0644`、安装后的 Sigstore bundle 为 `0444`，
+并拒绝任何额外、缺失、重复、未排序、路径穿越、symlink、特殊文件或未被文件路径蕴含的空目录。
+因此 `restore.sh`、Runbook 等非 Compose 成员的任意内容或执行位改写也会 fail closed。当前首发
+策略没有前序 release，因此跨 commit 恢复默认被拒绝。
 
 ## 2. 配置 secret、TLS 与 OIDC
 
@@ -90,8 +94,35 @@ docker --context default compose --project-name auris-flow \
 docker --context default compose --project-name auris-flow \
   --project-directory production \
   --env-file production/.env \
-  --file production/compose.yaml up -d --wait
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  mysql redis minio qdrant tempo node-exporter
+
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps db-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps minio-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps migrate
+
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  keycloak otel-collector
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps identity-bootstrap
+
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
+
+The four bootstrap/migration services are one-shots and must exit successfully in
+their own foreground phase. Do not include them in a detached `up --wait` command.
 
 confidential client 部署在上述每条 `docker --context default compose --project-name auris-flow`
 命令末尾的子命令前追加：

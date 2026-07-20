@@ -160,6 +160,7 @@ def test_failed_audit_runs_full_matrix_and_never_calls_finalizer(
     for script_name in (
         "verify_clean_clone.sh",
         "verify_all.sh",
+        "verify_production_mysql_migrations.sh",
         "verify_real_stack.sh",
         "verify_real_dagster.sh",
         "verify_product_dagster_path.sh",
@@ -263,6 +264,7 @@ def test_blocked_production_path_stops_release_before_supply_chain(
     for script_name in (
         "verify_clean_clone.sh",
         "verify_all.sh",
+        "verify_production_mysql_migrations.sh",
         "verify_real_stack.sh",
         "verify_real_dagster.sh",
         "verify_product_dagster_path.sh",
@@ -356,7 +358,7 @@ def test_real_stack_bootstraps_the_authenticated_minio_bucket_before_strict_read
     assert "mc mb --ignore-existing auris/auris-flow-local" in compose
     deadline_setting = "AURIS_MINIO_BOOTSTRAP_TIMEOUT_SECONDS:-60"
     deadline_runner = 'scripts/run_with_deadline.py"'
-    bootstrap = 'run --name "${container_name}" --rm --no-deps minio-bootstrap'
+    bootstrap = 'run --no-TTY --name "${container_name}" --rm --no-deps minio-bootstrap'
     for source in (gate, ui_gate):
         assert deadline_setting in source
         assert deadline_runner in source
@@ -365,6 +367,11 @@ def test_real_stack_bootstraps_the_authenticated_minio_bucket_before_strict_read
     assert 'COMPOSE_WAIT_TIMEOUT_SECONDS="${AURIS_REAL_STACK_WAIT_TIMEOUT:-180}"' in gate
     assert 'compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start real stack"' in gate
     assert '"${COMPOSE[@]}" up --detach --wait' not in gate
+    assert "unset DATABASE_URL_FILE" in gate
+    assert 'run_with_deadline 900 "real-stack MySQL full migration cycle"' in gate
+    assert 'run_with_deadline 60 "real-stack migration MySQL security check"' in gate
+    assert 'run_with_deadline 60 "real-stack runtime MySQL security check"' in gate
+    assert "mysql --protocol=socket --user=root --connect-timeout=5" in gate
 
     outer_health = gate.index("assert_compose_health")
     outer_bootstrap = gate.index("run_minio_bootstrap", outer_health)

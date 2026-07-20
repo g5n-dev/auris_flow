@@ -40,8 +40,6 @@ CREDENTIAL_URL_PATTERN = re.compile(
     r"://[^\s'\"]+"
 )
 
-ALLOWLIST_MARKER = "pragma: allowlist secret"
-
 PLACEHOLDER_PREFIXES = (
     "auris-demo-",
     "auris-dev-",
@@ -57,18 +55,6 @@ PLACEHOLDER_PREFIXES = (
     "test-",
     "your-",
 )
-
-BINARY_SUFFIXES = {
-    ".gif",
-    ".ico",
-    ".jpeg",
-    ".jpg",
-    ".pdf",
-    ".png",
-    ".sqlite",
-    ".wav",
-    ".webp",
-}
 
 SKIP_PREFIXES = (
     ".git/",
@@ -122,17 +108,7 @@ def scan_index(findings: list[str]) -> None:
 
 
 def should_skip_relative(rel: str) -> bool:
-    return any(rel.startswith(prefix) for prefix in SKIP_PREFIXES) or (
-        Path(rel).suffix.lower() in BINARY_SUFFIXES
-    )
-
-
-def _line_is_allowlisted(text: str, position: int) -> bool:
-    start = text.rfind("\n", 0, position) + 1
-    end = text.find("\n", position)
-    if end == -1:
-        end = len(text)
-    return ALLOWLIST_MARKER in text[start:end].lower()
+    return any(rel.startswith(prefix) for prefix in SKIP_PREFIXES)
 
 
 def _is_placeholder_secret(value: str) -> bool:
@@ -206,14 +182,10 @@ def _is_deterministic_test_fixture(origin: str, value: str) -> bool:
 def scan_text(text: str, origin: str, findings: list[str]) -> None:
     for name, pattern in DIRECT_PATTERNS:
         for match in pattern.finditer(text):
-            if _line_is_allowlisted(text, match.start()):
-                continue
             line = text.count("\n", 0, match.start()) + 1
             findings.append(f"{origin}:{line}: potential {name}")
 
     for match in SECRET_ASSIGNMENT_PATTERN.finditer(text):
-        if _line_is_allowlisted(text, match.start()):
-            continue
         key = match.group("key").replace("-", "_").upper()
         value = match.group("value")
         if key.endswith("_FILE") and value.startswith("/run/secrets/"):
@@ -230,8 +202,6 @@ def scan_text(text: str, origin: str, findings: list[str]) -> None:
         findings.append(f"{origin}:{line}: potential generic_secret_assignment")
 
     for match in CREDENTIAL_URL_PATTERN.finditer(text):
-        if _line_is_allowlisted(text, match.start()):
-            continue
         if not _credential_url_contains_secret(match.group(0)):
             continue
         line = text.count("\n", 0, match.start()) + 1

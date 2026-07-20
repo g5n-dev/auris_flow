@@ -292,10 +292,11 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             {
                 "baseline_oci_digest": f"sha256:{SHA256}",
                 "baseline_oci_ref": (
-                    f"ghcr.io/example/auris-flow/visual-baseline@sha256:{SHA256}"
+                    f"ghcr.io/auris-flow/auris-flow/visual-baseline@sha256:{SHA256}"
                 ),
                 "baseline_sha256": SHA256,
                 "baseline_source_commit": "2" * 40,
+                "job_workflow_sha": "2" * 40,
                 "kind": "auris-flow-visual-regression-evidence",
                 "manifest_sha256": SHA256,
                 "passed": 76,
@@ -303,7 +304,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "scenario_count": 76,
                 "schema_version": 1,
                 "signature_identity": (
-                    "https://github.com/example/auris-flow/.github/workflows/"
+                    "https://github.com/auris-flow/auris-flow/.github/workflows/"
                     "visual-baseline-build.yml@refs/heads/main"
                 ),
                 "signature_issuer": "https://token.actions.githubusercontent.com",
@@ -570,6 +571,34 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         self.assertIn("product-dagster-gate.json", paths)
         self.assertIn("production-path-gate.json", paths)
         self.assertEqual(len(paths), result["artifact_count"])
+
+    def test_visual_evidence_binds_workflow_commit_to_baseline_source(self) -> None:
+        path = self.evidence / "visual-regression.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["job_workflow_sha"] = "9" * 40
+        _write_json(path, payload)
+
+        with self.assertRaisesRegex(self.module.EvidenceError, "job_workflow_sha"):
+            self._finalize()
+
+    def test_visual_evidence_rejects_matching_foreign_repository_identity(
+        self,
+    ) -> None:
+        path = self.evidence / "visual-regression.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["baseline_oci_ref"] = (
+            f"ghcr.io/attacker/evil/visual-baseline@sha256:{SHA256}"
+        )
+        payload["signature_identity"] = (
+            "https://github.com/attacker/evil/.github/workflows/"
+            "visual-baseline-build.yml@refs/heads/main"
+        )
+        _write_json(path, payload)
+
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "official Auris Flow repository"
+        ):
+            self._finalize()
 
     def test_clean_clone_requires_explicit_release_readiness_scope(self) -> None:
         path = self.evidence / "clean-clone.json"

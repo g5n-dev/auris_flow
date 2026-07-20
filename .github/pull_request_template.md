@@ -15,7 +15,7 @@
 ## Harness Gate
 
 - [ ] I ran `bash scripts/verify_release.sh`.
-- [ ] `python3 scripts/check_platform_readiness.py --release` reports `11/11 passed`.
+- [ ] `python3 scripts/check_platform_readiness.py --release` reports `12/12 passed`.
 - [ ] Backend tests pass with coverage at or above the configured threshold.
 - [ ] UI/BFF E2E reports no `consoleErrors`, `pageErrors`, `requestFailures`, or `failedResponses`.
 - [ ] `npm audit --prefix prototype/auris-flow-ui --audit-level=high --omit=dev` reports no high vulnerabilities.

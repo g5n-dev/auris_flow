@@ -32,6 +32,9 @@ MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的�
 - 可选 `redis/cache.rdb`：只用于故障诊断，不参与自动恢复，也不计入业务一致性。
 - `metadata/release-metadata.json`、`metadata/release-metadata.sigstore.json`、`metadata/running-images.json`：签名部署包的 tag/commit、Compose、image-lock 与恢复兼容策略哈希，以及备份时全部正在运行的 release service 实际容器/RepoDigest 校验证据；MySQL、MinIO、Qdrant、Redis 始终为必选。
 - `manifest.json`、`manifest.sha256`：v2 schema 强绑定上述 release metadata/运行镜像证据、UTC 时间、每个文件的 SHA-256/大小、工具版本、deployment-wide counts、权威边界和固定恢复顺序。
+- 备份工具只接受 v3 release metadata，并保留其中按路径排序的完整 bundle 成员清单（SHA-256、
+  `regular-file` 类型与精确 mode）；这不会替代恢复前对目标 release bundle 的独立 Sigstore 与
+  全成员校验。
 
 MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历史，因此本实现不使用 mirror，而是逐代读取并重放版本。Qdrant collection snapshot 是派生数据恢复加速器，不得替代 MySQL/MinIO 重建能力。
 
@@ -95,8 +98,18 @@ docker --context default compose --project-name auris-flow \
   --file production/compose.yaml pull mysql db-bootstrap redis minio minio-bootstrap qdrant bff
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
-  --file production/compose.yaml up -d mysql db-bootstrap redis minio minio-bootstrap qdrant
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  mysql redis minio qdrant
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps db-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps minio-bootstrap
 ```
+
+两个 bootstrap 是前台 one-shot，必须分别返回 0；不得与长期依赖一起交给 detached
+`up --wait`。任一阶段失败都保留当前隔离 project 供诊断，不进入恢复步骤。
 
 恢复脚本要求：MySQL 所有目标表总行数为零、MinIO bucket 没有任何版本、Qdrant 没有 collection、应用写端全部停止。不存在“强制覆盖非空目标”参数；如目标非空，应创建另一个全新 Compose project/卷，而不是清库后重试。
 

@@ -15,6 +15,71 @@ else
   PYTHON_BIN="$(command -v python3)"
 fi
 
+UI_BFF_E2E_TIMEOUT_SECONDS="${AURIS_UI_BFF_E2E_TIMEOUT_SECONDS:-900}"
+if [ "${AURIS_UI_BFF_E2E_DEADLINE_CHILD:-0}" != "1" ]; then
+  # pytest-cov injects subprocess coverage through these variables. This gate
+  # starts several short-lived Python helpers; letting each helper flush the
+  # whole suite's coverage can consume the wall-clock deadline before the
+  # actual E2E command starts and can leave the detached child group behind.
+  # Coverage for the application is collected by the dedicated Python test
+  # gate, so keep this process supervisor deterministic and coverage-neutral.
+  exec env \
+    -u COVERAGE_PROCESS_START \
+    -u COV_CORE_SOURCE \
+    -u COV_CORE_CONFIG \
+    -u COV_CORE_DATAFILE \
+    -u COV_CORE_BRANCH \
+    -u COV_CORE_CONTEXT \
+    "${PYTHON_BIN}" - "${ROOT}" "${UI_BFF_E2E_TIMEOUT_SECONDS}" \
+    "${BASH_SOURCE[0]}" "$@" <<'PY'
+from __future__ import annotations
+
+import importlib.util
+import signal
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+timeout_seconds = sys.argv[2]
+script = sys.argv[3]
+script_arguments = sys.argv[4:]
+deadline_script = root / "scripts/run_with_deadline.py"
+spec = importlib.util.spec_from_file_location("auris_run_with_deadline", deadline_script)
+if spec is None or spec.loader is None:
+    raise SystemExit(f"unable to load deadline runner: {deadline_script}")
+run_with_deadline = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(run_with_deadline)
+
+requested_signal_status: int | None = None
+
+
+def handle_signal(signum: int, _frame: object) -> None:
+    global requested_signal_status
+    requested_signal_status = 128 + signum
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGINT, handle_signal)
+signal.signal(signal.SIGTERM, handle_signal)
+arguments = run_with_deadline.parse_args(
+    [
+        "--timeout-seconds",
+        timeout_seconds,
+        "--label",
+        "UI/BFF E2E gate",
+        "--",
+        "env",
+        "AURIS_UI_BFF_E2E_DEADLINE_CHILD=1",
+        "bash",
+        script,
+        *script_arguments,
+    ]
+)
+status = run_with_deadline.run_with_deadline(arguments)
+raise SystemExit(requested_signal_status or status)
+PY
+fi
+
 COMPLETION_HMAC_KEY_ID="${AURIS_E2E_COMPLETION_HMAC_KEY_ID:-auris-e2e-completion}"
 COMPLETION_HMAC_VALUE="${AURIS_E2E_COMPLETION_HMAC_SECRET:-${COMPLETION_RECEIPT_SECRET:-${DEFAULT_COMPLETION_HMAC_VALUE}}}"
 COMPLETION_KEY_BINDINGS_JSON="$(
@@ -76,6 +141,10 @@ CALLBACK_PID=""
 REAL_STACK_DB_NAME=""
 MIGRATION_DB_URL=""
 MINIO_BOOTSTRAP_TIMEOUT_SECONDS="${AURIS_MINIO_BOOTSTRAP_TIMEOUT_SECONDS:-60}"
+CURL_CONNECT_TIMEOUT_SECONDS="${AURIS_E2E_CURL_CONNECT_TIMEOUT_SECONDS:-2}"
+CURL_MAX_TIME_SECONDS="${AURIS_E2E_CURL_MAX_TIME_SECONDS:-5}"
+BACKGROUND_TERM_GRACE_TICKS="${AURIS_E2E_PROCESS_TERM_GRACE_TICKS:-20}"
+CLEANUP_STARTED=0
 
 run_minio_bootstrap() {
   local container_name status
@@ -83,7 +152,7 @@ run_minio_bootstrap() {
   if "${PYTHON_BIN}" "${ROOT}/scripts/run_with_deadline.py" \
     --timeout-seconds "${MINIO_BOOTSTRAP_TIMEOUT_SECONDS}" \
     --label "MinIO bootstrap" -- \
-    docker compose -f "${COMPOSE_FILE}" run --name "${container_name}" --rm --no-deps minio-bootstrap; then
+    docker compose -f "${COMPOSE_FILE}" run --no-TTY --name "${container_name}" --rm --no-deps minio-bootstrap; then
     return 0
   else
     status=$?
@@ -94,8 +163,36 @@ run_minio_bootstrap() {
   return "${status}"
 }
 
+stop_background_process() {
+  local label="$1"
+  local pid="$2"
+  local attempt=0
+  if [ -z "${pid}" ]; then
+    return 0
+  fi
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    wait "${pid}" 2>/dev/null || true
+    return 0
+  fi
+  kill -TERM "${pid}" 2>/dev/null || true
+  while kill -0 "${pid}" 2>/dev/null && [ "${attempt}" -lt "${BACKGROUND_TERM_GRACE_TICKS}" ]; do
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  if kill -0 "${pid}" 2>/dev/null; then
+    echo "${label} did not stop after TERM; sending KILL." >&2
+    kill -KILL "${pid}" 2>/dev/null || true
+  fi
+  wait "${pid}" 2>/dev/null || true
+}
+
 cleanup() {
-  local status=$?
+  local status="${1:-0}"
+  if [ "${CLEANUP_STARTED}" = "1" ]; then
+    return 0
+  fi
+  CLEANUP_STARTED=1
+  trap - EXIT INT TERM
   if [ "${status}" -ne 0 ] && [ -n "${TMP_DIR}" ] && [ -d "${TMP_DIR}" ]; then
     for log_file in outbox-worker.log bff.log vite.log; do
       if [ -f "${TMP_DIR}/${log_file}" ]; then
@@ -104,35 +201,34 @@ cleanup() {
       fi
     done
   fi
-  if [ -n "${WORKER_PID}" ] && kill -0 "${WORKER_PID}" 2>/dev/null; then
-    kill "${WORKER_PID}" 2>/dev/null || true
-    wait "${WORKER_PID}" 2>/dev/null || true
-  fi
-  if [ -n "${UI_PID}" ] && kill -0 "${UI_PID}" 2>/dev/null; then
-    kill "${UI_PID}" 2>/dev/null || true
-    wait "${UI_PID}" 2>/dev/null || true
-  fi
-  if [ -n "${BFF_PID}" ] && kill -0 "${BFF_PID}" 2>/dev/null; then
-    kill "${BFF_PID}" 2>/dev/null || true
-    wait "${BFF_PID}" 2>/dev/null || true
-  fi
-  if [ -n "${DAGSTER_PID}" ] && kill -0 "${DAGSTER_PID}" 2>/dev/null; then
-    kill "${DAGSTER_PID}" 2>/dev/null || true
-    wait "${DAGSTER_PID}" 2>/dev/null || true
-  fi
-  if [ -n "${CALLBACK_PID}" ] && kill -0 "${CALLBACK_PID}" 2>/dev/null; then
-    kill "${CALLBACK_PID}" 2>/dev/null || true
-    wait "${CALLBACK_PID}" 2>/dev/null || true
-  fi
+  stop_background_process "outbox worker" "${WORKER_PID}"
+  stop_background_process "Vite UI" "${UI_PID}"
+  stop_background_process "FastAPI BFF" "${BFF_PID}"
+  stop_background_process "Dagster protocol fake" "${DAGSTER_PID}"
+  stop_background_process "callback protocol fake" "${CALLBACK_PID}"
   if [ -n "${TMP_DIR}" ]; then
-    rm -rf "${TMP_DIR}"
+    rm -rf "${TMP_DIR}" || true
   fi
   if [ -n "${REAL_STACK_DB_NAME}" ] && [ "${AURIS_E2E_KEEP_MYSQL_DATABASE:-0}" != "1" ]; then
     drop_real_stack_database "${REAL_STACK_DB_NAME}" || true
   fi
+}
+
+handle_exit() {
+  local status=$?
+  cleanup "${status}"
   exit "${status}"
 }
-trap cleanup EXIT INT TERM
+
+handle_signal() {
+  local status="$1"
+  cleanup "${status}"
+  exit "${status}"
+}
+
+trap 'handle_exit' EXIT
+trap 'handle_signal 130' INT
+trap 'handle_signal 143' TERM
 
 free_port() {
   "${PYTHON_BIN}" - <<'PY'
@@ -148,8 +244,11 @@ wait_for_url() {
   local url="$1"
   local label="$2"
   local log_file="${3:-}"
-  for _ in $(seq 1 80); do
-    if curl -fsS "${url}" >/dev/null 2>&1; then
+  local timeout_seconds="${4:-20}"
+  local started_at="${SECONDS}"
+  while [ "$((SECONDS - started_at))" -lt "${timeout_seconds}" ]; do
+    if curl --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" \
+      --max-time "${CURL_MAX_TIME_SECONDS}" -fsS "${url}" >/dev/null 2>&1; then
       return 0
     fi
     sleep 0.25
@@ -160,6 +259,26 @@ wait_for_url() {
     tail -80 "${log_file}" >&2 || true
   fi
   return 1
+}
+
+target_health_is_valid() {
+  local url="$1"
+  local payload
+  if ! payload="$(curl --connect-timeout "${CURL_CONNECT_TIMEOUT_SECONDS}" \
+    --max-time "${CURL_MAX_TIME_SECONDS}" \
+    -fsS -H 'Accept: application/json' "${url}" 2>/dev/null)"; then
+    return 1
+  fi
+  printf '%s' "${payload}" | "${PYTHON_BIN}" -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except (UnicodeDecodeError, json.JSONDecodeError):
+    raise SystemExit(1)
+raise SystemExit(0 if isinstance(payload, dict) and payload.get("status") == "ok" else 1)
+'
 }
 
 wait_for_worker_health() {
@@ -328,27 +447,73 @@ assert_strict_readyz() {
   "${PYTHON_BIN}" - "${bff_url}" <<'PY'
 import json
 import sys
+import time
+from urllib.error import HTTPError, URLError
 from urllib.request import urlopen
 
 url = sys.argv[1].rstrip("/") + "/readyz"
-with urlopen(url, timeout=2) as response:
-    payload = json.loads(response.read().decode("utf-8"))
-if payload.get("status") != "ok":
-    raise SystemExit(f"strict readyz is not ok: {payload}")
-checks = payload.get("data", {}).get("checks", {})
-required = set(payload.get("data", {}).get("required_checks", []))
 expected = {"database", "redis", "object_storage", "qdrant", "dagster"}
-missing_required_names = expected - required
-if missing_required_names:
-    raise SystemExit(f"strict readyz missing required checks: {sorted(missing_required_names)}")
-not_ok = {name: checks.get(name) for name in expected if checks.get(name) != "ok"}
-if not_ok:
-    raise SystemExit(f"strict readyz dependencies are not ok: {not_ok}")
+
+
+def validation_error(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), dict):
+        return f"strict readyz contract is invalid: {payload!r}", False
+    checks = payload["data"].get("checks", {})
+    required = set(payload["data"].get("required_checks", []))
+    if not isinstance(checks, dict):
+        return f"strict readyz checks are invalid: {checks!r}", False
+    missing_required_names = expected - required
+    if missing_required_names:
+        return (
+            f"strict readyz missing required checks: {sorted(missing_required_names)}",
+            False,
+        )
+    not_ok = {name: checks.get(name) for name in expected if checks.get(name) != "ok"}
+    if payload.get("status") == "ok":
+        if not_ok:
+            return f"strict readyz reports ok with unhealthy dependencies: {not_ok}", False
+        return None, False
+    if not_ok:
+        return f"strict readyz dependencies are not ok: {not_ok}", True
+    return f"strict readyz is not ok: {payload}", False
+
+
+last_error = "readyz was not queried"
+deadline = time.monotonic() + 20
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise SystemExit(f"strict readyz did not converge: {last_error}")
+    retryable = True
+    try:
+        with urlopen(url, timeout=max(0.1, min(1, remaining))) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            payload = json.loads(raw)
+        except json.JSONDecodeError:
+            raise SystemExit(f"strict readyz returned HTTP {exc.code}: {raw!r}") from exc
+        else:
+            last_error, retryable = validation_error(payload)
+            last_error = last_error or f"strict readyz returned HTTP {exc.code}"
+            retryable = retryable and exc.code in {429, 500, 502, 503, 504}
+    except (OSError, URLError) as exc:
+        last_error = f"strict readyz request failed: {exc!r}"
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise SystemExit(f"strict readyz response is invalid: {exc!r}") from exc
+    else:
+        last_error, retryable = validation_error(payload)
+        if last_error is None:
+            break
+    if not retryable:
+        raise SystemExit(last_error)
+    time.sleep(min(0.25, max(0, deadline - time.monotonic())))
 PY
 }
 
 echo "Checking UI/BFF E2E target: ${E2E_URL}"
-if [ "${FORCE_AUTOSTART}" = "1" ] || ! curl -fsS "${E2E_URL%/}/healthz" >/dev/null 2>&1; then
+if [ "${FORCE_AUTOSTART}" = "1" ] || ! target_health_is_valid "${E2E_URL%/}/healthz"; then
   if [ "${AUTOSTART}" != "1" ]; then
     echo "UI/BFF E2E target is not reachable and AURIS_E2E_AUTOSTART=${AUTOSTART}" >&2
     exit 1
@@ -533,12 +698,14 @@ if [ "${FORCE_AUTOSTART}" = "1" ] || ! curl -fsS "${E2E_URL%/}/healthz" >/dev/nu
 
   (
     cd prototype/auris-flow-ui
-    exec env VITE_API_PROXY_TARGET="${BFF_URL}" ./node_modules/.bin/vite \
+    exec env VITE_DEMO_MODE=false VITE_API_PROXY_TARGET="${BFF_URL}" ./node_modules/.bin/vite \
       --host 127.0.0.1 --port "${UI_PORT}" --strictPort >"${TMP_DIR}/vite.log" 2>&1
   ) &
   UI_PID=$!
-  wait_for_url "${E2E_URL}" "UI" "${TMP_DIR}/vite.log"
-  wait_for_url "${E2E_URL%/}/healthz" "UI proxy" "${TMP_DIR}/vite.log"
+  wait_for_url "${E2E_URL}" "UI" "${TMP_DIR}/vite.log" \
+    "${AURIS_E2E_UI_READY_TIMEOUT_SECONDS:-120}"
+  wait_for_url "${E2E_URL%/}/healthz" "UI proxy" "${TMP_DIR}/vite.log" \
+    "${AURIS_E2E_UI_READY_TIMEOUT_SECONDS:-120}"
 fi
 
 if [ "${REAL_STACK}" = "1" ] && [ -z "${BFF_URL:-}" ]; then

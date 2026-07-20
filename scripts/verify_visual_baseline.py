@@ -49,6 +49,7 @@ CANONICAL_SEED_OVERLAY_PATH = ROOT / "production/visual/seed-overlay.json"
 ARTIFACT_PACKAGE_NAME = "visual-baseline.tar"
 ARTIFACT_MEDIA_TYPE = "application/vnd.auris-flow.visual-baseline.v1+tar"
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+OFFICIAL_VISUAL_REPOSITORY = ("auris-flow", "auris-flow")
 OCI_ARTIFACT_PATTERN = re.compile(
     r"^ghcr\.io/(?P<owner>[a-z0-9._-]+)/(?P<repository>[a-z0-9._-]+)/"
     r"visual-baseline@sha256:[0-9a-f]{64}$"
@@ -822,6 +823,14 @@ def _approved_artifact_failures(artifact: Any) -> list[str]:
             "visual baseline artifact reference must be an immutable "
             "ghcr.io/<owner>/<repo>/visual-baseline@sha256 digest"
         )
+    elif (
+        artifact_match.group("owner").lower(),
+        artifact_match.group("repository").lower(),
+    ) != OFFICIAL_VISUAL_REPOSITORY:
+        failures.append(
+            "visual baseline artifact reference must belong to the "
+            "official Auris Flow repository"
+        )
     if artifact.get("media_type") != ARTIFACT_MEDIA_TYPE:
         failures.append("visual baseline artifact media_type is not supported")
     for key in (
@@ -894,6 +903,11 @@ def _approved_artifact_failures(artifact: Any) -> list[str]:
             failures.append(
                 "visual baseline artifact and signature identity must belong to "
                 "the same GitHub repository"
+            )
+        if signer_repository != OFFICIAL_VISUAL_REPOSITORY:
+            failures.append(
+                "visual baseline signature identity must belong to the "
+                "official Auris Flow repository"
             )
     if artifact.get("signature_issuer") != GITHUB_ACTIONS_OIDC_ISSUER:
         failures.append(
@@ -1231,6 +1245,14 @@ def verify_visual_artifact_signature(
         raise BaselineValidationError(
             "visual signature verification requires an immutable ghcr.io digest"
         )
+    artifact_repository = (
+        artifact_match.group("owner").lower(),
+        artifact_match.group("repository").lower(),
+    )
+    if artifact_repository != OFFICIAL_VISUAL_REPOSITORY:
+        raise BaselineValidationError(
+            "visual artifact must belong to the official Auris Flow repository"
+        )
     identity_match = VISUAL_BUILD_IDENTITY_PATTERN.fullmatch(signature_identity)
     if (
         identity_match is None
@@ -1241,15 +1263,18 @@ def verify_visual_artifact_signature(
         raise BaselineValidationError(
             "visual signature identity is not the protected visual build workflow"
         )
-    if (
-        artifact_match.group("owner").lower(),
-        artifact_match.group("repository").lower(),
-    ) != (
+    identity_repository = (
         identity_match.group("owner").lower(),
         identity_match.group("repository").lower(),
-    ):
+    )
+    if artifact_repository != identity_repository:
         raise BaselineValidationError(
             "visual artifact and signature identity belong to different repositories"
+        )
+    if identity_repository != OFFICIAL_VISUAL_REPOSITORY:
+        raise BaselineValidationError(
+            "visual signature identity must belong to the "
+            "official Auris Flow repository"
         )
     if signature_issuer != GITHUB_ACTIONS_OIDC_ISSUER:
         raise BaselineValidationError(
@@ -1288,9 +1313,17 @@ def verify_visual_oci_provenance(
     source_commit: str,
     oras_binary: str = "oras",
 ) -> None:
-    if not OCI_ARTIFACT_PATTERN.fullmatch(artifact_ref):
+    artifact_match = OCI_ARTIFACT_PATTERN.fullmatch(artifact_ref)
+    if artifact_match is None:
         raise BaselineValidationError(
             "visual OCI provenance requires an immutable GHCR digest"
+        )
+    if (
+        artifact_match.group("owner").lower(),
+        artifact_match.group("repository").lower(),
+    ) != OFFICIAL_VISUAL_REPOSITORY:
+        raise BaselineValidationError(
+            "visual OCI provenance must belong to the official Auris Flow repository"
         )
     if not COMMIT_PATTERN.fullmatch(source_commit):
         raise BaselineValidationError(

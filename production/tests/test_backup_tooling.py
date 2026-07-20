@@ -6,6 +6,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -47,7 +48,7 @@ def load_release_bundle() -> ModuleType:
 
 def make_release_metadata() -> dict[str, object]:
     return {
-        "schema_version": "auris.release-deployment-metadata.v2",
+        "schema_version": "auris.release-deployment-metadata.v3",
         "release_tag": RELEASE_TAG,
         "source_commit": SOURCE_COMMIT,
         "compose": {"path": "production/compose.yaml", "sha256": "b" * 64},
@@ -60,6 +61,14 @@ def make_release_metadata() -> dict[str, object]:
             "sha256": "d" * 64,
         },
         "images": AUTHORITY_IMAGES,
+        "members": [
+            {
+                "path": "README.md",
+                "sha256": "e" * 64,
+                "type": "regular-file",
+                "mode": "0644",
+            }
+        ],
     }
 
 
@@ -518,12 +527,59 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
     assert "paths_overlap" in restore
 
     verify_backup = (SCRIPTS / "verify-backup.sh").read_text(encoding="utf-8")
-    assert "compose_drill pull" in verify_backup
+    assert 'compose_drill_with_deadline "${DRILL_PULL_TIMEOUT}"' in verify_backup
     assert "compose_drill build" not in verify_backup
     assert "verify-running-images" in verify_backup
     assert "--verify-signature" in verify_backup
     assert '--project-name "${DRILL_PROJECT}"' in verify_backup
     assert '--docker-context "${DOCKER_CONTEXT_NAME}"' in verify_backup
+
+
+def test_restore_drill_separates_one_shots_and_bounds_compose_commands() -> None:
+    source = (SCRIPTS / "verify-backup.sh").read_text(encoding="utf-8")
+
+    assert 'DEADLINE_RUNNER="${REPOSITORY_ROOT}/scripts/run_with_deadline.py"' in source
+    assert "compose_drill_with_deadline()" in source
+    assert "up --detach --no-deps --wait" in source
+    assert '--wait-timeout "${DRILL_WAIT_TIMEOUT}"' in source
+    assert "mysql redis minio qdrant" in source
+    assert "run --rm --no-deps db-bootstrap" in source
+    assert "run --rm --no-deps minio-bootstrap" in source
+    assert (
+        "up -d --wait mysql db-bootstrap redis minio minio-bootstrap qdrant"
+        not in source
+    )
+    assert 'compose_drill_with_deadline "${DRILL_CLEANUP_TIMEOUT}"' in source
+    assert 'local status="$1" cleanup_failed=0' in source
+    assert 'if [ "${status}" -eq 0 ] && [ "${cleanup_failed}" -ne 0 ]' in source
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    [
+        "RELEASE_CHECKLIST.md",
+        "production/README.md",
+        "production/deployment-bundle.README.md",
+        "doc/runbooks/upgrade-rollback.md",
+        "doc/runbooks/release-supply-chain.md",
+        "doc/runbooks/backup-restore.md",
+    ],
+)
+def test_operator_docs_do_not_mix_one_shots_into_detached_wait(
+    relative_path: str,
+) -> None:
+    source = (REPOSITORY_ROOT / relative_path).read_text(encoding="utf-8")
+    normalized = " ".join(source.split())
+
+    assert "up -d --wait mysql db-bootstrap" not in normalized
+    assert "up -d mysql db-bootstrap" not in normalized
+    assert "up -d --wait`" not in source
+    if relative_path == "RELEASE_CHECKLIST.md":
+        assert "production/README.md" in source
+        assert "foreground" in source
+    else:
+        assert "run --rm --no-deps db-bootstrap" in normalized
+        assert "run --rm --no-deps minio-bootstrap" in normalized
 
 
 def test_backup_manifest_binds_release_metadata_and_rejects_tampering(
@@ -622,11 +678,28 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
         text=True,
     )
     assert verified.returncode == 0, verified.stderr
+    release_metadata_path = root / "production/release-metadata.json"
+    release_metadata = json.loads(release_metadata_path.read_text(encoding="utf-8"))
+    assert release_metadata["schema_version"] == "auris.release-deployment-metadata.v3"
+    manifested_paths = [item["path"] for item in release_metadata["members"]]
+    assert manifested_paths == sorted(manifested_paths)
+    assert len(manifested_paths) == len(set(manifested_paths))
+    assert "production/scripts/restore.sh" in manifested_paths
+    assert "doc/runbooks/backup-restore.md" in manifested_paths
+    assert "production/release-metadata.json" not in manifested_paths
+    assert "production/release-metadata.sigstore.json" not in manifested_paths
+    assert all(
+        set(item) == {"path", "sha256", "type", "mode"}
+        and item["type"] == "regular-file"
+        and item["mode"] in {"0600", "0644", "0755"}
+        for item in release_metadata["members"]
+    )
     assert (root / "production/compose.yaml").read_bytes() == compose_path.read_bytes()
     assert not (root / "production/compose.release.json").exists()
     assert not (root / ".git").exists()
     assert (root / "production/compose.oidc-confidential.yaml").is_file()
     assert (root / "production/restore-compatibility.json").is_file()
+    assert (root / "scripts/run_with_deadline.py").is_file()
 
     readme = (root / "README.md").read_text(encoding="utf-8")
     assert "--file production/compose.yaml" in readme
@@ -660,8 +733,9 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
     )
     downloaded_signature.write_text("{}\n", encoding="utf-8")
     shutil.copyfile(downloaded_signature, canonical_signature)
+    canonical_signature.chmod(0o444)
     signed = release_bundle.verify_bundle_signature(root, run=fake_cosign)
-    assert signed["schema_version"] == "auris.release-deployment-metadata.v2"
+    assert signed["schema_version"] == "auris.release-deployment-metadata.v3"
     assert commands[0][0:2] == ("cosign", "verify-blob")
     assert (
         "https://github.com/auris-flow/auris-flow/.github/workflows/"
@@ -678,6 +752,105 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
             backup_source_commit="f" * 40,
             backup_metadata_sha256="e" * 64,
         )
+
+    for relative_path in (
+        "production/scripts/restore.sh",
+        "doc/runbooks/backup-restore.md",
+    ):
+        target = root / relative_path
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b"\nrelease-bundle-tamper\n")
+            with pytest.raises(
+                release_bundle.ReleaseBundleError,
+                match="bundle member checksum",
+            ):
+                release_bundle.verify_bundle(root)
+        finally:
+            target.write_bytes(original)
+
+    executable = root / "production/scripts/restore.sh"
+    original_mode = stat.S_IMODE(executable.stat().st_mode)
+    try:
+        executable.chmod(original_mode ^ stat.S_IXUSR)
+        with pytest.raises(
+            release_bundle.ReleaseBundleError,
+            match="bundle member mode",
+        ):
+            release_bundle.verify_bundle(root)
+    finally:
+        executable.chmod(original_mode)
+
+    hard_link_member = root / "doc/runbooks/security-incident-response.md"
+    parked_hard_link_member = tmp_path / "security-incident-response.parked.md"
+    hard_link_member.rename(parked_hard_link_member)
+    os.link(parked_hard_link_member, hard_link_member)
+    try:
+        with pytest.raises(
+            release_bundle.ReleaseBundleError,
+            match="hard links are forbidden",
+        ):
+            release_bundle.verify_bundle(root)
+    finally:
+        hard_link_member.unlink()
+        parked_hard_link_member.rename(hard_link_member)
+
+    runbook_directory = root / "doc/runbooks"
+    original_directory_mode = stat.S_IMODE(runbook_directory.stat().st_mode)
+    try:
+        runbook_directory.chmod(0o777)
+        with pytest.raises(
+            release_bundle.ReleaseBundleError,
+            match="bundle directory mode",
+        ):
+            release_bundle.verify_bundle(root)
+    finally:
+        runbook_directory.chmod(original_directory_mode)
+
+    missing = root / "doc/runbooks/key-rotation.md"
+    parked = tmp_path / "key-rotation.parked.md"
+    missing.rename(parked)
+    try:
+        with pytest.raises(
+            release_bundle.ReleaseBundleError,
+            match="missing bundle member",
+        ):
+            release_bundle.verify_bundle(root)
+    finally:
+        parked.rename(missing)
+
+    unexpected = root / "unexpected-release-member.txt"
+    unexpected.write_text("not signed\n", encoding="utf-8")
+    try:
+        with pytest.raises(
+            release_bundle.ReleaseBundleError,
+            match="unexpected bundle member",
+        ):
+            release_bundle.verify_bundle(root)
+    finally:
+        unexpected.unlink()
+
+    original_metadata = release_metadata_path.read_bytes()
+    for mutation, expected_error in (
+        (
+            lambda document: document["members"].append(document["members"][0]),
+            "duplicate bundle member path",
+        ),
+        (
+            lambda document: document["members"][0].__setitem__(
+                "path", "../escaped-release-member"
+            ),
+            "unsafe bundle member path",
+        ),
+    ):
+        mutated_metadata = json.loads(original_metadata)
+        mutation(mutated_metadata)
+        write_json(release_metadata_path, mutated_metadata)
+        try:
+            with pytest.raises(release_bundle.ReleaseBundleError, match=expected_error):
+                release_bundle.verify_bundle(root)
+        finally:
+            release_metadata_path.write_bytes(original_metadata)
 
 
 def test_running_image_validation_requires_config_and_content_digest() -> None:

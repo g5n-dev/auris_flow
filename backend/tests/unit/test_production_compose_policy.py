@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import ModuleType
@@ -77,6 +79,12 @@ def test_rendered_networks_confine_egress_to_application_services() -> None:
     assert set(services["worker"]["networks"]) == {"internal", "app-egress"}
     assert not services["bff"].get("ports")
     assert not services["worker"].get("ports")
+    assert set(services["mysql"]["cap_add"]) == {
+        "CHOWN",
+        "DAC_OVERRIDE",
+        "SETGID",
+        "SETUID",
+    }
 
     for name, service in services.items():
         networks = set(service.get("networks") or {})
@@ -134,7 +142,13 @@ def test_rendered_networks_confine_egress_to_application_services() -> None:
             lambda document: document["services"]["edge"].__setitem__(
                 "cap_add", ["NET_BIND_SERVICE", "NET_ADMIN"]
             ),
-            "edge: cap_add must contain only NET_BIND_SERVICE",
+            "edge: cap_add must contain exactly NET_BIND_SERVICE",
+        ),
+        (
+            lambda document: document["services"]["mysql"].__setitem__(
+                "cap_add", ["CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID", "SYS_ADMIN"]
+            ),
+            "mysql: cap_add must contain exactly CHOWN, DAC_OVERRIDE, SETGID, SETUID",
         ),
         (
             lambda document: document["networks"]["app-egress"].__setitem__("internal", True),
@@ -168,6 +182,50 @@ def test_bff_healthcheck_uses_a_trusted_http_host() -> None:
     assert "bff" in trusted_hosts
     assert "http://bff:8000/readyz" in healthcheck
     assert "http://127.0.0.1:8000/readyz" not in healthcheck
+
+
+def test_bff_proxy_headers_trust_only_the_static_edge_address() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    bff_command = document["services"]["bff"]["command"]
+    edge_network = document["services"]["edge"]["networks"]["internal"]
+    internal_ipam = document["networks"]["internal"]["ipam"]
+
+    flag_index = bff_command.index("--forwarded-allow-ips")
+    trusted_proxy = bff_command[flag_index + 1]
+    edge_ip = edge_network["ipv4_address"]
+    subnets = [ipaddress.ip_network(item["subnet"]) for item in internal_ipam["config"]]
+
+    assert trusted_proxy == edge_ip
+    assert trusted_proxy != "*"
+    assert ipaddress.ip_address(edge_ip) in next(
+        subnet for subnet in subnets if ipaddress.ip_address(edge_ip) in subnet
+    )
+
+
+def test_compose_policy_rejects_wildcard_or_non_edge_forwarded_proxy_trust() -> None:
+    policy = _load_policy()
+    wildcard = policy._render_compose()
+    wildcard_command = wildcard["services"]["bff"]["command"]
+    wildcard_command[wildcard_command.index("--forwarded-allow-ips") + 1] = "*"
+
+    mismatch = policy._render_compose()
+    mismatch_command = mismatch["services"]["bff"]["command"]
+    mismatch_command[mismatch_command.index("--forwarded-allow-ips") + 1] = "172.31.48.99"
+
+    duplicate = policy._render_compose()
+    duplicate_command = duplicate["services"]["bff"]["command"]
+    duplicate_command.extend(["--forwarded-allow-ips", "*"])
+
+    assert "bff: forwarded proxy trust must equal the static edge internal IP" in (
+        policy.validate_compose(wildcard)
+    )
+    assert "bff: forwarded proxy trust must equal the static edge internal IP" in (
+        policy.validate_compose(mismatch)
+    )
+    assert "bff: forwarded proxy trust must equal the static edge internal IP" in (
+        policy.validate_compose(duplicate)
+    )
 
 
 def test_oidc_defaults_to_reference_keycloak_but_allows_external_provider(
@@ -330,7 +388,7 @@ def test_policy_rejects_oidc_edge_readiness_cycle_and_wrong_internal_tls_port() 
 
     assert any("edge: BFF dependency must use service_started" in error for error in errors)
     assert any("edge: internal HTTPS target must be 443" in error for error in errors)
-    assert any("edge: cap_add must contain only NET_BIND_SERVICE" in error for error in errors)
+    assert any("edge: cap_add must contain exactly NET_BIND_SERVICE" in error for error in errors)
 
 
 def test_edge_exposes_readiness_but_never_metrics() -> None:
@@ -340,6 +398,52 @@ def test_edge_exposes_readiness_but_never_metrics() -> None:
     assert "proxy_pass http://bff:8000/readyz" in nginx
     metrics_location = nginx.split("location = /metrics", 1)[1].split("}", 1)[0]
     assert "return 404" in metrics_location
+
+
+def test_edge_overwrites_forwarded_for_and_never_logs_audio_grant_queries() -> None:
+    nginx = (ROOT / "production" / "edge" / "nginx.conf").read_text(encoding="utf-8")
+    forwarded_for_directives = re.findall(
+        r"proxy_set_header\s+X-Forwarded-For\s+([^;]+);",
+        nginx,
+    )
+    audio_location_match = re.search(
+        r"location\s*=\s*/api/v1/audio-playback\s*\{(?P<body>.*?)\n\s*\}",
+        nginx,
+        re.DOTALL,
+    )
+
+    assert forwarded_for_directives
+    assert set(forwarded_for_directives) == {"$remote_addr"}
+    assert "$proxy_add_x_forwarded_for" not in nginx
+    assert audio_location_match is not None
+    audio_location = audio_location_match.group("body")
+    assert re.search(r"\baccess_log\s+off\s*;", audio_location)
+    assert "proxy_pass http://bff:8000" in audio_location
+    assert "X-Forwarded-For $remote_addr" in audio_location
+    assert "$request_uri" not in audio_location
+
+
+def test_nginx_policy_rejects_forwarded_chain_append_and_playback_access_logging() -> None:
+    policy = _load_policy()
+    nginx = (ROOT / "production" / "edge" / "nginx.conf").read_text(encoding="utf-8")
+    append_chain = nginx.replace(
+        "X-Forwarded-For $remote_addr",
+        "X-Forwarded-For $proxy_add_x_forwarded_for",
+        1,
+    )
+    logged_playback = nginx.replace(
+        "location = /api/v1/audio-playback {\n        access_log off;",
+        "location = /api/v1/audio-playback {\n        access_log /var/log/nginx/access.log;",
+        1,
+    )
+
+    assert policy.validate_edge_nginx(nginx) == []
+    assert "edge nginx: every X-Forwarded-For header must overwrite with $remote_addr" in (
+        policy.validate_edge_nginx(append_chain)
+    )
+    assert "edge nginx: audio playback grant location must disable access logging" in (
+        policy.validate_edge_nginx(logged_playback)
+    )
 
 
 def test_plain_http_listener_cannot_redirect_through_an_untrusted_host_header() -> None:

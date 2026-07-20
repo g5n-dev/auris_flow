@@ -16,7 +16,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-METADATA_SCHEMA = "auris.release-deployment-metadata.v2"
+METADATA_SCHEMA = "auris.release-deployment-metadata.v3"
 IMAGE_LOCK_SCHEMA = "auris.release-image-lock.v1"
 RESTORE_POLICY_SCHEMA = "auris.release-restore-compatibility.v1"
 METADATA_RELATIVE_PATH = PurePosixPath("production/release-metadata.json")
@@ -27,6 +27,11 @@ COMPOSE_RELATIVE_PATH = PurePosixPath("production/compose.yaml")
 IMAGE_LOCK_RELATIVE_PATH = PurePosixPath("production/images.lock.json")
 RESTORE_POLICY_RELATIVE_PATH = PurePosixPath("production/restore-compatibility.json")
 SIGSTORE_ISSUER = "https://token.actions.githubusercontent.com"
+REGULAR_MEMBER_TYPE = "regular-file"
+ALLOWED_MEMBER_MODES = frozenset({"0600", "0644", "0755"})
+RELEASE_METADATA_MODE = 0o644
+INSTALLED_SIGNATURE_MODE = 0o444
+BUNDLE_DIRECTORY_MODE = 0o755
 OFFICIAL_RELEASE_WORKFLOW_PREFIX = (
     "https://github.com/auris-flow/auris-flow/.github/workflows/"
     "release-images.yml@refs/tags/"
@@ -57,6 +62,7 @@ REQUIRED_BUNDLE_FILES = (
     "production/scripts/restore.sh",
     "production/scripts/verify-backup.sh",
     "scripts/release_bundle.py",
+    "scripts/run_with_deadline.py",
     "scripts/verify_production_compose.py",
     "doc/backend-spec/migration-plan.md",
     "doc/release/versioning-and-compatibility.md",
@@ -140,12 +146,115 @@ def _load_json(path: Path, label: str) -> Any:
     def reject_constant(value: str) -> None:
         raise ValueError(f"non-finite JSON value: {value}")
 
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        document: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in document:
+                raise ValueError(f"duplicate JSON key: {key}")
+            document[key] = value
+        return document
+
     try:
         return json.loads(
-            path.read_text(encoding="utf-8"), parse_constant=reject_constant
+            path.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicate_keys,
         )
     except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
         raise ReleaseBundleError(f"invalid JSON in {label}") from exc
+
+
+def _validate_member_path(value: Any) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\\" in value
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise ReleaseBundleError("unsafe bundle member path")
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != value
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative in {METADATA_RELATIVE_PATH, METADATA_SIGNATURE_RELATIVE_PATH}
+    ):
+        raise ReleaseBundleError("unsafe bundle member path")
+    return value
+
+
+def _member_mode(path: Path) -> str:
+    return f"0{stat.S_IMODE(path.lstat().st_mode):03o}"
+
+
+def _bundle_member_record(bundle_root: Path, path: Path) -> dict[str, str]:
+    relative_path = path.relative_to(bundle_root).as_posix()
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ReleaseBundleError(
+            f"bundle member must be a regular file: {relative_path}"
+        )
+    if metadata.st_nlink != 1:
+        raise ReleaseBundleError(f"hard links are forbidden in bundle: {relative_path}")
+    mode = _member_mode(path)
+    return {
+        "path": _validate_member_path(relative_path),
+        "sha256": _sha256_file(path),
+        "type": REGULAR_MEMBER_TYPE,
+        "mode": mode,
+    }
+
+
+def _collect_bundle_members(bundle_root: Path) -> list[dict[str, str]]:
+    members: list[dict[str, str]] = []
+    for path in sorted(bundle_root.rglob("*")):
+        relative = PurePosixPath(path.relative_to(bundle_root).as_posix())
+        if relative in {METADATA_RELATIVE_PATH, METADATA_SIGNATURE_RELATIVE_PATH}:
+            continue
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            continue
+        members.append(_bundle_member_record(bundle_root, path))
+    return members
+
+
+def _validate_bundle_members(document: Any) -> list[dict[str, str]]:
+    if not isinstance(document, list) or not document:
+        raise ReleaseBundleError("release metadata members must be a non-empty list")
+    members: list[dict[str, str]] = []
+    paths: set[str] = set()
+    for raw_member in document:
+        if not isinstance(raw_member, dict) or set(raw_member) != {
+            "path",
+            "sha256",
+            "type",
+            "mode",
+        }:
+            raise ReleaseBundleError("release metadata bundle member is invalid")
+        path = _validate_member_path(raw_member.get("path"))
+        if path in paths:
+            raise ReleaseBundleError(f"duplicate bundle member path: {path}")
+        paths.add(path)
+        digest = raw_member.get("sha256")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ReleaseBundleError(f"bundle member sha256 is invalid: {path}")
+        if raw_member.get("type") != REGULAR_MEMBER_TYPE:
+            raise ReleaseBundleError(f"bundle member type is invalid: {path}")
+        mode = raw_member.get("mode")
+        if not isinstance(mode, str) or mode not in ALLOWED_MEMBER_MODES:
+            raise ReleaseBundleError(f"bundle member mode is invalid: {path}")
+        members.append(
+            {
+                "path": path,
+                "sha256": digest,
+                "type": REGULAR_MEMBER_TYPE,
+                "mode": mode,
+            }
+        )
+    if [member["path"] for member in members] != sorted(paths):
+        raise ReleaseBundleError("release metadata bundle members are not sorted")
+    return members
 
 
 def _validate_release_tag(value: Any) -> str:
@@ -278,6 +387,7 @@ def create_release_metadata(
     compose_file: Path,
     image_lock_file: Path,
     restore_policy_file: Path,
+    members: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
     release_tag = _validate_release_tag(release_tag)
     source_commit = _validate_source_commit(source_commit)
@@ -293,6 +403,7 @@ def create_release_metadata(
             "image lock source commit does not match bundle commit"
         )
     _validate_compose_images(compose, image_lock["images"])
+    validated_members = _validate_bundle_members(list(members))
     return {
         "schema_version": METADATA_SCHEMA,
         "release_tag": release_tag,
@@ -310,6 +421,7 @@ def create_release_metadata(
             "sha256": _sha256_file(restore_policy_file),
         },
         "images": image_lock["images"],
+        "members": validated_members,
     }
 
 
@@ -322,6 +434,7 @@ def _validate_release_metadata(document: Any) -> dict[str, Any]:
         "image_lock",
         "restore_policy",
         "images",
+        "members",
     }
     if not isinstance(document, dict) or set(document) != required:
         raise ReleaseBundleError("release metadata has missing or unexpected fields")
@@ -355,6 +468,7 @@ def _validate_release_metadata(document: Any) -> dict[str, Any]:
         ):
             raise ReleaseBundleError("release metadata service name is invalid")
         images[service] = _validate_image_reference(reference)
+    members = _validate_bundle_members(document.get("members"))
     return {
         "schema_version": METADATA_SCHEMA,
         "release_tag": release_tag,
@@ -363,6 +477,7 @@ def _validate_release_metadata(document: Any) -> dict[str, Any]:
         "image_lock": validated_files["image_lock"],
         "restore_policy": validated_files["restore_policy"],
         "images": images,
+        "members": members,
     }
 
 
@@ -386,6 +501,83 @@ def _resolve_bound_file(bundle_root: Path, raw: str, label: str) -> Path:
     return _require_regular_file(target, label)
 
 
+def _manifest_parent_directories(paths: Sequence[str]) -> set[str]:
+    directories: set[str] = set()
+    for raw in paths:
+        parent = PurePosixPath(raw).parent
+        while parent != PurePosixPath("."):
+            directories.add(parent.as_posix())
+            parent = parent.parent
+    return directories
+
+
+def _verify_exact_bundle_members(
+    bundle_root: Path,
+    members: Sequence[Mapping[str, str]],
+) -> None:
+    if stat.S_IMODE(bundle_root.lstat().st_mode) != BUNDLE_DIRECTORY_MODE:
+        raise ReleaseBundleError("bundle directory mode must be 0755: .")
+    metadata_path = _resolve_bound_file(
+        bundle_root, METADATA_RELATIVE_PATH.as_posix(), "release metadata"
+    )
+    if stat.S_IMODE(metadata_path.lstat().st_mode) != RELEASE_METADATA_MODE:
+        raise ReleaseBundleError("release metadata mode must be 0644")
+
+    signature_path = bundle_root / METADATA_SIGNATURE_RELATIVE_PATH
+    if signature_path.exists() or signature_path.is_symlink():
+        _require_regular_file(signature_path, "release metadata Sigstore bundle")
+        if stat.S_IMODE(signature_path.lstat().st_mode) != INSTALLED_SIGNATURE_MODE:
+            raise ReleaseBundleError(
+                "installed release metadata Sigstore bundle mode must be 0444"
+            )
+
+    declared = {member["path"]: dict(member) for member in members}
+    actual_records = _collect_bundle_members(bundle_root)
+    actual = {member["path"]: member for member in actual_records}
+    missing = sorted(set(declared) - set(actual))
+    if missing:
+        raise ReleaseBundleError("missing bundle member(s): " + ", ".join(missing))
+    unexpected = sorted(set(actual) - set(declared))
+    if unexpected:
+        raise ReleaseBundleError(
+            "unexpected bundle member(s): " + ", ".join(unexpected)
+        )
+
+    for path, expected in declared.items():
+        observed = actual[path]
+        if observed["type"] != expected["type"]:
+            raise ReleaseBundleError(
+                f"bundle member type does not match metadata: {path}"
+            )
+        if observed["mode"] != expected["mode"]:
+            raise ReleaseBundleError(
+                f"bundle member mode does not match metadata: {path}"
+            )
+        if observed["sha256"] != expected["sha256"]:
+            raise ReleaseBundleError(
+                f"bundle member checksum does not match metadata: {path}"
+            )
+
+    actual_directories: set[str] = set()
+    for path in bundle_root.rglob("*"):
+        metadata = path.lstat()
+        if stat.S_ISDIR(metadata.st_mode):
+            relative = path.relative_to(bundle_root).as_posix()
+            if stat.S_IMODE(metadata.st_mode) != BUNDLE_DIRECTORY_MODE:
+                raise ReleaseBundleError(
+                    f"bundle directory mode must be 0755: {relative}"
+                )
+            actual_directories.add(relative)
+    expected_directories = _manifest_parent_directories(
+        [*declared, METADATA_RELATIVE_PATH.as_posix()]
+    )
+    unexpected_directories = sorted(actual_directories - expected_directories)
+    if unexpected_directories:
+        raise ReleaseBundleError(
+            "unexpected bundle directory(s): " + ", ".join(unexpected_directories)
+        )
+
+
 def verify_bundle(bundle_root: Path) -> dict[str, Any]:
     bundle_root = _require_real_directory(bundle_root, "bundle root")
     for path in bundle_root.rglob("*"):
@@ -404,6 +596,7 @@ def verify_bundle(bundle_root: Path) -> dict[str, Any]:
         bundle_root, METADATA_RELATIVE_PATH.as_posix(), "release metadata"
     )
     metadata = _validate_release_metadata(_load_json(metadata_path, "release metadata"))
+    _verify_exact_bundle_members(bundle_root, metadata["members"])
     for relative_path in REQUIRED_BUNDLE_FILES:
         _resolve_bound_file(
             bundle_root, relative_path, f"bundle member {relative_path}"
@@ -690,6 +883,7 @@ def assemble_bundle(
         )
     for relative in (
         "scripts/release_bundle.py",
+        "scripts/run_with_deadline.py",
         "scripts/verify_production_compose.py",
     ):
         _copy_regular_file(
@@ -702,12 +896,18 @@ def assemble_bundle(
     _copy_regular_file(rendered_compose, compose_destination, mode=0o644)
     _copy_regular_file(image_lock_file, lock_destination, mode=0o644)
     _copy_regular_file(restore_policy_file, restore_policy_destination, mode=0o644)
+    output_root.chmod(BUNDLE_DIRECTORY_MODE)
+    for path in output_root.rglob("*"):
+        if path.is_dir() and not path.is_symlink():
+            path.chmod(BUNDLE_DIRECTORY_MODE)
+    members = _collect_bundle_members(output_root)
     metadata = create_release_metadata(
         release_tag=release_tag,
         source_commit=source_commit,
         compose_file=compose_destination,
         image_lock_file=lock_destination,
         restore_policy_file=restore_policy_destination,
+        members=members,
     )
     metadata_destination = output_root / METADATA_RELATIVE_PATH
     metadata_destination.write_bytes(_canonical_json(metadata))

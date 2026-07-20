@@ -287,6 +287,30 @@ def test_collector_redacts_sensitive_attributes_before_exporting_to_tempo() -> N
     assert tempo.get("endpoint") == "tempo:4317"
 
 
+def test_collector_internal_metrics_use_the_pinned_version_reader_schema() -> None:
+    collector = _load_yaml(OTEL_COLLECTOR_CONFIG)
+    assert isinstance(collector, dict)
+    service = collector.get("service")
+    assert isinstance(service, dict)
+    telemetry = service.get("telemetry")
+    assert isinstance(telemetry, dict)
+    metrics = telemetry.get("metrics")
+    assert isinstance(metrics, dict)
+    assert "address" not in metrics
+    assert metrics.get("readers") == [
+        {
+            "pull": {
+                "exporter": {
+                    "prometheus": {
+                        "host": "0.0.0.0",
+                        "port": 8888,
+                    }
+                }
+            }
+        }
+    ]
+
+
 def test_alerts_only_reference_existing_low_cardinality_auris_metrics() -> None:
     definitions = _registered_metric_definitions()
     assert definitions

@@ -47,7 +47,6 @@ def test_scanner_ignores_explicit_placeholders_and_local_urls() -> None:
             "AUTH_TOKEN_SECRET=replace-with-32-plus-char-secret",
             "EXTERNAL_CALLBACK_SECRET=auris-dev-callback-secret",
             "DATABASE_URL=mysql://auris:auris_root@127.0.0.1:3306/auris",
-            "AUTH_TOKEN_SECRET=" + "Z" * 32 + "  # pragma: allowlist secret",
         )
     )
     findings: list[str] = []
@@ -55,6 +54,16 @@ def test_scanner_ignores_explicit_placeholders_and_local_urls() -> None:
     scanner.scan_text(text, "fixture", findings)
 
     assert findings == []
+
+
+def test_scanner_rejects_inline_self_approval_markers() -> None:
+    scanner = _load_scanner()
+    text = "AUTH_TOKEN_SECRET=" + "Aa19_" * 7 + "  # " + "pragma: allowlist secret"
+    findings: list[str] = []
+
+    scanner.scan_text(text, "fixture", findings)
+
+    assert findings == ["fixture:1: potential generic_secret_assignment"]
 
 
 def test_scanner_accepts_docker_secret_file_references_but_not_inline_values() -> None:
@@ -109,6 +118,61 @@ def test_index_scan_reads_staged_content_missing_from_worktree(
     scanner.scan_index(findings)
 
     assert findings == ["index:staged.env:1: potential generic_secret_assignment"]
+
+
+def test_index_scan_does_not_trust_binary_looking_suffixes(tmp_path: Path) -> None:
+    scanner = _load_scanner()
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    staged = tmp_path / "release-proof.png"
+    staged.write_bytes(b"\x89PNG\r\n\x1a\n\x00OPENAI_API_KEY=" + b"sk-" + (b"A" * 24))
+    subprocess.run(["git", "add", staged.name], cwd=tmp_path, check=True)
+    scanner.ROOT = tmp_path
+    findings: list[str] = []
+
+    scanner.scan_index(findings)
+
+    assert any("potential openai_key" in finding for finding in findings), findings
+
+
+def test_history_scan_does_not_trust_deleted_binary_looking_files(
+    tmp_path: Path,
+) -> None:
+    scanner = _load_scanner()
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "config", "user.email", "scanner-tests@example.invalid"],
+        cwd=tmp_path,
+        check=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Scanner Tests"],
+        cwd=tmp_path,
+        check=True,
+    )
+    historical = tmp_path / "release-proof.pdf"
+    historical.write_bytes(b"%PDF-1.7\x00\nAUTH_TOKEN_SECRET=" + (b"Aa19_" * 7))
+    subprocess.run(["git", "add", historical.name], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "add release proof"],
+        cwd=tmp_path,
+        check=True,
+    )
+    historical.unlink()
+    subprocess.run(["git", "add", "-u"], cwd=tmp_path, check=True)
+    subprocess.run(
+        ["git", "commit", "-q", "-m", "remove release proof"],
+        cwd=tmp_path,
+        check=True,
+    )
+    scanner.ROOT = tmp_path
+    findings: list[str] = []
+
+    scanner.scan_history(findings)
+
+    assert any(
+        "release-proof.pdf" in finding and "potential generic_secret_assignment" in finding
+        for finding in findings
+    ), findings
 
 
 def test_history_scan_is_bound_to_checked_out_release_lineage() -> None:

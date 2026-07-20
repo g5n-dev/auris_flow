@@ -488,6 +488,51 @@ class ImmutableVisualArtifactTests(unittest.TestCase):
                 failures,
             )
 
+    def test_lock_writer_rejects_matching_foreign_repository_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            baseline, package_path = self._release_candidate(root)
+            foreign_ref = "ghcr.io/attacker/evil/visual-baseline@sha256:" + ("2" * 64)
+            foreign_identity = (
+                "https://github.com/attacker/evil/.github/workflows/"
+                "visual-baseline-build.yml@refs/heads/main"
+            )
+
+            with self.assertRaisesRegex(
+                BaselineValidationError, "official Auris Flow repository"
+            ):
+                write_visual_baseline_lock(
+                    root / "foreign.lock.json",
+                    baseline_dir=baseline,
+                    package_path=package_path,
+                    artifact_ref=foreign_ref,
+                    approval_reference="fixture-approval-123",
+                    signature_identity=foreign_identity,
+                    signature_issuer=self.signature_issuer,
+                )
+
+    def test_signature_verifier_rejects_foreign_repository_before_cosign(
+        self,
+    ) -> None:
+        foreign_ref = "ghcr.io/attacker/evil/visual-baseline@sha256:" + ("2" * 64)
+        foreign_identity = (
+            "https://github.com/attacker/evil/.github/workflows/"
+            "visual-baseline-build.yml@refs/heads/main"
+        )
+
+        with (
+            patch("verify_visual_baseline.subprocess.run") as run,
+            self.assertRaisesRegex(
+                BaselineValidationError, "official Auris Flow repository"
+            ),
+        ):
+            verify_visual_artifact_signature(
+                foreign_ref,
+                signature_identity=foreign_identity,
+                signature_issuer=self.signature_issuer,
+            )
+        run.assert_not_called()
+
     def test_lock_writer_does_not_follow_an_output_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

@@ -5,6 +5,7 @@ import hmac
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 from datetime import UTC, datetime
 from pathlib import Path
@@ -38,6 +39,105 @@ def _load_script(name: str) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _render_dagster_gate_compose() -> dict[str, object]:
+    if shutil.which("docker") is None:
+        pytest.skip("Docker Compose CLI is unavailable")
+    version = subprocess.run(
+        ["docker", "compose", "version"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if version.returncode != 0:
+        pytest.skip("Docker Compose plugin is unavailable")
+    result = subprocess.run(
+        [
+            "docker",
+            "compose",
+            "--project-name",
+            "auris-dagster-gate-network-unit",
+            "--project-directory",
+            str(ROOT / "production"),
+            "--file",
+            str(ROOT / "production" / "compose.yaml"),
+            "--file",
+            str(ROOT / "production" / "tests" / "dagster-gate.compose.yaml"),
+            "config",
+            "--format",
+            "json",
+        ],
+        cwd=ROOT,
+        env={
+            **os.environ,
+            "AURIS_DAGSTER_GATE_PORT": "39101",
+            "AURIS_DAGSTER_GATE_CALLBACK_PORT": "39102",
+            "AURIS_PUBLIC_HOST": "dagster-gate.invalid",
+            "AURIS_EXTERNAL_CALLBACK_URL": "https://callback.invalid/callbacks/auris-flow",
+            "AURIS_EXTERNAL_CALLBACK_HOST": "callback.invalid",
+            "AURIS_EMBEDDING_ENDPOINT": "https://embedding.invalid/v1/embeddings",
+            "AURIS_EMBEDDING_MODEL": "dagster-network-unit",
+            "AURIS_SECRETS_DIR": "/tmp/auris-dagster-network-unit",
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert isinstance(payload, dict)
+    return payload
+
+
+def _valid_gate_network_model() -> dict[str, object]:
+    project_name = "auris-dagster-gate-network-unit"
+    return {
+        "name": project_name,
+        "networks": {
+            "internal": {
+                "name": f"{project_name}_internal",
+                "internal": True,
+            },
+            "dagster-gate-host": {
+                "name": f"{project_name}_dagster-gate-host",
+                "driver": "bridge",
+                "internal": False,
+                "external": False,
+                "attachable": False,
+            },
+        },
+        "services": {
+            "dagster-gate-callback": {
+                "networks": {"internal": None, "dagster-gate-host": None},
+                "ports": [
+                    {
+                        "mode": "ingress",
+                        "host_ip": "127.0.0.1",
+                        "target": 8080,
+                        "published": "39102",
+                        "protocol": "tcp",
+                    }
+                ],
+            },
+            "dagster-webserver": {
+                "networks": {"internal": None, "dagster-gate-host": None},
+                "ports": [
+                    {
+                        "mode": "ingress",
+                        "host_ip": "127.0.0.1",
+                        "target": 3000,
+                        "published": "39101",
+                        "protocol": "tcp",
+                    }
+                ],
+            },
+            "dagster-code": {"networks": {"internal": None}},
+        },
+    }
 
 
 def _signed_request() -> tuple[str, dict[str, str], bytes, dict[str, object], datetime]:
@@ -168,6 +268,19 @@ def test_real_dagster_shell_gate_isolated_and_never_starts_protocol_fake() -> No
     assert '"${COMPOSE[@]}" up --detach --no-build --wait' not in source
 
 
+def test_real_dagster_shell_gate_runs_one_shot_services_to_completion() -> None:
+    source = (ROOT / "scripts" / "verify_real_dagster.sh").read_text(encoding="utf-8")
+
+    assert "ONE_SHOT_SERVICES=(" in source
+    assert "dagster-gate-secrets-init" in source
+    assert "dagster-gate-db-bootstrap" in source
+    assert 'if is_one_shot_service "${service}"; then' in source
+    assert "up --no-build --no-deps --abort-on-container-exit" in source
+    assert '--exit-code-from "${service}" "${service}"' in source
+    assert "up --detach --no-build --no-deps --wait" in source
+    assert "up --detach --no-build --wait" not in source
+
+
 def test_real_dagster_driver_accepts_only_exact_source_commit() -> None:
     module = _load_script("verify_real_dagster.py")
 
@@ -226,9 +339,16 @@ def test_real_dagster_compose_overlay_uses_real_services_and_loopback_ports() ->
     callback = services["dagster-gate-callback"]
     assert callback["build"]["dockerfile"] == ("production/tests/dagster-gate-callback.Dockerfile")
     assert callback["ports"] == ["127.0.0.1:${AURIS_DAGSTER_GATE_CALLBACK_PORT}:8080"]
+    assert set(callback["networks"]) == {"internal", "dagster-gate-host"}
     assert callback["secrets"] == []
     assert "dagster_gate_secrets:/run/secrets:ro" in callback["volumes"]
     assert services["dagster-gate-secrets-init"]["network_mode"] == "none"
+    assert set(services["dagster-webserver"]["networks"]) == {"internal", "dagster-gate-host"}
+    assert document["networks"]["dagster-gate-host"] == {
+        "driver": "bridge",
+        "internal": False,
+        "attachable": False,
+    }
     for service_name in ("mysql", "dagster-code", "dagster-webserver", "dagster-daemon"):
         assert services[service_name]["secrets"] == []
         assert "dagster_gate_secrets:/run/secrets:ro" in services[service_name]["volumes"]
@@ -236,6 +356,85 @@ def test_real_dagster_compose_overlay_uses_real_services_and_loopback_ports() ->
         encoding="utf-8"
     )
     assert "delay_match" not in callback_source
+
+
+def test_real_dagster_merged_compose_has_project_scoped_host_access_only() -> None:
+    module = _load_script("verify_dagster_gate_network.py")
+    model = _render_dagster_gate_compose()
+
+    proof = module.validate_compose_model(
+        model,
+        project_name="auris-dagster-gate-network-unit",
+        webserver_port=39101,
+        callback_port=39102,
+    )
+
+    assert proof == {
+        "network_name": "auris-dagster-gate-network-unit_dagster-gate-host",
+        "members": ["dagster-gate-callback", "dagster-webserver"],
+        "ports": {
+            "dagster-gate-callback": "127.0.0.1:39102:8080/tcp",
+            "dagster-webserver": "127.0.0.1:39101:3000/tcp",
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    [
+        ("internal", "non-internal"),
+        ("external", "external"),
+        ("attachable", "attachable"),
+        ("fixed-name", "project-scoped"),
+        ("public-port", "loopback"),
+        ("third-member", "members"),
+        ("remove-internal", "network set"),
+    ],
+)
+def test_real_dagster_network_policy_rejects_unsafe_topologies(
+    mutation: str,
+    error: str,
+) -> None:
+    module = _load_script("verify_dagster_gate_network.py")
+    model = json.loads(json.dumps(_valid_gate_network_model()))
+    host_network = model["networks"]["dagster-gate-host"]
+    services = model["services"]
+
+    if mutation == "internal":
+        host_network["internal"] = True
+    elif mutation == "external":
+        host_network["external"] = True
+    elif mutation == "attachable":
+        host_network["attachable"] = True
+    elif mutation == "fixed-name":
+        host_network["name"] = "shared-dagster-gate-host"
+    elif mutation == "public-port":
+        services["dagster-webserver"]["ports"][0]["host_ip"] = "0.0.0.0"
+    elif mutation == "third-member":
+        services["dagster-code"]["networks"]["dagster-gate-host"] = None
+    elif mutation == "remove-internal":
+        del services["dagster-webserver"]["networks"]["internal"]
+    else:  # pragma: no cover - the parametrization is exhaustive
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    with pytest.raises(module.GateFailure, match=error):
+        module.validate_compose_model(
+            model,
+            project_name="auris-dagster-gate-network-unit",
+            webserver_port=39101,
+            callback_port=39102,
+        )
+
+
+def test_real_dagster_shell_gate_validates_rendered_network_topology() -> None:
+    source = (ROOT / "scripts" / "verify_real_dagster.sh").read_text(encoding="utf-8")
+
+    assert 'COMPOSE_MODEL="${TEMP_ROOT}/compose-model.json"' in source
+    assert 'config --format json >"${COMPOSE_MODEL}"' in source
+    assert '"${ROOT}/scripts/verify_dagster_gate_network.py"' in source
+    assert '--project-name "${PROJECT_NAME}"' in source
+    assert '--webserver-port "${AURIS_DAGSTER_GATE_PORT}"' in source
+    assert '--callback-port "${AURIS_DAGSTER_GATE_CALLBACK_PORT}"' in source
 
 
 def test_real_dagster_driver_requires_exact_workspace_repository_and_job() -> None:

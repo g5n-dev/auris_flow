@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ipaddress
 import json
 import os
 import re
@@ -10,11 +11,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCTION_DIR = ROOT / "production"
 COMPOSE_FILE = PRODUCTION_DIR / "compose.yaml"
 ENV_FILE = PRODUCTION_DIR / ".env.example"
+NGINX_CONFIG = PRODUCTION_DIR / "edge" / "nginx.conf"
 REQUIRED_SERVICES = frozenset(
     {
         "mysql",
@@ -50,6 +51,12 @@ EXPECTED_NETWORKS_BY_SERVICE = {
     "bff": frozenset({"internal", "app-egress"}),
     "worker": frozenset({"internal", "app-egress"}),
     "edge": frozenset({"internal", "edge"}),
+}
+EXPECTED_CAPABILITIES_BY_SERVICE = {
+    "edge": frozenset({"NET_BIND_SERVICE"}),
+    # The official MySQL entrypoint initializes/chowns the named volume as
+    # root, then switches to the image's mysql uid/gid.
+    "mysql": frozenset({"CHOWN", "DAC_OVERRIDE", "SETGID", "SETUID"}),
 }
 SECRET_NAME_PATTERN = re.compile(
     r"(?:PASSWORD|SECRET|TOKEN|API_KEY|DATABASE_URL|REDIS_URL)$"
@@ -117,6 +124,62 @@ def _environment_map(service: dict[str, Any]) -> dict[str, str]:
     raise ComposePolicyError("service environment must render as a map")
 
 
+def _command_flag_value(service: dict[str, Any], flag: str) -> str | None:
+    command = service.get("command") or []
+    if not isinstance(command, list):
+        return None
+    normalized = [str(item) for item in command]
+    try:
+        index = normalized.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(normalized):
+        return None
+    return normalized[index + 1]
+
+
+def validate_edge_nginx(source: str) -> list[str]:
+    errors: list[str] = []
+    forwarded_for_values = re.findall(
+        r"proxy_set_header\s+X-Forwarded-For\s+([^;]+);",
+        source,
+    )
+    proxy_pass_count = len(re.findall(r"\bproxy_pass\s+[^;]+;", source))
+    if (
+        not forwarded_for_values
+        or len(forwarded_for_values) != proxy_pass_count
+        or any(value.strip() != "$remote_addr" for value in forwarded_for_values)
+        or "$proxy_add_x_forwarded_for" in source
+    ):
+        errors.append(
+            "edge nginx: every X-Forwarded-For header must overwrite with $remote_addr"
+        )
+
+    audio_location = re.search(
+        r"location\s*=\s*/api/v1/audio-playback\s*\{(?P<body>[^{}]*)\}",
+        source,
+        re.DOTALL,
+    )
+    if audio_location is None:
+        errors.append("edge nginx: exact audio playback grant location is required")
+    else:
+        body = audio_location.group("body")
+        if not re.search(r"\baccess_log\s+off\s*;", body):
+            errors.append(
+                "edge nginx: audio playback grant location must disable access logging"
+            )
+        if not re.search(r"\bproxy_pass\s+http://bff:8000\s*;", body):
+            errors.append("edge nginx: audio playback location must proxy to the BFF")
+        if not re.search(
+            r"proxy_set_header\s+X-Forwarded-For\s+\$remote_addr\s*;",
+            body,
+        ):
+            errors.append(
+                "edge nginx: audio playback location must overwrite X-Forwarded-For"
+            )
+    return errors
+
+
 def _validate_image(name: str, service: dict[str, Any], *, release: bool) -> list[str]:
     errors: list[str] = []
     image = str(service.get("image") or "")
@@ -161,11 +224,15 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
         if "ALL" not in cap_drop:
             errors.append(f"{name}: Linux capabilities must be dropped")
         cap_add = set(raw_service.get("cap_add") or [])
-        if name == "edge":
-            if cap_add != {"NET_BIND_SERVICE"}:
-                errors.append("edge: cap_add must contain only NET_BIND_SERVICE")
-        elif cap_add:
-            errors.append(f"{name}: added Linux capabilities are forbidden")
+        expected_cap_add = EXPECTED_CAPABILITIES_BY_SERVICE.get(name, frozenset())
+        if cap_add != expected_cap_add:
+            if expected_cap_add:
+                errors.append(
+                    f"{name}: cap_add must contain exactly "
+                    + ", ".join(sorted(expected_cap_add))
+                )
+            else:
+                errors.append(f"{name}: added Linux capabilities are forbidden")
         if raw_service.get("network_mode"):
             errors.append(f"{name}: host network mode is forbidden")
         if raw_service.get("privileged") is True:
@@ -272,6 +339,35 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
         if https_targets != {"443"}:
             errors.append("edge: internal HTTPS target must be 443")
 
+    bff_service = services.get("bff")
+    if isinstance(bff_service, dict) and isinstance(edge_service, dict):
+        edge_networks = edge_service.get("networks") or {}
+        edge_internal = (
+            edge_networks.get("internal") if isinstance(edge_networks, dict) else None
+        )
+        edge_internal_ip = (
+            str(edge_internal.get("ipv4_address") or "")
+            if isinstance(edge_internal, dict)
+            else ""
+        )
+        trusted_proxy = _command_flag_value(
+            bff_service,
+            "--forwarded-allow-ips",
+        )
+        bff_command = [str(item) for item in (bff_service.get("command") or [])]
+        if bff_command.count("--proxy-headers") != 1:
+            errors.append("bff: proxy headers must be explicitly enabled")
+        if not edge_internal_ip:
+            errors.append("edge: a static internal IPv4 address is required")
+        if (
+            bff_command.count("--forwarded-allow-ips") != 1
+            or not trusted_proxy
+            or trusted_proxy != edge_internal_ip
+        ):
+            errors.append(
+                "bff: forwarded proxy trust must equal the static edge internal IP"
+            )
+
     networks = document.get("networks") or {}
     if not isinstance(networks, dict):
         errors.append("compose networks map is missing")
@@ -282,6 +378,46 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
     internal = networks.get("internal") if isinstance(networks, dict) else None
     if not isinstance(internal, dict) or internal.get("internal") is not True:
         errors.append("internal network must set internal: true")
+    internal_subnets: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    if isinstance(internal, dict):
+        ipam = internal.get("ipam") or {}
+        configurations = (ipam.get("config") or []) if isinstance(ipam, dict) else []
+        for configuration in configurations:
+            subnet = (
+                configuration.get("subnet") if isinstance(configuration, dict) else None
+            )
+            if not subnet:
+                continue
+            try:
+                internal_subnets.append(ipaddress.ip_network(str(subnet), strict=True))
+            except ValueError:
+                errors.append("internal network must use a valid canonical subnet")
+    if not internal_subnets:
+        errors.append(
+            "internal network must define an IPAM subnet for static edge trust"
+        )
+    if isinstance(edge_service, dict):
+        edge_networks = edge_service.get("networks") or {}
+        edge_internal = (
+            edge_networks.get("internal") if isinstance(edge_networks, dict) else None
+        )
+        edge_internal_ip = (
+            str(edge_internal.get("ipv4_address") or "")
+            if isinstance(edge_internal, dict)
+            else ""
+        )
+        if edge_internal_ip and internal_subnets:
+            try:
+                edge_address = ipaddress.ip_address(edge_internal_ip)
+            except ValueError:
+                errors.append("edge: static internal address must be a valid IP")
+            else:
+                if edge_address.version != 4:
+                    errors.append("edge: static internal address must be IPv4")
+                if not any(edge_address in subnet for subnet in internal_subnets):
+                    errors.append(
+                        "edge: static internal address must belong to internal subnet"
+                    )
     app_egress = networks.get("app-egress")
     if (
         not isinstance(app_egress, dict)
@@ -349,8 +485,12 @@ def main(argv: list[str] | None = None) -> int:
             env_file=args.env_file,
         )
         errors = validate_compose(document, release=args.release)
+        errors.extend(validate_edge_nginx(NGINX_CONFIG.read_text(encoding="utf-8")))
     except ComposePolicyError as exc:
         print(f"production compose policy failed: {exc}", file=sys.stderr)
+        return 2
+    except OSError as exc:
+        print(f"production edge policy failed: {exc}", file=sys.stderr)
         return 2
     if errors:
         for error in errors:

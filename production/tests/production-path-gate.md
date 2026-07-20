@@ -72,6 +72,10 @@ Dagster，不能把业务 `trace_id` 与 OTel trace 混成一个字段。门禁�
   写入/召回，不得把 feature-hash 或其他门禁参考向量声明为生产模型质量认证。
 - 证据必须单独绑定 runtime driver、HTTPS support server、Keycloak gate realm、
   base/overlay/rendered Compose 的 SHA-256；仅依赖 overlay 间接引用不够。
+- 每条 raw proof 必须内嵌 `auris.production-path.capture.v1` 脱敏 capture；校验器
+  重算 `capture_sha256`，并要求 facts 与 capture observations 完全相同。OIDC、
+  Dagster、MinIO、Qdrant、callback、Tempo 和六类恢复场景分别执行字段级语义校验；
+  `recovered: true` 一类孤立布尔值不构成证据。
 - artifact 先写同目录临时文件，再原子替换
   `build/release-evidence/production-path-gate.json`；不得包含 token、cookie、密码、
   key material、响应正文或个人绝对路径。

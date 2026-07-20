@@ -10,6 +10,7 @@ COMPOSE_FILE="${PRODUCTION_ROOT}/compose.yaml"
 DOCKER_CONTEXT_NAME="default"
 BACKUP_TOOLS="${PRODUCTION_ROOT}/backup"
 RELEASE_BUNDLE_TOOL="${REPOSITORY_ROOT}/scripts/release_bundle.py"
+DEADLINE_RUNNER="${REPOSITORY_ROOT}/scripts/run_with_deadline.py"
 PYTHON="${PYTHON:-python3}"
 ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
 BACKUP_ROOT=""
@@ -17,6 +18,11 @@ RUN_DRILL=false
 CLEANUP_ON_SUCCESS=false
 DRILL_PROJECT=""
 ALLOW_RELEASE_MIGRATION_FROM=""
+VALIDATION_SCRIPT=""
+DRILL_PULL_TIMEOUT="${AURIS_RESTORE_DRILL_PULL_TIMEOUT:-900}"
+DRILL_WAIT_TIMEOUT="${AURIS_RESTORE_DRILL_WAIT_TIMEOUT:-240}"
+DRILL_RUN_TIMEOUT="${AURIS_RESTORE_DRILL_RUN_TIMEOUT:-120}"
+DRILL_CLEANUP_TIMEOUT="${AURIS_RESTORE_DRILL_CLEANUP_TIMEOUT:-60}"
 
 usage() {
   cat <<'USAGE'
@@ -43,6 +49,39 @@ fail() {
   fi
   exit 2
 }
+
+cleanup() {
+  local status="$1" cleanup_failed=0
+  trap - EXIT INT TERM
+  set +e
+  if [[ -n "${VALIDATION_SCRIPT}" && -e "${VALIDATION_SCRIPT}" ]]; then
+    if ! rm -f -- "${VALIDATION_SCRIPT}"; then
+      printf 'backup verification cleanup failed for validation script: %s\n' \
+        "${VALIDATION_SCRIPT}" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ "${status}" -eq 0 && "${CLEANUP_ON_SUCCESS}" == true && \
+    -n "${DRILL_PROJECT}" ]]; then
+    if compose_drill_with_deadline "${DRILL_CLEANUP_TIMEOUT}" \
+      "clean restore drill project" \
+      down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
+      printf 'Removed isolated project and volumes: %s\n' "${DRILL_PROJECT}"
+      DRILL_PROJECT=""
+    else
+      printf 'drill passed but exact-project cleanup failed: %s\n' \
+        "${DRILL_PROJECT}" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [ "${status}" -eq 0 ] && [ "${cleanup_failed}" -ne 0 ]; then
+    status=1
+  fi
+  exit "${status}"
+}
+trap 'cleanup "$?"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 has_control_character() {
   [[ "$1" == *$'\n'* || "$1" == *$'\r'* || "$1" == *$'\t'* ]]
@@ -105,12 +144,13 @@ paths_overlap "${BACKUP_ROOT}" "${REPOSITORY_ROOT}" && fail \
 "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify --root "${BACKUP_ROOT}"
 "${PYTHON}" "${BACKUP_TOOLS}/mysql_dump.py" verify \
   --input "${BACKUP_ROOT}/mysql/all-databases.sql.gz"
-validation_script="$(mktemp "${TMPDIR:-/tmp}/auris-minio-validate.XXXXXX")"
+VALIDATION_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/auris-minio-validate.XXXXXX")"
 "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" emit-restore-shell \
   --plan "${BACKUP_ROOT}/minio/versions.json" \
-  --output "${validation_script}"
-bash -n "${validation_script}"
-rm -f "${validation_script}"
+  --output "${VALIDATION_SCRIPT}"
+bash -n "${VALIDATION_SCRIPT}"
+rm -f -- "${VALIDATION_SCRIPT}"
+VALIDATION_SCRIPT=""
 "${PYTHON}" "${BACKUP_TOOLS}/qdrant_snapshots.py" validate \
   --input "${BACKUP_ROOT}/qdrant"
 printf 'Offline backup verification passed.\n'
@@ -121,6 +161,16 @@ fi
 
 command -v docker >/dev/null 2>&1 || fail "Docker is required for --drill"
 command -v cosign >/dev/null 2>&1 || fail "Cosign is required for --drill"
+for timeout_value in \
+  "${DRILL_PULL_TIMEOUT}" \
+  "${DRILL_WAIT_TIMEOUT}" \
+  "${DRILL_RUN_TIMEOUT}" \
+  "${DRILL_CLEANUP_TIMEOUT}"; do
+  [[ "${timeout_value}" =~ ^[1-9][0-9]*$ ]] || fail \
+    "restore drill timeouts must be positive integers"
+done
+[[ -f "${DEADLINE_RUNNER}" && ! -L "${DEADLINE_RUNNER}" ]] || fail \
+  "deadline runner is missing or unsafe"
 [[ -z "${DOCKER_HOST:-}" && -z "${DOCKER_CONTEXT:-}" && \
   -z "${COMPOSE_PROJECT_NAME:-}" ]] || fail \
   "DOCKER_HOST, DOCKER_CONTEXT and COMPOSE_PROJECT_NAME overrides are forbidden"
@@ -142,8 +192,13 @@ DRILL_PROJECT="auris-flow-restore-drill-${drill_suffix}"
 [[ "${DRILL_PROJECT}" =~ ^auris-flow-restore-drill-[0-9a-f]{12}$ ]] || fail \
   "unsafe drill project name"
 
-compose_drill() {
+compose_drill_with_deadline() {
+  local timeout_seconds="$1" label="$2"
+  shift 2
   COMPOSE_PROJECT_NAME="${DRILL_PROJECT}" \
+    "${PYTHON}" "${DEADLINE_RUNNER}" \
+    --timeout-seconds "${timeout_seconds}" \
+    --label "${label}" -- \
     docker --context "${DOCKER_CONTEXT_NAME}" compose \
     --project-name "${DRILL_PROJECT}" \
     --project-directory "${PRODUCTION_ROOT}" \
@@ -151,12 +206,27 @@ compose_drill() {
     -f "${COMPOSE_FILE}" "$@"
 }
 
-compose_drill config --quiet || fail "Compose configuration is invalid"
+compose_drill_with_deadline "${DRILL_RUN_TIMEOUT}" \
+  "validate restore drill Compose" config --quiet || fail \
+  "Compose configuration is invalid"
 printf 'Pulling digest-pinned recovery images for isolated drill %s...\n' "${DRILL_PROJECT}"
-compose_drill pull mysql db-bootstrap redis minio minio-bootstrap qdrant bff || fail \
+compose_drill_with_deadline "${DRILL_PULL_TIMEOUT}" \
+  "pull restore drill images" \
+  pull mysql db-bootstrap redis minio minio-bootstrap qdrant bff || fail \
   "could not pull the signed recovery-side images"
-compose_drill up -d --wait mysql db-bootstrap redis minio minio-bootstrap qdrant || fail \
+compose_drill_with_deadline "${DRILL_WAIT_TIMEOUT}" \
+  "start restore drill authority services" \
+  up --detach --no-deps --wait --wait-timeout "${DRILL_WAIT_TIMEOUT}" \
+  mysql redis minio qdrant || fail \
   "could not start an empty dependency stack"
+compose_drill_with_deadline "${DRILL_RUN_TIMEOUT}" \
+  "run restore drill database bootstrap" \
+  run --rm --no-deps db-bootstrap || fail \
+  "restore drill database bootstrap failed"
+compose_drill_with_deadline "${DRILL_RUN_TIMEOUT}" \
+  "run restore drill object-storage bootstrap" \
+  run --rm --no-deps minio-bootstrap || fail \
+  "restore drill object-storage bootstrap failed"
 "${PYTHON}" "${RELEASE_BUNDLE_TOOL}" verify-running-images \
   --bundle-root "${REPOSITORY_ROOT}" \
   --project-directory "${PRODUCTION_ROOT}" \
@@ -188,10 +258,7 @@ AURIS_RESTORE_REPORT_ROOT="${TMPDIR:-/tmp}/auris-flow-restore-reports-${DRILL_PR
 
 printf 'Isolated restore drill passed for project %s.\n' "${DRILL_PROJECT}"
 if [[ "${CLEANUP_ON_SUCCESS}" == true ]]; then
-  compose_drill down --volumes --remove-orphans || fail \
-    "drill passed but exact-project cleanup failed"
-  printf 'Removed isolated project and volumes: %s\n' "${DRILL_PROJECT}"
-  DRILL_PROJECT=""
+  printf 'Exact-project cleanup requested; removing it through the bounded exit handler.\n'
 else
   printf 'Drill project retained for inspection; remove it explicitly with:\n'
   printf '  docker --context %q compose --project-name %q --project-directory %q --env-file %q -f %q down --volumes --remove-orphans\n' \

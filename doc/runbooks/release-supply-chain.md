@@ -94,10 +94,14 @@ policy validator are covered by the final manifest and signed checksum set.
 The deployment tar has one top-level `auris-flow-<tag>-deployment/` directory, a stable
 `production/compose.yaml` containing the rendered digest-only document, and a
 `production/release-metadata.json` binding its schema/tag/source commit, Compose
-SHA-256, image-lock SHA-256, restore-policy SHA-256, and exact service-image map. The
-metadata is signed separately; its Sigstore bundle is a published checksum-covered
-asset installed as `production/release-metadata.sigstore.json`. It has no `.git` and
-never contains a runner workspace path.
+SHA-256, image-lock SHA-256, restore-policy SHA-256, exact service-image map, and a
+sorted v3 inventory of every regular bundle file with its canonical path, SHA-256,
+type and exact mode. The metadata file itself is the unavoidable self-hash exception;
+the detached Sigstore bundle is a separately checksum-covered asset installed read-only
+as `production/release-metadata.sigstore.json`. Post-extraction verification rejects
+missing, extra, duplicate, traversal, symlink/special-file and mode-changing members,
+including scripts and Runbooks. The deployment archive has no `.git` and never contains
+a runner workspace path.
 
 Images are first pushed under a commit staging tag. The workflow promotes their
 already scanned and signed digests to the SemVer release tag only after every
@@ -134,8 +138,33 @@ docker --context default compose --project-name auris-flow \
   --file production/compose.yaml pull
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
-  --file production/compose.yaml up -d --wait
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  mysql redis minio qdrant tempo node-exporter
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps db-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps minio-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps migrate
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  keycloak otel-collector
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps identity-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
+  dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
+
+The bootstrap and migration services are foreground one-shots. Each must exit zero
+before the next phase; never mix an exited one-shot into detached `up --wait` health
+semantics.
 
 The release validator rejects missing digests, `latest`, unresolved image
 variables, and any release service that still contains `build:`. Rollback means

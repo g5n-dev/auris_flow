@@ -53,3 +53,4 @@ def test_dockerfile_is_pinned_multistage_and_non_root() -> None:
 def test_runtime_dependencies_match_compose_mysql_url_driver() -> None:
     source = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"pymysql==1.1.1"' in source
+    assert '"cryptography==49.0.0"' in source

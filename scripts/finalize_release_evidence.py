@@ -82,6 +82,7 @@ LICENSE_POLICY = {
 }
 SPDX_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*|[()]")
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
+OFFICIAL_VISUAL_REPOSITORY = ("auris-flow", "auris-flow")
 VISUAL_OCI_REF_PATTERN = re.compile(
     r"ghcr\.io/(?P<owner>[a-z0-9._-]+)/(?P<repository>[a-z0-9._-]+)/"
     r"visual-baseline@(?P<digest>sha256:[0-9a-f]{64})"
@@ -914,6 +915,7 @@ def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
                 "baseline_oci_ref",
                 "baseline_sha256",
                 "baseline_source_commit",
+                "job_workflow_sha",
                 "kind",
                 "manifest_sha256",
                 "passed",
@@ -948,6 +950,15 @@ def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
         or COMMIT_PATTERN.fullmatch(baseline_commit) is None
     ):
         raise EvidenceError(f"{filename} baseline_source_commit is invalid")
+    job_workflow_sha = payload.get("job_workflow_sha")
+    if (
+        not isinstance(job_workflow_sha, str)
+        or COMMIT_PATTERN.fullmatch(job_workflow_sha) is None
+        or job_workflow_sha != baseline_commit
+    ):
+        raise EvidenceError(
+            f"{filename} job_workflow_sha must equal baseline_source_commit"
+        )
     reference = payload.get("baseline_oci_ref")
     reference_match = (
         VISUAL_OCI_REF_PATTERN.fullmatch(reference)
@@ -959,6 +970,15 @@ def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
         or reference_match.group("digest") != payload["baseline_oci_digest"]
     ):
         raise EvidenceError(f"{filename} baseline OCI reference is invalid")
+    reference_repository = (
+        reference_match.group("owner").lower(),
+        reference_match.group("repository").lower(),
+    )
+    if reference_repository != OFFICIAL_VISUAL_REPOSITORY:
+        raise EvidenceError(
+            f"{filename} baseline OCI reference is not from the "
+            "official Auris Flow repository"
+        )
     signature_identity = payload.get("signature_identity")
     if not isinstance(signature_identity, str):
         raise EvidenceError(f"{filename} signature identity is invalid")
@@ -970,15 +990,18 @@ def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
         or signature_identity.endswith("/")
     ):
         raise EvidenceError(f"{filename} signature identity is invalid")
-    if (
-        reference_match.group("owner").lower(),
-        reference_match.group("repository").lower(),
-    ) != (
+    identity_repository = (
         identity_match.group("owner").lower(),
         identity_match.group("repository").lower(),
-    ):
+    )
+    if reference_repository != identity_repository:
         raise EvidenceError(
             f"{filename} OCI reference and signature identity repository differ"
+        )
+    if identity_repository != OFFICIAL_VISUAL_REPOSITORY:
+        raise EvidenceError(
+            f"{filename} signature identity is not from the "
+            "official Auris Flow repository"
         )
     if payload.get("signature_issuer") != GITHUB_ACTIONS_OIDC_ISSUER:
         raise EvidenceError(f"{filename} signature issuer is invalid")

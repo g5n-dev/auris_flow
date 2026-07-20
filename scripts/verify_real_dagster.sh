@@ -18,6 +18,7 @@ mkdir -p "${ROOT}/build/tmp"
 TEMP_BASE="$(cd "${ROOT}/build/tmp" && pwd -P)"
 TEMP_ROOT="$(mktemp -d "${TEMP_BASE}/auris-dagster-gate.XXXXXX")"
 INITIAL_ARTIFACT="${TEMP_ROOT}/initial.json"
+COMPOSE_MODEL="${TEMP_ROOT}/compose-model.json"
 RESULT_ARTIFACT="${AURIS_REAL_DAGSTER_RESULT:-${ROOT}/build/release-evidence/real-dagster-gate.json}"
 WAIT_TIMEOUT="${AURIS_REAL_DAGSTER_WAIT_TIMEOUT:-240}"
 RUN_TIMEOUT="${AURIS_REAL_DAGSTER_RUN_TIMEOUT:-90}"
@@ -125,6 +126,15 @@ AURIS_SECRETS_DIR="${AURIS_SECRETS_DIR}" \
   bash "${ROOT}/production/scripts/init-secrets.sh" >/dev/null
 
 compose_with_deadline "${CLEANUP_TIMEOUT}" "validate real Dagster Compose" config --quiet
+compose_with_deadline "${CLEANUP_TIMEOUT}" "render real Dagster Compose" config --format json >"${COMPOSE_MODEL}"
+"${PYTHON_BIN}" "${DEADLINE_RUNNER}" \
+  --timeout-seconds "${CLEANUP_TIMEOUT}" \
+  --label "validate real Dagster host network" -- \
+  "${PYTHON_BIN}" "${ROOT}/scripts/verify_dagster_gate_network.py" \
+  --compose-model "${COMPOSE_MODEL}" \
+  --project-name "${PROJECT_NAME}" \
+  --webserver-port "${AURIS_DAGSTER_GATE_PORT}" \
+  --callback-port "${AURIS_DAGSTER_GATE_CALLBACK_PORT}" >/dev/null
 mkdir -p "$(dirname "${RESULT_ARTIFACT}")"
 rm -f "${RESULT_ARTIFACT}"
 
@@ -140,10 +150,32 @@ START_ORDER=(
   dagster-webserver
   dagster-daemon
 )
+ONE_SHOT_SERVICES=(
+  dagster-gate-secrets-init
+  dagster-gate-db-bootstrap
+)
+
+is_one_shot_service() {
+  local candidate="$1"
+  local one_shot
+  for one_shot in "${ONE_SHOT_SERVICES[@]}"; do
+    if [ "${candidate}" = "${one_shot}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 for service in "${START_ORDER[@]}"; do
-  compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}" \
-    up --detach --no-build --wait \
-    --wait-timeout "${WAIT_TIMEOUT}" "${service}"
+  if is_one_shot_service "${service}"; then
+    compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "run ${service}" \
+      up --no-build --no-deps --abort-on-container-exit \
+      --exit-code-from "${service}" "${service}"
+  else
+    compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}" \
+      up --detach --no-build --no-deps --wait \
+      --wait-timeout "${WAIT_TIMEOUT}" "${service}"
+  fi
 done
 
 GRAPHQL_URL="http://127.0.0.1:${AURIS_DAGSTER_GATE_PORT}/graphql"
@@ -168,7 +200,7 @@ for service in dagster-code dagster-webserver dagster-daemon; do
   compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "restart ${service}" \
     restart "${service}" >/dev/null
   compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "wait for ${service}" \
-    up --detach --no-build --wait \
+    up --detach --no-build --no-deps --wait \
     --wait-timeout "${WAIT_TIMEOUT}" "${service}" >/dev/null
 done
 

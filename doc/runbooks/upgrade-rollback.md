@@ -96,13 +96,33 @@ docker compose \
   --project-directory production \
   --env-file production/.env \
   -f production/compose.yaml \
-  up -d --wait mysql db-bootstrap redis minio minio-bootstrap qdrant
+  up -d --no-deps --wait --wait-timeout 240 mysql redis minio qdrant
 
 docker compose \
   --project-directory production \
   --env-file production/.env \
-  -f production/compose.yaml run --rm migrate
+  -f production/compose.yaml run --rm --no-deps db-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps minio-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps migrate
 ```
+
+两个 bootstrap 与 migration 都是前台 one-shot，必须逐个返回 0；不得把它们混入 detached
+`up --wait`，否则“正常完成并退出”会被错误地当成长期服务未就绪。
+
+该命令必须使用 Compose 注入的 `auris_migration` URL；禁止改成 root/SUPER 后把结果视为生产
+验收。MySQL binary log 保持启用，生产 Compose 固定 trigger creator 策略，bootstrap 只授予
+迁移账号 schema 级 DDL/DML、`REFERENCES` 与 `TRIGGER`。执行后核对 migration 用户没有
+`ALL PRIVILEGES`/`SUPER` 或遗留 role membership，runtime 没有 `TRIGGER` 或遗留 role
+membership，Keycloak/Dagster 没有 `auris_flow` 权限；出现 errno 1419 时应修复
+部署配置并重建隔离环境，不得在共享实例临时放权后继续。
 
 确认 migration head、表/索引约束和回填账本与 release notes 一致。大数据回填必须由可恢复、有界批次
 的 migrate 阶段执行；不在同步 DDL 中做无界全表业务转换。任何 contract 都应位于旧版本已退出

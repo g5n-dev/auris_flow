@@ -82,6 +82,7 @@ TEMP_BASE="$(cd "${ROOT}/build/tmp" && pwd -P)"
 TEMP_ROOT="$(mktemp -d "${TEMP_BASE}/auris-product-dagster-gate.XXXXXX")"
 TEMP_ARTIFACT_DIR="${TEMP_ROOT}/artifacts"
 TEMP_ARTIFACT="${TEMP_ARTIFACT_DIR}/product-dagster-gate.json"
+COMPOSE_MODEL="${TEMP_ROOT}/compose-model.json"
 mkdir -p "${TEMP_ARTIFACT_DIR}" "${TEMP_ROOT}/runtime-metrics" "${TEMP_ROOT}/secrets"
 chmod 0777 "${TEMP_ARTIFACT_DIR}"
 
@@ -125,7 +126,7 @@ compose_with_deadline() {
 }
 
 cleanup() {
-  local status="$?"
+  local status="$?" cleanup_failed=0
   trap - EXIT INT TERM
   if [ "${status}" -ne 0 ]; then
     compose_with_deadline "${CLEANUP_TIMEOUT}" "collect product Dagster logs" \
@@ -136,16 +137,22 @@ cleanup() {
     if ! compose_with_deadline "${CLEANUP_TIMEOUT}" "clean product Dagster project" \
       down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
       echo "Could not clean the isolated product Dagster gate project." >&2
-      status=1
+      cleanup_failed=1
     fi
   else
     echo "Refusing to clean an unexpected Compose project." >&2
-    status=1
+    cleanup_failed=1
   fi
   if [[ "${TEMP_ROOT}" == "${TEMP_BASE}"/auris-product-dagster-gate.* ]] && [ -d "${TEMP_ROOT}" ]; then
-    rm -rf -- "${TEMP_ROOT}"
+    if ! rm -rf -- "${TEMP_ROOT}"; then
+      echo "Could not remove the isolated product Dagster gate directory." >&2
+      cleanup_failed=1
+    fi
   else
     echo "Refusing to remove an unexpected product gate directory." >&2
+    cleanup_failed=1
+  fi
+  if [ "${status}" -eq 0 ] && [ "${cleanup_failed}" -ne 0 ]; then
     status=1
   fi
   exit "${status}"
@@ -155,6 +162,15 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 compose_with_deadline "${CLEANUP_TIMEOUT}" "validate product Dagster Compose" config --quiet
+compose_with_deadline "${CLEANUP_TIMEOUT}" "render product Dagster Compose" config --format json >"${COMPOSE_MODEL}"
+"${PYTHON_BIN}" "${DEADLINE_RUNNER}" \
+  --timeout-seconds "${CLEANUP_TIMEOUT}" \
+  --label "validate product Dagster host network" -- \
+  "${PYTHON_BIN}" "${ROOT}/scripts/verify_dagster_gate_network.py" \
+  --compose-model "${COMPOSE_MODEL}" \
+  --project-name "${PROJECT_NAME}" \
+  --webserver-port "${AURIS_DAGSTER_GATE_PORT}" \
+  --callback-port "${AURIS_DAGSTER_GATE_CALLBACK_PORT}" >/dev/null
 mkdir -p "$(dirname "${RESULT_ARTIFACT}")"
 rm -f -- "${RESULT_ARTIFACT}"
 
@@ -176,10 +192,35 @@ START_ORDER=(
   bff
   worker
 )
+ONE_SHOT_SERVICES=(
+  dagster-gate-secrets-init
+  dagster-gate-db-bootstrap
+  dagster-product-gate-db-bootstrap
+  migrate
+  dagster-product-gate-seed
+)
+
+is_one_shot_service() {
+  local candidate="$1"
+  local one_shot
+  for one_shot in "${ONE_SHOT_SERVICES[@]}"; do
+    if [ "${candidate}" = "${one_shot}" ]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
 for service in "${START_ORDER[@]}"; do
-  compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}" \
-    up --detach --no-build --wait \
-    --wait-timeout "${WAIT_TIMEOUT}" "${service}"
+  if is_one_shot_service "${service}"; then
+    compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "run ${service}" \
+      up --no-build --no-deps --abort-on-container-exit \
+      --exit-code-from "${service}" "${service}"
+  else
+    compose_with_deadline "${COMPOSE_WAIT_DEADLINE}" "start ${service}" \
+      up --detach --no-build --no-deps --wait \
+      --wait-timeout "${WAIT_TIMEOUT}" "${service}"
+  fi
 done
 
 echo "Exercising BFF submit/query/sync/cancel through the real Dagster deployment..."

@@ -20,6 +20,8 @@ SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse --verify HEAD^{commit})"
 DATABASE_NAME="auris_flow_e2e_$(date +%s)_$$"
 DATABASE_USER="auris_e2e_$$"
 DATABASE_PASSWORD="auris_e2e"
+MIGRATION_DATABASE_USER="auris_migrate_$$"
+MIGRATION_DATABASE_PASSWORD="auris_migrate"
 DATABASE_CREATED=0
 RUN_STARTED_AT="$(date +%s)"
 COMPOSE=(docker compose -f "${COMPOSE_FILE}")
@@ -27,6 +29,17 @@ SERVICES=(mysql redis minio qdrant)
 MINIO_BOOTSTRAP_TIMEOUT_SECONDS="${AURIS_MINIO_BOOTSTRAP_TIMEOUT_SECONDS:-60}"
 COMPOSE_WAIT_TIMEOUT_SECONDS="${AURIS_REAL_STACK_WAIT_TIMEOUT:-180}"
 COMPOSE_DEADLINE_GRACE="${AURIS_REAL_STACK_DEADLINE_GRACE:-15}"
+unset DATABASE_URL_FILE
+
+run_with_deadline() {
+  local timeout_seconds="$1"
+  local label="$2"
+  shift 2
+  "${PYTHON_BIN}" "${ROOT}/scripts/run_with_deadline.py" \
+    --timeout-seconds "${timeout_seconds}" \
+    --label "${label}" -- \
+    "$@"
+}
 
 compose_with_deadline() {
   local timeout_seconds="$1"
@@ -44,7 +57,7 @@ run_minio_bootstrap() {
   if "${PYTHON_BIN}" "${ROOT}/scripts/run_with_deadline.py" \
     --timeout-seconds "${MINIO_BOOTSTRAP_TIMEOUT_SECONDS}" \
     --label "MinIO bootstrap" -- \
-    "${COMPOSE[@]}" run --name "${container_name}" --rm --no-deps minio-bootstrap; then
+    "${COMPOSE[@]}" run --no-TTY --name "${container_name}" --rm --no-deps minio-bootstrap; then
     return 0
   else
     status=$?
@@ -56,16 +69,18 @@ run_minio_bootstrap() {
 }
 
 mysql_exec() {
-  "${COMPOSE[@]}" exec -T -e MYSQL_PWD=auris_root mysql \
-    mysql --protocol=socket --user=root --batch --skip-column-names "$@"
+  compose_with_deadline 30 "real-stack MySQL command" \
+    exec -T -e MYSQL_PWD=auris_root mysql \
+    mysql --protocol=socket --user=root --connect-timeout=5 \
+    --batch --skip-column-names "$@"
 }
 
 cleanup() {
   local status="$1"
   trap - EXIT INT TERM
   if [ "${DATABASE_CREATED}" = "1" ]; then
-    if ! mysql_exec --execute "DROP DATABASE IF EXISTS \`${DATABASE_NAME}\`; DROP USER IF EXISTS '${DATABASE_USER}'@'%';" >/dev/null 2>&1; then
-      echo "Could not drop temporary MySQL database/user ${DATABASE_NAME}/${DATABASE_USER}." >&2
+    if ! mysql_exec --execute "DROP DATABASE IF EXISTS \`${DATABASE_NAME}\`; DROP USER IF EXISTS '${DATABASE_USER}'@'%'; DROP USER IF EXISTS '${MIGRATION_DATABASE_USER}'@'%';" >/dev/null 2>&1; then
+      echo "Could not drop temporary MySQL database/users ${DATABASE_NAME}/${DATABASE_USER}/${MIGRATION_DATABASE_USER}." >&2
       if [ "${status}" -eq 0 ]; then
         status=1
       fi
@@ -165,50 +180,29 @@ print(
 PY
 }
 
-verify_runtime_mysql_privilege_boundary() {
+verify_migration_mysql_privilege_boundary() {
   local database_url="$1"
-  DATABASE_URL="${database_url}" "${PYTHON_BIN}" - <<'PY'
-import os
+  shift
+  run_with_deadline 60 "real-stack migration MySQL security check" \
+    env -u DATABASE_URL_FILE DATABASE_URL="${database_url}" \
+    "${PYTHON_BIN}" "${ROOT}/backend/scripts/verify_mysql_migration_security.py" \
+    --expected-database "${DATABASE_NAME}" \
+    --expected-user "${MIGRATION_DATABASE_USER}" \
+    --expected-version-prefix 8.4. \
+    --privilege-profile migration \
+    "$@"
+}
 
-from sqlalchemy import create_engine, text
-from sqlalchemy.exc import DBAPIError
-
-
-engine = create_engine(os.environ["DATABASE_URL"], pool_pre_ping=True)
-try:
-    with engine.connect() as connection:
-        gold_count = connection.execute(text("SELECT COUNT(*) FROM gold_set_versions")).scalar_one()
-        if gold_count < 1:
-            raise SystemExit("runtime privilege gate requires a published gold version")
-
-        try:
-            connection.execute(
-                text(
-                    "UPDATE gold_set_versions SET trace_id = trace_id "
-                    "WHERE gold_set_version_id = (SELECT gold_set_version_id FROM "
-                    "(SELECT gold_set_version_id FROM gold_set_versions LIMIT 1) AS selected_gold)"
-                )
-            )
-        except DBAPIError as exc:
-            connection.rollback()
-            if "append-only calibration record" not in str(exc):
-                raise SystemExit(f"unexpected append-only rejection: {exc}") from exc
-        else:
-            raise SystemExit("runtime account unexpectedly updated an append-only gold version")
-
-        try:
-            connection.execute(text("DROP TRIGGER trg_gold_set_versions_no_update"))
-        except DBAPIError as exc:
-            connection.rollback()
-            if "denied" not in str(exc).lower():
-                raise SystemExit(f"unexpected DROP TRIGGER rejection: {exc}") from exc
-        else:
-            raise SystemExit("runtime account unexpectedly dropped an append-only trigger")
-finally:
-    engine.dispose()
-
-print("MySQL runtime privilege gate ok: DML-only account cannot mutate gold or drop triggers")
-PY
+verify_runtime_mysql_exact_grants() {
+  local database_url="$1"
+  run_with_deadline 60 "real-stack runtime MySQL security check" \
+    env -u DATABASE_URL_FILE DATABASE_URL="${database_url}" \
+    "${PYTHON_BIN}" "${ROOT}/backend/scripts/verify_mysql_migration_security.py" \
+    --expected-database "${DATABASE_NAME}" \
+    --expected-user "${DATABASE_USER}" \
+    --expected-version-prefix 8.4. \
+    --privilege-profile runtime \
+    --require-runtime-trigger-probe
 }
 
 if [ "${AURIS_SKIP_REAL_STACK_E2E:-0}" = "1" ]; then
@@ -243,12 +237,15 @@ run_minio_bootstrap
 verify_qdrant_api_key_gate
 
 DATABASE_CREATED=1
-mysql_exec --execute "DROP DATABASE IF EXISTS \`${DATABASE_NAME}\`; DROP USER IF EXISTS '${DATABASE_USER}'@'%'; CREATE DATABASE \`${DATABASE_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER '${DATABASE_USER}'@'%' IDENTIFIED BY '${DATABASE_PASSWORD}'; GRANT SELECT, INSERT, UPDATE, DELETE ON \`${DATABASE_NAME}\`.* TO '${DATABASE_USER}'@'%'; FLUSH PRIVILEGES;" >/dev/null
+mysql_exec --execute "DROP DATABASE IF EXISTS \`${DATABASE_NAME}\`; DROP USER IF EXISTS '${DATABASE_USER}'@'%'; DROP USER IF EXISTS '${MIGRATION_DATABASE_USER}'@'%'; CREATE DATABASE \`${DATABASE_NAME}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; CREATE USER '${DATABASE_USER}'@'%' IDENTIFIED BY '${DATABASE_PASSWORD}'; CREATE USER '${MIGRATION_DATABASE_USER}'@'%' IDENTIFIED BY '${MIGRATION_DATABASE_PASSWORD}'; GRANT SELECT, INSERT, UPDATE, DELETE ON \`${DATABASE_NAME}\`.* TO '${DATABASE_USER}'@'%'; GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES, TRIGGER ON \`${DATABASE_NAME}\`.* TO '${MIGRATION_DATABASE_USER}'@'%'; FLUSH PRIVILEGES;" >/dev/null
 DATABASE_URL="mysql+pymysql://${DATABASE_USER}:${DATABASE_PASSWORD}@127.0.0.1:3306/${DATABASE_NAME}"
-MIGRATION_DATABASE_URL="mysql+pymysql://root:auris_root@127.0.0.1:3306/${DATABASE_NAME}"
+MIGRATION_DATABASE_URL="mysql+pymysql://${MIGRATION_DATABASE_USER}:${MIGRATION_DATABASE_PASSWORD}@127.0.0.1:3306/${DATABASE_NAME}"
+
+verify_migration_mysql_privilege_boundary "${MIGRATION_DATABASE_URL}"
 
 echo "Verifying MySQL migration upgrade, legacy backfill and downgrade..."
-env DATABASE_URL="${MIGRATION_DATABASE_URL}" \
+run_with_deadline 900 "real-stack MySQL full migration cycle" \
+  env -u DATABASE_URL_FILE DATABASE_URL="${MIGRATION_DATABASE_URL}" \
   "${PYTHON_BIN}" "${ROOT}/backend/scripts/verify_migrations.py" \
   --database-url "${MIGRATION_DATABASE_URL}"
 
@@ -288,8 +285,12 @@ env \
   EXTERNAL_CALLBACK_URL= \
   bash "${ROOT}/scripts/verify_ui_bff_e2e.sh"
 
+echo "Verifying MySQL migration head, exact grants and controlled trigger definers..."
+verify_migration_mysql_privilege_boundary \
+  "${MIGRATION_DATABASE_URL}" --require-head-triggers
+
 echo "Verifying MySQL runtime least-privilege and append-only enforcement..."
-verify_runtime_mysql_privilege_boundary "${DATABASE_URL}"
+verify_runtime_mysql_exact_grants "${DATABASE_URL}"
 
 echo "Rechecking dependency health after E2E..."
 assert_compose_health

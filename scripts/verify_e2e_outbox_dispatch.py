@@ -27,7 +27,6 @@ from app.core.database import SessionLocal  # noqa: E402
 from app.models import (  # noqa: E402
     AgentDecision,
     AgentRun,
-    AuditLog,
     AssetLineageEdge,
     AssetMaterialization,
     AssetPartition,
@@ -326,6 +325,7 @@ def collect_expected_runs(result: dict[str, Any]) -> list[ExpectedRun]:
             result.get("domainPageActions", {}).get("settingsProviderTest"),
             "dagster",
         ),
+        ("dataExportAction", result.get("dataExportAction"), "object_storage"),
         ("globalExportAction", result.get("globalExportAction"), "object_storage"),
         ("assetPackageExport", result.get("assetPackageExport"), "object_storage"),
         (
@@ -3366,159 +3366,21 @@ def verify_agentic_execution_trace(
     return checked
 
 
-def verify_voiceprint_enrollment_resource(
-    result: dict[str, Any], started_at: datetime
-) -> dict[str, Any]:
-    receipt = result.get("voiceprintEnrollment")
-    if not isinstance(receipt, dict):
-        fail("UI/BFF artifact is missing voiceprintEnrollment")
-    enrollment_id = receipt.get("id")
-    voiceprint_id = receipt.get("voiceprintId")
-    trace_id = receipt.get("traceId")
-    status = receipt.get("status")
-    if not all(
-        isinstance(value, str) and value
-        for value in (enrollment_id, voiceprint_id, trace_id, status)
-    ):
-        fail(
-            "voiceprintEnrollment artifact is missing id, voiceprintId, traceId, or status",
-            receipt,
-        )
-    if status != "pending_review":
-        fail(
-            "voiceprintEnrollment must stay pending_review in browser E2E",
-            {"expected": "pending_review", "actual": status, "receipt": receipt},
-        )
-
-    with SessionLocal() as session:
-        resource = session.scalar(
-            select(JsonResource).where(
-                JsonResource.collection == "voiceprint_enrollments",
-                JsonResource.resource_key == enrollment_id,
-                JsonResource.tenant_id == DEFAULT_E2E_HEADERS["X-Tenant-Id"],
-                JsonResource.project_id == DEFAULT_E2E_HEADERS["X-Project-Id"],
-            )
-        )
-        if not resource:
-            fail("Persisted voiceprint enrollment resource was not found", receipt)
-        if resource.trace_id != trace_id:
-            fail(
-                "Voiceprint enrollment resource trace does not match browser artifact",
-                {
-                    "expected": trace_id,
-                    "actual": resource.trace_id,
-                    "resource": resource.data,
-                },
-            )
-        if ensure_aware(resource.updated_at) < started_at - timedelta(
-            seconds=FRESHNESS_TOLERANCE_SECONDS
-        ):
-            fail(
-                "Voiceprint enrollment resource is older than browser artifact",
-                {
-                    "enrollment_id": enrollment_id,
-                    "updated_at": ensure_aware(resource.updated_at).isoformat(),
-                    "artifact_started_at": started_at.isoformat(),
-                },
-            )
-        data = resource.data
-        if (
-            data.get("voiceprint_id") != voiceprint_id
-            or data.get("status") != "pending_review"
-        ):
-            fail(
-                "Voiceprint enrollment resource does not preserve voiceprint id or pending status",
-                {"receipt": receipt, "resource": data},
-            )
-        gate = data.get("quality_gate")
-        if not isinstance(gate, dict) or gate.get("passed") is not True:
-            fail("Voiceprint enrollment resource is missing passed quality gate", data)
-        affected = data.get("affected_objects")
-        if not isinstance(affected, list) or not any(
-            isinstance(item, dict)
-            and item.get("type") == "voiceprint"
-            and item.get("id") == voiceprint_id
-            for item in affected
-        ):
-            fail(
-                "Voiceprint enrollment resource is missing affected voiceprint object",
-                data,
-            )
-        audit = session.scalar(
-            select(AuditLog)
-            .where(
-                AuditLog.object_type == "voiceprint_enrollments",
-                AuditLog.object_id == enrollment_id,
-                AuditLog.trace_id == trace_id,
-                AuditLog.tenant_id == DEFAULT_E2E_HEADERS["X-Tenant-Id"],
-                AuditLog.project_id == DEFAULT_E2E_HEADERS["X-Project-Id"],
-            )
-            .order_by(AuditLog.audit_id.desc())
-            .limit(1)
-        )
-        if not audit:
-            fail("Voiceprint enrollment audit log was not found", receipt)
-        event = session.scalar(
-            select(OutboxEvent)
-            .where(
-                OutboxEvent.aggregate_type == "voiceprint_enrollments",
-                OutboxEvent.aggregate_id == enrollment_id,
-                OutboxEvent.event_type == "voiceprint_enrollments.upserted",
-                OutboxEvent.tenant_id == DEFAULT_E2E_HEADERS["X-Tenant-Id"],
-                OutboxEvent.project_id == DEFAULT_E2E_HEADERS["X-Project-Id"],
-            )
-            .order_by(OutboxEvent.event_id.desc())
-            .limit(1)
-        )
-        if not event:
-            fail("Voiceprint enrollment outbox event was not found", receipt)
-        if (
-            event.payload.get("trace_id") != trace_id
-            or event.payload.get("voiceprint_id") != voiceprint_id
-        ):
-            fail(
-                "Voiceprint enrollment outbox payload does not match browser artifact",
-                {"receipt": receipt, "payload": event.payload},
-            )
-
-    detail = bff_json_request(
-        "GET",
-        f"/api/v1/voiceprint-enrollments/{enrollment_id}",
-        trace_id=trace_id,
-    )
-    if detail.get("data", {}).get("voiceprint_id") != voiceprint_id:
-        fail(
-            "Voiceprint enrollment BFF detail does not match artifact",
-            {"detail": detail, "receipt": receipt},
-        )
-    trace = bff_json_request("GET", f"/api/v1/traces/{trace_id}", trace_id=trace_id)
-    spans = trace.get("data", {}).get("spans")
-    if not isinstance(spans, list):
-        fail("Voiceprint enrollment trace response is missing spans", trace)
-    required_span_kinds = {"resource", "audit", "outbox"}
-    present = {
-        span.get("kind")
-        for span in spans
-        if isinstance(span, dict)
-        and (
-            span.get("id") == enrollment_id
-            or span.get("object_id") == enrollment_id
-            or span.get("aggregate_id") == enrollment_id
-            or span.get("event_type") == "voiceprint_enrollments.upserted"
-        )
+def verify_voiceprint_enrollment_gate(result: dict[str, Any]) -> dict[str, Any]:
+    gate = result.get("voiceprintEnrollmentGate")
+    if not isinstance(gate, dict):
+        fail("UI/BFF artifact is missing voiceprintEnrollmentGate")
+    expected = {
+        "status": "blocked",
+        "reasonCode": "VOICEPRINT_CANDIDATE_READ_MODEL_UNAVAILABLE",
+        "postCount": 0,
     }
-    missing = required_span_kinds - present
-    if missing:
+    if any(gate.get(key) != value for key, value in expected.items()):
         fail(
-            "Voiceprint enrollment trace does not contain resource/audit/outbox spans",
-            {"missing": sorted(missing), "trace": trace, "receipt": receipt},
+            "Voiceprint enrollment must fail closed until the candidate read model is authoritative",
+            {"expected": expected, "actual": gate},
         )
-    return {
-        "id": enrollment_id,
-        "voiceprint_id": voiceprint_id,
-        "trace_id": trace_id,
-        "status": status,
-    }
+    return gate
 
 
 def verify_approved_voiceprint_qdrant_index(started_at: datetime) -> dict[str, Any]:
@@ -3768,9 +3630,7 @@ def main() -> None:
     )
     checked_audio_range_stream = verify_audio_recording_range_stream()
     checked_agentic_execution = verify_agentic_execution_trace(run_event_pairs)
-    checked_voiceprint_enrollment = verify_voiceprint_enrollment_resource(
-        result, started_at
-    )
+    checked_voiceprint_enrollment = verify_voiceprint_enrollment_gate(result)
     checked_voiceprint_qdrant = verify_approved_voiceprint_qdrant_index(started_at)
 
     dispatchable = [item for item in checked if item.get("adapter")]

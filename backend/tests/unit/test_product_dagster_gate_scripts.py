@@ -350,6 +350,40 @@ def test_product_gate_shell_is_clean_tree_commit_bound_and_fail_closed() -> None
     assert 'compose_with_deadline "${BUILD_TIMEOUT}"' in source
     assert 'compose_with_deadline "${RUN_COMMAND_DEADLINE}"' in source
     assert '"${COMPOSE[@]}" up --detach --no-build --wait' not in source
+    assert 'COMPOSE_MODEL="${TEMP_ROOT}/compose-model.json"' in source
+    assert 'config --format json >"${COMPOSE_MODEL}"' in source
+    assert '"${ROOT}/scripts/verify_dagster_gate_network.py"' in source
+    assert '--project-name "${PROJECT_NAME}"' in source
+    assert '--webserver-port "${AURIS_DAGSTER_GATE_PORT}"' in source
+    assert '--callback-port "${AURIS_DAGSTER_GATE_CALLBACK_PORT}"' in source
+
+
+def test_product_gate_shell_runs_bootstrap_services_to_completion() -> None:
+    source = (ROOT / "scripts" / "verify_product_dagster_path.sh").read_text(encoding="utf-8")
+
+    assert "ONE_SHOT_SERVICES=(" in source
+    for service in (
+        "dagster-gate-secrets-init",
+        "dagster-gate-db-bootstrap",
+        "dagster-product-gate-db-bootstrap",
+        "migrate",
+        "dagster-product-gate-seed",
+    ):
+        assert service in source
+    assert 'if is_one_shot_service "${service}"; then' in source
+    assert "up --no-build --no-deps --abort-on-container-exit" in source
+    assert '--exit-code-from "${service}" "${service}"' in source
+    assert "up --detach --no-build --no-deps --wait" in source
+    assert "up --detach --no-build --wait" not in source
+
+
+def test_product_gate_cleanup_preserves_the_original_failure_status() -> None:
+    source = (ROOT / "scripts" / "verify_product_dagster_path.sh").read_text(encoding="utf-8")
+
+    assert 'local status="$?" cleanup_failed=0' in source
+    assert source.count("cleanup_failed=1") >= 2
+    assert 'if [ "${status}" -eq 0 ] && [ "${cleanup_failed}" -ne 0 ]' in source
+    assert 'exit "${status}"' in source
 
 
 def test_product_gate_shell_rejects_skip_and_dirty_source_before_docker(
