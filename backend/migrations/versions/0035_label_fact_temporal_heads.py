@@ -565,13 +565,6 @@ def downgrade() -> None:
     op.drop_table("label_fact_set_heads")
     op.drop_table("label_fact_heads")
 
-    for index_name in (
-        "ix_label_facts_scope_fact_set",
-        "ix_label_facts_temporal_source",
-        "ix_label_facts_temporal_occurred",
-        "ix_label_facts_temporal_as_of",
-    ):
-        op.drop_index(index_name, table_name="label_facts")
     with op.batch_alter_table("label_facts") as batch_op:
         batch_op.drop_constraint("ck_label_facts_temporal_completeness", type_="check")
         batch_op.drop_constraint("ck_label_facts_expand_source", type_="check")
@@ -589,6 +582,16 @@ def downgrade() -> None:
             type_="unique",
         )
         batch_op.drop_constraint("uq_label_facts_temporal_revision", type_="unique")
+    # MySQL may use these explicit indexes to enforce the foreign keys above.
+    # Remove the constraints first, then their supporting indexes.
+    for index_name in (
+        "ix_label_facts_scope_fact_set",
+        "ix_label_facts_temporal_source",
+        "ix_label_facts_temporal_occurred",
+        "ix_label_facts_temporal_as_of",
+    ):
+        op.drop_index(index_name, table_name="label_facts")
+    with op.batch_alter_table("label_facts") as batch_op:
         for column_name in (
             "action_trace_id",
             "root_trace_id",

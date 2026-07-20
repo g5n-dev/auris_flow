@@ -17,8 +17,15 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.sql.elements import TextClause
 
-ROOT = Path(__file__).resolve().parents[2]
-BACKEND = ROOT / "backend"
+
+def resolve_layout(script_path: Path) -> tuple[Path, Path]:
+    """Resolve both source checkout (repo/backend) and image (/app) layouts."""
+
+    backend = script_path.resolve().parents[1]
+    return backend.parent, backend
+
+
+ROOT, BACKEND = resolve_layout(Path(__file__))
 
 
 CORE_TABLES = {
@@ -2977,6 +2984,8 @@ def _expect_integrity_error(
     statement: TextClause,
     parameters: dict[str, object],
     label: str,
+    *,
+    expected_mysql_signal: str | None = None,
 ) -> None:
     try:
         with engine.begin() as connection:
@@ -2992,12 +3001,195 @@ def _expect_integrity_error(
                 return
             if (
                 error_args[0] == 1644
-                and label.startswith("append-only ")
-                and "append-only calibration record" in str(error_args[1])
+                and expected_mysql_signal is not None
+                and str(error_args[1]) == expected_mysql_signal
             ):
                 return
         raise
     raise AssertionError(f"causal integrity check unexpectedly accepted {label}")
+
+
+def assert_label_fact_append_only_enforcement(database_url: str) -> None:
+    engine = _causal_test_engine(database_url)
+    if engine.dialect.name not in {"mysql", "mariadb"}:
+        engine.dispose()
+        return
+
+    insert_fact = text(
+        "INSERT INTO label_facts ("
+        "fact_id, tenant_id, project_id, aggregate_id, supersedes_fact_id, "
+        "fact_namespace, logical_key_sha, revision, event_or_segment_id, assertion_slot, "
+        "occurred_at, recorded_at, occurred_at_origin, source_kind, "
+        "human_review_decision_id, recompute_run_item_id, fact_set_id, content_sha256, "
+        "root_trace_id, action_trace_id, label_version_id, subject_scope, subject_key, "
+        "label_id, value_type, value_json, authority, status, active_slot, "
+        "review_decision_id, trace_id, payload"
+        ") VALUES ("
+        ":fact_id, 'migration_tenant', 'migration_project', :aggregate_id, "
+        ":supersedes_fact_id, 'production', :logical_key_sha, :revision, "
+        "'segment-mysql-label-fact', 'assertion-main', "
+        "'2026-07-18 00:00:00.000000', '2026-07-18 00:00:01.000000', "
+        "'source', 'aggregate', NULL, NULL, NULL, :content_sha256, "
+        "'trace_label_fact_mysql_root', 'trace_label_fact_mysql_action', "
+        "'lv_mysql_append_only_probe', 'audio-segment', 'segment-mysql-label-fact', "
+        "'label-mysql-append-only', 'boolean', :value_json, 'model-consensus', "
+        ":status, :active_slot, NULL, :trace_id, :payload"
+        ")"
+    )
+    logical_key_sha = "1" * 64
+    base_parameters: dict[str, object] = {
+        "aggregate_id": "aggregate_mysql_append_only_1",
+        "supersedes_fact_id": None,
+        "logical_key_sha": logical_key_sha,
+        "revision": 1,
+        "content_sha256": "2" * 64,
+        "value_json": json.dumps(True),
+        "status": "recorded",
+        "active_slot": None,
+        "trace_id": "trace_label_fact_mysql_1",
+        "payload": json.dumps({"migration_probe": True, "revision": 1}),
+    }
+
+    def expect_mysql_signal(
+        connection: Any,
+        statement: TextClause,
+        parameters: dict[str, object],
+        expected_message: str,
+    ) -> None:
+        try:
+            connection.execute(statement, parameters)
+        except DBAPIError as exc:
+            error_args = getattr(exc.orig, "args", ())
+            if error_args and error_args[0] == 1644 and str(error_args[1]) == expected_message:
+                return
+            raise
+        raise AssertionError(f"MySQL label Fact guard unexpectedly accepted: {expected_message}")
+
+    try:
+        with engine.connect() as connection:
+            transaction = connection.begin()
+            try:
+                invalid_parameters = {
+                    **base_parameters,
+                    "fact_id": "fact_mysql_append_only_invalid",
+                    "status": "active",
+                    "active_slot": "active",
+                }
+                expect_mysql_signal(
+                    connection,
+                    insert_fact,
+                    invalid_parameters,
+                    "label_facts contract requires recorded rows",
+                )
+
+                first_parameters = {
+                    **base_parameters,
+                    "fact_id": "fact_mysql_append_only_1",
+                }
+                second_parameters = {
+                    **base_parameters,
+                    "fact_id": "fact_mysql_append_only_2",
+                    "aggregate_id": "aggregate_mysql_append_only_2",
+                    "supersedes_fact_id": "fact_mysql_append_only_1",
+                    "revision": 2,
+                    "content_sha256": "3" * 64,
+                    "trace_id": "trace_label_fact_mysql_2",
+                    "payload": json.dumps({"migration_probe": True, "revision": 2}),
+                }
+                connection.execute(insert_fact, first_parameters)
+                connection.execute(
+                    text(
+                        "INSERT INTO label_fact_heads ("
+                        "fact_head_id, tenant_id, project_id, fact_namespace, logical_key_sha, "
+                        "current_fact_id, current_revision, generation, root_trace_id, "
+                        "action_trace_id, trace_id, payload"
+                        ") VALUES ("
+                        "'fact_head_mysql_append_only', 'migration_tenant', "
+                        "'migration_project', 'production', :logical_key_sha, "
+                        "'fact_mysql_append_only_1', 1, 1, 'trace_label_fact_mysql_root', "
+                        "'trace_label_fact_mysql_action', 'trace_label_fact_mysql_head', :payload"
+                        ")"
+                    ),
+                    {
+                        "logical_key_sha": logical_key_sha,
+                        "payload": json.dumps({"migration_probe": True}),
+                    },
+                )
+                connection.execute(insert_fact, second_parameters)
+                connection.execute(
+                    text(
+                        "UPDATE label_fact_heads SET current_fact_id = "
+                        "'fact_mysql_append_only_2', current_revision = 2, generation = 2 "
+                        "WHERE fact_head_id = 'fact_head_mysql_append_only'"
+                    )
+                )
+
+                expect_mysql_signal(
+                    connection,
+                    text(
+                        "UPDATE label_facts SET value_json = :value_json "
+                        "WHERE fact_id = 'fact_mysql_append_only_1'"
+                    ),
+                    {"value_json": json.dumps(False)},
+                    "append-only label_facts",
+                )
+                expect_mysql_signal(
+                    connection,
+                    text("DELETE FROM label_facts WHERE fact_id = 'fact_mysql_append_only_1'"),
+                    {},
+                    "append-only label_facts",
+                )
+
+                facts = (
+                    connection.execute(
+                        text(
+                            "SELECT fact_id, revision, status, active_slot, content_sha256 "
+                            "FROM label_facts WHERE fact_id IN "
+                            "('fact_mysql_append_only_1', 'fact_mysql_append_only_2') "
+                            "ORDER BY revision"
+                        )
+                    )
+                    .mappings()
+                    .all()
+                )
+                if [dict(row) for row in facts] != [
+                    {
+                        "fact_id": "fact_mysql_append_only_1",
+                        "revision": 1,
+                        "status": "recorded",
+                        "active_slot": None,
+                        "content_sha256": "2" * 64,
+                    },
+                    {
+                        "fact_id": "fact_mysql_append_only_2",
+                        "revision": 2,
+                        "status": "recorded",
+                        "active_slot": None,
+                        "content_sha256": "3" * 64,
+                    },
+                ]:
+                    raise AssertionError("MySQL append-only LabelFact rows changed unexpectedly")
+                head = (
+                    connection.execute(
+                        text(
+                            "SELECT current_fact_id, current_revision, generation "
+                            "FROM label_fact_heads "
+                            "WHERE fact_head_id = 'fact_head_mysql_append_only'"
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                if dict(head) != {
+                    "current_fact_id": "fact_mysql_append_only_2",
+                    "current_revision": 2,
+                    "generation": 2,
+                }:
+                    raise AssertionError("MySQL LabelFactHead is not the current projection")
+            finally:
+                transaction.rollback()
+    finally:
+        engine.dispose()
 
 
 def assert_hotword_enforcement(database_url: str, legacy_badcase_id: str) -> None:
@@ -3124,7 +3316,11 @@ def assert_insight_causal_enforcement(database_url: str) -> None:
                         "payload": payload,
                     },
                 )
-            for metric_result_id in ("metric_causal_baseline", "metric_causal_outcome"):
+            for metric_result_id in (
+                "metric_causal_baseline",
+                "metric_causal_outcome",
+                "metric_causal_unreferenced",
+            ):
                 connection.execute(
                     text(
                         "INSERT INTO metric_results "
@@ -3203,10 +3399,22 @@ def assert_insight_causal_enforcement(database_url: str) -> None:
         )
         _expect_integrity_error(
             engine,
-            text("DELETE FROM metric_results WHERE metric_result_id = 'metric_causal_baseline'"),
+            text(
+                "DELETE FROM metric_results WHERE metric_result_id = 'metric_causal_unreferenced'"
+            ),
             {},
-            "delete of a referenced baseline metric",
+            "append-only metric_results delete of an unreferenced frozen metric",
+            expected_mysql_signal="append-only metric_results",
         )
+        with engine.connect() as connection:
+            metric_count = connection.execute(
+                text(
+                    "SELECT COUNT(*) FROM metric_results "
+                    "WHERE metric_result_id = 'metric_causal_unreferenced'"
+                )
+            ).scalar_one()
+        if metric_count != 1:
+            raise AssertionError("append-only metric_results delete changed the frozen row")
         _expect_integrity_error(
             engine,
             text("DELETE FROM insight_reports WHERE report_id = 'report_causal'"),
@@ -3683,12 +3891,14 @@ def assert_calibration_enforcement(database_url: str) -> None:
                 ),
                 {"record_id": record_id},
                 f"append-only update of {table_name}",
+                expected_mysql_signal="append-only calibration record",
             )
         _expect_integrity_error(
             engine,
             text("DELETE FROM gold_annotations WHERE gold_annotation_id = 'gold_annotation_one'"),
             {},
             "append-only delete of gold annotation",
+            expected_mysql_signal="append-only calibration record",
         )
     finally:
         engine.dispose()
@@ -3783,6 +3993,7 @@ def run_migration_cycle(database_url: str) -> None:
     assert_tables_present(database_url)
     assert_legacy_hotword_badcase_backfilled(database_url, legacy_hotword_badcase_id)
     assert_hotword_enforcement(database_url, legacy_hotword_badcase_id)
+    assert_label_fact_append_only_enforcement(database_url)
     assert_insight_causal_enforcement(database_url)
     assert_quality_appeal_enforcement(database_url, terminal_id, escalated_id)
     assert_calibration_enforcement(database_url)

@@ -474,8 +474,8 @@ PATCH /api/v1/{resources}/{id}
 | API | 用途 | 最低字段 |
 | --- | --- | --- |
 | `GET /api/v1/connectors` | 连接器配置列表 | `id`、`type`、`name`、`status`、`auth_mode`、`last_sync_at`、`owner` |
-| `POST /api/v1/connectors` | 创建连接器配置 | `type`、`name`、`base_url`、`auth_mode`、`secret_ref`、`status`、`trace_id` |
-| `PATCH /api/v1/connectors/{id}` | 更新连接器配置 | `changed_fields`、`secret_ref`、`status`、`audit_log_id`、`trace_id` |
+| `POST /api/v1/connectors` | 创建连接器配置 | `type`、`name`、`base_url`、`auth_mode`、`secret_ref`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`trace_id`；服务端必须校验当前项目 production 绑定并写入权威快照，调用方提供的任一锁字段不一致时返回稳定 409 |
+| `PATCH /api/v1/connectors/{id}` | 更新连接器配置 | `changed_fields`、`secret_ref`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`audit_log_id`、`trace_id`；每次更新重新校验并捕获当前项目权威 Scene 快照 |
 | `POST /api/v1/platform-connections/{connection_id}/session` | 生成外部平台会话引用 | `session_id`、`access_token_ref`、`tenant_scope[]`、`expires_at`、`trace_id` |
 | `GET /api/v1/data-sources/{source_id}/records` | 读取租户、员工、门店等主数据 | `resource_id`、`tenant_id`、`store_id`、`display_name`、`cursor`、`raw_payload_ref` |
 | `POST /api/v1/audio-ingest/recordings` | 接入录音 URL 或原始音频引用 | `recording_id`、`audio_url_ref`、`device_id`、`started_at`、`duration_ms`、`asset_key` |
@@ -548,9 +548,9 @@ launch 最终提交到达，会先以 `pending_binding` 持久化；绑定不一
 | API | 用途 | 最低字段 |
 | --- | --- | --- |
 | `GET /api/v1/audio-sessions` | 音频会话列表和聚合叶子对象 | `id`、`recording_id`、`store_id`、`employee_id`、`started_at`、`duration_ms`、`status`、`confidence` |
-| `GET /api/v1/audio-sessions/aggregations` | 按时间、门店、销售、单据事件聚合 | `group_key`、`group_label`、`count`、`risk_count`、`sample_session_id`、`filters` |
+| `GET /api/v1/audio-sessions/aggregations` | 按 `started_at` 小时返回可验证的会话叶子 | 组：`group_key`、`count`、派生 `status`、`children[]`；叶子：`audio_session_id`、`recording_id`、`started_at`、`status`、`confidence`、`target_asset_key` nullable、`connector_import.enabled`、`connector_import.blocked_reason` nullable、`trace_id` |
 | `GET /api/v1/audio-sessions/{id}` | 调听详情入口 | `id`、`boundary`、`tracks[]`、`event_links[]`、`review_tasks[]`、`asset_refs[]` |
-| `PUT /api/v1/audio-sessions/{id}/recording-object` | 幂等登记 MinIO / S3 / OBS / OSS 录音对象元数据 | `recording_id`、`storage_object_id`、`provider`、`bucket`、`object_key`、`content_length`、`checksum_sha256`、`etag`、`trace_id` |
+| `PUT /api/v1/audio-sessions/{id}/recording-object` | 幂等验证并登记 MinIO / S3 / OBS / OSS 录音对象 | `recording_id`、`storage_object_id`、`provider`、`bucket`、`object_key`、`content_length`、`checksum_sha256`、`etag`、`verification.checksum_verified=true`、`verification.wav_verified=true`、`status=verified`、`trace_id` |
 | `POST /api/v1/audio-sessions/{id}/playback-grants` | 为原生媒体元素签发短时播放授权 | `audio_session_id`、`playback_url`、`expires_at`、`trace_id` |
 | `GET /api/v1/audio-playback?grant=...` | 校验播放授权和当前项目成员关系后，按已登记 `provider` 代理 MinIO / S3 / OBS / OSS 录音字节 | 单区间 `Range` 原样下推，返回 `200/206/416`、`Accept-Ranges`、`Content-Range`、`ETag`、`X-Storage-Object-Id`、`X-Storage-Provider`；Provider 未独立配置时返回 `503`，禁止跨 Provider 复用凭据 |
 | `POST /api/v1/audio-sessions/{id}/intelligence-runs` | 创建 VAD、ASR、说话人分离、声纹和质量检测运行 | 请求：`execution_mode`、`language`、`hotword_pack_version_id` nullable、`return_word_timestamps`；响应：`audio_session_id`、`recording_id`、`capabilities[]`、`output_assets[]`、`trace_id` |
@@ -561,6 +561,10 @@ launch 最终提交到达，会先以 `pending_binding` 持久化；绑定不一
 | `PATCH /api/v1/event-links/{id}` | 修复或改绑事件关联 | `target_event_ref`、`reason`、`status`、`affected_objects`、`trace_id` |
 | `GET /api/v1/data-aggregation-views` | 数据页聚合视图配置和当前选择 | `id`、`name`、`aggregate_order[]`、`selected_leaf`、`filters`、`version` |
 | `PATCH /api/v1/data-aggregation-views/{id}` | 保存聚合优先级、叶子对象状态和关联修复 | `aggregate_order[]`、`selected_leaf`、`relation_fix`、`version`、`trace_id` |
+
+生产录音登记不得信任调用方声明的 MIME、SHA-256 或扩展名。BFF 必须以强 ETag 固定对象版本，核对 Provider HEAD 的大小、内容类型和由 Provider 验证的 SHA-256，并在同一版本上读取最多 64 KiB 做 RIFF/WAVE、chunk 边界、`fmt` 参数、`data` frame 对齐校验；全部通过后才写 `verified`。`registered` 仅用于 local/test 兼容，不得在真实对象存储模式下播放或进入音频智能运行。单对象上限为 5 GiB；缺 Provider checksum、版本漂移、伪 WAV 或大小/哈希不一致均 fail closed。首发生产基线 MinIO/S3 上传必须启用 S3 checksum，调用方自定义 `x-amz-meta-sha256` 不构成可信校验。
+
+`audio-sessions/aggregations` 的时间窗必须从叶子 `started_at` 动态计算，缺失或非法时间进入显式 `unknown / started_at-missing-or-invalid` 组；组 `status` 必须由子项状态派生，不得写死演示状态。连接器目标只接受会话显式声明、且在同一 tenant/project 的权威 `data_assets` 中已登记的 `target_asset_key`。读端不得静默默认到 raw recordings；缺失或越界 key 必须返回 `target_asset_key=null`、`connector_import.enabled=false` 和稳定阻断原因，前端不得发起连接器 POST。Data 页的连接器写入与导出还必须取得当前项目已发布且未漂移的 SceneProfile 绑定，并把 `scene_profile_id + scene_profile_version_id + scene_profile_snapshot_sha256` 原样锁入请求；绑定读取中、未绑定、读取失败或快照漂移均 fail closed。
 
 `AudioIntelligenceRunRequest` 的新写入不得使用旧 `hotwords_ref`；该字段只允许在历史 TaskVersion 响应中以 `legacy-read-through` 方式读取。`execution_mode=production` 的热词运行必须提交已发布 `task_version_id`，BFF 从不可变 TaskVersion 恢复 `hotword_pack_version_id + provider + language + root_trace_id`，客户端不得逐次覆盖；候选版本只能直接用于 `shadow`。当运行实际绑定热词版本时，成功完成回执必须在 `result_ref.hotword_diagnostics` 返回与冻结版本一致的 `matched_terms`、`missed_terms`、`false_boosted_terms` 和 `diagnostics_storage_object_id`；当 `return_word_timestamps=true` 时还必须返回 `word_timestamps_storage_object_id`，否则 `POST /api/v1/runs/{id}/completion-receipts` 返回 422。完整词时间戳与诊断保存在对象存储，MySQL 只保存引用、计数和聚合。
 
@@ -799,9 +803,13 @@ Prompt 审核的 `modified` 不是原地批准：两份密封修改一致或独�
 | `GET /api/v1/data-assets/{asset_key}/partitions` | 分区窗口 | `partition_key`、`status`、`record_count`、`started_at`、`finished_at` |
 | `GET /api/v1/data-assets/{asset_key}/materializations` | 生成记录 | `materialization_id`、`run_id`、`partition_key`、`status`、`checks[]`；热词回填物化另含 `source_materialization_id`、`hotword_pack_version_id`、`eval_run_id`、`task_version_id`、`root_trace_id`、`overwrite_history=false` |
 | `GET /api/v1/data-assets/{asset_key}/lineage` | 业务化血缘和下游影响 | `asset`、`nodes[]`、`edges[]`、`materializations[]`；ASR 热词链路节点覆盖原物化、证据、Badcase、词包版本、EvalRun、TaskVersion、回填 Run 与新物化 |
-| `POST /api/v1/data-assets/{asset_key}/backfills` | 创建受控回填 | `backfill_id`、`approval_status`、`impact_scope`、`run_request`、`trace_id` |
-| `POST /api/v1/data-assets/{asset_key}/checks/retry` | 重跑失败质量校验 | `retry_id`、`status`、`failed_partitions[]`、`trace_id` |
-| `POST /api/v1/exports` | 创建导出任务 | `export_job_id`、`format`、`scope`、`status`、`download_ref`、`trace_id` |
+| `POST /api/v1/data-assets/{asset_key}/backfills` | 创建受控回填 | `backfill_id`、`approval_status`、`impact_scope`、`run_request`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`trace_id` |
+| `POST /api/v1/data-assets/{asset_key}/checks/retry` | 重跑失败质量校验 | `retry_id`、`status`、`failed_partitions[]`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`trace_id` |
+| `POST /api/v1/exports` | 创建导出任务 | `export_job_id`、`format`、`scope`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`download_ref`、`trace_id` |
+
+连接器创建、资产回填、资产质量重跑以及项目业务数据导出都必须在服务端解析当前 tenant/project 的 active production SceneProfile，并把权威 `scene_profile_id + scene_profile_version_id + scene_profile_snapshot_sha256` 写入资源或 Run/Outbox。调用方可省略锁字段，由 BFF 原子捕获当前绑定；但只要显式提供任一字段，就必须与当前已发布快照逐字段完全一致，否则 fail closed。没有 active 绑定返回 `SCENE_PROFILE_BINDING_REQUIRED`；资产不存在或跨项目时应先返回同构 404，不能借 Scene 错误泄漏资产存在性。仅 `target=module_view`、`module_key` 为 `tenants/projects/settings` 且 `object_id` 以同一模块前缀开头的治理视图导出不要求业务 Scene 锁。
+
+质量重跑不是无条件运行按钮。BFF 必须从当前资产权威 `checks[]` 中解析 `check_id + status + failed_partitions[]`，只允许 `failed/error` 或明确含失败分区的检查进入重跑；请求中的 `failed_check_ids[]` 与 `failed_partitions[]` 必须是该失败集合的子集，并由服务端规范化写入 Run/Outbox。资产没有权威失败检查时返回 `ASSET_CHECK_RETRY_NOT_REQUIRED`，伪造检查或分区返回 `ASSET_CHECK_RETRY_SCOPE_INVALID`，前端在 loading/error/empty/无失败时保持禁用并显示原因。
 
 资产对象最低字段：
 

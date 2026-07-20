@@ -9,7 +9,7 @@ services:
       MYSQL_DATABASE: auris_flow
       MYSQL_USER: auris
       MYSQL_PASSWORD: auris
-    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    command: ["mysqld", "--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci", "--log-bin-trust-function-creators=1"]
     volumes:
       - auris_mysql_data:/var/lib/mysql
     healthcheck:

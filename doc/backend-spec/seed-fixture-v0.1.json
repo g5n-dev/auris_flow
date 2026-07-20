@@ -269,6 +269,7 @@
         "ended_at": "2025-05-26T12:34:34+08:00",
         "status": "success",
         "confidence": 0.86,
+        "target_asset_key": "auris/audio/raw_recordings",
         "trace_id": "trace_20250526_122718"
       },
       {
@@ -280,6 +281,7 @@
         "ended_at": "2025-05-26T09:18:00+08:00",
         "status": "pending_review",
         "confidence": 0.64,
+        "target_asset_key": "auris/audio/raw_recordings",
         "trace_id": "trace_20250526_091608"
       }
     ],
@@ -886,7 +888,15 @@
       "latest_materialization_id": "mat_label_20250526_122300",
       "latest_run_id": "task_run_20250526_122300",
       "upstream": ["auris/audio/raw_recordings", "auris/events/document_links"],
-      "downstream": ["auris/eval/quality_metrics", "auris/insights/reception_quality"]
+      "downstream": ["auris/eval/quality_metrics", "auris/insights/reception_quality"],
+      "checks": [
+        {
+          "check_id": "check_label_document_consistency",
+          "name": "标签与业务单据一致性",
+          "status": "failed",
+          "failed_partitions": ["aurora_auto/BJ-AURORA-001/2025-05-26/12"]
+        }
+      ]
     },
     {
       "asset_key": "auris/events/document_links",

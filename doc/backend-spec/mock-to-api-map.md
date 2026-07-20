@@ -124,8 +124,8 @@
 
 | 原型模块或文案 | 后端资源 | 列表/详情接口 | 动作接口 | 前端状态反馈 |
 | --- | --- | --- | --- | --- |
-| 音频、人物声纹、事件、业务单据、关联视图 | `AudioSession`、`PersonVoiceprint`、`EventLink`、`AggregationView` | `GET /api/v1/audio-sessions`；`GET /api/v1/audio-sessions/aggregations`；`GET /api/v1/voiceprints`；`GET /api/v1/event-links` | `POST /api/v1/event-links`；`PATCH /api/v1/event-links/{id}` | 维度切换只更新聚合；进入调听携带对象 ID、时间窗和证据上下文。 |
-| `POST /api/v1/data-source-bindings · PATCH /api/v1/data-aggregation-views/:id` | `ConnectorBinding`、`AggregationView` | `GET /api/v1/connectors`；`GET /api/v1/audio-sessions/aggregations` | `POST /api/v1/connectors`；`PATCH /api/v1/data-aggregation-views/{id}` | 保存后返回版本号和审计记录；不在数据页手造音频或单据。 |
+| 音频、人物声纹、事件、业务单据、关联视图 | `AudioSession`、`PersonVoiceprint`、`EventLink`、`AggregationView` | `GET /api/v1/audio-sessions`；`GET /api/v1/audio-sessions/aggregations`；`GET /api/v1/voiceprints`；`GET /api/v1/event-links` | `POST /api/v1/event-links`；`PATCH /api/v1/event-links/{id}` | 音频真值页只渲染 aggregation 的 `children[]`；人物/事件/关系读模型未接入时显式 unavailable，不回落本地 fixture。 |
+| `POST /api/v1/data-source-bindings · PATCH /api/v1/data-aggregation-views/:id` | `ConnectorBinding`、`AggregationView` | `GET /api/v1/connectors`；`GET /api/v1/audio-sessions/aggregations` | `POST /api/v1/connectors`；`PATCH /api/v1/data-aggregation-views/{id}` | 仅当叶子返回同 scope 已登记 `target_asset_key` 且 `connector_import.enabled=true` 时开放 POST；否则显示 `blocked_reason` 并 fail closed。 |
 | 平台主数据 `GET /api/v1/data-sources/{source_id}/records` | `DataSourceRecord` | 同接口带 `resource=tenant|employee|store` | 无 | 外部主数据读取失败用 `retry`，权限失败用 `blocked`。 |
 | 音频 URL `POST /api/v1/audio-ingest/recordings` | `AudioRecordingRef` | `GET /api/v1/audio-sessions` | `POST /api/v1/audio-ingest/recordings` | 返回 `recording_id`、`asset_key`，后续任务消费资产引用。 |
 | 认证事件 `GET /api/v1/authenticated-events` | `AuthenticatedEvent` | `GET /api/v1/authenticated-events` | 无 | 只读当前任务授权范围事件。 |
@@ -143,6 +143,11 @@
 - `document_ref`
 - `match_score`
 - `status`
+- `target_asset_key`（nullable）
+- `connector_import.enabled`
+- `connector_import.blocked_reason`（nullable）
+
+聚合组按 `started_at` 小时动态生成，非法或缺失时间进入显式 unknown 组，组状态由子项派生。会话创建/seed 必须显式声明目标资产；读端不得用演示默认值补齐缺失绑定，也不得接受其他租户或项目的资产 key。Data 页的 connector/export 操作必须由 workspace 下传当前已发布 SceneProfile 绑定；operation 自身在绑定读取中、未绑定、读取失败或快照漂移时阻断 POST，绑定有效时请求必须携带 profile ID、version ID 与 snapshot SHA-256 三元锁。
 
 ### 2.6 知识库
 
@@ -276,7 +281,7 @@
 
 | 原型模块或文案 | 后端资源 | 列表/详情接口 | 动作接口 | 前端状态反馈 |
 | --- | --- | --- | --- | --- |
-| 资产目录、血缘、质量、回填、导出 | `DataAsset`、`AssetLineage`、`AssetQualityCheck`、`BackfillRequest`、`ExportJob` | `GET /api/v1/data-assets`；`GET /api/v1/data-assets/{asset_key}`；`GET /api/v1/data-assets/{asset_key}/lineage` | `POST /api/v1/data-assets/{asset_key}/backfills`；`POST /api/v1/data-assets/{asset_key}/checks/retry`；`POST /api/v1/exports` | 血缘节点默认聚焦；回填展示影响范围、审批状态、运行记录和失败分区。 |
+| 资产目录、血缘、质量、回填、导出 | `DataAsset`、`AssetLineage`、`AssetQualityCheck`、`BackfillRequest`、`ExportJob` | `GET /api/v1/data-assets`；`GET /api/v1/data-assets/{asset_key}`；`GET /api/v1/data-assets/{asset_key}/lineage` | `POST /api/v1/data-assets/{asset_key}/backfills`；`POST /api/v1/data-assets/{asset_key}/checks/retry`；`POST /api/v1/exports` | 血缘节点默认聚焦；回填展示影响范围、审批状态、运行记录和失败分区；三类项目业务写入由 BFF 校验并持久化当前 active production SceneProfile 三元锁，缺绑定或调用方锁漂移均拒绝。 |
 | `GET /api/v1/data-assets/:id/partitions` | `DataAssetPartition` | `GET /api/v1/data-assets/{asset_key}/partitions` | 无 | 大分区使用 cursor，避免 offset 慢查。 |
 | `GET /api/v1/data-assets/:id/materializations` | `AssetMaterialization` | `GET /api/v1/data-assets/{asset_key}/materializations` | 无 | 返回 `materialization_id`、`run_id`、`checks`。 |
 | ASR 热词修复血缘 | `LineageEdge` | `GET /api/v1/data-assets/{asset_key}/lineage` | `POST /api/v1/data-assets/{asset_key}/backfills` | 依次显示原 ASR、证据、A-4107、词包版本、EvalRun、新转写和回填；任何历史转写/人工确认均不覆盖。 |

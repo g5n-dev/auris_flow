@@ -55,7 +55,8 @@
 | 0039 | `label_fact_append_only_contract` | Fact append-only Contract 与 head 唯一真相源 | 0038 |
 | 0040 | `label_recomputation_fact_sets` | 全量重算 candidate FactSet/namespace | 0039 |
 | 0041 | `oidc_browser_sessions` | OIDC identity/state 与 hash-only browser session | 0040 |
-| 0042 | `task_run_control_plane` | RunRecord 运行时间、deadline、引擎观察、状态版本和取消终态控制字段；当前 head | 0041 |
+| 0042 | `task_run_control_plane` | RunRecord 运行时间、deadline、引擎观察、状态版本和取消终态控制字段 | 0041 |
+| 0043 | `oidc_transaction_binding` | OIDC state 绑定短期浏览器 transaction hash；当前 head | 0042 |
 
 ## 3. 0001 Platform Foundation
 
@@ -360,6 +361,15 @@ S2.b 已在应用层实现可暂停、可重入的 taxonomy/LabelVersion 强字�
 后先部署新 writer，再 canary Worker；必须观察旧有绑定运行产生 fenced status-sync、NULL deadline 行不产生
 deadline cancellation，且 Worker health 中 monitor 从 `pending` 进入 `healthy`，方可解除写入冻结。
 
+`0043_oidc_transaction_binding.py` 为 `oidc_authorization_states` 增加非空、唯一的
+`transaction_sha256` 以及 transaction/consumed/expiry 复合索引。迁移不会伪造可继续使用的浏览器绑定：
+既有 state 以其唯一 `state_sha256` 回填 transaction hash，并在同一升级事务中标记已消费，因此升级前发起、
+尚未完成的 OIDC 登录必须重新开始。应用先升级 0043，再部署要求 transaction cookie 的 callback；回退到
+0042 前会先把 0043 期间创建且尚未消费的 state 全部标记为已消费，再删除新增索引、约束和列；不得因旧
+runtime 不认识浏览器绑定而把 pending state 降级成仅凭公开 state 即可消费的登录票据。生产切换前应排空
+短 TTL 登录窗口，切换后监控
+`OIDC_STATE_INVALID`，不得把 transaction cookie 原值写入数据库、日志或运维证据。
+
 ## 18. 迁移验收
 
 - 空库可完整执行到最新版本。
@@ -367,5 +377,5 @@ deadline cancellation，且 Worker health 中 monitor 从 `pending` 进入 `heal
 - 回滚最近一版在本地可执行；生产回滚使用 forward migration。
 - `tenant_id + project_id` 索引覆盖所有项目级大表。
 - 幂等、审计、outbox 表先于任何业务写接口上线。
-- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表、0041 OIDC/browser session hash-only 强表，以及 0042 task-run control 字段/索引在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
+- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表、0041 OIDC/browser session hash-only 强表、0042 task-run control 字段/索引，以及 0043 OIDC transaction hash 绑定在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
 - 0028 后每个 environment 只有一个 `release_bundle_heads` 行、每个 deployment 只有一个 active ReleaseCommand；0039 后每个 scope/namespace/logical key 只有一个 `label_fact_heads` current 指针，Fact 行本身不再承担可变 current 状态。

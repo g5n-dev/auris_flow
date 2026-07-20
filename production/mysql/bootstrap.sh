@@ -28,8 +28,40 @@ ALTER USER 'auris_runtime'@'%' IDENTIFIED BY '${runtime_password}';
 ALTER USER 'auris_migration'@'%' IDENTIFIED BY '${migration_password}';
 ALTER USER 'keycloak'@'%' IDENTIFIED BY '${keycloak_password}';
 ALTER USER 'dagster'@'%' IDENTIFIED BY '${dagster_password}';
+REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'auris_runtime'@'%';
+REVOKE ALL PRIVILEGES, GRANT OPTION FROM 'auris_migration'@'%';
+SQL
+
+# MySQL's REVOKE ALL PRIVILEGES does not revoke role memberships. Remove any
+# legacy direct role edges as well so rerunning bootstrap converges existing
+# installations to the same least-privilege account state as a fresh install.
+revoke_role_edges() {
+  account_user="$1"
+  role_revokes="$(
+    mysql --protocol=tcp --host="${MYSQL_HOST:-mysql}" --user=root \
+      --batch --skip-column-names <<SQL
+SELECT CONCAT(
+  'REVOKE ', QUOTE(FROM_USER), '@', QUOTE(FROM_HOST),
+  ' FROM ', QUOTE(TO_USER), '@', QUOTE(TO_HOST), ';'
+)
+FROM mysql.role_edges
+WHERE TO_USER = '${account_user}' AND TO_HOST = '%';
+SQL
+  )"
+  if [ -n "${role_revokes}" ]; then
+    printf '%s\n' "${role_revokes}" |
+      mysql --protocol=tcp --host="${MYSQL_HOST:-mysql}" --user=root
+  fi
+}
+
+revoke_role_edges auris_runtime
+revoke_role_edges auris_migration
+
+mysql --protocol=tcp --host="${MYSQL_HOST:-mysql}" --user=root <<SQL
 GRANT SELECT, INSERT, UPDATE, DELETE ON auris_flow.* TO 'auris_runtime'@'%';
-GRANT ALL PRIVILEGES ON auris_flow.* TO 'auris_migration'@'%';
+GRANT SELECT, INSERT, UPDATE, DELETE, CREATE, ALTER, DROP, INDEX, REFERENCES,
+  TRIGGER
+  ON auris_flow.* TO 'auris_migration'@'%';
 GRANT ALL PRIVILEGES ON keycloak.* TO 'keycloak'@'%';
 GRANT ALL PRIVILEGES ON dagster.* TO 'dagster'@'%';
 FLUSH PRIVILEGES;

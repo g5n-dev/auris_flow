@@ -3,9 +3,15 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from types import MappingProxyType
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.auth_models import BrowserAuthSession, OidcIdentity, UserSecurityState
+from app.auth_models import (
+    BrowserAuthSession,
+    OidcAuthorizationState,
+    OidcIdentity,
+    UserSecurityState,
+)
 from app.core.auth import AuthActor
 from app.core.browser_session import create_browser_session
 from app.core.config import get_settings
@@ -15,14 +21,18 @@ from app.core.oidc import OIDCValidatedClaims
 from app.core.oidc_flow import (
     OIDCAuthorizationCallback,
     OIDCAuthorizationRequest,
+    OIDCTokenExchangeError,
     OIDCTokenSet,
 )
+from app.main import app
 from app.models import Project
 
 ISSUER = "https://identity.example.test/realms/auris"
 OIDC_STATE = "oidc-state-" + ("s" * 48)
 OIDC_NONCE = "oidc-nonce-" + ("n" * 48)
 OIDC_VERIFIER = "v" * 64
+LOCAL_TRANSACTION_COOKIE = "auris_oidc_transaction"
+PRODUCTION_TRANSACTION_COOKIE = "__Host-auris_oidc_transaction"
 
 
 class StubAuthorizationFlow:
@@ -78,6 +88,28 @@ class StubAuthorizationFlow:
             scope="openid profile email",
             claims=claims,
         )
+
+
+class FailingTokenExchangeFlow(StubAuthorizationFlow):
+    def exchange_code(
+        self,
+        code: str,
+        *,
+        code_verifier: str,
+        expected_nonce: str,
+    ) -> OIDCTokenSet:
+        raise OIDCTokenExchangeError
+
+
+class UnexpectedTokenExchangeFlow(StubAuthorizationFlow):
+    def exchange_code(
+        self,
+        code: str,
+        *,
+        code_verifier: str,
+        expected_nonce: str,
+    ) -> OIDCTokenSet:
+        raise RuntimeError("unexpected-provider-detail-must-not-leak")
 
 
 def _issue_admin_browser_session(*, now: datetime | None = None):
@@ -285,6 +317,7 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
         )
     settings = get_settings()
     monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(settings, "allow_dev_auth", False)
     monkeypatch.setattr(settings, "oidc_session_ttl_seconds", 3600)
     monkeypatch.setattr(settings, "oidc_authorization_state_ttl_seconds", 300)
     monkeypatch.setattr(
@@ -299,6 +332,18 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert started.status_code == 303
     assert started.headers["location"].startswith("https://identity.example.test/authorize")
     assert started.headers["cache-control"] == "no-store"
+    transaction_secret = client.cookies.get(LOCAL_TRANSACTION_COOKIE)
+    assert transaction_secret is not None
+    transaction_cookie_header = started.headers["set-cookie"]
+    assert f"{LOCAL_TRANSACTION_COOKIE}=" in transaction_cookie_header
+    assert "HttpOnly" in transaction_cookie_header
+    assert "SameSite=lax" in transaction_cookie_header
+    assert "Domain=" not in transaction_cookie_header
+
+    with SessionLocal() as session:
+        state_record = session.execute(select(OidcAuthorizationState)).scalar_one()
+        assert state_record.transaction_sha256 != transaction_secret
+        assert transaction_secret not in repr(state_record.__dict__)
 
     callback = client.get(
         f"/api/v1/auth/oidc/callback?code=one-time-code&state={OIDC_STATE}&iss={ISSUER}",
@@ -307,6 +352,8 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert callback.status_code == 303, callback.text
     assert callback.headers["location"] == "/insights"
     assert "HttpOnly" in callback.headers["set-cookie"]
+    assert f'{LOCAL_TRANSACTION_COOKIE}=""' in callback.headers["set-cookie"]
+    assert "Max-Age=0" in callback.headers["set-cookie"]
     assert "redacted-access-token" not in callback.text
     assert "redacted-id-token" not in callback.text
     assert "redacted-refresh-token" not in callback.text
@@ -328,6 +375,22 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert len(data["csrf_token"]) >= 43
     assert restored.headers["cache-control"] == "no-store"
 
+    playback_grant = client.post(
+        "/api/v1/audio-sessions/S20250526-000128/playback-grants",
+        headers={
+            "X-Tenant-Id": "aurora_auto",
+            "X-Project-Id": "sales_qa",
+            "Origin": "http://localhost:5173",
+            "X-CSRF-Token": data["csrf_token"],
+            "Idempotency-Key": "oidc-code-pkce-playback",
+        },
+    )
+    assert playback_grant.status_code == 201, playback_grant.text
+    playback_url = playback_grant.json()["data"]["playback_url"]
+    streamed = client.get(playback_url, headers={"Range": "bytes=0-15"})
+    assert streamed.status_code == 206, streamed.text
+    assert streamed.content.startswith(b"RIFF")
+
     logged_out = client.post(
         "/api/v1/auth/logout",
         headers={
@@ -338,6 +401,133 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert logged_out.status_code == 200, logged_out.text
     assert logged_out.json()["data"]["status"] == "revoked"
     assert "Max-Age=0" in logged_out.headers["set-cookie"]
+
+    revoked_stream = client.get(playback_url, headers={"Range": "bytes=0-15"})
+    assert revoked_stream.status_code == 403
+    assert revoked_stream.json()["error"]["code"] == "AUDIO_PLAYBACK_GRANT_REVOKED"
+
+
+def test_oidc_callback_rejects_state_from_another_browser_without_consuming_it(
+    client,
+    monkeypatch,
+) -> None:
+    _issue_admin_browser_session()
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(
+        "app.api.routers.auth.get_oidc_authorization_flow",
+        lambda: StubAuthorizationFlow(),
+    )
+
+    started = client.get("/api/v1/auth/oidc/login", follow_redirects=False)
+    assert started.status_code == 303
+    initiating_secret = client.cookies.get(LOCAL_TRANSACTION_COOKIE)
+    assert initiating_secret is not None
+    client.cookies.delete(LOCAL_TRANSACTION_COOKIE)
+
+    callback_url = f"/api/v1/auth/oidc/callback?code=one-time-code&state={OIDC_STATE}&iss={ISSUER}"
+    rejected = client.get(callback_url, follow_redirects=False)
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "OIDC_STATE_INVALID"
+    assert f'{LOCAL_TRANSACTION_COOKIE}=""' in rejected.headers["set-cookie"]
+    assert "Max-Age=0" in rejected.headers["set-cookie"]
+    with SessionLocal() as session:
+        assert session.execute(select(OidcAuthorizationState)).scalar_one().consumed_at is None
+
+    client.cookies.set(LOCAL_TRANSACTION_COOKIE, initiating_secret)
+    accepted = client.get(callback_url, follow_redirects=False)
+    assert accepted.status_code == 303, accepted.text
+
+
+def test_oidc_callback_clears_transaction_cookie_when_token_exchange_fails(
+    client,
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(
+        "app.api.routers.auth.get_oidc_authorization_flow",
+        lambda: FailingTokenExchangeFlow(),
+    )
+    started = client.get("/api/v1/auth/oidc/login", follow_redirects=False)
+    assert started.status_code == 303
+
+    rejected = client.get(
+        f"/api/v1/auth/oidc/callback?code=one-time-code&state={OIDC_STATE}&iss={ISSUER}",
+        follow_redirects=False,
+    )
+
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "OIDC_TOKEN_EXCHANGE_FAILED"
+    assert f'{LOCAL_TRANSACTION_COOKIE}=""' in rejected.headers["set-cookie"]
+    assert "Max-Age=0" in rejected.headers["set-cookie"]
+
+
+def test_oidc_callback_clears_transaction_cookie_before_state_validation(
+    client,
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    client.cookies.set(LOCAL_TRANSACTION_COOKIE, "transaction-" + ("z" * 48))
+
+    rejected = client.get("/api/v1/auth/oidc/callback", follow_redirects=False)
+
+    assert rejected.status_code == 400
+    assert rejected.json()["error"]["code"] == "OIDC_STATE_INVALID"
+    assert f'{LOCAL_TRANSACTION_COOKIE}=""' in rejected.headers["set-cookie"]
+    assert "Max-Age=0" in rejected.headers["set-cookie"]
+
+
+def test_oidc_callback_clears_transaction_cookie_on_an_unexpected_server_error(
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(
+        "app.api.routers.auth.get_oidc_authorization_flow",
+        lambda: UnexpectedTokenExchangeFlow(),
+    )
+
+    with TestClient(app, raise_server_exceptions=False) as error_client:
+        started = error_client.get("/api/v1/auth/oidc/login", follow_redirects=False)
+        assert started.status_code == 303
+        rejected = error_client.get(
+            f"/api/v1/auth/oidc/callback?code=one-time-code&state={OIDC_STATE}&iss={ISSUER}",
+            follow_redirects=False,
+        )
+
+    assert rejected.status_code == 500
+    assert rejected.json()["error"]["code"] == "INTERNAL_ERROR"
+    assert "unexpected-provider-detail-must-not-leak" not in rejected.text
+    assert f'{LOCAL_TRANSACTION_COOKIE}=""' in rejected.headers["set-cookie"]
+    assert "Max-Age=0" in rejected.headers["set-cookie"]
+
+
+def test_production_oidc_transaction_cookie_is_secure_host_only_and_short_lived(
+    client,
+    monkeypatch,
+) -> None:
+    settings = get_settings()
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "auth_provider", "oidc")
+    monkeypatch.setattr(settings, "oidc_authorization_state_ttl_seconds", 300)
+    monkeypatch.setattr(
+        "app.api.routers.auth.get_oidc_authorization_flow",
+        lambda: StubAuthorizationFlow(),
+    )
+
+    started = client.get("/api/v1/auth/oidc/login", follow_redirects=False)
+
+    assert started.status_code == 303
+    cookie = started.headers["set-cookie"]
+    assert f"{PRODUCTION_TRANSACTION_COOKIE}=" in cookie
+    assert "HttpOnly" in cookie
+    assert "Secure" in cookie
+    assert "SameSite=lax" in cookie
+    assert "Max-Age=300" in cookie
+    assert "Path=/" in cookie
+    assert "Domain=" not in cookie
 
 
 def test_cross_site_or_concurrent_session_restore_does_not_invalidate_existing_csrf(

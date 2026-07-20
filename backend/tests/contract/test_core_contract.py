@@ -964,6 +964,154 @@ def test_audio_recording_object_registration_is_scoped_idempotent_and_traceable(
     assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
+def test_audio_recording_object_id_cannot_be_rebound_to_another_recording(client, auth_headers):
+    storage_object_id = "sto_recording_binding_is_immutable"
+    original_recording_id = "rec_A_1001_20250526_122300"
+    replacement_recording_id = "rec_SH_A012_20250526_091500"
+    original_payload = {
+        "storage_object_id": storage_object_id,
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": (
+            "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/immutable-source-a.wav"
+        ),
+        "content_type": "audio/wav",
+        "content_length": 68,
+        "checksum_sha256": "1" * 64,
+        "etag": "immutable-source-a-etag",
+    }
+    replacement_payload = {
+        **original_payload,
+        "object_key": (
+            "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/immutable-source-b.wav"
+        ),
+        "checksum_sha256": "2" * 64,
+        "etag": "immutable-source-b-etag",
+    }
+
+    original = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json=original_payload,
+        headers={**auth_headers, "Idempotency-Key": "immutable-recording-source-a"},
+    )
+    assert original.status_code == 200
+
+    with SessionLocal() as session:
+        strong_object = session.get(StorageObject, storage_object_id)
+        original_recording = session.get(AudioRecording, original_recording_id)
+        replacement_recording = session.get(AudioRecording, replacement_recording_id)
+        assert strong_object is not None
+        assert original_recording is not None
+        assert replacement_recording is not None
+        original_strong_payload = dict(strong_object.payload)
+        original_recording_payload = dict(original_recording.payload)
+        replacement_recording_payload = dict(replacement_recording.payload)
+
+    rebound = client.put(
+        "/api/v1/audio-sessions/S20250526-000131/recording-object",
+        json=replacement_payload,
+        headers={**auth_headers, "Idempotency-Key": "immutable-recording-source-b"},
+    )
+
+    assert rebound.status_code == 409
+    assert rebound.json()["error"]["code"] == "STORAGE_OBJECT_SOURCE_CONFLICT"
+    with SessionLocal() as session:
+        strong_object = session.get(StorageObject, storage_object_id)
+        original_recording = session.get(AudioRecording, original_recording_id)
+        replacement_recording = session.get(AudioRecording, replacement_recording_id)
+        replacement_projection = session.scalar(
+            select(JsonResource).where(
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
+                JsonResource.collection == "recordings",
+                JsonResource.resource_key == replacement_recording_id,
+            )
+        )
+        assert strong_object is not None
+        assert strong_object.source_type == "audio_recording"
+        assert strong_object.source_id == original_recording_id
+        assert strong_object.object_key == original_payload["object_key"]
+        assert strong_object.payload == original_strong_payload
+        assert original_recording is not None
+        assert original_recording.payload == original_recording_payload
+        assert replacement_recording is not None
+        assert replacement_recording.payload == replacement_recording_payload
+        assert replacement_projection is not None
+        assert replacement_projection.data.get("storage_object_id") != storage_object_id
+
+
+def test_audio_recording_object_id_cannot_change_locator_or_version_identity(client, auth_headers):
+    storage_object_id = "sto_recording_version_is_immutable"
+    original_payload = {
+        "storage_object_id": storage_object_id,
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "object_key": (
+            "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/immutable-version.wav"
+        ),
+        "content_type": "audio/wav",
+        "content_length": 68,
+        "checksum_sha256": "3" * 64,
+        "etag": "immutable-version-etag",
+    }
+    created = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json=original_payload,
+        headers={**auth_headers, "Idempotency-Key": "immutable-version-create"},
+    )
+    assert created.status_code == 200
+
+    mutations = (
+        {"provider": "s3"},
+        {"bucket": "auris-flow-archive"},
+        {
+            "object_key": (
+                "tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/"
+                "immutable-version-replaced.wav"
+            )
+        },
+        {"content_type": "audio/x-wav"},
+        {"content_length": 69},
+        {"checksum_sha256": "4" * 64},
+        {"etag": "immutable-version-replaced-etag"},
+    )
+    for index, mutation in enumerate(mutations):
+        changed = client.put(
+            "/api/v1/audio-sessions/S20250526-000128/recording-object",
+            json={**original_payload, **mutation},
+            headers={
+                **auth_headers,
+                "Idempotency-Key": f"immutable-version-mutation-{index}",
+            },
+        )
+        assert changed.status_code == 409
+        assert changed.json()["error"]["code"] == "STORAGE_OBJECT_IDENTITY_CONFLICT"
+
+    with SessionLocal() as session:
+        strong_object = session.get(StorageObject, storage_object_id)
+        recording = session.get(AudioRecording, "rec_A_1001_20250526_122300")
+        projection = session.scalar(
+            select(JsonResource).where(
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
+                JsonResource.collection == "recordings",
+                JsonResource.resource_key == "rec_A_1001_20250526_122300",
+            )
+        )
+        assert strong_object is not None
+        assert strong_object.provider == original_payload["provider"]
+        assert strong_object.bucket == original_payload["bucket"]
+        assert strong_object.object_key == original_payload["object_key"]
+        assert strong_object.content_type == original_payload["content_type"]
+        assert strong_object.size_bytes == original_payload["content_length"]
+        assert strong_object.content_sha256 == original_payload["checksum_sha256"]
+        assert strong_object.etag == original_payload["etag"]
+        assert recording is not None
+        assert recording.payload["storage_object"] == strong_object.payload
+        assert projection is not None
+        assert projection.data["storage_object"] == strong_object.payload
+
+
 def test_audio_recording_object_registration_rejects_unsafe_object_key(client, auth_headers):
     response = client.put(
         "/api/v1/audio-sessions/S20250526-000128/recording-object",
@@ -1067,7 +1215,25 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
 
     aggregations = client.get("/api/v1/audio-sessions/aggregations", headers=auth_headers)
     assert aggregations.status_code == 200
-    assert aggregations.json()["data"]["items"][0]["children"]
+    aggregation_groups = aggregations.json()["data"]["items"]
+    groups_by_key = {group["group_key"]: group for group in aggregation_groups}
+    assert groups_by_key["2025-05-26 / 09:00-10:00"]["status"] == "pending_review"
+    assert groups_by_key["2025-05-26 / 12:00-13:00"]["status"] == "success"
+    aggregation_children = [item for group in aggregation_groups for item in group["children"]]
+    assert aggregation_children
+    aggregated_session = next(
+        item for item in aggregation_children if item["audio_session_id"] == "S20250526-000128"
+    )
+    assert aggregated_session["target_asset_key"] == "auris/audio/raw_recordings"
+    assert aggregated_session["connector_import"] == {
+        "enabled": True,
+        "blocked_reason": None,
+    }
+    scoped_assets = client.get("/api/v1/data-assets/recent?limit=100", headers=auth_headers)
+    assert scoped_assets.status_code == 200
+    assert aggregated_session["target_asset_key"] in {
+        item["asset_key"] for item in scoped_assets.json()["data"]["items"]
+    }
 
     voiceprints = client.get("/api/v1/voiceprints", headers=auth_headers)
     assert voiceprints.status_code == 200
@@ -1420,6 +1586,84 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
         and span.get("event_type") == "conversation_boundary.sync_requested"
         for span in boundary_spans
     )
+
+
+def test_audio_aggregations_block_connector_for_unregistered_target_asset(client, auth_headers):
+    with SessionLocal() as session:
+        audio_session = session.scalar(
+            select(JsonResource).where(
+                JsonResource.collection == "audio_sessions",
+                JsonResource.resource_key == "S20250526-000128",
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
+            )
+        )
+        assert audio_session is not None
+        audio_session.data = {
+            **audio_session.data,
+            "target_asset_key": "auris/audio/not-registered",
+        }
+        session.commit()
+
+    response = client.get("/api/v1/audio-sessions/aggregations", headers=auth_headers)
+
+    assert response.status_code == 200
+    aggregated_session = next(
+        item
+        for group in response.json()["data"]["items"]
+        for item in group["children"]
+        if item["audio_session_id"] == "S20250526-000128"
+    )
+    assert aggregated_session["target_asset_key"] is None
+    assert aggregated_session["connector_import"] == {
+        "enabled": False,
+        "blocked_reason": "当前会话未绑定本租户项目内已登记的数据资产",
+    }
+
+
+def test_audio_aggregations_reject_cross_project_asset_binding(client, auth_headers):
+    foreign_asset_key = "auris/audio/foreign-project-only"
+    with SessionLocal() as session:
+        session.add(
+            JsonResource(
+                collection="data_assets",
+                resource_key=foreign_asset_key,
+                tenant_id="aurora_auto",
+                project_id="other_project",
+                status="success",
+                trace_id="trace_foreign_data_asset",
+                data={"asset_key": foreign_asset_key, "status": "success"},
+            )
+        )
+        audio_session = session.scalar(
+            select(JsonResource).where(
+                JsonResource.collection == "audio_sessions",
+                JsonResource.resource_key == "S20250526-000128",
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
+            )
+        )
+        assert audio_session is not None
+        audio_session.data = {
+            **audio_session.data,
+            "target_asset_key": foreign_asset_key,
+        }
+        session.commit()
+
+    response = client.get("/api/v1/audio-sessions/aggregations", headers=auth_headers)
+
+    assert response.status_code == 200
+    aggregated_session = next(
+        item
+        for group in response.json()["data"]["items"]
+        for item in group["children"]
+        if item["audio_session_id"] == "S20250526-000128"
+    )
+    assert aggregated_session["target_asset_key"] is None
+    assert aggregated_session["connector_import"] == {
+        "enabled": False,
+        "blocked_reason": "当前会话未绑定本租户项目内已登记的数据资产",
+    }
 
 
 def test_human_review_decision_is_idempotent_and_updates_queue(client, auth_headers):
@@ -2163,7 +2407,7 @@ def test_json_resources_are_scoped_by_tenant_and_project(client, auth_headers):
     project = client.post(
         "/api/v1/projects",
         json={"project_id": "project_scope_contract", "name": "隔离项目"},
-        headers={**auth_headers, "Idempotency-Key": "connector-scope-project-create"},
+        headers={**auth_headers, "Idempotency-Key": "resource-scope-project-create"},
     )
     assert project.status_code == 201
     project_headers = {
@@ -2177,23 +2421,23 @@ def test_json_resources_are_scoped_by_tenant_and_project(client, auth_headers):
         "X-Project-Id": "other_project",
         "X-Request-Id": "pytest-other-scope",
     }
-    connector_id = "shared_connector"
+    work_item_id = "shared_work_item"
 
     aurora = client.post(
-        "/api/v1/connectors",
-        json={"connector_id": connector_id, "name": "同名连接器", "tenant_marker": "aurora"},
-        headers={**auth_headers, "Idempotency-Key": "connector-scope-aurora"},
+        "/api/v1/work-items",
+        json={"work_item_id": work_item_id, "name": "同名工作项", "tenant_marker": "aurora"},
+        headers={**auth_headers, "Idempotency-Key": "resource-scope-aurora"},
     )
     other = client.post(
-        "/api/v1/connectors",
-        json={"connector_id": connector_id, "name": "同名连接器", "tenant_marker": "project"},
-        headers={**project_headers, "Idempotency-Key": "connector-scope-project"},
+        "/api/v1/work-items",
+        json={"work_item_id": work_item_id, "name": "同名工作项", "tenant_marker": "project"},
+        headers={**project_headers, "Idempotency-Key": "resource-scope-project"},
     )
     assert aurora.status_code == 201
     assert other.status_code == 201
 
-    aurora_items = client.get("/api/v1/connectors", headers=auth_headers).json()["data"]["items"]
-    project_items = client.get("/api/v1/connectors", headers=project_headers).json()["data"][
+    aurora_items = client.get("/api/v1/work-items", headers=auth_headers).json()["data"]["items"]
+    project_items = client.get("/api/v1/work-items", headers=project_headers).json()["data"][
         "items"
     ]
     assert any(item.get("tenant_marker") == "aurora" for item in aurora_items)
@@ -2201,7 +2445,7 @@ def test_json_resources_are_scoped_by_tenant_and_project(client, auth_headers):
     assert any(item.get("tenant_marker") == "project" for item in project_items)
     assert not any(item.get("tenant_marker") == "aurora" for item in project_items)
 
-    denied = client.get("/api/v1/connectors", headers=other_headers)
+    denied = client.get("/api/v1/work-items", headers=other_headers)
     assert denied.status_code == 403
     assert denied.json()["error"]["code"] == "TENANT_NOT_FOUND"
 

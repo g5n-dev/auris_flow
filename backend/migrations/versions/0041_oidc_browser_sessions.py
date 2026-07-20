@@ -223,15 +223,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("ix_browser_auth_sessions_identity", table_name="browser_auth_sessions")
-    op.drop_index("ix_browser_auth_sessions_user_active", table_name="browser_auth_sessions")
+    # Drop child tables directly. MySQL may reuse either explicit index to enforce
+    # a foreign key and rejects dropping that index while the constraint exists;
+    # dropping the table removes its constraints and indexes atomically.
     op.drop_table("browser_auth_sessions")
-    op.drop_index(
-        "ix_oidc_authorization_states_expiry",
-        table_name="oidc_authorization_states",
-    )
     op.drop_table("oidc_authorization_states")
-    op.drop_index("ix_oidc_identities_scope", table_name="oidc_identities")
-    op.drop_index("ix_oidc_identities_user_id", table_name="oidc_identities")
     op.drop_table("oidc_identities")
     op.drop_table("user_security_states")
