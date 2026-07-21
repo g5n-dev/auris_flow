@@ -1,0 +1,84 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+from pathspec import GitIgnoreSpec
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DOCKERIGNORE = REPOSITORY_ROOT / ".dockerignore"
+UI_ROOT = "prototype/auris-flow-ui"
+
+
+def _dockerignore_spec() -> GitIgnoreSpec:
+    return GitIgnoreSpec.from_lines(
+        DOCKERIGNORE.read_text(encoding="utf-8").splitlines(),
+    )
+
+
+def _ignored_ui_files() -> list[str]:
+    result = subprocess.run(
+        [
+            "git",
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            UI_ROOT,
+        ],
+        cwd=REPOSITORY_ROOT,
+        check=True,
+        capture_output=True,
+    )
+    return [path.decode("utf-8") for path in result.stdout.split(b"\0") if path]
+
+
+def test_local_ui_outputs_are_excluded_from_the_docker_build_context() -> None:
+    spec = _dockerignore_spec()
+    local_outputs = (
+        f"{UI_ROOT}/audit/capture-diagnostics.json",
+        f"{UI_ROOT}/audit/voiceprint-final.png",
+        f"{UI_ROOT}/audit/screenshots/01-home.png",
+        f"{UI_ROOT}/audit/prototype-interaction-audit-5173/audit-report.md",
+        f"{UI_ROOT}/homepage-review.png",
+        f"{UI_ROOT}/dist-experiment/assets/index.js",
+        f"{UI_ROOT}/src/catalogs/production/static-catalog.json",
+        f"{UI_ROOT}/src/features/canvas/fixtures/production/canvas-fixtures.json",
+        f"{UI_ROOT}/src/features/listening/fixtures/production/listening-fixtures.json",
+        f"{UI_ROOT}/tsconfig.tsbuildinfo",
+        f"{UI_ROOT}/.next/server/app.js",
+        f"{UI_ROOT}/.vite/deps/react.js",
+        f"{UI_ROOT}/node_modules/.vite/deps/react.js",
+    )
+
+    leaked = [path for path in local_outputs if not spec.match_file(path)]
+    assert leaked == [], f"local UI outputs leak into the Docker context: {leaked}"
+
+
+def test_existing_git_ignored_ui_files_are_excluded_from_docker_context() -> None:
+    spec = _dockerignore_spec()
+    leaked = [path for path in _ignored_ui_files() if not spec.match_file(path)]
+
+    assert leaked == [], f"Git-ignored UI files leak into the Docker context: {leaked}"
+
+
+def test_production_ui_build_inputs_remain_in_the_docker_context() -> None:
+    spec = _dockerignore_spec()
+    required_inputs = (
+        f"{UI_ROOT}/package.json",
+        f"{UI_ROOT}/package-lock.json",
+        f"{UI_ROOT}/tsconfig.json",
+        f"{UI_ROOT}/vite.config.ts",
+        f"{UI_ROOT}/index.html",
+        f"{UI_ROOT}/src/main.tsx",
+        f"{UI_ROOT}/src/catalogs/module-catalog.json",
+        f"{UI_ROOT}/src/features/canvas/fixtures/data/canvas-fixtures.json",
+        f"{UI_ROOT}/scripts/generate-production-catalogs.mjs",
+        f"{UI_ROOT}/scripts/generate-production-fixtures.mjs",
+        f"{UI_ROOT}/audit/visual-regression.config.mjs",
+        f"{UI_ROOT}/audit/visual-regression.spec.mjs",
+    )
+
+    excluded = [path for path in required_inputs if spec.match_file(path)]
+    assert excluded == [], f"required UI build inputs are Docker-ignored: {excluded}"

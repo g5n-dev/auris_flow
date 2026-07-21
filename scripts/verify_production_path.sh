@@ -49,9 +49,8 @@ if [ -e "${ARTIFACT}" ]; then
   exit 2
 fi
 
-# Preflight runs before Docker and source-tree checks so the checked-in blocked
-# contract reports its exact missing capabilities.  A successful preflight is
-# explicitly not release evidence.
+# Preflight validates the checked-in runtime contract before Docker work.  A
+# successful preflight is explicitly not release evidence.
 "${PYTHON_BIN}" "${VALIDATOR}" preflight \
   --compose "production/tests/production-path-gate.compose.yaml"
 

@@ -439,6 +439,20 @@ def test_node_exporter_scrapes_the_host_filesystem_backing_named_volumes() -> No
             "bind": {"propagation": "rslave"},
         }
     ]
+    metrics_mounts = [
+        volume
+        for volume in node_exporter["volumes"]
+        if isinstance(volume, dict)
+        and volume.get("target") == "/var/lib/node_exporter/textfile_collector"
+    ]
+    assert metrics_mounts == [
+        {
+            "type": "bind",
+            "source": "${AURIS_RUNTIME_METRICS_DIR:-./runtime-metrics}",
+            "target": "/var/lib/node_exporter/textfile_collector",
+            "read_only": True,
+        }
+    ]
 
 
 def test_every_alert_runbook_link_resolves_to_an_existing_markdown_anchor() -> None:

@@ -620,7 +620,7 @@ services:
         bind:
           propagation: rslave
       - type: bind
-        source: ./runtime-metrics
+        source: ${AURIS_RUNTIME_METRICS_DIR:-./runtime-metrics}
         target: /var/lib/node_exporter/textfile_collector
         read_only: true
     healthcheck:

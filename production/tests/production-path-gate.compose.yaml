@@ -1,18 +1,14 @@
-# Runnable gate blueprint, not release evidence.  The contract remains blocked
-# until the checked-in verifier/driver passes the full isolated Compose run and
-# the capture-bound evidence validator accepts the resulting artifact.
+# Runtime contract for one isolated production Compose diagnostic.  `ready`
+# means the checked-in driver/verifier is runnable; only a successful fresh run
+# bound to the release commit can create release evidence.
 x-auris-production-path-gate:
   schema_version: auris.production-path-gate-contract.v1
-  status: blocked
+  status: ready
   source_compose: production/compose.yaml
   runtime_driver: scripts/verify_production_path_runtime.py
   required_external_stubs:
     - production-gate-embedding
     - production-gate-callback
-  missing_capabilities:
-    - production path runtime driver and in-container verifier sources are not implemented
-    - the isolated production Compose path has not passed the real Compose diagnostic
-    - raw recovery proofs have not yet been bound to one clean source commit
 
 x-production-gate-app-environment: &production-gate-app-environment
   APP_ENV: prod
@@ -143,7 +139,9 @@ services:
       - embedding_api_key
     volumes:
       - ./tests/production_gate_support.py:/opt/auris-gate/production_gate_support.py:ro
-      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}:/run/auris-gate-tls:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/fullchain.pem:/run/auris-gate-tls/fullchain.pem:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/privkey.pem:/run/auris-gate-tls/privkey.pem:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/ca.pem:/run/auris-gate-tls/ca.pem:ro
       - ${AURIS_PRODUCTION_GATE_CONTROL_SECRET:?set AURIS_PRODUCTION_GATE_CONTROL_SECRET}:/run/auris-gate/control-secret:ro
     networks:
       internal:
@@ -194,7 +192,9 @@ services:
       - external_callback_key_bindings
     volumes:
       - ./tests/production_gate_support.py:/opt/auris-gate/production_gate_support.py:ro
-      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}:/run/auris-gate-tls:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/fullchain.pem:/run/auris-gate-tls/fullchain.pem:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/privkey.pem:/run/auris-gate-tls/privkey.pem:ro
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/ca.pem:/run/auris-gate-tls/ca.pem:ro
       - ${AURIS_PRODUCTION_GATE_CONTROL_SECRET:?set AURIS_PRODUCTION_GATE_CONTROL_SECRET}:/run/auris-gate/control-secret:ro
     networks:
       production-gate-callback:

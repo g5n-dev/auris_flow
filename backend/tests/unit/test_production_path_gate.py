@@ -41,6 +41,15 @@ def _load_gate_support() -> ModuleType:
     return module
 
 
+def _load_runtime_verifier() -> ModuleType:
+    path = ROOT / "production" / "tests" / "production_path_verifier.py"
+    spec = importlib.util.spec_from_file_location("production_path_verifier_contract", path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def test_real_callback_client_reconciles_without_private_gate_control_header() -> None:
     """The real adapter signs POSTs, then reconciles with an ordinary same-origin GET."""
 
@@ -219,6 +228,22 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _rehash_raw_proof(gate: ModuleType, evidence: dict[str, object], proof_id: str) -> None:
+    raw_proofs = evidence["raw_proofs"]
+    assert isinstance(raw_proofs, dict)
+    records = raw_proofs["records"]
+    assert isinstance(records, dict)
+    record = records[proof_id]
+    assert isinstance(record, dict)
+    facts = record["facts"]
+    capture = record["capture"]
+    assert isinstance(capture, dict)
+    capture["observations"] = facts
+    record["facts_sha256"] = gate._canonical_sha256(facts)
+    record["capture_sha256"] = gate._canonical_sha256(capture)
+    raw_proofs["bundle_sha256"] = gate._canonical_sha256(records)
+
+
 def _valid_evidence() -> dict[str, object]:
     trace_ids = {
         "oidc": "trace_production_path_oidc_001",
@@ -226,6 +251,72 @@ def _valid_evidence() -> dict[str, object]:
         "object_storage": "trace_production_path_object_001",
         "qdrant": "trace_production_path_qdrant_001",
         "external_callback": "trace_production_path_callback_001",
+    }
+    operation_otel_trace_ids = {
+        "oidc": "a" * 32,
+        "dagster": "d" * 32,
+        "object_storage": "b" * 32,
+        "qdrant": "c" * 32,
+        "external_callback": "e" * 32,
+    }
+    signal_by_component = {
+        "bff": "service.name=auris-flow-bff",
+        "worker": "service.name=auris-flow-worker",
+        "dagster": "service.name=auris-flow-dagster-code",
+        "mysql": "db.system=mysql",
+        "redis": "db.system=redis",
+        "outbox": "span.name=outbox.process",
+        "object_storage": "client.host=minio",
+        "qdrant": "client.host=qdrant",
+        "external_callback": "client.host=callback.production-gate.invalid",
+        "oidc": "client.host=auris-production-gate.invalid",
+        "otel": "tempo.trace",
+    }
+    operation_components = {
+        "oidc": {"bff", "mysql", "oidc", "otel"},
+        "dagster": {"bff", "mysql", "redis", "outbox", "worker", "dagster", "otel"},
+        "object_storage": {
+            "bff",
+            "mysql",
+            "outbox",
+            "worker",
+            "object_storage",
+            "otel",
+        },
+        "qdrant": {"bff", "mysql", "outbox", "worker", "qdrant", "otel"},
+        "external_callback": {
+            "bff",
+            "mysql",
+            "outbox",
+            "worker",
+            "external_callback",
+            "otel",
+        },
+    }
+    operation_services = {
+        "oidc": {"auris-flow-bff"},
+        "dagster": {
+            "auris-flow-bff",
+            "auris-flow-worker",
+            "auris-flow-dagster-code",
+        },
+        "object_storage": {"auris-flow-bff", "auris-flow-worker"},
+        "qdrant": {"auris-flow-bff", "auris-flow-worker"},
+        "external_callback": {"auris-flow-bff", "auris-flow-worker"},
+    }
+    tempo_operations = {
+        operation: {
+            "otel_trace_id": operation_otel_trace_ids[operation],
+            "services": sorted(operation_services[operation]),
+            "components": sorted(operation_components[operation]),
+            "component_signals": {
+                component: [signal_by_component[component]]
+                for component in sorted(operation_components[operation])
+            },
+            "span_count": 8,
+            "client_span_count": 4,
+        }
+        for operation in operation_otel_trace_ids
     }
 
     def raw_proof(proof_id: str, source: str, facts: dict[str, object]) -> dict[str, object]:
@@ -303,9 +394,14 @@ def _valid_evidence() -> dict[str, object]:
             {
                 "tenant_id": "aurora_auto",
                 "project_id": "sales_qa",
-                "authoritative_run_ids": ["task_run_gate", "knowledge_build_gate"],
-                "authoritative_run_count": 2,
-                "processed_outbox_count": 2,
+                "authoritative_run_ids": [
+                    "task_run_gate",
+                    "knowledge_build_gate",
+                    "object_ingest_gate",
+                    "callback_gate",
+                ],
+                "authoritative_run_count": 4,
+                "processed_outbox_count": 4,
             },
         ),
         "dagster_graphql": raw_proof(
@@ -367,6 +463,8 @@ def _valid_evidence() -> dict[str, object]:
                 "http_status": 200,
                 "authorized_hit_count": 1,
                 "point_ids": ["12345678-1234-5678-1234-567812345678"],
+                "written_point_id": "12345678-1234-5678-1234-567812345678",
+                "written_point_occurrences": 1,
                 "trace_id": trace_ids["qdrant"],
             },
         ),
@@ -410,12 +508,11 @@ def _valid_evidence() -> dict[str, object]:
             "tempo-http",
             {
                 "http_status": 200,
-                "otel_trace_id": "d" * 32,
-                "services": [
-                    "auris-flow-bff",
-                    "auris-flow-worker",
-                    "auris-flow-dagster-code",
-                ],
+                "otel_trace_id": operation_otel_trace_ids["dagster"],
+                "operation_otel_trace_ids": operation_otel_trace_ids,
+                "operations": tempo_operations,
+                "services": sorted(set().union(*operation_services.values())),
+                "components": sorted(set().union(*operation_components.values())),
             },
         ),
         "mysql_restart": raw_proof(
@@ -426,8 +523,8 @@ def _valid_evidence() -> dict[str, object]:
                 "started_at_before": "2026-01-01T00:00:00Z",
                 "started_at_after": "2026-01-01T00:01:00Z",
                 "ready_status_after": 200,
-                "authoritative_run_count_before": 2,
-                "authoritative_run_count_after": 2,
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
             },
         ),
         "worker_crash": raw_proof(
@@ -441,6 +538,8 @@ def _valid_evidence() -> dict[str, object]:
                 "event_status_before": "pending",
                 "event_status_after": "processed",
                 "remote_run_count": 1,
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
             },
         ),
         "duplicate_delivery": raw_proof(
@@ -453,6 +552,14 @@ def _valid_evidence() -> dict[str, object]:
                 "reconcile_attempt_count": 1,
                 "remote_receipt_count": 1,
                 "business_outcome_count": 1,
+                "stale_owner_rejected": True,
+                "new_owner_accepted": True,
+                "lease_generation_before": 7,
+                "lease_generation_after": 8,
+                "claim_token_sha256_before": "5" * 64,
+                "claim_token_sha256_after": "6" * 64,
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
             },
         ),
         "callback_timeout": raw_proof(
@@ -464,6 +571,8 @@ def _valid_evidence() -> dict[str, object]:
                 "final_attempt_status": "success",
                 "final_delivery_mode": "reconcile",
                 "remote_receipt_count": 1,
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
             },
         ),
         "qdrant_outage": raw_proof(
@@ -472,10 +581,15 @@ def _valid_evidence() -> dict[str, object]:
             {
                 "ready_status_during": 503,
                 "ready_status_after": 200,
+                "failed_dependency_during": "qdrant",
+                "failed_dependency_status_during": "not_ready",
+                "missing_required_during": ["qdrant"],
+                "recovered_dependency_status_after": "ok",
+                "missing_required_after": [],
                 "point_id": "12345678-1234-5678-1234-567812345678",
                 "point_present_after": True,
-                "authoritative_run_count_before": 2,
-                "authoritative_run_count_after": 2,
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
             },
         ),
         "redis_outage": raw_proof(
@@ -484,8 +598,13 @@ def _valid_evidence() -> dict[str, object]:
             {
                 "ready_status_during": 503,
                 "ready_status_after": 200,
-                "authoritative_run_count_before": 2,
-                "authoritative_run_count_after": 2,
+                "failed_dependency_during": "redis",
+                "failed_dependency_status_during": "not_ready",
+                "missing_required_during": ["redis"],
+                "recovered_dependency_status_after": "ok",
+                "missing_required_after": [],
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
             },
         ),
     }
@@ -506,6 +625,108 @@ def _valid_evidence() -> dict[str, object]:
             "raw_proof_ids": [proof_id],
         }
 
+    defined_services = [
+        "bff",
+        "worker",
+        "mysql",
+        "db-bootstrap",
+        "redis",
+        "minio",
+        "minio-bootstrap",
+        "qdrant",
+        "migrate",
+        "keycloak",
+        "identity-bootstrap",
+        "production-path-seed",
+        "dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+        "otel-collector",
+        "tempo",
+        "prometheus",
+        "grafana",
+        "node-exporter",
+        "edge",
+        "production-gate-embedding",
+        "production-gate-callback",
+        "production-path-verifier",
+    ]
+    external_images = {
+        "mysql": "mysql:8.4.5",
+        "db-bootstrap": "mysql:8.4.5",
+        "redis": "redis:7.4.2-alpine3.21",
+        "minio": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+        "minio-bootstrap": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
+        "qdrant": "qdrant/qdrant:v1.14.1",
+        "keycloak": "quay.io/keycloak/keycloak:26.2.5",
+        "otel-collector": "otel/opentelemetry-collector-contrib:0.128.0",
+        "tempo": "grafana/tempo:2.8.0",
+        "prometheus": "prom/prometheus:v3.4.1",
+        "grafana": "grafana/grafana:12.0.1",
+        "node-exporter": "prom/node-exporter:v1.9.1",
+    }
+
+    def configured_image(service: str) -> str:
+        if service in external_images:
+            return external_images[service]
+        if service.startswith("dagster-"):
+            return "auris-flow-production-gate-dagster:aaaaaaaaaaaa"
+        if service == "edge":
+            return "auris-flow-production-gate-edge:aaaaaaaaaaaa"
+        return "auris-flow-production-gate-bff:aaaaaaaaaaaa"
+
+    def runtime_observation(service: str, *, completed: bool = False) -> dict[str, object]:
+        image = configured_image(service)
+        repository = image.rsplit(":", 1)[0]
+        return {
+            "container_id_sha256": hashlib.sha256(service.encode()).hexdigest(),
+            "configured_image": image,
+            "image_id": "sha256:" + hashlib.sha256(f"image:{service}".encode()).hexdigest(),
+            "repo_digests": (
+                [f"{repository}@sha256:" + hashlib.sha256(f"repo:{service}".encode()).hexdigest()]
+                if service in external_images
+                else []
+            ),
+            "os": "linux",
+            "architecture": "amd64",
+            "state": "exited" if completed else "running",
+            **({"exit_code": 0} if completed else {"health": "healthy"}),
+        }
+
+    running_services = {
+        service: runtime_observation(service)
+        for service in (
+            "mysql",
+            "redis",
+            "minio",
+            "qdrant",
+            "keycloak",
+            "dagster-code",
+            "dagster-webserver",
+            "dagster-daemon",
+            "bff",
+            "worker",
+            "otel-collector",
+            "tempo",
+            "prometheus",
+            "grafana",
+            "node-exporter",
+            "edge",
+            "production-gate-embedding",
+            "production-gate-callback",
+        )
+    }
+    completed_services = {
+        service: runtime_observation(service, completed=True)
+        for service in (
+            "db-bootstrap",
+            "minio-bootstrap",
+            "migrate",
+            "identity-bootstrap",
+            "production-path-seed",
+        )
+    }
+
     return {
         "schema_version": "auris.production-path-gate.v1",
         "status": "ok",
@@ -518,24 +739,25 @@ def _valid_evidence() -> dict[str, object]:
             "base_sha256": _sha256(BASE_COMPOSE),
             "overlay_sha256": _sha256(GATE_COMPOSE),
             "rendered_config_sha256": "b" * 64,
-            "services": [
-                "bff",
-                "worker",
-                "mysql",
-                "redis",
-                "minio",
-                "qdrant",
-                "keycloak",
-                "dagster-code",
-                "dagster-webserver",
-                "dagster-daemon",
-                "otel-collector",
-                "tempo",
-                "edge",
-                "production-gate-embedding",
-                "production-gate-callback",
-                "production-path-verifier",
-            ],
+            "services": defined_services,
+            "host_runtime": {
+                "schema_version": "auris.production-path.host-runtime.v1",
+                "native_linux": True,
+                "host_platform": "linux",
+                "docker_endpoint_scheme": "unix",
+                "docker_endpoint_path": "/var/run/docker.sock",
+                "docker_ostype": "linux",
+                "docker_operating_system": "Ubuntu 24.04 LTS",
+                "architecture": "amd64",
+                "rootless": False,
+                "cgroup_driver": "systemd",
+                "cgroup_version": "2",
+                "storage_driver": "overlay2",
+            },
+            "runtime": {
+                "running_services": running_services,
+                "completed_services": completed_services,
+            },
         },
         "runtime_sources": {
             relative: (_sha256(ROOT / relative) if (ROOT / relative).is_file() else "e" * 64)
@@ -544,6 +766,7 @@ def _valid_evidence() -> dict[str, object]:
                 "production/tests/production_path_verifier.py",
                 "production/tests/production_gate_support.py",
                 "production/tests/production-path-keycloak-realm.template.json",
+                "production/tests/production-path-gate.env",
             )
         },
         "identity": {
@@ -600,7 +823,8 @@ def _valid_evidence() -> dict[str, object]:
         },
         "trace": {
             "primary_business_trace_id": trace_ids["dagster"],
-            "otel_trace_id": "d" * 32,
+            "otel_trace_id": operation_otel_trace_ids["dagster"],
+            "operation_otel_trace_ids": operation_otel_trace_ids,
             "operation_trace_ids": trace_ids,
             "linked_components": [
                 "oidc",
@@ -609,6 +833,7 @@ def _valid_evidence() -> dict[str, object]:
                 "redis",
                 "worker",
                 "dagster",
+                "outbox",
                 "object_storage",
                 "qdrant",
                 "external_callback",
@@ -681,18 +906,192 @@ def test_callback_nonce_store_claim_is_atomic_and_replay_rejecting() -> None:
     assert nonce_store.claim(key_id="callback-v2", nonce="n" * 32, expires_at=2**31)
 
 
-def test_checked_in_gate_contract_remains_blocked_until_runtime_is_complete() -> None:
+def test_checked_in_gate_contract_is_ready_for_the_runtime_diagnostic() -> None:
     gate = _load_gate()
     document = yaml.safe_load(GATE_COMPOSE.read_text(encoding="utf-8"))
 
     errors = gate.validate_gate_compose(document)
 
-    assert any("contract status must be ready" in error for error in errors)
-    assert any("real Compose diagnostic" in error for error in errors)
-    assert any("raw recovery proofs" in error for error in errors)
+    assert errors == []
 
 
-def test_evidence_validator_rejects_even_complete_shape_until_runtime_is_activated() -> None:
+def test_release_gate_mirrors_the_runtime_verifier_closed_proof_contract() -> None:
+    gate = _load_gate()
+    verifier = _load_runtime_verifier()
+
+    runtime_driver_path = ROOT / "scripts" / "verify_production_path_runtime.py"
+    driver_spec = importlib.util.spec_from_file_location(
+        "production_path_runtime_contract", runtime_driver_path
+    )
+    assert driver_spec and driver_spec.loader
+    driver = importlib.util.module_from_spec(driver_spec)
+    driver_spec.loader.exec_module(driver)
+
+    assert gate.RAW_PROOF_SOURCE_BY_ID == verifier.PROOF_SOURCES
+    assert gate.PROOF_FACT_KEYS == verifier.PROOF_FACT_KEYS
+    assert gate.OPERATION_OTEL_FACT_KEYS == verifier.OPERATION_OTEL_FACT_KEYS
+    assert gate.OPERATION_OTEL_COMPONENTS == verifier.OPERATION_OTEL_COMPONENTS
+    assert gate.OPERATION_OTEL_SERVICES == verifier.OPERATION_OTEL_SERVICES
+    assert gate.HOST_RUNTIME_FIELDS == driver.HOST_RUNTIME_FIELDS
+
+
+def test_release_gate_rejects_rehashed_extra_proof_fields() -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    raw = evidence["raw_proofs"]
+    assert isinstance(raw, dict)
+    records = raw["records"]
+    assert isinstance(records, dict)
+    record = records["dagster_graphql"]
+    assert isinstance(record, dict)
+    facts = record["facts"]
+    assert isinstance(facts, dict)
+    facts["unreviewed_claim"] = True
+    _rehash_raw_proof(gate, evidence, "dagster_graphql")
+
+    errors = gate.validate_evidence(evidence, root=ROOT, expected_commit="a" * 40)
+
+    assert any("dagster_graphql" in error and "fields" in error for error in errors)
+
+
+def test_release_gate_rejects_rehashed_cross_proof_and_recovery_forgeries() -> None:
+    gate = _load_gate()
+
+    authority = _valid_evidence()
+    authority_raw = authority["raw_proofs"]
+    assert isinstance(authority_raw, dict)
+    authority_records = authority_raw["records"]
+    assert isinstance(authority_records, dict)
+    authority_proof = authority_records["mysql_authority"]
+    assert isinstance(authority_proof, dict)
+    authority_facts = authority_proof["facts"]
+    assert isinstance(authority_facts, dict)
+    authority_facts["processed_outbox_count"] = 3
+    _rehash_raw_proof(gate, authority, "mysql_authority")
+    errors = gate.validate_evidence(authority, root=ROOT, expected_commit="a" * 40)
+    assert any("processed outbox" in error for error in errors)
+
+    recall = _valid_evidence()
+    recall_raw = recall["raw_proofs"]
+    assert isinstance(recall_raw, dict)
+    recall_records = recall_raw["records"]
+    assert isinstance(recall_records, dict)
+    recall_proof = recall_records["qdrant_recall"]
+    assert isinstance(recall_proof, dict)
+    recall_facts = recall_proof["facts"]
+    assert isinstance(recall_facts, dict)
+    recall_facts["written_point_id"] = "forged-point"
+    _rehash_raw_proof(gate, recall, "qdrant_recall")
+    errors = gate.validate_evidence(recall, root=ROOT, expected_commit="a" * 40)
+    assert any("cross-bound" in error for error in errors)
+
+    outage = _valid_evidence()
+    outage_raw = outage["raw_proofs"]
+    assert isinstance(outage_raw, dict)
+    outage_records = outage_raw["records"]
+    assert isinstance(outage_records, dict)
+    outage_proof = outage_records["qdrant_outage"]
+    assert isinstance(outage_proof, dict)
+    outage_facts = outage_proof["facts"]
+    assert isinstance(outage_facts, dict)
+    outage_facts["failed_dependency_during"] = "redis"
+    outage_facts["missing_required_during"] = ["redis"]
+    _rehash_raw_proof(gate, outage, "qdrant_outage")
+    errors = gate.validate_evidence(outage, root=ROOT, expected_commit="a" * 40)
+    assert any("outage target" in error for error in errors)
+
+    fencing = _valid_evidence()
+    fencing_raw = fencing["raw_proofs"]
+    assert isinstance(fencing_raw, dict)
+    fencing_records = fencing_raw["records"]
+    assert isinstance(fencing_records, dict)
+    fencing_proof = fencing_records["duplicate_delivery"]
+    assert isinstance(fencing_proof, dict)
+    fencing_facts = fencing_proof["facts"]
+    assert isinstance(fencing_facts, dict)
+    fencing_facts["stale_owner_rejected"] = False
+    _rehash_raw_proof(gate, fencing, "duplicate_delivery")
+    errors = gate.validate_evidence(fencing, root=ROOT, expected_commit="a" * 40)
+    assert any("stale lease owner" in error for error in errors)
+
+    tempo = _valid_evidence()
+    tempo_raw = tempo["raw_proofs"]
+    assert isinstance(tempo_raw, dict)
+    tempo_records = tempo_raw["records"]
+    assert isinstance(tempo_records, dict)
+    tempo_proof = tempo_records["tempo_trace"]
+    assert isinstance(tempo_proof, dict)
+    tempo_facts = tempo_proof["facts"]
+    assert isinstance(tempo_facts, dict)
+    operations = tempo_facts["operations"]
+    assert isinstance(operations, dict)
+    qdrant_operation = operations["qdrant"]
+    assert isinstance(qdrant_operation, dict)
+    components = qdrant_operation["components"]
+    assert isinstance(components, list)
+    components.remove("qdrant")
+    signals = qdrant_operation["component_signals"]
+    assert isinstance(signals, dict)
+    signals.pop("qdrant")
+    _rehash_raw_proof(gate, tempo, "tempo_trace")
+    errors = gate.validate_evidence(tempo, root=ROOT, expected_commit="a" * 40)
+    assert any("Tempo qdrant" in error for error in errors)
+
+
+def test_release_gate_requires_native_linux_and_closed_evidence_envelopes() -> None:
+    gate = _load_gate()
+
+    missing_host = _valid_evidence()
+    compose = missing_host["compose"]
+    assert isinstance(compose, dict)
+    compose.pop("host_runtime")
+    errors = gate.validate_evidence(missing_host, root=ROOT, expected_commit="a" * 40)
+    assert any("native Linux host" in error for error in errors)
+
+    extra_top_level = _valid_evidence()
+    extra_top_level["approval_reference"] = "self-asserted"
+    errors = gate.validate_evidence(extra_top_level, root=ROOT, expected_commit="a" * 40)
+    assert any("top-level fields" in error for error in errors)
+
+    extra_identity = _valid_evidence()
+    identity = extra_identity["identity"]
+    assert isinstance(identity, dict)
+    identity["unreviewed_claim"] = True
+    errors = gate.validate_evidence(extra_identity, root=ROOT, expected_commit="a" * 40)
+    assert any("identity fields" in error for error in errors)
+
+    extra_record = _valid_evidence()
+    raw = extra_record["raw_proofs"]
+    assert isinstance(raw, dict)
+    records = raw["records"]
+    assert isinstance(records, dict)
+    record = records["dagster_graphql"]
+    assert isinstance(record, dict)
+    record["confidence"] = 1
+    raw["bundle_sha256"] = gate._canonical_sha256(records)
+    errors = gate.validate_evidence(extra_record, root=ROOT, expected_commit="a" * 40)
+    assert any("dagster_graphql" in error and "record fields" in error for error in errors)
+
+    extra_component = _valid_evidence()
+    trace = extra_component["trace"]
+    assert isinstance(trace, dict)
+    linked = trace["linked_components"]
+    assert isinstance(linked, list)
+    linked.append("self_asserted_component")
+    errors = gate.validate_evidence(extra_component, root=ROOT, expected_commit="a" * 40)
+    assert any("linked components" in error for error in errors)
+
+    duplicate_otel = _valid_evidence()
+    duplicate_trace = duplicate_otel["trace"]
+    assert isinstance(duplicate_trace, dict)
+    operation_otel_ids = duplicate_trace["operation_otel_trace_ids"]
+    assert isinstance(operation_otel_ids, dict)
+    operation_otel_ids["qdrant"] = operation_otel_ids["dagster"]
+    errors = gate.validate_evidence(duplicate_otel, root=ROOT, expected_commit="a" * 40)
+    assert any("distinct operation OTel trace ids" in error for error in errors)
+
+
+def test_evidence_validator_accepts_complete_shape_after_runtime_is_activated() -> None:
     gate = _load_gate()
     evidence = _valid_evidence()
 
@@ -701,11 +1100,26 @@ def test_evidence_validator_rejects_even_complete_shape_until_runtime_is_activat
         root=ROOT,
         expected_commit="a" * 40,
     )
-    assert any("contract status is not ready" in error for error in activation_errors)
-    assert any("runtime source is missing" in error for error in activation_errors)
-    assert any(
-        "raw runtime proof binding is not implemented" in error for error in activation_errors
-    )
+    assert activation_errors == []
+
+    missing_runtime = copy.deepcopy(evidence)
+    missing_runtime["compose"]["runtime"]["running_services"].pop("dagster-daemon")  # type: ignore[index]
+    errors = gate.validate_evidence(missing_runtime, root=ROOT, expected_commit="a" * 40)
+    assert any("running service inventory" in error for error in errors)
+
+    unhealthy_runtime = copy.deepcopy(evidence)
+    unhealthy_runtime["compose"]["runtime"]["running_services"]["redis"][  # type: ignore[index]
+        "health"
+    ] = "unhealthy"
+    errors = gate.validate_evidence(unhealthy_runtime, root=ROOT, expected_commit="a" * 40)
+    assert any("not healthy" in error for error in errors)
+
+    unbound_image = copy.deepcopy(evidence)
+    unbound_image["compose"]["runtime"]["running_services"]["redis"][  # type: ignore[index]
+        "repo_digests"
+    ] = ["attacker/redis@sha256:" + "f" * 64]
+    errors = gate.validate_evidence(unbound_image, root=ROOT, expected_commit="a" * 40)
+    assert any("repository digest" in error for error in errors)
 
     for mutation, expected in (
         (("identity", "dev_auth_enabled", True), "dev auth"),
@@ -727,6 +1141,18 @@ def test_evidence_validator_rejects_even_complete_shape_until_runtime_is_activat
     forged_raw["raw_proofs"]["records"]["tempo_trace"]["facts"]["services"] = []  # type: ignore[index]
     errors = gate.validate_evidence(forged_raw, root=ROOT, expected_commit="a" * 40)
     assert any("facts_sha256" in error or "bundle_sha256" in error for error in errors)
+
+    sensitive_raw = copy.deepcopy(evidence)
+    sensitive_record = sensitive_raw["raw_proofs"]["records"]["qdrant_point"]  # type: ignore[index]
+    sensitive_record["facts"]["qdrant_api_key"] = "must-never-be-uploaded"  # type: ignore[index]
+    sensitive_record["capture"]["observations"] = sensitive_record["facts"]  # type: ignore[index]
+    sensitive_record["facts_sha256"] = gate._canonical_sha256(sensitive_record["facts"])
+    sensitive_record["capture_sha256"] = gate._canonical_sha256(sensitive_record["capture"])
+    sensitive_raw["raw_proofs"]["bundle_sha256"] = gate._canonical_sha256(  # type: ignore[index]
+        sensitive_raw["raw_proofs"]["records"]  # type: ignore[index]
+    )
+    errors = gate.validate_evidence(sensitive_raw, root=ROOT, expected_commit="a" * 40)
+    assert any("sensitive field" in error for error in errors)
 
     forged_capture = copy.deepcopy(evidence)
     forged_capture["raw_proofs"]["records"]["mysql_restart"]["capture"][  # type: ignore[index]
@@ -828,8 +1254,52 @@ def test_validators_fail_closed_on_non_string_inventories() -> None:
     )
 
     assert any("missing services" in error for error in evidence_errors)
-    assert any("missing components" in error for error in evidence_errors)
+    assert any("linked components" in error for error in evidence_errors)
     assert any("BFF, Worker and Dagster" in error for error in evidence_errors)
+
+
+def test_evidence_validator_rejects_extra_observability_services() -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    evidence["observability"]["services"].append("unexpected-service")  # type: ignore[index,union-attr]
+
+    errors = gate.validate_evidence(
+        evidence,
+        root=ROOT,
+        expected_commit="a" * 40,
+    )
+
+    assert any("exactly BFF, Worker and Dagster" in error for error in errors)
+
+
+def test_evidence_validator_rejects_extra_recovery_proof_references() -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    evidence["recovery"]["mysql_restart"]["raw_proof_ids"].append(  # type: ignore[index,union-attr]
+        "worker_crash"
+    )
+
+    errors = gate.validate_evidence(
+        evidence,
+        root=ROOT,
+        expected_commit="a" * 40,
+    )
+
+    assert any("must reference exactly its named raw proof" in error for error in errors)
+
+
+def test_evidence_validator_binds_container_architecture_to_native_host() -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    evidence["compose"]["host_runtime"]["architecture"] = "arm64"  # type: ignore[index]
+
+    errors = gate.validate_evidence(
+        evidence,
+        root=ROOT,
+        expected_commit="a" * 40,
+    )
+
+    assert any("must match the native Linux host" in error for error in errors)
 
 
 def test_shell_entrypoint_is_fail_closed_and_not_wired_as_release_success() -> None:
@@ -913,7 +1383,7 @@ def test_shell_rejects_unsafe_evidence_parent_before_preflight(
     assert "blocked capability" not in completed.stderr
 
 
-def test_preflight_cli_reports_current_runtime_blockers() -> None:
+def test_preflight_cli_accepts_the_ready_runtime_contract() -> None:
     completed = subprocess.run(
         [
             str(ROOT / "backend" / ".venv" / "bin" / "python"),
@@ -928,14 +1398,13 @@ def test_preflight_cli_reports_current_runtime_blockers() -> None:
         text=True,
     )
 
-    assert completed.returncode == 2
-    output = json.loads(completed.stderr)
-    assert output["status"] == "blocked"
+    assert completed.returncode == 0, completed.stderr
+    output = json.loads(completed.stdout)
+    assert output["status"] == "ready"
     assert output["release_evidence"] is False
-    assert any("real Compose diagnostic" in item for item in output["blockers"])
 
 
-def test_evidence_cli_rejects_constructed_ok_artifact_while_activation_is_blocked(
+def test_evidence_cli_rejects_constructed_artifact_without_commit_bound_runtime_sources(
     tmp_path: Path,
 ) -> None:
     repository = tmp_path / "evidence-cli-fixture"
@@ -974,14 +1443,10 @@ def test_evidence_cli_rejects_constructed_ok_artifact_while_activation_is_blocke
     assert completed.returncode == 1
     output = json.loads(completed.stderr)
     assert output["release_evidence"] is False
-    assert any("contract status is not ready" in item for item in output["blockers"])
     assert any("runtime source is missing" in item for item in output["blockers"])
-    assert any(
-        "raw runtime proof binding is not implemented" in item for item in output["blockers"]
-    )
 
 
-def test_finalizer_mandates_strict_production_path_evidence_behind_blocked_gate() -> None:
+def test_finalizer_mandates_strict_production_path_runtime_evidence() -> None:
     documentation = (ROOT / "production" / "tests" / "production-path-gate.md").read_text(
         encoding="utf-8"
     )
@@ -989,7 +1454,7 @@ def test_finalizer_mandates_strict_production_path_evidence_behind_blocked_gate(
     finalizer = (ROOT / "scripts" / "finalize_release_evidence.py").read_text(encoding="utf-8")
 
     assert "列为强制 core evidence" in documentation
-    assert "前置 hard-fail" in documentation
+    assert "一次性运行证据" in documentation
     assert "严格复用同一运行证明校验器" in documentation
     assert '"production-path-gate.json"' in finalizer
     assert "validate_production_path_evidence" in finalizer

@@ -72,7 +72,10 @@ def test_secret_initialization_is_private_complete_and_idempotent(
     assert stat.S_IMODE(metrics_dir.stat().st_mode) == 0o755
     for path in secrets_dir.iterdir():
         assert path.is_file() and not path.is_symlink()
-        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        # Docker Compose file-backed secrets retain host modes on native Linux.
+        # The parent stays 0700; leaf files must be readable by remapped
+        # non-root container UIDs without exposing the directory to host users.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o444
     initial = _digests(secrets_dir)
     operator_password = (
         (secrets_dir / "keycloak_bootstrap_operator_password")

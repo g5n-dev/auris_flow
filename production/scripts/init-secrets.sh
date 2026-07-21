@@ -33,12 +33,13 @@ secret_value() {
       echo "refusing non-regular secret path: ${target}" >&2
       exit 2
     fi
+    chmod 444 "${target}"
     echo "preserving existing secret: ${name}" >&2
     tr -d '\r\n' <"${target}"
     return 0
   fi
   printf '%s\n' "${generated}" >"${target}"
-  chmod 600 "${target}"
+  chmod 444 "${target}"
   printf '%s' "${generated}"
 }
 
