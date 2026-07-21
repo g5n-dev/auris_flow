@@ -93,6 +93,36 @@ VISUAL_SIGNATURE_IDENTITY_PATTERN = re.compile(
     r"\.github/workflows/visual-baseline-build\.yml@refs/heads/"
     r"(?P<branch>[A-Za-z0-9._/-]+)"
 )
+FRONTEND_CANDIDATE_OCI_REF_PATTERN = re.compile(
+    r"ghcr\.io/auris-flow/auris-flow/frontend-bundle-candidate@"
+    r"(?P<digest>sha256:[0-9a-f]{64})"
+)
+FRONTEND_APPROVAL_OCI_REF_PATTERN = re.compile(
+    r"ghcr\.io/auris-flow/auris-flow/frontend-bundle-approval@"
+    r"(?P<digest>sha256:[0-9a-f]{64})"
+)
+FRONTEND_CANDIDATE_SIGNATURE_IDENTITY_PATTERN = re.compile(
+    r"https://github\.com/auris-flow/auris-flow/\.github/workflows/"
+    r"frontend-bundle-candidate\.yml@refs/heads/(?P<branch>[A-Za-z0-9._/-]+)"
+)
+FRONTEND_APPROVAL_SIGNATURE_IDENTITY_PATTERN = re.compile(
+    r"https://github\.com/auris-flow/auris-flow/\.github/workflows/"
+    r"frontend-bundle-promotion\.yml@refs/heads/(?P<branch>[A-Za-z0-9._/-]+)"
+)
+FRONTEND_BUNDLE_VERIFIED_CHECKS = frozenset(
+    {
+        "approval-cosign-signature",
+        "approval-statement-binding",
+        "approved-lock",
+        "candidate-cosign-signature",
+        "candidate-lock-binding",
+        "candidate-oci-provenance",
+        "candidate-source-ancestor",
+        "current-release-build-binding",
+        "exact-candidate-payload",
+        "frontend-subtree-unchanged",
+    }
+)
 RELEASE_MARKER_ENVIRONMENT = {
     "implementation_name": sys.implementation.name,
     "os_name": os.name,
@@ -135,6 +165,7 @@ SUPPLY_ARTIFACTS = frozenset(
 CORE_EVIDENCE = frozenset(
     {
         "clean-clone.json",
+        "frontend-bundle.json",
         "visual-regression.json",
         "real-stack-gate.json",
         "real-dagster-gate.json",
@@ -1007,6 +1038,460 @@ def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
         raise EvidenceError(f"{filename} signature issuer is invalid")
 
 
+def _require_frontend_git_object(value: object, *, label: str) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{40}", value) is None:
+        raise EvidenceError(f"{label} is not an exact Git object id")
+    return value
+
+
+def _require_frontend_workflow_identity(
+    value: object,
+    *,
+    label: str,
+    pattern: re.Pattern[str],
+) -> str:
+    if (
+        not isinstance(value, str)
+        or pattern.fullmatch(value) is None
+        or ".." in value
+        or "//" in value.removeprefix("https://")
+        or value.endswith("/")
+    ):
+        raise EvidenceError(f"{label} is invalid")
+    return value
+
+
+def _require_frontend_totals(value: object, *, label: str) -> dict[str, int]:
+    expected = {
+        "allBrotliBytes",
+        "allRawBytes",
+        "jsBrotliBytes",
+        "jsRawBytes",
+    }
+    if not isinstance(value, dict) or set(value) != expected:
+        raise EvidenceError(f"{label} fields are invalid")
+    if not all(
+        isinstance(total, int)
+        and not isinstance(total, bool)
+        and 0 <= total <= (2**53 - 1)
+        for total in value.values()
+    ):
+        raise EvidenceError(f"{label} values are invalid")
+    return value
+
+
+def _require_frontend_approval_reference(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value.strip()) < 8
+        or re.search(
+            r"(?:^|[-_\s])(?:pending|todo|tbd|placeholder|example|replace-me)"
+            r"(?:$|[-_\s])",
+            value.strip(),
+            re.IGNORECASE,
+        )
+        is not None
+    ):
+        raise EvidenceError("frontend bundle approval reference is invalid")
+    return value.strip()
+
+
+def validate_frontend_bundle_lock(
+    lock: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    _require_exact_fields(
+        lock,
+        filename="frontend bundle lock",
+        fields=frozenset(
+            {"approval", "candidate", "kind", "reason", "schema_version", "status"}
+        ),
+    )
+    if (
+        lock.get("schema_version") != 3
+        or lock.get("kind") != "auris-flow-frontend-bundle-lock"
+        or lock.get("status") != "APPROVED"
+        or not _nonempty_text(lock.get("reason"))
+    ):
+        raise EvidenceError("frontend bundle lock is not an approved schema-v3 lock")
+
+    candidate = lock.get("candidate")
+    approval = lock.get("approval")
+    if not isinstance(candidate, dict):
+        raise EvidenceError("frontend bundle candidate must be an object")
+    if not isinstance(approval, dict):
+        raise EvidenceError("frontend bundle approval must be an object")
+    _require_exact_fields(
+        candidate,
+        filename="frontend bundle candidate",
+        fields=frozenset(
+            {
+                "artifact_ref",
+                "brotli_manifest_sha256",
+                "build_workflow_sha",
+                "bundle_report_sha256",
+                "candidate_sha256",
+                "dist_inventory_sha256",
+                "frontend_tree",
+                "package_lock_sha256",
+                "repository_tree",
+                "signature_identity",
+                "signature_issuer",
+                "source_commit",
+                "totals",
+                "vite_manifest_sha256",
+            }
+        ),
+    )
+    _require_exact_fields(
+        approval,
+        filename="frontend bundle approval",
+        fields=frozenset(
+            {
+                "approval_reference",
+                "artifact_ref",
+                "environment",
+                "promotion_workflow_sha",
+                "rebuild_evidence_sha256",
+                "run_attempt",
+                "run_id",
+                "signature_identity",
+                "signature_issuer",
+                "statement_sha256",
+            }
+        ),
+    )
+
+    candidate_reference = candidate.get("artifact_ref")
+    if (
+        not isinstance(candidate_reference, str)
+        or FRONTEND_CANDIDATE_OCI_REF_PATTERN.fullmatch(candidate_reference) is None
+    ):
+        raise EvidenceError(
+            "frontend bundle candidate artifact must be an immutable official GHCR digest"
+        )
+    approval_reference = approval.get("artifact_ref")
+    if (
+        not isinstance(approval_reference, str)
+        or FRONTEND_APPROVAL_OCI_REF_PATTERN.fullmatch(approval_reference) is None
+    ):
+        raise EvidenceError(
+            "frontend bundle approval artifact must be an immutable official GHCR digest"
+        )
+
+    candidate_source = _require_frontend_git_object(
+        candidate.get("source_commit"), label="frontend bundle candidate source_commit"
+    )
+    _require_frontend_git_object(
+        candidate.get("repository_tree"),
+        label="frontend bundle candidate repository_tree",
+    )
+    _require_frontend_git_object(
+        candidate.get("frontend_tree"), label="frontend bundle candidate frontend_tree"
+    )
+    build_workflow_sha = _require_frontend_git_object(
+        candidate.get("build_workflow_sha"),
+        label="frontend bundle candidate build_workflow_sha",
+    )
+    if build_workflow_sha != candidate_source:
+        raise EvidenceError(
+            "frontend bundle candidate build_workflow_sha must equal source_commit"
+        )
+    promotion_workflow_sha = _require_frontend_git_object(
+        approval.get("promotion_workflow_sha"),
+        label="frontend bundle approval promotion_workflow_sha",
+    )
+    if promotion_workflow_sha != candidate_source:
+        raise EvidenceError(
+            "frontend bundle approval promotion_workflow_sha must equal candidate source_commit"
+        )
+
+    for field in (
+        "brotli_manifest_sha256",
+        "bundle_report_sha256",
+        "candidate_sha256",
+        "dist_inventory_sha256",
+        "package_lock_sha256",
+        "vite_manifest_sha256",
+    ):
+        _require_sha256(
+            candidate.get(field), label=f"frontend bundle candidate {field}"
+        )
+    for field in ("rebuild_evidence_sha256", "statement_sha256"):
+        _require_sha256(approval.get(field), label=f"frontend bundle approval {field}")
+    _require_frontend_totals(candidate.get("totals"), label="frontend bundle totals")
+    candidate_identity = _require_frontend_workflow_identity(
+        candidate.get("signature_identity"),
+        label="frontend bundle candidate signature identity",
+        pattern=FRONTEND_CANDIDATE_SIGNATURE_IDENTITY_PATTERN,
+    )
+    approval_identity = _require_frontend_workflow_identity(
+        approval.get("signature_identity"),
+        label="frontend bundle approval signature identity",
+        pattern=FRONTEND_APPROVAL_SIGNATURE_IDENTITY_PATTERN,
+    )
+    candidate_identity_match = FRONTEND_CANDIDATE_SIGNATURE_IDENTITY_PATTERN.fullmatch(
+        candidate_identity
+    )
+    approval_identity_match = FRONTEND_APPROVAL_SIGNATURE_IDENTITY_PATTERN.fullmatch(
+        approval_identity
+    )
+    assert candidate_identity_match is not None
+    assert approval_identity_match is not None
+    if candidate_identity_match.group("branch") != approval_identity_match.group(
+        "branch"
+    ):
+        raise EvidenceError("frontend bundle candidate and approval branches differ")
+    if candidate.get("signature_issuer") != GITHUB_ACTIONS_OIDC_ISSUER:
+        raise EvidenceError("frontend bundle candidate signature issuer is invalid")
+    if approval.get("signature_issuer") != GITHUB_ACTIONS_OIDC_ISSUER:
+        raise EvidenceError("frontend bundle approval signature issuer is invalid")
+    _require_frontend_approval_reference(approval.get("approval_reference"))
+    if approval.get("environment") != "frontend-bundle-production":
+        raise EvidenceError("frontend bundle approval environment is invalid")
+    run_id = approval.get("run_id")
+    if not isinstance(run_id, str) or re.fullmatch(r"[1-9][0-9]*", run_id) is None:
+        raise EvidenceError("frontend bundle approval run_id is invalid")
+    if not _positive_int(approval.get("run_attempt")):
+        raise EvidenceError("frontend bundle approval run_attempt is invalid")
+    return candidate, approval
+
+
+def _verify_frontend_bundle_repository_binding(
+    *,
+    candidate_source_commit: str,
+    candidate_repository_tree: str,
+    frontend_tree: str,
+    source_commit: str,
+    repository_root: Path,
+) -> None:
+    try:
+        ancestor = subprocess.run(
+            (
+                "git",
+                "merge-base",
+                "--is-ancestor",
+                candidate_source_commit,
+                source_commit,
+            ),
+            cwd=repository_root,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        resolved: dict[str, str] = {}
+        for label, reference in (
+            ("candidate repository tree", f"{candidate_source_commit}^{{tree}}"),
+            (
+                "candidate frontend subtree",
+                f"{candidate_source_commit}:prototype/auris-flow-ui",
+            ),
+            ("release frontend subtree", f"{source_commit}:prototype/auris-flow-ui"),
+        ):
+            resolved[label] = subprocess.run(
+                ("git", "rev-parse", "--verify", reference),
+                cwd=repository_root,
+                check=True,
+                capture_output=True,
+                text=True,
+            ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise EvidenceError(
+            "unable to verify frontend bundle repository binding"
+        ) from exc
+    if ancestor.returncode != 0:
+        raise EvidenceError(
+            "frontend bundle candidate source commit is not an ancestor of the release"
+        )
+    if resolved["candidate repository tree"] != candidate_repository_tree:
+        raise EvidenceError(
+            "frontend bundle candidate repository tree does not match Git"
+        )
+    if resolved["candidate frontend subtree"] != frontend_tree:
+        raise EvidenceError(
+            "frontend bundle candidate frontend subtree does not match Git"
+        )
+    if resolved["release frontend subtree"] != frontend_tree:
+        raise EvidenceError(
+            "frontend bundle release frontend subtree changed after the candidate"
+        )
+
+
+def _validate_frontend_bundle(
+    payload: dict[str, Any],
+    *,
+    source_commit: str,
+    repository_root: Path,
+    check_repository_binding: bool,
+) -> None:
+    filename = "frontend-bundle.json"
+    _require_exact_fields(
+        payload,
+        filename=filename,
+        fields=frozenset(
+            {
+                "approval_artifact_digest",
+                "approval_artifact_ref",
+                "approval_reference",
+                "approval_signature_identity",
+                "approval_signature_issuer",
+                "approval_statement_sha256",
+                "artifact_digest",
+                "artifact_ref",
+                "brotli_manifest_sha256",
+                "build_workflow_sha",
+                "bundle_report_sha256",
+                "candidate_repository_tree",
+                "candidate_sha256",
+                "candidate_source_commit",
+                "dist_inventory_sha256",
+                "frontend_tree",
+                "kind",
+                "lock_sha256",
+                "package_lock_sha256",
+                "promotion_workflow_sha",
+                "rebuild_evidence_sha256",
+                "schema_version",
+                "signature_identity",
+                "signature_issuer",
+                "source_commit",
+                "status",
+                "totals",
+                "verified_checks",
+                "vite_manifest_sha256",
+            }
+        ),
+    )
+    _require_common(
+        payload,
+        filename=filename,
+        schema_version="auris.frontend-bundle-evidence.v1",
+        source_commit=source_commit,
+    )
+    if payload.get("kind") != "auris-flow-frontend-bundle-evidence":
+        raise EvidenceError(f"{filename} kind is invalid")
+
+    candidate_reference = payload.get("artifact_ref")
+    candidate_match = (
+        FRONTEND_CANDIDATE_OCI_REF_PATTERN.fullmatch(candidate_reference)
+        if isinstance(candidate_reference, str)
+        else None
+    )
+    if candidate_match is None:
+        raise EvidenceError(f"{filename} candidate artifact reference is invalid")
+    approval_reference = payload.get("approval_artifact_ref")
+    approval_match = (
+        FRONTEND_APPROVAL_OCI_REF_PATTERN.fullmatch(approval_reference)
+        if isinstance(approval_reference, str)
+        else None
+    )
+    if approval_match is None:
+        raise EvidenceError(f"{filename} approval artifact reference is invalid")
+    if payload.get("artifact_digest") != candidate_match.group("digest"):
+        raise EvidenceError(f"{filename} candidate artifact digest is invalid")
+    if payload.get("approval_artifact_digest") != approval_match.group("digest"):
+        raise EvidenceError(f"{filename} approval artifact digest is invalid")
+    _require_frontend_workflow_identity(
+        payload.get("signature_identity"),
+        label=f"{filename} candidate signature identity",
+        pattern=FRONTEND_CANDIDATE_SIGNATURE_IDENTITY_PATTERN,
+    )
+    _require_frontend_workflow_identity(
+        payload.get("approval_signature_identity"),
+        label=f"{filename} approval signature identity",
+        pattern=FRONTEND_APPROVAL_SIGNATURE_IDENTITY_PATTERN,
+    )
+    if payload.get("signature_issuer") != GITHUB_ACTIONS_OIDC_ISSUER:
+        raise EvidenceError(f"{filename} candidate signature issuer is invalid")
+    if payload.get("approval_signature_issuer") != GITHUB_ACTIONS_OIDC_ISSUER:
+        raise EvidenceError(f"{filename} approval signature issuer is invalid")
+    for field in (
+        "approval_statement_sha256",
+        "brotli_manifest_sha256",
+        "bundle_report_sha256",
+        "candidate_sha256",
+        "dist_inventory_sha256",
+        "lock_sha256",
+        "package_lock_sha256",
+        "rebuild_evidence_sha256",
+        "vite_manifest_sha256",
+    ):
+        _require_sha256(payload.get(field), label=f"{filename} {field}")
+    for field in (
+        "build_workflow_sha",
+        "candidate_repository_tree",
+        "candidate_source_commit",
+        "frontend_tree",
+        "promotion_workflow_sha",
+    ):
+        _require_frontend_git_object(payload.get(field), label=f"{filename} {field}")
+    _require_frontend_approval_reference(payload.get("approval_reference"))
+    _require_frontend_totals(payload.get("totals"), label=f"{filename} totals")
+    verified_checks = payload.get("verified_checks")
+    if (
+        not isinstance(verified_checks, list)
+        or len(verified_checks) != len(FRONTEND_BUNDLE_VERIFIED_CHECKS)
+        or set(verified_checks) != FRONTEND_BUNDLE_VERIFIED_CHECKS
+        or not all(isinstance(item, str) for item in verified_checks)
+    ):
+        raise EvidenceError(f"{filename} verified_checks are incomplete")
+
+    lock_path = repository_root / "production/frontend/frontend-bundle.lock.json"
+    lock, lock_raw = _load_json_object(lock_path)
+    candidate, approval = validate_frontend_bundle_lock(lock)
+    if payload.get("lock_sha256") != _sha256_bytes(lock_raw):
+        raise EvidenceError(f"{filename} lock_sha256 does not match committed lock")
+    candidate_bindings = {
+        "artifact_ref": "artifact_ref",
+        "brotli_manifest_sha256": "brotli_manifest_sha256",
+        "build_workflow_sha": "build_workflow_sha",
+        "bundle_report_sha256": "bundle_report_sha256",
+        "candidate_repository_tree": "repository_tree",
+        "candidate_sha256": "candidate_sha256",
+        "candidate_source_commit": "source_commit",
+        "dist_inventory_sha256": "dist_inventory_sha256",
+        "frontend_tree": "frontend_tree",
+        "package_lock_sha256": "package_lock_sha256",
+        "signature_identity": "signature_identity",
+        "signature_issuer": "signature_issuer",
+        "totals": "totals",
+        "vite_manifest_sha256": "vite_manifest_sha256",
+    }
+    for evidence_field, lock_field in candidate_bindings.items():
+        if payload.get(evidence_field) != candidate.get(lock_field):
+            raise EvidenceError(
+                f"{filename} {evidence_field} does not match committed lock"
+            )
+    approval_bindings = {
+        "approval_artifact_ref": "artifact_ref",
+        "approval_reference": "approval_reference",
+        "approval_signature_identity": "signature_identity",
+        "approval_signature_issuer": "signature_issuer",
+        "approval_statement_sha256": "statement_sha256",
+        "promotion_workflow_sha": "promotion_workflow_sha",
+        "rebuild_evidence_sha256": "rebuild_evidence_sha256",
+    }
+    for evidence_field, lock_field in approval_bindings.items():
+        if payload.get(evidence_field) != approval.get(lock_field):
+            raise EvidenceError(
+                f"{filename} {evidence_field} does not match committed lock"
+            )
+    package_lock_raw = _read_regular_bytes(
+        repository_root / "prototype/auris-flow-ui/package-lock.json"
+    )
+    if candidate.get("package_lock_sha256") != _sha256_bytes(package_lock_raw):
+        raise EvidenceError(
+            f"{filename} package_lock_sha256 does not match committed package lock"
+        )
+    if check_repository_binding:
+        _verify_frontend_bundle_repository_binding(
+            candidate_source_commit=str(candidate["source_commit"]),
+            candidate_repository_tree=str(candidate["repository_tree"]),
+            frontend_tree=str(candidate["frontend_tree"]),
+            source_commit=source_commit,
+            repository_root=repository_root,
+        )
+
+
 def _validate_real_stack(payload: dict[str, Any], *, source_commit: str) -> None:
     filename = "real-stack-gate.json"
     _require_exact_fields(
@@ -1598,11 +2083,21 @@ def _validate_core_evidence(
     *,
     source_commit: str,
     repository_root: Path,
+    check_repository_binding: bool,
 ) -> tuple[dict[str, bytes], SupplyExpectations]:
     verified_bytes: dict[str, bytes] = {}
     clean_clone, raw = _load_json_object(evidence_dir / "clean-clone.json")
     verified_bytes["clean-clone.json"] = raw
     _validate_clean_clone(clean_clone, source_commit=source_commit)
+
+    frontend_bundle, raw = _load_json_object(evidence_dir / "frontend-bundle.json")
+    verified_bytes["frontend-bundle.json"] = raw
+    _validate_frontend_bundle(
+        frontend_bundle,
+        source_commit=source_commit,
+        repository_root=repository_root,
+        check_repository_binding=check_repository_binding,
+    )
 
     visual, raw = _load_json_object(evidence_dir / "visual-regression.json")
     verified_bytes["visual-regression.json"] = raw
@@ -1935,6 +2430,7 @@ def finalize_release_evidence(
         evidence_dir,
         source_commit=normalized_commit,
         repository_root=repository_root,
+        check_repository_binding=check_repository_binding,
     )
     audit_documents: dict[str, tuple[dict[str, Any], bytes]] = {}
     for filename in sorted(OPTIONAL_RELEASE_EVIDENCE & names):

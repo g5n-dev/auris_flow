@@ -3,16 +3,33 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 from types import ModuleType
+from unittest.mock import patch
 
 
 SCRIPT_UNDER_TEST = Path(__file__).resolve().parents[1] / "finalize_release_evidence.py"
 SOURCE_COMMIT = "1" * 40
+CANDIDATE_SOURCE_COMMIT = "2" * 40
+CANDIDATE_REPOSITORY_TREE = "3" * 40
+FRONTEND_TREE = "4" * 40
 SHA256 = "a" * 64
 TIMESTAMP = "2026-07-18T08:00:00+00:00"
+FRONTEND_BUNDLE_VERIFIED_CHECKS = [
+    "approval-cosign-signature",
+    "approval-statement-binding",
+    "approved-lock",
+    "candidate-cosign-signature",
+    "candidate-lock-binding",
+    "candidate-oci-provenance",
+    "candidate-source-ancestor",
+    "current-release-build-binding",
+    "exact-candidate-payload",
+    "frontend-subtree-unchanged",
+]
 SOURCE_INPUTS = (
     "backend/uv.lock",
     "config/release/license-review-exceptions.json",
@@ -149,6 +166,65 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "version": "0.1.0",
             },
         )
+        frontend_bundle_lock = {
+            "approval": {
+                "approval_reference": "CAB-2026-0718",
+                "artifact_ref": (
+                    "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval"
+                    f"@sha256:{SHA256}"
+                ),
+                "environment": "frontend-bundle-production",
+                "promotion_workflow_sha": CANDIDATE_SOURCE_COMMIT,
+                "rebuild_evidence_sha256": SHA256,
+                "run_attempt": 1,
+                "run_id": "123456789",
+                "signature_identity": (
+                    "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                    "frontend-bundle-promotion.yml@refs/heads/main"
+                ),
+                "signature_issuer": "https://token.actions.githubusercontent.com",
+                "statement_sha256": SHA256,
+            },
+            "candidate": {
+                "artifact_ref": (
+                    "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate"
+                    f"@sha256:{SHA256}"
+                ),
+                "brotli_manifest_sha256": SHA256,
+                "build_workflow_sha": CANDIDATE_SOURCE_COMMIT,
+                "bundle_report_sha256": SHA256,
+                "candidate_sha256": SHA256,
+                "dist_inventory_sha256": SHA256,
+                "frontend_tree": FRONTEND_TREE,
+                "package_lock_sha256": hashlib.sha256(
+                    (
+                        self.repository / "prototype/auris-flow-ui/package-lock.json"
+                    ).read_bytes()
+                ).hexdigest(),
+                "repository_tree": CANDIDATE_REPOSITORY_TREE,
+                "signature_identity": (
+                    "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                    "frontend-bundle-candidate.yml@refs/heads/main"
+                ),
+                "signature_issuer": "https://token.actions.githubusercontent.com",
+                "source_commit": CANDIDATE_SOURCE_COMMIT,
+                "totals": {
+                    "allBrotliBytes": 461_776,
+                    "allRawBytes": 2_233_037,
+                    "jsBrotliBytes": 298_925,
+                    "jsRawBytes": 1_124_550,
+                },
+                "vite_manifest_sha256": SHA256,
+            },
+            "kind": "auris-flow-frontend-bundle-lock",
+            "reason": "Dual-signed immutable frontend bundle approval.",
+            "schema_version": 3,
+            "status": "APPROVED",
+        }
+        frontend_bundle_lock_path = (
+            self.repository / "production/frontend/frontend-bundle.lock.json"
+        )
+        _write_json(frontend_bundle_lock_path, frontend_bundle_lock)
 
         supply_artifacts = {
             "backend-python.cdx.json": {
@@ -310,6 +386,46 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "signature_issuer": "https://token.actions.githubusercontent.com",
                 "source_commit": SOURCE_COMMIT,
                 "status": "ok",
+            },
+        )
+        candidate = frontend_bundle_lock["candidate"]
+        approval = frontend_bundle_lock["approval"]
+        assert isinstance(candidate, dict)
+        assert isinstance(approval, dict)
+        _write_json(
+            self.evidence / "frontend-bundle.json",
+            {
+                "approval_artifact_digest": f"sha256:{SHA256}",
+                "approval_artifact_ref": approval["artifact_ref"],
+                "approval_reference": approval["approval_reference"],
+                "approval_signature_identity": approval["signature_identity"],
+                "approval_signature_issuer": approval["signature_issuer"],
+                "approval_statement_sha256": approval["statement_sha256"],
+                "artifact_digest": f"sha256:{SHA256}",
+                "artifact_ref": candidate["artifact_ref"],
+                "brotli_manifest_sha256": candidate["brotli_manifest_sha256"],
+                "build_workflow_sha": candidate["build_workflow_sha"],
+                "bundle_report_sha256": candidate["bundle_report_sha256"],
+                "candidate_repository_tree": candidate["repository_tree"],
+                "candidate_sha256": candidate["candidate_sha256"],
+                "candidate_source_commit": candidate["source_commit"],
+                "dist_inventory_sha256": candidate["dist_inventory_sha256"],
+                "frontend_tree": candidate["frontend_tree"],
+                "kind": "auris-flow-frontend-bundle-evidence",
+                "lock_sha256": hashlib.sha256(
+                    frontend_bundle_lock_path.read_bytes()
+                ).hexdigest(),
+                "package_lock_sha256": candidate["package_lock_sha256"],
+                "promotion_workflow_sha": approval["promotion_workflow_sha"],
+                "rebuild_evidence_sha256": approval["rebuild_evidence_sha256"],
+                "schema_version": "auris.frontend-bundle-evidence.v1",
+                "signature_identity": candidate["signature_identity"],
+                "signature_issuer": candidate["signature_issuer"],
+                "source_commit": SOURCE_COMMIT,
+                "status": "ok",
+                "totals": candidate["totals"],
+                "verified_checks": FRONTEND_BUNDLE_VERIFIED_CHECKS,
+                "vite_manifest_sha256": candidate["vite_manifest_sha256"],
             },
         )
         _write_json(
@@ -568,9 +684,195 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         paths = [item["path"] for item in artifacts]
         self.assertEqual(sorted(paths), paths)
         self.assertNotIn("release-gate-manifest.json", paths)
+        self.assertIn("frontend-bundle.json", paths)
         self.assertIn("product-dagster-gate.json", paths)
         self.assertIn("production-path-gate.json", paths)
         self.assertEqual(len(paths), result["artifact_count"])
+
+    def test_frontend_bundle_evidence_and_dual_signed_lock_are_mandatory(self) -> None:
+        (self.evidence / "frontend-bundle.json").unlink()
+        with self.assertRaisesRegex(self.module.EvidenceError, "frontend-bundle.json"):
+            self._finalize()
+
+        self._write_valid_fixture()
+        lock_path = self.repository / "production/frontend/frontend-bundle.lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        lock["approval"]["unexpected"] = "not allowed"
+        _write_json(lock_path, lock)
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "frontend bundle approval fields"
+        ):
+            self._finalize()
+
+    def test_frontend_bundle_evidence_binds_both_signed_artifacts_and_lock(
+        self,
+    ) -> None:
+        path = self.evidence / "frontend-bundle.json"
+        cases = (
+            ("lock_sha256", "b" * 64, "lock_sha256"),
+            ("candidate_sha256", "b" * 64, "candidate_sha256"),
+            (
+                "approval_artifact_ref",
+                f"ghcr.io/attacker/evil/frontend-bundle-approval@sha256:{SHA256}",
+                "approval artifact",
+            ),
+            (
+                "approval_signature_identity",
+                "https://github.com/attacker/evil/.github/workflows/"
+                "frontend-bundle-promotion.yml@refs/heads/main",
+                "approval signature identity",
+            ),
+        )
+        for field, value, message in cases:
+            with self.subTest(field=field):
+                self._write_valid_fixture()
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload[field] = value
+                _write_json(path, payload)
+                with self.assertRaisesRegex(self.module.EvidenceError, message):
+                    self._finalize()
+
+    def test_frontend_bundle_rejects_malformed_lock_and_incomplete_proof(self) -> None:
+        lock_path = self.repository / "production/frontend/frontend-bundle.lock.json"
+        lock_cases = (
+            (
+                "candidate artifact",
+                "candidate",
+                "artifact_ref",
+                f"ghcr.io/attacker/evil/frontend-bundle-candidate@sha256:{SHA256}",
+                "candidate artifact",
+            ),
+            (
+                "build workflow",
+                "candidate",
+                "build_workflow_sha",
+                "9" * 40,
+                "build_workflow_sha",
+            ),
+            (
+                "approval environment",
+                "approval",
+                "environment",
+                "unprotected",
+                "approval environment",
+            ),
+            (
+                "approval run id",
+                "approval",
+                "run_id",
+                "0",
+                "run_id",
+            ),
+            (
+                "approval branch",
+                "approval",
+                "signature_identity",
+                "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                "frontend-bundle-promotion.yml@refs/heads/release/other",
+                "branches differ",
+            ),
+        )
+        for label, section, field, value, message in lock_cases:
+            with self.subTest(label=label):
+                self._write_valid_fixture()
+                lock = json.loads(lock_path.read_text(encoding="utf-8"))
+                lock[section][field] = value
+                _write_json(lock_path, lock)
+                with self.assertRaisesRegex(self.module.EvidenceError, message):
+                    self._finalize()
+
+        self._write_valid_fixture()
+        evidence_path = self.evidence / "frontend-bundle.json"
+        evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+        evidence["verified_checks"] = evidence["verified_checks"][:-1]
+        _write_json(evidence_path, evidence)
+        with self.assertRaisesRegex(self.module.EvidenceError, "verified_checks"):
+            self._finalize()
+
+        self._write_valid_fixture()
+        package_lock = self.repository / "prototype/auris-flow-ui/package-lock.json"
+        package_lock.write_text("{}\n", encoding="utf-8")
+        with self.assertRaisesRegex(self.module.EvidenceError, "package_lock_sha256"):
+            self._finalize()
+
+    def test_frontend_bundle_repository_binding_allows_only_lock_only_descendants(
+        self,
+    ) -> None:
+        payload = json.loads(
+            (self.evidence / "frontend-bundle.json").read_text(encoding="utf-8")
+        )
+
+        def git_result(
+            arguments: tuple[str, ...], **_: object
+        ) -> subprocess.CompletedProcess[str]:
+            if arguments[:3] == ("git", "merge-base", "--is-ancestor"):
+                return subprocess.CompletedProcess(arguments, 0, "", "")
+            refs = {
+                f"{CANDIDATE_SOURCE_COMMIT}^{{tree}}": CANDIDATE_REPOSITORY_TREE,
+                f"{CANDIDATE_SOURCE_COMMIT}:prototype/auris-flow-ui": FRONTEND_TREE,
+                f"{SOURCE_COMMIT}:prototype/auris-flow-ui": FRONTEND_TREE,
+            }
+            if arguments[:3] == ("git", "rev-parse", "--verify"):
+                return subprocess.CompletedProcess(
+                    arguments, 0, refs[arguments[3]] + "\n", ""
+                )
+            raise AssertionError(arguments)
+
+        with patch.object(self.module.subprocess, "run", side_effect=git_result):
+            self.module._validate_frontend_bundle(
+                payload,
+                source_commit=SOURCE_COMMIT,
+                repository_root=self.repository,
+                check_repository_binding=True,
+            )
+
+        def changed_frontend_result(
+            arguments: tuple[str, ...], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            result = git_result(arguments, **kwargs)
+            if arguments == (
+                "git",
+                "rev-parse",
+                "--verify",
+                f"{SOURCE_COMMIT}:prototype/auris-flow-ui",
+            ):
+                return subprocess.CompletedProcess(arguments, 0, "9" * 40 + "\n", "")
+            return result
+
+        with (
+            patch.object(
+                self.module.subprocess, "run", side_effect=changed_frontend_result
+            ),
+            self.assertRaisesRegex(
+                self.module.EvidenceError, "frontend subtree changed"
+            ),
+        ):
+            self.module._validate_frontend_bundle(
+                payload,
+                source_commit=SOURCE_COMMIT,
+                repository_root=self.repository,
+                check_repository_binding=True,
+            )
+
+        def non_ancestor_result(
+            arguments: tuple[str, ...], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            if arguments[:3] == ("git", "merge-base", "--is-ancestor"):
+                return subprocess.CompletedProcess(arguments, 1, "", "")
+            return git_result(arguments, **kwargs)
+
+        with (
+            patch.object(
+                self.module.subprocess, "run", side_effect=non_ancestor_result
+            ),
+            self.assertRaisesRegex(self.module.EvidenceError, "not an ancestor"),
+        ):
+            self.module._validate_frontend_bundle(
+                payload,
+                source_commit=SOURCE_COMMIT,
+                repository_root=self.repository,
+                check_repository_binding=True,
+            )
 
     def test_visual_evidence_binds_workflow_commit_to_baseline_source(self) -> None:
         path = self.evidence / "visual-regression.json"

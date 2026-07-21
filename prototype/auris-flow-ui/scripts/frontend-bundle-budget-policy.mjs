@@ -1,8 +1,8 @@
 export const frontendBundleBudgetPolicy = Object.freeze({
-  schemaVersion: 2,
+  schemaVersion: 3,
   auditedAt: "2026-07-20",
   rationale:
-    "以 8e009d9 已审计构建为量化参照，登记当前 647fb5c 基础工作树上 Scene 锁、Data/Assets 权威投影与质量重跑闭环后的确定性生产构建总量；检查器要求产物与候选快照精确一致，预算只保留约 1% 缓冲。",
+    "以 8e009d9 已审计构建为量化参照；接受的确定性生产构建快照由 production/frontend/frontend-bundle.lock.json 独立锁定，预算只保留约 1% 缓冲。",
   referenceAudit: Object.freeze({
     id: "frontend-decomposition/final-2026-07-18",
     totals: Object.freeze({
@@ -21,8 +21,9 @@ export const frontendBundleBudgetPolicy = Object.freeze({
       allBrotliBytes: 456_212
     })
   }),
-  auditedCandidate: Object.freeze({
-    sourceBaseCommit: "647fb5c7e7fb1cc600917be38385166004b9b552",
+  comparisonSnapshot: Object.freeze({
+    status: "LEGACY_REFERENCE",
+    sourceCommit: "647fb5c7e7fb1cc600917be38385166004b9b552",
     comparisonBaselineCommit: "8e009d971b3ca91f72287ee3c2529399740e1147",
     scope: "scene-data-assets-authoritative-bff-closure",
     totals: Object.freeze({

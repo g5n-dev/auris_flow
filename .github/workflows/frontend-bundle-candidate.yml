@@ -1,0 +1,291 @@
+name: Build signed frontend bundle candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_commit:
+        description: Exact default-branch commit to build from the npm lock
+        required: true
+        type: string
+
+concurrency:
+  group: frontend-bundle-candidate-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-candidate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_commit }}
+
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: prototype/auris-flow-ui/package-lock.json
+
+      - name: Bind the unprivileged build to the reviewed default-branch tip
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SOURCE_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "Frontend bundle candidates must be dispatched from the default branch." >&2
+            exit 2
+          fi
+          if ! [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_commit must be an exact 40-character Git object id." >&2
+            exit 2
+          fi
+          if [ "$(git rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
+            echo "checkout does not match source_commit." >&2
+            exit 2
+          fi
+          default_tip="$(git rev-parse --verify "refs/remotes/origin/$DEFAULT_BRANCH")"
+          if [ "$SOURCE_COMMIT" != "$default_tip" ]; then
+            echo "source_commit must equal the reviewed default-branch tip." >&2
+            exit 2
+          fi
+          if [ "$WORKFLOW_SOURCE_COMMIT" != "$SOURCE_COMMIT" ]; then
+            echo "the executing workflow definition must come from source_commit." >&2
+            exit 2
+          fi
+          expected_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-candidate.yml@refs/heads/$DEFAULT_BRANCH"
+          actual_identity="https://github.com/$GITHUB_WORKFLOW_REF"
+          if [ "$actual_identity" != "$expected_identity" ]; then
+            echo "candidate workflow identity is not the default-branch identity." >&2
+            exit 2
+          fi
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Install locked frontend dependencies and build without signing authority
+        run: |
+          npm ci --ignore-scripts --prefix prototype/auris-flow-ui
+          npm run build --prefix prototype/auris-flow-ui
+
+      - name: Generate and verify deterministic PENDING_REVIEW evidence
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+        run: |
+          node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs generate \
+            --source-commit "$SOURCE_COMMIT" \
+            --output "$GITHUB_WORKSPACE/build/frontend-bundle-candidate"
+          node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs verify \
+            --candidate-dir "$GITHUB_WORKSPACE/build/frontend-bundle-candidate"
+          git diff --exit-code -- .
+
+      - id: upload-candidate
+        name: Transfer the verified candidate to the isolated publisher
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frontend-bundle-candidate-input-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: build/frontend-bundle-candidate/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-signed-candidate:
+    needs: build-candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Repository administrators must configure required reviewers. Naming this
+    # environment in YAML is not evidence that hosted protection exists.
+    # Once configured, it protects the only job that can publish or request OIDC.
+    environment: frontend-bundle-build
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+
+    steps:
+      # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: frontend-bundle-candidate-input-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: build/frontend-bundle-candidate
+
+      - name: Verify the transferred files without executing repository code
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SOURCE_COMMIT: ${{ github.workflow_sha }}
+        run: |
+          candidate_dir="$GITHUB_WORKSPACE/build/frontend-bundle-candidate"
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "Candidate publication must run from the default branch." >&2
+            exit 2
+          fi
+          if ! [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [ "$WORKFLOW_SOURCE_COMMIT" != "$SOURCE_COMMIT" ]; then
+            echo "candidate publisher is not bound to the source workflow commit." >&2
+            exit 2
+          fi
+          expected_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-candidate.yml@refs/heads/$DEFAULT_BRANCH"
+          if [ "https://github.com/$GITHUB_WORKFLOW_REF" != "$expected_identity" ]; then
+            echo "candidate publisher workflow identity is invalid." >&2
+            exit 2
+          fi
+          mapfile -t actual_entries < <(
+            find "$candidate_dir" -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort
+          )
+          expected_entries=(
+            SHA256SUMS
+            brotli-manifest.json
+            bundle-report.json
+            candidate.json
+            dist-inventory.json
+            vite-manifest.json
+          )
+          if [ "${actual_entries[*]}" != "${expected_entries[*]}" ]; then
+            echo "candidate transfer contains unexpected entries: ${actual_entries[*]}" >&2
+            exit 1
+          fi
+          if find "$candidate_dir" -mindepth 1 -maxdepth 1 \! -type f -print -quit | grep -q .; then
+            echo "candidate transfer contains a non-regular entry." >&2
+            exit 1
+          fi
+          if find "$candidate_dir" -mindepth 1 -maxdepth 1 -type f -links +1 -print -quit | grep -q .; then
+            echo "candidate transfer contains a hard-linked entry." >&2
+            exit 1
+          fi
+          (
+            cd "$candidate_dir"
+            sha256sum --check --strict SHA256SUMS
+            for document in candidate.json bundle-report.json vite-manifest.json brotli-manifest.json dist-inventory.json; do
+              jq --sort-keys . "$document" > "$document.canonical"
+              cmp --silent "$document" "$document.canonical" || {
+                echo "$document is not canonical JSON." >&2
+                exit 1
+              }
+              rm "$document.canonical"
+            done
+          )
+          jq -e \
+            --arg source_commit "$SOURCE_COMMIT" \
+            '.schema_version == "auris.frontend-bundle-candidate.v1" and
+             .kind == "auris-flow-frontend-bundle-candidate" and
+             .status == "PENDING_REVIEW" and
+             .source.commit == $source_commit and
+             (.source.repository_tree | test("^[0-9a-f]{40}$")) and
+             (.source.frontend_tree | test("^[0-9a-f]{40}$"))' \
+            "$candidate_dir/candidate.json" >/dev/null
+
+      # oras-project/setup-oras v1.2.3
+      - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
+        with:
+          version: "1.2.3"
+
+      # docker/login-action v3.4.0
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sigstore/cosign-installer v3.9.2
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+        with:
+          cosign-release: "v2.5.3"
+
+      - id: provenance
+        name: Push once, sign the returned digest, and verify exact OIDC claims
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          WORKFLOW_SOURCE_COMMIT: ${{ github.workflow_sha }}
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          repository_name="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          repository="ghcr.io/$repository_name/frontend-bundle-candidate"
+          staging_ref="$repository:source-$SOURCE_COMMIT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          candidate_dir="$GITHUB_WORKSPACE/build/frontend-bundle-candidate"
+          media_type="application/vnd.auris-flow.frontend-bundle-candidate.v1"
+          candidate_sha256="$(sha256sum "$candidate_dir/candidate.json" | cut -d' ' -f1)"
+          frontend_tree="$(jq -er '.source.frontend_tree' "$candidate_dir/candidate.json")"
+          push_result="$({
+            cd "$candidate_dir"
+            oras push "$staging_ref" \
+              --format json \
+              --artifact-type "$media_type" \
+              --annotation "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+              --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --annotation "org.opencontainers.image.title=Auris Flow frontend bundle candidate" \
+              --annotation "io.auris.frontend.candidate-sha256=$candidate_sha256" \
+              --annotation "io.auris.frontend.frontend-tree=$frontend_tree" \
+              --annotation "io.auris.frontend.job-workflow-sha=$WORKFLOW_SOURCE_COMMIT" \
+              "candidate.json:application/json" \
+              "bundle-report.json:application/json" \
+              "vite-manifest.json:application/json" \
+              "brotli-manifest.json:application/json" \
+              "dist-inventory.json:application/json" \
+              "SHA256SUMS:text/plain"
+          })"
+          artifact_ref="$(jq -er \
+            --arg repository "$repository" \
+            '.reference | select(startswith($repository + "@sha256:"))' \
+            <<<"$push_result")"
+          digest="${artifact_ref#"$repository"@}"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "ORAS did not return an immutable digest for this push." >&2
+            exit 1
+          fi
+          manifest="$(oras manifest fetch "$artifact_ref")"
+          jq -e \
+            --arg media_type "$media_type" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg candidate_sha256 "$candidate_sha256" \
+            --arg frontend_tree "$frontend_tree" \
+            --arg workflow_sha "$WORKFLOW_SOURCE_COMMIT" \
+            '.artifactType == $media_type and
+             .annotations["org.opencontainers.image.revision"] == $source_commit and
+             .annotations["io.auris.frontend.candidate-sha256"] == $candidate_sha256 and
+             .annotations["io.auris.frontend.frontend-tree"] == $frontend_tree and
+             .annotations["io.auris.frontend.job-workflow-sha"] == $workflow_sha and
+             ([.layers[].annotations["org.opencontainers.image.title"]] | sort) ==
+               ["SHA256SUMS", "brotli-manifest.json", "bundle-report.json", "candidate.json", "dist-inventory.json", "vite-manifest.json"]' \
+            <<<"$manifest" >/dev/null
+          signature_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-candidate.yml@refs/heads/$DEFAULT_BRANCH"
+          cosign sign --yes "$artifact_ref"
+          cosign verify "$artifact_ref" \
+            --certificate-identity "$signature_identity" \
+            --certificate-oidc-issuer "$SIGNATURE_ISSUER" \
+            --certificate-github-workflow-sha "$SOURCE_COMMIT" \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-ref "refs/heads/$DEFAULT_BRANCH" \
+            --certificate-github-workflow-trigger workflow_dispatch
+          mkdir -p "$GITHUB_WORKSPACE/build/frontend-bundle-published"
+          jq -n --sort-keys \
+            --arg artifact_ref "$artifact_ref" \
+            --arg candidate_sha256 "$candidate_sha256" \
+            --arg frontend_tree "$frontend_tree" \
+            --arg job_workflow_sha "$WORKFLOW_SOURCE_COMMIT" \
+            --arg signature_identity "$signature_identity" \
+            --arg signature_issuer "$SIGNATURE_ISSUER" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            '{artifact_ref: $artifact_ref, candidate_sha256: $candidate_sha256, frontend_tree: $frontend_tree, job_workflow_sha: $job_workflow_sha, kind: "auris-flow-frontend-bundle-build-provenance", schema_version: 2, signature_identity: $signature_identity, signature_issuer: $signature_issuer, source_commit: $source_commit, status: "signed"}' \
+            > "$GITHUB_WORKSPACE/build/frontend-bundle-published/build-provenance.json"
+          echo "artifact_ref=$artifact_ref" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the signed digest pointer and immutable candidate payload
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frontend-bundle-candidate-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: |
+            build/frontend-bundle-candidate/
+            build/frontend-bundle-published/build-provenance.json
+          if-no-files-found: error
+          retention-days: 30

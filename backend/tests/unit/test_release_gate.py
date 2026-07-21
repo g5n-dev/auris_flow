@@ -18,6 +18,24 @@ def _isolated_release_gate_repo(tmp_path: Path) -> Path:
         (ROOT / "scripts" / "verify_release.sh").read_text(encoding="utf-8"),
         encoding="utf-8",
     )
+    (scripts / "verify_frontend_bundle.mjs").write_text(
+        """\
+import { writeFileSync } from "node:fs";
+
+const args = process.argv.slice(2);
+const outputIndex = args.indexOf("--output");
+if (
+  args[0] !== "verify-release" ||
+  outputIndex < 0 ||
+  outputIndex + 1 >= args.length
+) {
+  process.stderr.write("invalid frontend bundle verifier fixture invocation\\n");
+  process.exit(2);
+}
+writeFileSync(args[outputIndex + 1], "{}\\n", "utf8");
+""",
+        encoding="utf-8",
+    )
     (repository / ".gitignore").write_text("/build/\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
     subprocess.run(

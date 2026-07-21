@@ -22,6 +22,10 @@ from verify_visual_baseline import (  # noqa: E402
     release_runtime_contract,
     validate_visual_baseline_lock,
 )
+from finalize_release_evidence import (  # noqa: E402
+    EvidenceError,
+    validate_frontend_bundle_lock,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -622,9 +626,20 @@ RELEASE_REQUIRED_TRACKED_PATHS = (
     "production/visual/runtime.mjs",
     "production/visual/seed-overlay.json",
     "production/visual/visual-baseline.lock.json",
+    "production/frontend/frontend-bundle.lock.json",
     ".github/workflows/visual-baseline-build.yml",
     ".github/workflows/visual-baseline-promotion.yml",
+    ".github/workflows/frontend-bundle-candidate.yml",
+    ".github/workflows/frontend-bundle-promotion.yml",
+    "prototype/auris-flow-ui/scripts/frontend-bundle-candidate.mjs",
+    "prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs",
+    "prototype/auris-flow-ui/scripts/frontend-bundle-lock.mjs",
+    "prototype/auris-flow-ui/scripts/frontend-bundle-candidate.test.mjs",
+    "prototype/auris-flow-ui/scripts/frontend-bundle-lock.test.mjs",
+    "scripts/verify_frontend_bundle.mjs",
+    "scripts/verify_frontend_bundle.test.mjs",
     "scripts/promote_visual_baseline.sh",
+    "scripts/tests/test_frontend_bundle_readiness.py",
     "scripts/tests/test_verify_clean_clone.py",
     "scripts/tests/test_finalize_release_evidence.py",
     "scripts/tests/test_release_authorization.py",
@@ -722,6 +737,20 @@ def is_release_artifact(path: str) -> bool:
 
 def tracked_release_artifacts() -> list[str]:
     return [path for path in git_tracked_files() if is_release_artifact(path)]
+
+
+def validate_frontend_bundle_release_lock(lock: object) -> list[str]:
+    if not isinstance(lock, dict):
+        return ["frontend bundle lock must be an object"]
+    if lock.get("status") != "APPROVED":
+        return [
+            "status is PENDING; no independently approved immutable candidate exists"
+        ]
+    try:
+        validate_frontend_bundle_lock(lock)
+    except EvidenceError as error:
+        return [str(error)]
+    return []
 
 
 def validate_release_authorization(root: Path = ROOT) -> list[str]:
@@ -918,6 +947,27 @@ def run_release_checks() -> list[ReadinessResult]:
     tree_failures.extend(
         f"visual baseline lock: {failure}" for failure in visual_lock_failures
     )
+    frontend_lock_path = ROOT / "production/frontend/frontend-bundle.lock.json"
+    try:
+        frontend_lock = json.loads(frontend_lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        tree_failures.append(f"frontend bundle lock: unable to read lock: {error}")
+    else:
+        tree_failures.extend(
+            f"frontend bundle lock: {failure}"
+            for failure in validate_frontend_bundle_release_lock(frontend_lock)
+        )
+    verify_release_text = (ROOT / "scripts/verify_release.sh").read_text(
+        encoding="utf-8"
+    )
+    if verify_release_text.count("verify_frontend_bundle.mjs verify-release") != 1:
+        tree_failures.append(
+            "strict release gate must invoke frontend bundle online verification once"
+        )
+    if "frontend-bundle.json" not in verify_release_text:
+        tree_failures.append(
+            "strict release gate does not produce frontend bundle evidence"
+        )
     for path in sorted(untracked_files):
         tree_failures.append(f"untracked release source would be omitted: {path}")
     for path in sorted(unstaged_files):

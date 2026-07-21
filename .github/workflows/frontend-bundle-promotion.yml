@@ -1,0 +1,522 @@
+name: Promote frontend bundle pointer
+
+permissions:
+  contents: read
+  packages: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      artifact_ref:
+        description: Immutable signed GHCR candidate (ghcr.io/...@sha256:...)
+        required: true
+        type: string
+      source_commit:
+        description: Exact default-branch commit used to build the candidate
+        required: true
+        type: string
+      approval_reference:
+        description: Human change-control reference from protected review
+        required: true
+        type: string
+
+concurrency:
+  group: frontend-bundle-promotion-${{ inputs.source_commit }}
+  cancel-in-progress: false
+
+jobs:
+  rebuild-verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      packages: read
+
+    steps:
+      # actions/checkout v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ inputs.source_commit }}
+
+      # actions/setup-node v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: prototype/auris-flow-ui/package-lock.json
+
+      - name: Bind the unprivileged rebuild to the reviewed default-branch tip
+        env:
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROMOTION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+        run: |
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]; then
+            echo "Frontend bundle promotion must be dispatched from the default branch." >&2
+            exit 2
+          fi
+          if ! [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "source_commit must be an exact 40-character Git object id." >&2
+            exit 2
+          fi
+          if [ "$(git rev-parse HEAD)" != "$SOURCE_COMMIT" ]; then
+            echo "promotion checkout does not match source_commit." >&2
+            exit 2
+          fi
+          default_tip="$(git rev-parse --verify "refs/remotes/origin/$DEFAULT_BRANCH")"
+          if [ "$SOURCE_COMMIT" != "$default_tip" ]; then
+            echo "promotion source must equal the reviewed default-branch tip." >&2
+            exit 2
+          fi
+          if [ "$PROMOTION_WORKFLOW_SHA" != "$SOURCE_COMMIT" ]; then
+            echo "the executing promotion workflow must come from source_commit." >&2
+            exit 2
+          fi
+          expected_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-promotion.yml@refs/heads/$DEFAULT_BRANCH"
+          if [ "https://github.com/$GITHUB_WORKFLOW_REF" != "$expected_identity" ]; then
+            echo "promotion workflow identity is not the default-branch identity." >&2
+            exit 2
+          fi
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Rebuild the exact frontend candidate without publication authority
+        run: |
+          npm ci --ignore-scripts --prefix prototype/auris-flow-ui
+          npm run build --prefix prototype/auris-flow-ui
+
+      # oras-project/setup-oras v1.2.3
+      - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
+        with:
+          version: "1.2.3"
+
+      # docker/login-action v3.4.0
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sigstore/cosign-installer v3.9.2
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+        with:
+          cosign-release: "v2.5.3"
+
+      - name: Verify candidate signature, OCI provenance, and byte-identical rebuild
+        env:
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          repository_name="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          expected_repository="ghcr.io/$repository_name/frontend-bundle-candidate"
+          if [ "${ARTIFACT_REF#"$expected_repository"@sha256:}" = "$ARTIFACT_REF" ]; then
+            echo "candidate must be an immutable digest in the official GHCR repository." >&2
+            exit 2
+          fi
+          artifact_digest="${ARTIFACT_REF#"$expected_repository"@sha256:}"
+          if ! [[ "$artifact_digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "candidate artifact digest is invalid." >&2
+            exit 2
+          fi
+          signature_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-candidate.yml@refs/heads/$DEFAULT_BRANCH"
+          cosign verify "$ARTIFACT_REF" \
+            --certificate-identity "$signature_identity" \
+            --certificate-oidc-issuer "$SIGNATURE_ISSUER" \
+            --certificate-github-workflow-sha "$SOURCE_COMMIT" \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-ref "refs/heads/$DEFAULT_BRANCH" \
+            --certificate-github-workflow-trigger workflow_dispatch
+          manifest="$(oras manifest fetch "$ARTIFACT_REF")"
+          media_type="application/vnd.auris-flow.frontend-bundle-candidate.v1"
+          candidate_sha256="$(jq -er '.annotations["io.auris.frontend.candidate-sha256"] | select(test("^[0-9a-f]{64}$"))' <<<"$manifest")"
+          frontend_tree="$(jq -er '.annotations["io.auris.frontend.frontend-tree"] | select(test("^[0-9a-f]{40}$"))' <<<"$manifest")"
+          jq -e \
+            --arg media_type "$media_type" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg workflow_sha "$SOURCE_COMMIT" \
+            '.artifactType == $media_type and
+             .annotations["org.opencontainers.image.revision"] == $source_commit and
+             .annotations["io.auris.frontend.job-workflow-sha"] == $workflow_sha and
+             ([.layers[].annotations["org.opencontainers.image.title"]] | sort) ==
+               ["SHA256SUMS", "brotli-manifest.json", "bundle-report.json", "candidate.json", "dist-inventory.json", "vite-manifest.json"]' \
+            <<<"$manifest" >/dev/null
+          candidate_dir="$GITHUB_WORKSPACE/build/frontend-bundle-promotion-candidate"
+          mkdir -p "$candidate_dir"
+          oras pull "$ARTIFACT_REF" --output "$candidate_dir"
+          verified="$({
+            node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs verify \
+              --candidate-dir "$candidate_dir"
+          })"
+          if [ "$(jq -er '.candidate_sha256' <<<"$verified")" != "$candidate_sha256" ]; then
+            echo "candidate payload hash does not match signed OCI provenance." >&2
+            exit 1
+          fi
+          if [ "$(jq -er '.source.frontend_tree' "$candidate_dir/candidate.json")" != "$frontend_tree" ]; then
+            echo "candidate frontend tree does not match signed OCI provenance." >&2
+            exit 1
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild"
+          jq -n --sort-keys \
+            --arg artifact_ref "$ARTIFACT_REF" \
+            --arg candidate_sha256 "$candidate_sha256" \
+            --arg signature_identity "$signature_identity" \
+            --arg signature_issuer "$SIGNATURE_ISSUER" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --slurpfile candidate "$candidate_dir/candidate.json" \
+            --slurpfile inventory "$candidate_dir/dist-inventory.json" \
+            '{
+              schema_version: "auris.frontend-bundle-rebuild-verification.v1",
+              kind: "auris-flow-frontend-bundle-rebuild-verification",
+              status: "VERIFIED",
+              candidate: {
+                artifact_ref: $artifact_ref,
+                candidate_sha256: $candidate_sha256,
+                source_commit: $source_commit,
+                repository_tree: $candidate[0].source.repository_tree,
+                frontend_tree: $candidate[0].source.frontend_tree,
+                build_workflow_sha: $source_commit,
+                signature_identity: $signature_identity,
+                signature_issuer: $signature_issuer,
+                bundle_report_sha256: $candidate[0].artifacts.bundle_report_sha256,
+                vite_manifest_sha256: $candidate[0].artifacts.vite_manifest_sha256,
+                brotli_manifest_sha256: $candidate[0].artifacts.brotli_manifest_sha256,
+                dist_inventory_sha256: $candidate[0].artifacts.dist_inventory_sha256,
+                package_lock_sha256: $candidate[0].build_contract.package_lock_sha256,
+                totals: $candidate[0].totals
+              },
+              rebuild: {
+                artifacts: $candidate[0].artifacts,
+                build_contract: $candidate[0].build_contract,
+                totals: $candidate[0].totals,
+                frontend_tree: $candidate[0].source.frontend_tree,
+                dist_file_count: ($inventory[0] | length)
+              }
+            }' > "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild/rebuild-verification.json"
+          jq --sort-keys . "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild/rebuild-verification.json" \
+            > "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild/rebuild-verification.canonical.json"
+          cmp --silent \
+            "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild/rebuild-verification.json" \
+            "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild/rebuild-verification.canonical.json"
+          rm "$GITHUB_WORKSPACE/build/frontend-bundle-rebuild/rebuild-verification.canonical.json"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+
+      - name: Transfer verified rebuild evidence to protected approval
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frontend-bundle-rebuild-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: build/frontend-bundle-rebuild/rebuild-verification.json
+          if-no-files-found: error
+          retention-days: 7
+
+  approve-sign:
+    needs: rebuild-verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # Repository administrators must configure required reviewers. Naming this
+    # environment in YAML is not evidence that hosted protection exists.
+    # Once configured, it protects the only job that can create APPROVED evidence.
+    environment: frontend-bundle-production
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+
+    steps:
+      # actions/download-artifact v4.3.0
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: frontend-bundle-rebuild-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: build/frontend-bundle-approval-input
+
+      - name: Validate transferred evidence and protected workflow context
+        env:
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROMOTION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EXPECTED_ENVIRONMENT: frontend-bundle-production
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+          API_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GRAPHQL_URL: ${{ github.graphql_url }}
+        run: |
+          evidence="$GITHUB_WORKSPACE/build/frontend-bundle-approval-input/rebuild-verification.json"
+          if [ "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ] || [ "$GITHUB_EVENT_NAME" != "workflow_dispatch" ]; then
+            echo "protected approval must be dispatched from the default branch." >&2
+            exit 2
+          fi
+          if ! [[ "$SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ ]] || [ "$PROMOTION_WORKFLOW_SHA" != "$SOURCE_COMMIT" ]; then
+            echo "protected approval workflow is not bound to source_commit." >&2
+            exit 2
+          fi
+          expected_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-promotion.yml@refs/heads/$DEFAULT_BRANCH"
+          if [ "https://github.com/$GITHUB_WORKFLOW_REF" != "$expected_identity" ]; then
+            echo "protected approval workflow identity is invalid." >&2
+            exit 2
+          fi
+          if ! [[ "$APPROVAL_REFERENCE" =~ ^[A-Za-z0-9][A-Za-z0-9._:/#-]{7,127}$ ]]; then
+            echo "approval_reference must be a non-placeholder change-control identifier." >&2
+            exit 2
+          fi
+          shopt -s nocasematch
+          if [[ "$APPROVAL_REFERENCE" =~ (^|[-_])(pending|todo|tbd|placeholder|example|replace-me)($|[-_]) ]]; then
+            echo "approval_reference must not be a placeholder." >&2
+            exit 2
+          fi
+          shopt -u nocasematch
+          mapfile -t evidence_entries < <(
+            find "$GITHUB_WORKSPACE/build/frontend-bundle-approval-input" \
+              -mindepth 1 -maxdepth 1 -printf '%f\n' | LC_ALL=C sort
+          )
+          if [ "${evidence_entries[*]}" != "rebuild-verification.json" ]; then
+            echo "approval input contains unexpected entries: ${evidence_entries[*]}" >&2
+            exit 1
+          fi
+          if [ ! -f "$evidence" ] || [ -L "$evidence" ] || [ "$(stat -c '%h' "$evidence")" != "1" ]; then
+            echo "rebuild verification must be one regular non-linked file." >&2
+            exit 1
+          fi
+          jq --sort-keys . "$evidence" > "$evidence.canonical"
+          cmp --silent "$evidence" "$evidence.canonical" || {
+            echo "rebuild verification is not canonical JSON." >&2
+            exit 1
+          }
+          rm "$evidence.canonical"
+          candidate_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-candidate.yml@refs/heads/$DEFAULT_BRANCH"
+          jq -e \
+            --arg artifact_ref "$ARTIFACT_REF" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg candidate_identity "$candidate_identity" \
+            --arg signature_issuer "$SIGNATURE_ISSUER" \
+            '.schema_version == "auris.frontend-bundle-rebuild-verification.v1" and
+             .kind == "auris-flow-frontend-bundle-rebuild-verification" and
+             .status == "VERIFIED" and
+             .candidate.artifact_ref == $artifact_ref and
+             .candidate.source_commit == $source_commit and
+             .candidate.build_workflow_sha == $source_commit and
+             .candidate.signature_identity == $candidate_identity and
+             .candidate.signature_issuer == $signature_issuer and
+             (.candidate.repository_tree | test("^[0-9a-f]{40}$")) and
+             (.candidate.frontend_tree | test("^[0-9a-f]{40}$")) and
+             (.candidate.candidate_sha256 | test("^[0-9a-f]{64}$")) and
+             .rebuild.frontend_tree == .candidate.frontend_tree and
+             .rebuild.artifacts.dist_inventory_sha256 == .candidate.dist_inventory_sha256 and
+             .rebuild.artifacts.bundle_report_sha256 == .candidate.bundle_report_sha256 and
+             .rebuild.build_contract.package_lock_sha256 == .candidate.package_lock_sha256 and
+             .rebuild.totals == .candidate.totals' \
+            "$evidence" >/dev/null
+          repository_owner="${GITHUB_REPOSITORY%%/*}"
+          repository_name="${GITHUB_REPOSITORY#*/}"
+          qualified_ref="refs/heads/$DEFAULT_BRANCH"
+          api_payload="$(jq -n \
+            --arg owner "$repository_owner" \
+            --arg name "$repository_name" \
+            --arg qualified_ref "$qualified_ref" \
+            '{query: "query($owner:String!,$name:String!,$qualifiedRef:String!){repository(owner:$owner,name:$name){ref(qualifiedName:$qualifiedRef){target{oid}}}}", variables: {owner: $owner, name: $name, qualifiedRef: $qualified_ref}}')"
+          current_tip="$(curl --fail-with-body --silent --show-error \
+            -H "Authorization: Bearer $API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$api_payload" \
+            "$GRAPHQL_URL" | jq -er '.data.repository.ref.target.oid | select(test("^[0-9a-f]{40}$"))')"
+          if [ "$current_tip" != "$SOURCE_COMMIT" ]; then
+            echo "default branch advanced after rebuild; restart protected promotion." >&2
+            exit 2
+          fi
+
+      - name: Render the canonical approval statement without repository code
+        env:
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EXPECTED_ENVIRONMENT: frontend-bundle-production
+          PROMOTION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          evidence="$GITHUB_WORKSPACE/build/frontend-bundle-approval-input/rebuild-verification.json"
+          evidence_sha256="$(sha256sum "$evidence" | cut -d' ' -f1)"
+          repository_name="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          promotion_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-promotion.yml@refs/heads/$DEFAULT_BRANCH"
+          mkdir -p "$GITHUB_WORKSPACE/build/frontend-bundle-approval"
+          jq -n --sort-keys \
+            --arg approval_reference "$APPROVAL_REFERENCE" \
+            --arg environment "$EXPECTED_ENVIRONMENT" \
+            --arg event "$GITHUB_EVENT_NAME" \
+            --arg evidence_sha256 "$evidence_sha256" \
+            --arg promotion_identity "$promotion_identity" \
+            --arg qualified_ref "refs/heads/$DEFAULT_BRANCH" \
+            --arg repository "$repository_name" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --argjson run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg signature_issuer "$SIGNATURE_ISSUER" \
+            --arg workflow_sha "$PROMOTION_WORKFLOW_SHA" \
+            --slurpfile evidence "$evidence" \
+            '{
+              schema_version: "auris.frontend-bundle-approval.v1",
+              kind: "auris-flow-frontend-bundle-approval",
+              status: "APPROVED",
+              candidate: $evidence[0].candidate,
+              rebuild: {
+                evidence_sha256: $evidence_sha256,
+                frontend_tree: $evidence[0].rebuild.frontend_tree,
+                dist_inventory_sha256: $evidence[0].rebuild.artifacts.dist_inventory_sha256,
+                bundle_report_sha256: $evidence[0].rebuild.artifacts.bundle_report_sha256,
+                package_lock_sha256: $evidence[0].rebuild.build_contract.package_lock_sha256
+              },
+              approval: {
+                reference: $approval_reference,
+                environment: $environment,
+                repository: $repository,
+                ref: $qualified_ref,
+                event: $event,
+                workflow_sha: $workflow_sha,
+                signature_identity: $promotion_identity,
+                signature_issuer: $signature_issuer,
+                run_id: $run_id,
+                run_attempt: $run_attempt
+              }
+            }' > "$GITHUB_WORKSPACE/build/frontend-bundle-approval/approval-statement.json"
+
+      # oras-project/setup-oras v1.2.3
+      - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
+        with:
+          version: "1.2.3"
+
+      # docker/login-action v3.4.0
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # sigstore/cosign-installer v3.9.2
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
+        with:
+          cosign-release: "v2.5.3"
+
+      - name: Publish and sign the approval OCI, then render lock schema 3
+        env:
+          ARTIFACT_REF: ${{ inputs.artifact_ref }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          APPROVAL_REFERENCE: ${{ inputs.approval_reference }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PROMOTION_WORKFLOW_SHA: ${{ github.workflow_sha }}
+          EXPECTED_ENVIRONMENT: frontend-bundle-production
+          SIGNATURE_ISSUER: https://token.actions.githubusercontent.com
+        run: |
+          repository_name="$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')"
+          repository="ghcr.io/$repository_name/frontend-bundle-approval"
+          staging_ref="$repository:source-$SOURCE_COMMIT-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          approval_dir="$GITHUB_WORKSPACE/build/frontend-bundle-approval"
+          evidence="$GITHUB_WORKSPACE/build/frontend-bundle-approval-input/rebuild-verification.json"
+          statement="$approval_dir/approval-statement.json"
+          statement_sha256="$(sha256sum "$statement" | cut -d' ' -f1)"
+          evidence_sha256="$(sha256sum "$evidence" | cut -d' ' -f1)"
+          candidate_sha256="$(jq -er '.candidate.candidate_sha256' "$statement")"
+          media_type="application/vnd.auris-flow.frontend-bundle-approval.v1"
+          cp "$evidence" "$approval_dir/rebuild-verification.json"
+          push_result="$({
+            cd "$approval_dir"
+            oras push "$staging_ref" \
+              --format json \
+              --artifact-type "$media_type" \
+              --annotation "org.opencontainers.image.revision=$SOURCE_COMMIT" \
+              --annotation "org.opencontainers.image.source=https://github.com/$GITHUB_REPOSITORY" \
+              --annotation "org.opencontainers.image.title=Auris Flow frontend bundle approval" \
+              --annotation "io.auris.frontend.candidate-ref=$ARTIFACT_REF" \
+              --annotation "io.auris.frontend.candidate-sha256=$candidate_sha256" \
+              --annotation "io.auris.frontend.approval-statement-sha256=$statement_sha256" \
+              --annotation "io.auris.frontend.rebuild-evidence-sha256=$evidence_sha256" \
+              --annotation "io.auris.frontend.job-workflow-sha=$PROMOTION_WORKFLOW_SHA" \
+              "approval-statement.json:application/json" \
+              "rebuild-verification.json:application/json"
+          })"
+          approval_artifact_ref="$(jq -er \
+            --arg repository "$repository" \
+            '.reference | select(startswith($repository + "@sha256:"))' \
+            <<<"$push_result")"
+          digest="${approval_artifact_ref#"$repository"@}"
+          if ! [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "ORAS did not return an immutable approval digest for this push." >&2
+            exit 1
+          fi
+          manifest="$(oras manifest fetch "$approval_artifact_ref")"
+          jq -e \
+            --arg media_type "$media_type" \
+            --arg source_commit "$SOURCE_COMMIT" \
+            --arg candidate_ref "$ARTIFACT_REF" \
+            --arg candidate_sha256 "$candidate_sha256" \
+            --arg statement_sha256 "$statement_sha256" \
+            --arg evidence_sha256 "$evidence_sha256" \
+            --arg workflow_sha "$PROMOTION_WORKFLOW_SHA" \
+            '.artifactType == $media_type and
+             .annotations["org.opencontainers.image.revision"] == $source_commit and
+             .annotations["io.auris.frontend.candidate-ref"] == $candidate_ref and
+             .annotations["io.auris.frontend.candidate-sha256"] == $candidate_sha256 and
+             .annotations["io.auris.frontend.approval-statement-sha256"] == $statement_sha256 and
+             .annotations["io.auris.frontend.rebuild-evidence-sha256"] == $evidence_sha256 and
+             .annotations["io.auris.frontend.job-workflow-sha"] == $workflow_sha and
+             ([.layers[].annotations["org.opencontainers.image.title"]] | sort) ==
+               ["approval-statement.json", "rebuild-verification.json"]' \
+            <<<"$manifest" >/dev/null
+          promotion_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/frontend-bundle-promotion.yml@refs/heads/$DEFAULT_BRANCH"
+          cosign sign --yes "$approval_artifact_ref"
+          cosign verify "$approval_artifact_ref" \
+            --certificate-identity "$promotion_identity" \
+            --certificate-oidc-issuer "$SIGNATURE_ISSUER" \
+            --certificate-github-workflow-sha "$SOURCE_COMMIT" \
+            --certificate-github-workflow-repository "$GITHUB_REPOSITORY" \
+            --certificate-github-workflow-ref "refs/heads/$DEFAULT_BRANCH" \
+            --certificate-github-workflow-trigger workflow_dispatch
+          lock_dir="$GITHUB_WORKSPACE/build/frontend-bundle-lock/production/frontend"
+          mkdir -p "$lock_dir"
+          jq -n --sort-keys \
+            --arg approval_artifact_ref "$approval_artifact_ref" \
+            --arg statement_sha256 "$statement_sha256" \
+            --arg evidence_sha256 "$evidence_sha256" \
+            --slurpfile statement "$statement" \
+            '{
+              schema_version: 3,
+              kind: "auris-flow-frontend-bundle-lock",
+              status: "APPROVED",
+              reason: "Dual-signed protected promotion.",
+              candidate: $statement[0].candidate,
+              approval: {
+                artifact_ref: $approval_artifact_ref,
+                statement_sha256: $statement_sha256,
+                rebuild_evidence_sha256: $evidence_sha256,
+                approval_reference: $statement[0].approval.reference,
+                environment: $statement[0].approval.environment,
+                promotion_workflow_sha: $statement[0].approval.workflow_sha,
+                signature_identity: $statement[0].approval.signature_identity,
+                signature_issuer: $statement[0].approval.signature_issuer,
+                run_id: $statement[0].approval.run_id,
+                run_attempt: $statement[0].approval.run_attempt
+              }
+            }' > "$lock_dir/frontend-bundle.lock.json"
+          jq -e \
+            --arg candidate_ref "$ARTIFACT_REF" \
+            --arg approval_ref "$approval_artifact_ref" \
+            --arg statement_sha256 "$statement_sha256" \
+            '.schema_version == 3 and
+             .kind == "auris-flow-frontend-bundle-lock" and
+             .status == "APPROVED" and
+             .candidate.artifact_ref == $candidate_ref and
+             .approval.artifact_ref == $approval_ref and
+             .approval.statement_sha256 == $statement_sha256' \
+            "$lock_dir/frontend-bundle.lock.json" >/dev/null
+
+      - name: Upload the dual-signed lock pointer for a dedicated commit
+        # actions/upload-artifact v4.6.2
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: frontend-bundle-lock-${{ inputs.source_commit }}-${{ github.run_attempt }}
+          path: |
+            build/frontend-bundle-lock/production/frontend/frontend-bundle.lock.json
+            build/frontend-bundle-approval/approval-statement.json
+            build/frontend-bundle-approval/rebuild-verification.json
+          if-no-files-found: error
+          retention-days: 30

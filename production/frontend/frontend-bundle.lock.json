@@ -1,0 +1,7 @@
+{
+  "artifact": null,
+  "kind": "auris-flow-frontend-bundle-lock",
+  "reason": "No cryptographically verifiable, independently approved frontend bundle artifact exists yet.",
+  "schema_version": 1,
+  "status": "PENDING"
+}

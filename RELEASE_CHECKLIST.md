@@ -12,8 +12,9 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Run `bash scripts/verify_release.sh`; do not use any skip flag for the real-stack,
   real-Dagster, product-Dagster, browser, visual, migration, audit, or security gates.
 - [ ] Confirm `build/release-evidence/release-gate-manifest.json` is produced only after
-  clean-clone, visual 76/76, real-stack, real-Dagster Compose, product-path Dagster and
-  supply-chain evidence all report `status=ok` for the exact same clean HEAD. Recompute
+  clean-clone, dual-signed frontend bundle, visual 76/76, real-stack, real-Dagster
+  Compose, product-path Dagster and supply-chain evidence all report `status=ok` for the
+  exact same clean HEAD. Recompute
   every recorded SHA-256 and reject stale, extra, symlinked or local-path-bearing files.
 - [ ] Confirm `production/visual/visual-baseline.lock.json` is `APPROVED` and points to
   an immutable `ghcr.io/...@sha256:...` artifact. The gate must download it with ORAS,
@@ -27,6 +28,16 @@ external repository controls, clean-host installation, or recovery drill below.
   with required reviewers. Build the candidate from an exact clean commit, retain the
   workflow-produced GHCR digest and signer metadata, and reject manually written digest,
   identity, issuer, or approval fields.
+- [ ] Confirm `production/frontend/frontend-bundle.lock.json` is `APPROVED` only after
+  the protected candidate workflow built the exact default-branch tip in an unprivileged
+  job, uploaded the complete dist inventory as an immutable GHCR digest, and Cosign
+  verified its exact workflow SHA/repository/ref/event. The independent
+  `frontend-bundle-production` promotion must rebuild byte-identically, sign a second
+  approval OCI under the promotion workflow identity, and output a schema-3 pointer to
+  both immutable digests. `verify_release.sh` must reverify both signatures and emit
+  `frontend-bundle.json`; a `PENDING` lock, local candidate, single candidate signature,
+  legacy totals reference, manually written digest or simultaneous budget increase is
+  not release evidence.
 - [ ] Confirm `git status --short` is empty and `git diff --check` is clean after the
   candidate commit is created.
 - [ ] Confirm a fresh clone of that commit can install locked dependencies, migrate,

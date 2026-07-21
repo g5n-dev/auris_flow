@@ -1089,12 +1089,8 @@ class VisualShellPolicyIntegrationTests(unittest.TestCase):
         self.assertIn("--require-release-runtime", shell)
         self.assertIn("--runtime-descriptor", shell)
         self.assertNotIn("FROZEN_BASELINE_ROOT", shell)
-        self.assertIn(
-            "--env AURIS_VISUAL_ARTIFACT_DIR=/artifacts/test-results", shell
-        )
-        self.assertIn(
-            '--volume "${CONTAINER_ARTIFACT_DIR}:/artifacts:rw"', shell
-        )
+        self.assertIn("--env AURIS_VISUAL_ARTIFACT_DIR=/artifacts/test-results", shell)
+        self.assertIn('--volume "${CONTAINER_ARTIFACT_DIR}:/artifacts:rw"', shell)
         self.assertNotRegex(
             shell,
             r"--env AURIS_VISUAL_ARTIFACT_DIR=/artifacts\s+\\",

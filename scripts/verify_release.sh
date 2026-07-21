@@ -90,6 +90,9 @@ fi
 "${PYTHON_BIN}" scripts/verify_release_authorization.py
 AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh
 AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1 bash scripts/verify_all.sh
+node scripts/verify_frontend_bundle.mjs verify-release \
+  --source-commit "${SOURCE_COMMIT}" \
+  --output "${EVIDENCE_DIR}/frontend-bundle.json"
 
 if ! command -v docker >/dev/null 2>&1; then
   echo "Docker is required for release real-stack and real Dagster E2E." >&2

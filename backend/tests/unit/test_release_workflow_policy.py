@@ -79,7 +79,11 @@ def test_release_and_verify_workflows_bound_every_job_runtime() -> None:
         "assemble-release",
         "publish-release",
     }
-    assert set(verify_jobs) == {"clean-clone-reproducibility", "verify"}
+    assert set(verify_jobs) == {
+        "clean-clone-reproducibility",
+        "verify",
+        "release-verify",
+    }
     for name, block in {**release_jobs, **verify_jobs}.items():
         assert re.search(r"^    timeout-minutes: [1-9]\d*$", block, re.MULTILINE), name
 
@@ -292,9 +296,10 @@ def test_strict_release_jobs_install_pinned_cosign_before_visual_gate() -> None:
     pinned_installer = "sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159"
     pinned_login = "docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772"
     release_dependency = _job_blocks(_workflow_text())["dependency-evidence"]
-    verify_job = _job_blocks(VERIFY_WORKFLOW.read_text(encoding="utf-8"))["verify"]
+    verify_jobs = _job_blocks(VERIFY_WORKFLOW.read_text(encoding="utf-8"))
+    strict_verify_job = verify_jobs["release-verify"]
 
-    for block in (release_dependency, verify_job):
+    for block in (release_dependency, strict_verify_job):
         assert "packages: read" in block
         assert "fetch-depth: 0" in block
         assert pinned_login in block
@@ -302,6 +307,12 @@ def test_strict_release_jobs_install_pinned_cosign_before_visual_gate() -> None:
         assert 'cosign-release: "v2.5.3"' in block
         assert block.index(pinned_login) < block.index("bash scripts/verify_release.sh")
         assert block.index(pinned_installer) < block.index("bash scripts/verify_release.sh")
+
+    fast_verify_job = verify_jobs["verify"]
+    assert "packages: read" not in fast_verify_job
+    assert pinned_login not in fast_verify_job
+    assert pinned_installer not in fast_verify_job
+    assert "bash scripts/verify_fast.sh" in fast_verify_job
 
 
 def test_final_dependency_evidence_manifest_requires_all_audits() -> None:

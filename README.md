@@ -201,6 +201,39 @@ bash scripts/verify_real_dagster.sh
 bash scripts/verify_product_dagster_path.sh
 ```
 
+前端固定硬预算与“是否批准该精确产物”是两道独立门禁。旧四项 totals 只保留为
+`LEGACY_REFERENCE`，不得改名伪装成批准证据；正式指针是
+`production/frontend/frontend-bundle.lock.json`，当前明确为 `PENDING`。当构建产物仍满足
+硬预算、动态 import、fixture 分类、route closure 和预压缩规则，但尚未获批准时，常规
+`bundle:check` 仍拒绝畸形锁和任何硬门禁失败，同时把批准状态漂移作为诊断输出而不阻断
+`verify_fast` 与 base clean-clone。`bundle:check:release`（以及继承
+`AURIS_RELEASE_CHECK=1` 的严格发布路径）必须要求 APPROVED 且逐字节匹配锁，否则 fail closed。
+候选 CLI 会显式启用批准比较模式，并可在干净 commit 上生成不改变 policy/limits/lock 的
+确定性候选：
+
+```bash
+npm --prefix prototype/auris-flow-ui run build
+node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs generate \
+  --source-commit "$(git rev-parse HEAD)" \
+  --output "$PWD/build/frontend-bundle-candidate"
+node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs verify \
+  --candidate-dir "$PWD/build/frontend-bundle-candidate"
+```
+
+候选永久标记为 `PENDING_REVIEW`，绑定 commit、根 tree、前端子 tree、npm lock、Vite/检查器/
+policy 哈希，以及包含 `.vite/*`、全部 `.br` 在内的完整 dist inventory；目录拒绝 extra、
+symlink、hardlink、路径逃逸和同尺寸内容替换。正式候选只允许由受保护的
+`.github/workflows/frontend-bundle-candidate.yml` 从默认分支精确 tip 构建；npm/仓库代码只在
+无 OIDC、无 packages write 的低权 job 执行，隔离的 publisher 仅校验 transfer 后推送不可变
+GHCR digest，并以精确 GitHub workflow SHA/repository/ref/event 的 OIDC identity 进行 Cosign
+签名。独立的 `.github/workflows/frontend-bundle-promotion.yml` 先在低权 job 重建出相同
+inventory，再由 `frontend-bundle-production` protected environment 的隔离 job 生成并签名
+第二份 approval OCI。schema-3 production lock 必须同时绑定 candidate 与 approval 两个 digest；
+严格 `verify_release.sh` 会在线复验双签、OCI annotations、候选/批准 payload、Git 祖先与前端
+子树、当前 dist，并生成 `build/release-evidence/frontend-bundle.json`。不得手写 `APPROVED`、
+artifact digest、签名 identity 或 approval reference，也不得在同一变更中自动抬高 limits。
+GitHub 环境名写入 YAML 不等于已配置 required reviewers；该外部控制仍须由仓库管理员核验。
+
 视觉场景、runner contract 与规范化 seed 是 Git 源码；PNG、geometry、生成 manifest 和 Playwright 输出不是源码，必须留在忽略的 diagnostics 目录或不可变 OCI 制品中。正式基线只由 `production/visual/visual-baseline.lock.json` 指向，并且只接受 `ghcr.io/...@sha256:...`；下载后会校验 OCI 包哈希、manifest、76 张 PNG 哈希、场景/runner/seed digest 与生成时 source commit。`production/visual/runtime-contract.json` 继续固定 `linux/amd64` Playwright 镜像 digest、锁文件版本、Chromium 和镜像字体。release 模式禁止 goal/seed override、host runtime 与 update mode。
 
 当前锁明确为 `PENDING`，表示尚无经过人工批准的 Linux 制品，因此严格 release 门禁会 fail closed。现有 Darwin 截图只能作为本机 diagnostics，不能改写锁或生成 `status=ok` 的发布证据。需要生成诊断或候选截图时，只能写到 `prototype/auris-flow-ui/e2e/artifacts/` 下的命名目录，例如：

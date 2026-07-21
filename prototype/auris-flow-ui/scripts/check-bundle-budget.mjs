@@ -1,4 +1,5 @@
 import { readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { dirname, join, relative, resolve } from "node:path";
 import { brotliCompressSync, constants as zlibConstants } from "node:zlib";
 import {
@@ -12,10 +13,20 @@ import {
   frontendBundleBudgetPolicy,
   frontendBundleLimits
 } from "./frontend-bundle-budget-policy.mjs";
+import {
+  loadFrontendBundleLock,
+  buildDistInventory,
+  distInventorySha256,
+  requiresApprovedFrontendBundle,
+  sha256CanonicalJsonFile,
+  sha256File,
+  validateApprovedBundleAgainstBuild
+} from "./frontend-bundle-lock.mjs";
 import { buildProductionFixturePayload, productionFixtureSpecs } from "./production-fixture-policy.mjs";
 import { auditPrecompressedAssets, listProductionResources } from "./precompressed-assets.mjs";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
+const repositoryRoot = resolve(root, "../..");
 const distDir = process.env.AURIS_DIST_DIR ? resolve(root, process.env.AURIS_DIST_DIR) : join(root, "dist");
 const assetsDir = join(distDir, "assets");
 const manifestPath = join(distDir, ".vite", "manifest.json");
@@ -100,22 +111,36 @@ const cssAssets = productionAssets.filter((asset) => asset.type === "css");
 const jsonAssets = productionAssets.filter((asset) => asset.type === "json");
 const totalJs = sumAssets(jsAssets);
 const totalAssets = sumAssets(productionAssets);
-const auditedCandidate = frontendBundleBudgetPolicy.auditedCandidate?.totals;
-assertBudget(Boolean(auditedCandidate), "AUDITED_CANDIDATE_MISSING", {
-  schemaVersion: frontendBundleBudgetPolicy.schemaVersion
+const approvedBundleLock = loadFrontendBundleLock();
+const approvedBundleRequired = requiresApprovedFrontendBundle();
+const actualCandidateTotals = {
+  jsRawBytes: totalJs.rawBytes,
+  jsBrotliBytes: totalJs.brotliBytes,
+  allRawBytes: totalAssets.rawBytes,
+  allBrotliBytes: totalAssets.brotliBytes
+};
+const distInventory = buildDistInventory(distDir);
+const currentDistInventorySha256 = distInventorySha256(distInventory);
+let frontendTree = null;
+if (approvedBundleLock.status === "APPROVED") {
+  frontendTree = execFileSync(
+    "git",
+    ["rev-parse", "HEAD:prototype/auris-flow-ui"],
+    { cwd: repositoryRoot, encoding: "utf8" }
+  ).trim();
+}
+const approvedBundleFailures = validateApprovedBundleAgainstBuild(approvedBundleLock, {
+  totals: actualCandidateTotals,
+  frontendTree,
+  packageLockSha256: sha256File(join(root, "package-lock.json")),
+  viteManifestSha256: sha256CanonicalJsonFile(manifestPath),
+  brotliManifestSha256: sha256CanonicalJsonFile(
+    join(distDir, ".vite", "brotli-manifest.json")
+  ),
+  distInventorySha256: currentDistInventorySha256
 });
-if (auditedCandidate) {
-  const actualCandidateTotals = {
-    jsRawBytes: totalJs.rawBytes,
-    jsBrotliBytes: totalJs.brotliBytes,
-    allRawBytes: totalAssets.rawBytes,
-    allBrotliBytes: totalAssets.brotliBytes
-  };
-  assertBudget(
-    JSON.stringify(actualCandidateTotals) === JSON.stringify(auditedCandidate),
-    "AUDITED_CANDIDATE_DRIFT",
-    { actual: actualCandidateTotals, expected: auditedCandidate }
-  );
+if (approvedBundleRequired) {
+  failures.push(...approvedBundleFailures);
 }
 
 const jsonEntries = Object.entries(manifest).filter(([key, value]) => key.endsWith(".json") && value.file?.endsWith(".json"));
@@ -247,6 +272,17 @@ const report = {
   brotliQuality: 11,
   diagnosticBrotliQuality: 5,
   budgetPolicy: frontendBundleBudgetPolicy,
+  approvedBundleLock,
+  approvedBundleGate: {
+    required: approvedBundleRequired,
+    status: approvedBundleFailures.length ? "not-approved" : "approved",
+    failures: approvedBundleFailures
+  },
+  distInventory: {
+    fileCount: distInventory.length,
+    sha256: currentDistInventorySha256,
+    files: distInventory
+  },
   limits,
   totals: { js: totalJs, all: totalAssets },
   initialClosure: { ...initialClosure, assets: initialAssets.map((asset) => asset.name) },
