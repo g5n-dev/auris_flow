@@ -5,6 +5,7 @@ from urllib.parse import quote
 
 from sqlalchemy import select
 
+from app.api.routers import audio_sessions as audio_sessions_router
 from app.core.auth import sign_auth_token
 from app.core.database import SessionLocal
 from app.core.oidc import OIDCProviderUnavailableError
@@ -812,6 +813,86 @@ def test_audio_recording_if_range_mismatch_returns_full_representation(client, a
     assert len(mismatch.content) > 16
     assert matched.status_code == 206
     assert matched.content == mismatch.content[:16]
+
+
+def test_audio_recording_head_matches_get_range_semantics_without_a_body(
+    client,
+    auth_headers,
+    monkeypatch,
+):
+    registration = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_head_contract",
+            "provider": "minio",
+            "bucket": "auris-flow-local",
+            "object_key": ("tenants/aurora_auto/projects/sales_qa/audio/raw/2025-05-26/head.wav"),
+            "content_type": "audio/wav",
+            "content_length": 68,
+            "checksum_sha256": "d" * 64,
+            "etag": "head-contract-etag",
+        },
+        headers={**auth_headers, "Idempotency-Key": "register-head-contract"},
+    )
+    assert registration.status_code == 200
+
+    playback_url = _issue_audio_playback_url(
+        client,
+        auth_headers,
+        key="grant-audio-head-contract",
+    )
+    grant = playback_url.partition("grant=")[2]
+    urls = (
+        playback_url,
+        f"/api/v1/audio-sessions/S20250526-000128/recording?grant={grant}",
+    )
+
+    for url in urls:
+        whole_get = client.get(url)
+        assert whole_get.status_code == 200
+        etag = whole_get.headers["ETag"]
+        cases = (
+            ({}, 200),
+            ({"Range": "bytes=0-15"}, 206),
+            ({"Range": "bytes=16-"}, 206),
+            ({"Range": "bytes=-8"}, 206),
+            ({"Range": "bytes=0-15", "If-Range": etag}, 206),
+            ({"Range": "bytes=0-15", "If-Range": '"stale-etag"'}, 200),
+            ({"Range": "bytes=0-1,4-5"}, 416),
+            ({"Range": "bytes=999999-1000000"}, 416),
+        )
+        for request_headers, expected_status in cases:
+            get_response = client.get(url, headers=request_headers)
+            head_response = client.head(url, headers=request_headers)
+
+            assert get_response.status_code == expected_status
+            assert head_response.status_code == expected_status
+            assert head_response.content == b""
+            for header in (
+                "Accept-Ranges",
+                "Content-Length",
+                "Content-Range",
+                "Content-Type",
+                "ETag",
+            ):
+                assert head_response.headers.get(header) == get_response.headers.get(header)
+
+    missing_grant = client.head(
+        "/api/v1/audio-sessions/S20250526-000128/recording",
+    )
+    assert missing_grant.status_code == 403
+
+    tampered = client.head(f"{playback_url}x", headers={"Range": "bytes=0-15"})
+    assert tampered.status_code == 403
+
+    def fail_if_audio_body_is_built(*_args, **_kwargs):
+        raise AssertionError("HEAD must not synthesize an audio response body")
+
+    monkeypatch.setattr(audio_sessions_router, "_synthetic_wav_bytes", fail_if_audio_body_is_built)
+    for url in urls:
+        metadata_only = client.head(url, headers={"Range": "bytes=0-15"})
+        assert metadata_only.status_code == 206
+        assert metadata_only.content == b""
 
 
 def test_audio_playback_grant_allows_native_media_range_without_custom_headers(

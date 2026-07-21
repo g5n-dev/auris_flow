@@ -553,6 +553,7 @@ launch 最终提交到达，会先以 `pending_binding` 持久化；绑定不一
 | `PUT /api/v1/audio-sessions/{id}/recording-object` | 幂等验证并登记 MinIO / S3 / OBS / OSS 录音对象 | `recording_id`、`storage_object_id`、`provider`、`bucket`、`object_key`、`content_length`、`checksum_sha256`、`etag`、`verification.checksum_verified=true`、`verification.wav_verified=true`、`status=verified`、`trace_id` |
 | `POST /api/v1/audio-sessions/{id}/playback-grants` | 为原生媒体元素签发短时播放授权 | `audio_session_id`、`playback_url`、`expires_at`、`trace_id` |
 | `GET /api/v1/audio-playback?grant=...` | 校验播放授权和当前项目成员关系后，按已登记 `provider` 代理 MinIO / S3 / OBS / OSS 录音字节 | 单区间 `Range` 原样下推，返回 `200/206/416`、`Accept-Ranges`、`Content-Range`、`ETag`、`X-Storage-Object-Id`、`X-Storage-Provider`；Provider 未独立配置时返回 `503`，禁止跨 Provider 复用凭据 |
+| `HEAD /api/v1/audio-playback?grant=...` | 使用与 GET 相同的授权、If-Range 和对象版本校验读取音频元数据 | 返回与对应 GET 一致的 `200/206/416`、`Content-Length`、`Content-Range`、`ETag` 和 `Accept-Ranges`，不读取或传输对象正文；真实 Provider 只执行带强 `If-Match` 的 HEAD |
 | `POST /api/v1/audio-sessions/{id}/intelligence-runs` | 创建 VAD、ASR、说话人分离、声纹和质量检测运行 | 请求：`execution_mode`、`language`、`hotword_pack_version_id` nullable、`return_word_timestamps`；响应：`audio_session_id`、`recording_id`、`capabilities[]`、`output_assets[]`、`trace_id` |
 | `GET /api/v1/voiceprints` | 声纹对象列表 | `id`、`speaker_id`、`employee_ref`、`status`、`confidence`、`source_asset` |
 | `GET /api/v1/event-links` | 音频和业务单据事件关联 | `id`、`audio_session_id`、`event_id`、`document_ref`、`match_score`、`status`、`risk_hint` |

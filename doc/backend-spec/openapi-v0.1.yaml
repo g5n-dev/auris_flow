@@ -1818,6 +1818,31 @@ paths:
           $ref: "#/components/responses/AudioRangeNotSatisfiable"
         default:
           $ref: "#/components/responses/Error"
+    head:
+      tags: [audio-sessions]
+      summary: 使用短时授权读取遗留音频会话 Range 元数据
+      description: >
+        与 GET 入口执行相同的 grant、成员关系、角色、If-Range 和对象版本校验，
+        返回对应的 200、206 或 416 状态及媒体头，但不读取或传输对象正文。
+      operationId: headAudioSessionsByIdRecording
+      deprecated: true
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/AudioPlaybackGrant"
+        - $ref: "#/components/parameters/AudioRange"
+        - $ref: "#/components/parameters/AudioIfRange"
+      responses:
+        "200":
+          $ref: "#/components/responses/AudioHeadFullContent"
+        "206":
+          $ref: "#/components/responses/AudioHeadPartialContent"
+        "403":
+          $ref: "#/components/responses/Error"
+        "416":
+          $ref: "#/components/responses/AudioRangeNotSatisfiable"
+        default:
+          $ref: "#/components/responses/Error"
 
   /audio-sessions/{id}/recording-object:
     put:
@@ -1873,6 +1898,29 @@ paths:
           $ref: "#/components/responses/AudioFullContent"
         "206":
           $ref: "#/components/responses/AudioPartialContent"
+        "403":
+          $ref: "#/components/responses/Error"
+        "416":
+          $ref: "#/components/responses/AudioRangeNotSatisfiable"
+        default:
+          $ref: "#/components/responses/Error"
+    head:
+      tags: [audio-sessions]
+      summary: 校验短时授权并读取 HTTP Range 音频元数据
+      description: >
+        与 GET 入口执行相同的 grant、成员关系、角色、If-Range 和对象版本校验，
+        真实 Provider 仅执行带版本条件的 HEAD；返回媒体头但不读取或传输对象正文。
+      operationId: headAudioPlayback
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/AudioPlaybackGrant"
+        - $ref: "#/components/parameters/AudioRange"
+        - $ref: "#/components/parameters/AudioIfRange"
+      responses:
+        "200":
+          $ref: "#/components/responses/AudioHeadFullContent"
+        "206":
+          $ref: "#/components/responses/AudioHeadPartialContent"
         "403":
           $ref: "#/components/responses/Error"
         "416":
@@ -6844,6 +6892,39 @@ components:
           schema:
             type: string
             format: binary
+    AudioHeadFullContent:
+      description: 完整音频表示的元数据，不包含响应正文
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            enum: [bytes]
+        Content-Length:
+          required: true
+          schema:
+            type: integer
+        ETag:
+          schema:
+            type: string
+    AudioHeadPartialContent:
+      description: 满足单区间请求的音频元数据，不包含响应正文
+      headers:
+        Accept-Ranges:
+          schema:
+            type: string
+            enum: [bytes]
+        Content-Range:
+          required: true
+          schema:
+            type: string
+            example: bytes 0-65535/320044
+        Content-Length:
+          required: true
+          schema:
+            type: integer
+        ETag:
+          schema:
+            type: string
     AudioRangeNotSatisfiable:
       description: 多区间、格式错误或不可满足的 Range
       headers:

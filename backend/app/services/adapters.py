@@ -1486,17 +1486,25 @@ class RealObjectStorageClient:
             },
         )
 
-    def head_object(self, bucket: str, object_key: str) -> dict[str, Any]:
+    def head_object(
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        if_match: str | None = None,
+    ) -> dict[str, Any]:
         # S3-compatible providers return their validated SHA-256 only when
         # checksum mode is requested. This header is signed and does not trust
         # caller-controlled x-amz-meta-* values.
-        extra_headers = (
-            {"x-amz-checksum-mode": "ENABLED"} if self.provider in {"minio", "s3"} else None
-        )
+        extra_headers: dict[str, str] = {}
+        if self.provider in {"minio", "s3"}:
+            extra_headers["x-amz-checksum-mode"] = "ENABLED"
+        if if_match:
+            extra_headers["If-Match"] = if_match
         return self._request(
             "HEAD",
             f"/{bucket}/{object_key}",
-            extra_headers=extra_headers,
+            extra_headers=extra_headers or None,
         )
 
     def head_bucket(
@@ -1643,7 +1651,7 @@ class RealObjectStorageClient:
             extra_headers=extra_headers,
         )
         with urlopen(request, timeout=timeout_seconds) as response:
-            raw = response.read()
+            raw = b"" if method == "HEAD" else response.read()
             return {
                 "status": response.status,
                 "headers": dict(response.headers.items()),

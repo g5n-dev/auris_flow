@@ -374,6 +374,133 @@ def test_real_client_open_object_defers_audio_body_read(
     assert response.closed is True
 
 
+@pytest.mark.parametrize("provider,endpoint,addressing_style,signature_mode", PROVIDER_CASES)
+def test_real_client_head_object_signs_if_match_without_getting_object_body(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    endpoint: str,
+    addressing_style: str,
+    signature_mode: str,
+) -> None:
+    captured: list[Request] = []
+
+    class HeadObjectResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.headers = Message()
+            self.headers["Content-Length"] = "100"
+            self.headers["Content-Type"] = "audio/wav"
+            self.headers["ETag"] = '"head-etag"'
+
+        def __enter__(self) -> HeadObjectResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            raise AssertionError("HeadObject metadata must not read a response body")
+
+    def fake_urlopen(request: Request, timeout: float) -> HeadObjectResponse:
+        assert timeout == 5
+        captured.append(request)
+        return HeadObjectResponse()
+
+    monkeypatch.setattr(storage_adapters, "urlopen", fake_urlopen)
+    client = storage_adapters.RealObjectStorageClient(
+        provider=provider,
+        endpoint=endpoint,
+        bucket="audio-bucket",
+        access_key=f"{provider}-access",
+        secret_key=f"{provider}-secret",
+        region="test-region-1",
+        addressing_style=addressing_style,
+        signature_mode=signature_mode,
+    )
+
+    result = client.head_object(
+        "audio-bucket",
+        "tenants/tenant-a/recording.wav",
+        if_match='"head-etag"',
+    )
+
+    assert captured[0].get_method() == "HEAD"
+    assert captured[0].get_header("If-match") == '"head-etag"'
+    assert captured[0].get_header("Range") is None
+    assert result["status"] == 200
+    assert result["body"] == b""
+
+
+@pytest.mark.parametrize("provider", PROVIDERS)
+def test_bff_audio_head_uses_provider_metadata_without_getting_object_body(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+) -> None:
+    calls: list[tuple[str, str, str | None]] = []
+
+    class HeadOnlyProviderClient:
+        def allows_bucket(self, bucket: str) -> bool:
+            return bucket == "audio-bucket"
+
+        def head_object(
+            self,
+            bucket: str,
+            object_key: str,
+            *,
+            if_match: str | None = None,
+        ) -> dict[str, object]:
+            calls.append((bucket, object_key, if_match))
+            return {
+                "status": 200,
+                "etag": "head-etag",
+                "content_length": "100",
+                "content_type": "audio/wav",
+                "body": b"",
+            }
+
+        def get_object(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("HEAD must not issue GetObject")
+
+        def open_object(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            raise AssertionError("HEAD must not open an object body stream")
+
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: HeadOnlyProviderClient(),
+    )
+    response = audio_sessions_router._object_storage_audio_response(
+        _registered_range_recording(provider, "head-etag"),
+        range_header="bytes=10-19",
+        head_only=True,
+    )
+
+    assert response.status_code == 206
+    assert response.body == b""
+    assert response.headers["Accept-Ranges"] == "bytes"
+    assert response.headers["Content-Range"] == "bytes 10-19/100"
+    assert response.headers["Content-Length"] == "10"
+    assert response.headers["ETag"] == '"head-etag"'
+    assert calls == [
+        (
+            "audio-bucket",
+            "tenants/tenant-a/projects/project-a/audio/recording.wav",
+            '"head-etag"',
+        )
+    ]
+
+    invalid = audio_sessions_router._object_storage_audio_response(
+        _registered_range_recording(provider, "head-etag"),
+        range_header="bytes=100-120",
+        head_only=True,
+    )
+    assert invalid.status_code == 416
+    assert invalid.body == b""
+    assert invalid.headers["Content-Range"] == "bytes */100"
+    assert len(calls) == 1
+
+
 def test_bff_closes_upstream_object_stream_when_consumer_stops(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -816,12 +943,26 @@ class _ProviderRangeClient:
     def __init__(self, provider: str) -> None:
         self.provider = provider
         self.calls: list[tuple[str, str, str | None, str | None]] = []
+        self.head_calls: list[tuple[str, str, str | None]] = []
 
     def allows_bucket(self, bucket: str) -> bool:
         return bucket == f"{self.provider}-audio"
 
-    def head_object(self, _bucket: str, _object_key: str) -> dict[str, Any]:
-        raise AssertionError("registered content_length should avoid a HEAD request")
+    def head_object(
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        if_match: str | None = None,
+    ) -> dict[str, Any]:
+        self.head_calls.append((bucket, object_key, if_match))
+        return {
+            "status": 200,
+            "etag": f"{self.provider}-range-etag",
+            "content_length": "100",
+            "content_type": "audio/wav",
+            "body": b"",
+        }
 
     def get_object(
         self,
@@ -1181,6 +1322,24 @@ def test_audio_range_route_uses_registered_provider_and_preserves_upstream_parti
     assert response.content == b"partial-audio"
     assert provider_client.calls == [
         (f"{provider}-audio", object_key, "bytes=-13", f'"{provider}-range-etag"')
+    ]
+    assert provider_client.head_calls == []
+
+    head = client.head(
+        grant.json()["data"]["playback_url"],
+        headers={"Range": "bytes=-13"},
+    )
+    assert head.status_code == 206
+    assert head.content == b""
+    assert head.headers["Accept-Ranges"] == "bytes"
+    assert head.headers["Content-Range"] == "bytes 87-99/100"
+    assert head.headers["Content-Length"] == "13"
+    assert head.headers["ETag"] == f'"{provider}-range-etag"'
+    assert provider_client.calls == [
+        (f"{provider}-audio", object_key, "bytes=-13", f'"{provider}-range-etag"')
+    ]
+    assert provider_client.head_calls == [
+        (f"{provider}-audio", object_key, f'"{provider}-range-etag"')
     ]
 
     invalid = client.get(

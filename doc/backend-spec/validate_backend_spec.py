@@ -24,7 +24,7 @@ API_CONTRACT_PATH = ROOT / "api-contract.md"
 SEED_PATH = ROOT / "seed-fixture-v0.1.json"
 DOC_GLOB = "*.md"
 
-HTTP_METHODS = {"get", "post", "patch", "put", "delete"}
+HTTP_METHODS = {"get", "head", "post", "patch", "put", "delete"}
 WRITING_METHODS = {"post", "patch", "put", "delete"}
 IDEMPOTENCY_EXEMPT_OPERATIONS = {
     ("post", "/auth/dev-login"),

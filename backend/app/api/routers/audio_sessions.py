@@ -93,6 +93,9 @@ router = APIRouter(tags=["audio-sessions"])
 settings = get_settings()
 logger = get_logger("audio_sessions")
 
+SYNTHETIC_WAV_DATA_SIZE = 32_000
+SYNTHETIC_WAV_HEADER_SIZE = 44
+
 MANUAL_LABEL_DRAFT_WRITE_ROLES = (
     "project_admin",
     "asset_manager",
@@ -594,6 +597,28 @@ def _open_object_with_if_match(
     )
 
 
+def _head_object_with_if_match(
+    client: Any,
+    bucket: str,
+    object_key: str,
+    *,
+    registered_etag: str,
+) -> dict[str, Any]:
+    head_object = getattr(client, "head_object", None)
+    if not callable(head_object):
+        raise ApiError(
+            "AUDIO_OBJECT_HEAD_UNSUPPORTED",
+            "对象存储 Provider 未提供安全的对象元数据读取能力",
+            502,
+            retryable=True,
+        )
+    return head_object(
+        bucket,
+        object_key,
+        if_match=_etag_header(registered_etag),
+    )
+
+
 def _read_versioned_wav_probe(
     client: Any,
     bucket: str,
@@ -796,7 +821,7 @@ def _parse_byte_range(range_header: str | None, total: int) -> tuple[int, int, b
 @lru_cache(maxsize=32)
 def _synthetic_wav_bytes(recording_id: str, file_name: str) -> bytes:
     sample_rate = 8000
-    data_size = 32000
+    data_size = SYNTHETIC_WAV_DATA_SIZE
     seed = sum(recording_id.encode("utf-8")) % 23
     pcm = bytes((index * 7 + seed) % 256 for index in range(data_size))
     header = b"".join(
@@ -812,16 +837,15 @@ def _synthetic_wav_bytes(recording_id: str, file_name: str) -> bytes:
     return header + pcm
 
 
-def _audio_response(
-    body: bytes,
+def _audio_response_plan(
+    total: int,
     *,
     range_header: str | None,
     content_type: str,
     file_name: str,
     source: str,
     extra_headers: dict[str, str] | None = None,
-) -> Response:
-    total = len(body)
+) -> tuple[int, int, int, dict[str, str]]:
     parsed = _parse_byte_range(range_header, total)
     common_headers = {
         "Accept-Ranges": "bytes",
@@ -833,22 +857,62 @@ def _audio_response(
         **(extra_headers or {}),
     }
     if parsed is None:
-        return Response(
-            status_code=416,
-            headers={**common_headers, "Content-Range": f"bytes */{total}"},
-        )
+        return (416, 0, -1, {**common_headers, "Content-Range": f"bytes */{total}"})
     start, end, partial = parsed
-    payload = body[start : end + 1]
-    headers = {**common_headers, "Content-Length": str(len(payload))}
+    headers = {**common_headers, "Content-Length": str(end - start + 1)}
     if partial:
         headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-    return Response(content=payload, status_code=206 if partial else 200, headers=headers)
+    return (206 if partial else 200, start, end, headers)
+
+
+def _audio_response(
+    body: bytes,
+    *,
+    range_header: str | None,
+    content_type: str,
+    file_name: str,
+    source: str,
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
+    status_code, start, end, headers = _audio_response_plan(
+        len(body),
+        range_header=range_header,
+        content_type=content_type,
+        file_name=file_name,
+        source=source,
+        extra_headers=extra_headers,
+    )
+    if status_code == 416:
+        return Response(status_code=status_code, headers=headers)
+    payload = body[start : end + 1]
+    return Response(content=payload, status_code=status_code, headers=headers)
+
+
+def _audio_head_response(
+    total: int,
+    *,
+    range_header: str | None,
+    content_type: str,
+    file_name: str,
+    source: str,
+    extra_headers: dict[str, str] | None = None,
+) -> Response:
+    status_code, _start, _end, headers = _audio_response_plan(
+        total,
+        range_header=range_header,
+        content_type=content_type,
+        file_name=file_name,
+        source=source,
+        extra_headers=extra_headers,
+    )
+    return Response(status_code=status_code, headers=headers)
 
 
 def _object_storage_audio_response(
     recording: dict,
     *,
     range_header: str | None,
+    head_only: bool = False,
 ) -> Response:
     raw_storage = recording.get("storage_object")
     storage = raw_storage if isinstance(raw_storage, dict) else {}
@@ -877,6 +941,7 @@ def _object_storage_audio_response(
     content_type = str(storage.get("content_type") or recording.get("content_type") or "audio/wav")
     file_name = str(recording.get("file_name") or f"{recording.get('recording_id')}.wav")
     total = 0
+    result: dict[str, Any] | None = None
     try:
         provider = str(
             storage.get("provider") or recording.get("provider") or settings.object_storage_provider
@@ -901,7 +966,18 @@ def _object_storage_audio_response(
         if isinstance(registered_total, int) and registered_total > 0:
             total = registered_total
         else:
-            head = client.head_object(bucket, object_key)
+            head = (
+                _head_object_with_if_match(
+                    client,
+                    bucket,
+                    object_key,
+                    registered_etag=registered_etag,
+                )
+                if head_only
+                else client.head_object(bucket, object_key)
+            )
+            if head_only:
+                result = head
             total = int(head.get("content_length") or 0)
         parsed = _parse_byte_range(range_header, total)
         if parsed is None:
@@ -915,13 +991,21 @@ def _object_storage_audio_response(
                 },
             )
         start, end, partial = parsed
-        result = _open_object_with_if_match(
-            client,
-            bucket,
-            object_key,
-            byte_range=range_header if partial else None,
-            registered_etag=registered_etag,
-        )
+        if head_only:
+            result = result or _head_object_with_if_match(
+                client,
+                bucket,
+                object_key,
+                registered_etag=registered_etag,
+            )
+        else:
+            result = _open_object_with_if_match(
+                client,
+                bucket,
+                object_key,
+                byte_range=range_header if partial else None,
+                registered_etag=registered_etag,
+            )
         upstream_status = int(result.get("status") or 0)
         if upstream_status == 412:
             _close_object_stream(result)
@@ -931,7 +1015,10 @@ def _object_storage_audio_response(
                 412,
                 retryable=False,
             )
-        if (partial and upstream_status != 206) or (not partial and upstream_status != 200):
+        if (head_only and upstream_status != 200) or (
+            not head_only
+            and ((partial and upstream_status != 206) or (not partial and upstream_status != 200))
+        ):
             _close_object_stream(result)
             raise ApiError(
                 "AUDIO_OBJECT_RANGE_UNSUPPORTED",
@@ -981,9 +1068,11 @@ def _object_storage_audio_response(
         raise ApiError(
             "AUDIO_OBJECT_FETCH_FAILED", "读取对象存储录音失败", 502, retryable=True
         ) from exc
+    assert result is not None
     expected_length = end - start + 1 if partial else total
     upstream_length = result.get("content_length")
-    if str(upstream_length or "") != str(expected_length):
+    expected_upstream_length = total if head_only else expected_length
+    if str(upstream_length or "") != str(expected_upstream_length):
         _close_object_stream(result)
         raise ApiError(
             "AUDIO_OBJECT_RANGE_INVALID",
@@ -993,7 +1082,7 @@ def _object_storage_audio_response(
         )
     expected_content_range = f"bytes {start}-{end}/{total}"
     upstream_content_range = result.get("content_range")
-    if partial and upstream_content_range != expected_content_range:
+    if not head_only and partial and upstream_content_range != expected_content_range:
         _close_object_stream(result)
         raise ApiError(
             "AUDIO_OBJECT_RANGE_INVALID",
@@ -1030,6 +1119,8 @@ def _object_storage_audio_response(
     }
     if partial:
         headers["Content-Range"] = expected_content_range
+    if head_only:
+        return Response(status_code=206 if partial else 200, headers=headers)
     stream = result.get("stream")
     if stream is not None and hasattr(stream, "read"):
 
@@ -1198,6 +1289,22 @@ def get_audio_sessions_by_id_recording(
     )
 
 
+@router.head("/audio-sessions/{id}/recording")
+def head_audio_sessions_by_id_recording(
+    id: str,
+    request: Request,
+    session: SessionDep,
+    grant: str | None = None,
+):
+    return _stream_audio_with_playback_grant(
+        grant,
+        request,
+        session,
+        expected_audio_session_id=id,
+        head_only=True,
+    )
+
+
 @router.post("/audio-sessions/{id}/playback-grants", status_code=201)
 async def post_audio_sessions_by_id_playback_grants(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
@@ -1267,6 +1374,7 @@ def _stream_audio_with_playback_grant(
     session: SessionDep,
     *,
     expected_audio_session_id: str | None = None,
+    head_only: bool = False,
 ) -> Response:
     playback_grant, ctx = authorize_audio_playback_grant(
         session,
@@ -1296,23 +1404,37 @@ def _stream_audio_with_playback_grant(
         )
     range_header = _effective_range_header(request, recording)
     if _real_object_storage_enabled():
-        response = _object_storage_audio_response(recording, range_header=range_header)
+        response = _object_storage_audio_response(
+            recording,
+            range_header=range_header,
+            head_only=head_only,
+        )
     else:
         file_name = str(
             recording.get("file_name")
             or f"{recording.get('recording_id') or playback_grant.audio_session_id}.wav"
         )
-        response = _audio_response(
-            _synthetic_wav_bytes(
-                str(recording.get("recording_id") or playback_grant.audio_session_id),
-                file_name,
-            ),
-            range_header=range_header,
-            content_type="audio/wav",
-            file_name=file_name,
-            source="mock-range-stream",
-            extra_headers=_storage_response_headers(recording),
-        )
+        if head_only:
+            response = _audio_head_response(
+                SYNTHETIC_WAV_HEADER_SIZE + SYNTHETIC_WAV_DATA_SIZE,
+                range_header=range_header,
+                content_type="audio/wav",
+                file_name=file_name,
+                source="mock-range-stream",
+                extra_headers=_storage_response_headers(recording),
+            )
+        else:
+            response = _audio_response(
+                _synthetic_wav_bytes(
+                    str(recording.get("recording_id") or playback_grant.audio_session_id),
+                    file_name,
+                ),
+                range_header=range_header,
+                content_type="audio/wav",
+                file_name=file_name,
+                source="mock-range-stream",
+                extra_headers=_storage_response_headers(recording),
+            )
     response.headers["Cache-Control"] = "private, no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
     record_audit(
@@ -1335,6 +1457,11 @@ def _stream_audio_with_playback_grant(
 @router.get("/audio-playback")
 def get_audio_playback(grant: str, request: Request, session: SessionDep):
     return _stream_audio_with_playback_grant(grant, request, session)
+
+
+@router.head("/audio-playback")
+def head_audio_playback(grant: str, request: Request, session: SessionDep):
+    return _stream_audio_with_playback_grant(grant, request, session, head_only=True)
 
 
 @router.put("/audio-sessions/{id}/recording-object")
