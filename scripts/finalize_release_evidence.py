@@ -1565,7 +1565,9 @@ def _validate_real_stack(payload: dict[str, Any], *, source_commit: str) -> None
         not isinstance(http_range, dict)
         or http_range.get("status") != 206
         or http_range.get("invalid_range_status") != 416
-        or http_range.get("same_size_version_mismatch_status") != 412
+        or http_range.get("replacement_current_version_changed") is not True
+        or http_range.get("registered_version_continuity_status") != 200
+        or http_range.get("registered_version_body_match") is not True
         or not _positive_int(http_range.get("content_length"))
     ):
         raise EvidenceError(f"{filename} HTTP Range proof is invalid")

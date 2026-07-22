@@ -441,7 +441,9 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "http_range": {
                     "content_length": 32,
                     "invalid_range_status": 416,
-                    "same_size_version_mismatch_status": 412,
+                    "replacement_current_version_changed": True,
+                    "registered_version_continuity_status": 200,
+                    "registered_version_body_match": True,
                     "status": 206,
                 },
                 "object_storage": {

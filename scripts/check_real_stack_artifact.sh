@@ -229,7 +229,9 @@ expected_range_fields = {
     "invalid_range_status": 416,
     "metadata_registered": True,
     "registration_event_processed": 1,
-    "same_size_version_mismatch_status": 412,
+    "replacement_current_version_changed": True,
+    "registered_version_continuity_status": 200,
+    "registered_version_body_match": True,
 }
 range_mismatches = {
     key: {"expected": expected, "actual": range_check.get(key)}
@@ -281,8 +283,14 @@ verification = {
     "http_range": {
         "status": range_check.get("range_status"),
         "invalid_range_status": range_check.get("invalid_range_status"),
-        "same_size_version_mismatch_status": range_check.get(
-            "same_size_version_mismatch_status"
+        "replacement_current_version_changed": range_check.get(
+            "replacement_current_version_changed"
+        ),
+        "registered_version_continuity_status": range_check.get(
+            "registered_version_continuity_status"
+        ),
+        "registered_version_body_match": range_check.get(
+            "registered_version_body_match"
         ),
         "content_length": range_check.get("content_length"),
     },

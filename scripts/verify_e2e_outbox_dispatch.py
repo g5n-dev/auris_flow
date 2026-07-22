@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request as UrlRequest
@@ -176,7 +176,7 @@ def expected_status_for_adapter(adapter: str | None) -> tuple[str, str | None]:
     return "success", None
 
 
-def fail(message: str, detail: Any | None = None) -> None:
+def fail(message: str, detail: Any | None = None) -> NoReturn:
     payload: dict[str, Any] = {"status": "failed", "message": message}
     if detail is not None:
         payload["detail"] = detail
@@ -2864,51 +2864,57 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
                 pcm,
             ]
         )
-        try:
-            storage_client._ensure_bucket()
-            put_result = storage_client._request(
+        with SessionLocal() as session:
+            pre_registered = session.get(StorageObject, storage_object_id) is not None
+        if not pre_registered:
+            try:
+                storage_client._ensure_bucket()
+                put_result = storage_client._request(
+                    "PUT",
+                    f"/{bucket}/{object_key}",
+                    body=body,
+                    content_type="audio/wav",
+                )
+                uploaded_etag = str(put_result.get("etag") or "")
+            except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
+                fail(
+                    "Could not seed real object storage audio fixture for Range verification",
+                    {"bucket": bucket, "object_key": object_key, "error": str(exc)},
+                )
+            registration = bff_json_request(
                 "PUT",
-                f"/{bucket}/{object_key}",
-                body=body,
-                content_type="audio/wav",
+                f"/api/v1/audio-sessions/{audio_session_id}/recording-object",
+                payload={
+                    "storage_object_id": storage_object_id,
+                    "provider": "minio",
+                    "bucket": bucket,
+                    "object_key": object_key,
+                    "content_type": "audio/wav",
+                    "content_length": len(body),
+                    "checksum_sha256": hashlib.sha256(body).hexdigest(),
+                    "etag": put_result.get("etag"),
+                },
+                idempotency_key="e2e-register-audio-range-object",
+                trace_id="trace_e2e_audio_range_object",
             )
-            original_etag = str(put_result.get("etag") or "")
-        except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
-            fail(
-                "Could not seed real object storage audio fixture for Range verification",
-                {"bucket": bucket, "object_key": object_key, "error": str(exc)},
+            registered = (
+                registration.get("data") if isinstance(registration, dict) else None
             )
-        registration = bff_json_request(
-            "PUT",
-            f"/api/v1/audio-sessions/{audio_session_id}/recording-object",
-            payload={
-                "storage_object_id": storage_object_id,
-                "provider": "minio",
-                "bucket": bucket,
-                "object_key": object_key,
-                "content_type": "audio/wav",
-                "content_length": len(body),
-                "checksum_sha256": hashlib.sha256(body).hexdigest(),
-                "etag": put_result.get("etag"),
-            },
-            idempotency_key="e2e-register-audio-range-object",
-            trace_id="trace_e2e_audio_range_object",
-        )
-        registered = (
-            registration.get("data") if isinstance(registration, dict) else None
-        )
-        registered_storage = (
-            registered.get("storage_object") if isinstance(registered, dict) else None
-        )
-        if (
-            not isinstance(registered_storage, dict)
-            or registered_storage.get("storage_object_id") != storage_object_id
-            or registered_storage.get("etag") != original_etag
-        ):
-            fail(
-                "BFF did not register the real audio storage object",
-                {"registration": registration},
+            registered_storage = (
+                registered.get("storage_object")
+                if isinstance(registered, dict)
+                else None
             )
+            if (
+                not isinstance(registered_storage, dict)
+                or registered_storage.get("storage_object_id") != storage_object_id
+                or registered_storage.get("etag") != uploaded_etag
+            ):
+                fail(
+                    "BFF did not register the real audio storage object",
+                    {"registration": registration},
+                )
+
         registration_event = wait_for_aggregate_outbox_event(
             aggregate_type="storage_object",
             aggregate_id=storage_object_id,
@@ -2927,12 +2933,30 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
             )
         with SessionLocal() as session:
             storage_record = session.get(StorageObject, storage_object_id)
+            registered_version_id = (
+                storage_record.payload.get("object_version_id")
+                if storage_record is not None
+                and isinstance(storage_record.payload, dict)
+                else None
+            )
             if (
                 not storage_record
                 or storage_record.tenant_id != "aurora_auto"
                 or storage_record.project_id != "sales_qa"
+                or storage_record.provider != "minio"
+                or storage_record.bucket != bucket
+                or storage_record.object_key != object_key
+                or storage_record.object_key_sha256
+                != hashlib.sha256(object_key.encode()).hexdigest()
+                or storage_record.source_type != "audio_recording"
+                or storage_record.source_id != recording_id
+                or storage_record.content_type != "audio/wav"
                 or storage_record.content_sha256 != hashlib.sha256(body).hexdigest()
                 or storage_record.size_bytes != len(body)
+                or storage_record.status != "verified"
+                or not storage_record.etag
+                or not isinstance(registered_version_id, str)
+                or not registered_version_id
             ):
                 fail(
                     "MySQL storage object metadata does not match the uploaded WAV",
@@ -2941,6 +2965,35 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
                         "registered": bool(storage_record),
                     },
                 )
+            original_etag = storage_record.etag
+        try:
+            registered_remote = storage_client.head_object(
+                bucket,
+                object_key,
+                version_id=registered_version_id,
+            )
+        except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
+            fail(
+                "Could not resolve the registered exact audio object version",
+                {
+                    "storage_object_id": storage_object_id,
+                    "object_version_id": registered_version_id,
+                    "error": str(exc),
+                },
+            )
+        if (
+            str(registered_remote.get("etag") or "").strip('"') != original_etag
+            or str(registered_remote.get("content_length") or "") != str(len(body))
+            or registered_remote.get("version_id") != registered_version_id
+        ):
+            fail(
+                "Registered exact audio object version does not match MySQL authority",
+                {
+                    "storage_object_id": storage_object_id,
+                    "object_version_id": registered_version_id,
+                    "remote": registered_remote,
+                },
+            )
 
     playback_grant = bff_json_request(
         "POST",
@@ -2992,11 +3045,13 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
         invalid.get("headers", {}).get("content-range") or ""
     ).startswith("bytes */"):
         fail("Audio recording invalid Range did not return 416", invalid)
-    version_mismatch_status = 0
+    replacement_current_version_changed = False
+    registered_version_continuity_status = 0
+    registered_version_body_match = False
     if real_storage and storage_client is not None:
         replacement = bytearray(body)
         replacement[-1] ^= 0x01
-        stale_grant_response: dict[str, Any] | None = None
+        registered_version_response: dict[str, Any] | None = None
         replacement_etag = ""
         replacement_error: str | None = None
         restore_error: str | None = None
@@ -3009,7 +3064,7 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
                 content_type="audio/wav",
             )
             replacement_etag = str(replacement_result.get("etag") or "")
-            stale_grant_response = bff_binary_request(
+            registered_version_response = bff_binary_request(
                 "GET",
                 playback_url,
                 include_default_context=False,
@@ -3045,32 +3100,38 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
                     "replacement_etag": replacement_etag,
                 },
             )
+        replacement_current_version_changed = True
         if restored_etag != original_etag:
             fail(
-                "Real audio fixture was not restored to its registered provider version",
+                "Real audio fixture latest content was not restored after replacement",
                 {
                     "expected_etag": original_etag,
                     "restored_etag": restored_etag,
                 },
             )
-        stale_body: dict[str, Any] = {}
-        if stale_grant_response and isinstance(stale_grant_response.get("body"), bytes):
-            try:
-                stale_body = json.loads(stale_grant_response["body"].decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                stale_body = {}
-        version_mismatch_status = int(
-            stale_grant_response.get("status", 0) if stale_grant_response else 0
+        registered_version_continuity_status = int(
+            registered_version_response.get("status", 0)
+            if registered_version_response
+            else 0
+        )
+        registered_version_body_match = bool(
+            registered_version_response
+            and registered_version_response.get("body") == body
+            and registered_version_response.get("headers", {}).get("accept-ranges")
+            == "bytes"
+            and registered_version_response.get("headers", {}).get(
+                "x-storage-object-id"
+            )
+            == storage_object_id
         )
         if (
-            version_mismatch_status != 412
-            or stale_body.get("error", {}).get("code") != "AUDIO_OBJECT_VERSION_CHANGED"
+            registered_version_continuity_status != 200
+            or not registered_version_body_match
         ):
             fail(
-                "A stale audio playback grant did not reject same-size object replacement",
+                "Exact-version audio playback did not survive a newer current object version",
                 {
-                    "response": stale_grant_response,
-                    "error": stale_body.get("error"),
+                    "response": registered_version_response,
                     "original_etag": original_etag,
                     "replacement_etag": replacement_etag,
                 },
@@ -3086,7 +3147,9 @@ def verify_audio_recording_range_stream() -> dict[str, Any]:
         "playback_grant_status": playback_grant.get("data", {}).get("status"),
         "metadata_registered": real_storage,
         "registration_event_processed": processed_registration_events,
-        "same_size_version_mismatch_status": version_mismatch_status,
+        "replacement_current_version_changed": replacement_current_version_changed,
+        "registered_version_continuity_status": registered_version_continuity_status,
+        "registered_version_body_match": registered_version_body_match,
     }
 
 
