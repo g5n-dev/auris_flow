@@ -207,6 +207,31 @@ def test_launch_then_exact_run_key_lookup_records_only_the_launch(
     assert len(receipt_log.read_text(encoding="utf-8").splitlines()) == 1
 
 
+def test_fake_protocol_endpoint_accepts_only_the_allowlisted_audio_domain_job(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_fake_server_module()
+    monkeypatch.delenv("DAGSTER_REPOSITORY_LOCATION_NAME", raising=False)
+    monkeypatch.delenv("DAGSTER_REPOSITORY_NAME", raising=False)
+    monkeypatch.delenv("DAGSTER_DEFAULT_JOB_NAME", raising=False)
+
+    with _running_server(module) as (state, graphql_url):
+        accepted_status, _accepted = _post_json(
+            graphql_url,
+            _valid_launch_payload(job_name="auris_flow_audio_intelligence_v1"),
+        )
+        rejected_status, _rejected = _post_json(
+            graphql_url,
+            _valid_launch_payload(job_name="caller_selected_job"),
+        )
+
+    assert accepted_status == 200
+    assert rejected_status == 400
+    assert {receipt["job_name"] for receipt in state.receipts.values()} == {
+        "auris_flow_audio_intelligence_v1"
+    }
+
+
 @pytest.mark.parametrize(
     "payload",
     [

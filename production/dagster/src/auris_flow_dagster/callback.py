@@ -15,9 +15,10 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import Request, build_opener
 
 from auris_flow_dagster.contracts import AurisRunContext
+from auris_flow_dagster.http_transport import RejectRedirectHandler as _RejectRedirectHandler
 
 SIGNATURE_VERSION = "auris-completion-v1"
 SOURCE = "dagster"
@@ -200,7 +201,7 @@ class CompletionCallbackClient:
         active_key_id: str | None = None,
         timeout_seconds: float = 5.0,
         max_attempts: int = 3,
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         nonce_factory: Callable[[], str] | None = None,
         sleeper: Callable[[float], None] = time.sleep,
@@ -225,7 +226,7 @@ class CompletionCallbackClient:
             raise CompletionCallbackError("callback retry configuration is invalid")
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
-        self._opener = opener
+        self._opener = opener or build_opener(_RejectRedirectHandler()).open
         self._clock = clock or (lambda: datetime.now(UTC))
         self._nonce_factory = nonce_factory or (lambda: secrets.token_hex(24))
         self._sleeper = sleeper

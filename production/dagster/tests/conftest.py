@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from auris_flow_dagster.contracts import AurisRunContext
+
+# Dagster definitions configure tracing at test-module import time. Keep
+# collection hermetic while production continues to fail closed when telemetry
+# is absent or invalid.
+os.environ["APP_ENV"] = "test"
+os.environ["OTEL_ENABLED"] = "false"
 
 
 @pytest.fixture

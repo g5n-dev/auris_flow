@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import re
 import secrets
 import sys
 import time
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,10 +23,89 @@ if not (BACKEND_ROOT / "app").is_dir() and Path("/app/app").is_dir():
     BACKEND_ROOT = Path("/app")
 sys.path.insert(0, str(BACKEND_ROOT))
 
+from app.services.public_run_projection_service import (  # noqa: E402
+    PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS,
+    PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS,
+)
+
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 TERMINAL_STATUSES = frozenset({"success", "failed", "cancelled"})
 MAX_RESPONSE_BYTES = 1_048_576
 SCOPE = ("aurora_auto", "sales_qa")
+PUBLIC_RUN_FORBIDDEN_FIELD_FRAGMENTS = tuple(sorted(PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS))
+PUBLIC_RUN_FORBIDDEN_VALUE_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"dagster",
+        r"graphql",
+        r"\badapter\b",
+        r"\b[a-z0-9._-]+_(?:job|pipeline)\b",
+    )
+)
+SUCCESS_INTERNAL_EVIDENCE_SOURCES = frozenset(
+    {"run_records", "outbox_events", "completion_receipts"}
+)
+CANCELLATION_INTERNAL_EVIDENCE_SOURCES = frozenset({"run_records", "outbox_events"})
+SUCCESS_INTERNAL_EVIDENCE_FIELDS = frozenset(
+    {
+        "adapter_mode",
+        "dagster_run_id",
+        "evidence_sources",
+        "outbox_confirmed",
+        "outbox_events",
+        "signed_completion",
+        "status_sync",
+    }
+)
+CANCELLATION_INTERNAL_EVIDENCE_FIELDS = frozenset(
+    {
+        "adapter_mode",
+        "dagster_run_id",
+        "engine_status",
+        "evidence_sources",
+        "outbox_confirmed",
+        "outbox_events",
+        "terminate_policy",
+    }
+)
+_CONFUSABLE_TRANSLATION = str.maketrans(
+    {
+        "Α": "A",
+        "Β": "B",
+        "Ε": "E",
+        "Ζ": "Z",
+        "Η": "H",
+        "Ι": "I",
+        "Κ": "K",
+        "Μ": "M",
+        "Ν": "N",
+        "Ο": "O",
+        "Ρ": "P",
+        "Τ": "T",
+        "Χ": "X",
+        "а": "a",
+        "е": "e",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "у": "y",
+        "х": "x",
+        "і": "i",
+        "ј": "j",
+        "ѕ": "s",
+        "А": "A",
+        "В": "B",
+        "Е": "E",
+        "К": "K",
+        "М": "M",
+        "Н": "H",
+        "О": "O",
+        "Р": "P",
+        "С": "C",
+        "Т": "T",
+        "Х": "X",
+    }
+)
 
 
 class GateFailure(RuntimeError):
@@ -61,6 +143,53 @@ def _validate_terminal_history(history: object, final_status: str) -> None:
         raise GateFailure("task run status history does not prove its terminal state")
 
 
+def _assert_engine_neutral_projection(value: object, *, path: str = "data") -> None:
+    if isinstance(value, dict):
+        for raw_key, child in value.items():
+            if not isinstance(raw_key, str):
+                raise GateFailure(
+                    f"public run projection is not engine-neutral at {path}"
+                )
+            key = raw_key
+            canonical_key = unicodedata.normalize("NFKC", key)
+            if key != canonical_key or not re.fullmatch(
+                r"[A-Za-z0-9_.:/ -]+", canonical_key
+            ):
+                raise GateFailure(
+                    f"public run projection is not engine-neutral at {path}.{key}"
+                )
+            fingerprint = re.sub(r"[^a-z0-9]+", "", canonical_key.casefold())
+            if fingerprint in PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS or any(
+                fragment in fingerprint
+                for fragment in PUBLIC_RUN_FORBIDDEN_FIELD_FRAGMENTS
+            ):
+                raise GateFailure(
+                    f"public run projection is not engine-neutral at {path}.{key}"
+                )
+            _assert_engine_neutral_projection(child, path=f"{path}.{key}")
+        return
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            _assert_engine_neutral_projection(child, path=f"{path}[{index}]")
+        return
+    if isinstance(value, str):
+        normalized_value = unicodedata.normalize("NFKC", value)
+        visible_value = "".join(
+            char for char in normalized_value if unicodedata.category(char) != "Cf"
+        ).translate(_CONFUSABLE_TRANSLATION)
+        if any(
+            pattern.search(visible_value)
+            for pattern in PUBLIC_RUN_FORBIDDEN_VALUE_PATTERNS
+        ):
+            raise GateFailure(f"public run projection is not engine-neutral at {path}")
+        return
+    if value is None or isinstance(value, (bool, int)):
+        return
+    if isinstance(value, float) and math.isfinite(value):
+        return
+    raise GateFailure(f"public run projection is not engine-neutral at {path}")
+
+
 def validate_run_projection(
     payload: dict[str, Any],
     *,
@@ -68,6 +197,7 @@ def validate_run_projection(
     expected_scope: tuple[str, str],
     expected_trace_id: str,
 ) -> dict[str, Any]:
+    _assert_engine_neutral_projection(payload)
     run_id = _text(payload.get("run_id"), "task run id")
     if (
         payload.get("run_type") != "task_run"
@@ -88,49 +218,130 @@ def validate_run_projection(
     ):
         raise GateFailure("task run status version is invalid")
 
-    dispatch = _mapping(payload.get("dispatch"), "task run dispatch")
-    details = _mapping(dispatch.get("details"), "task run dispatch details")
-    if (
-        dispatch.get("adapter") != "dagster"
-        or dispatch.get("operation") != "run_request"
-        or dispatch.get("status") != "success"
-        or details.get("mode") != "real"
-        or details.get("response_typename") != "LaunchRunSuccess"
-    ):
-        raise GateFailure("task run was not submitted through the real Dagster adapter")
-    if (
-        details.get("tenant_id") != tenant_id
-        or details.get("project_id") != project_id
-        or details.get("trace_id") != expected_trace_id
-    ):
-        raise GateFailure("real Dagster dispatch scope or trace binding is invalid")
-    dagster_run_id = _text(details.get("external_run_id"), "Dagster run id")
     _validate_terminal_history(payload.get("status_history"), expected_status)
     return {
         "run_id": run_id,
         "status": expected_status,
         "status_version": status_version,
         "trace_id": trace_id,
-        "dagster_run_id": dagster_run_id,
-        "adapter_mode": "real",
+        "tenant_id": tenant_id,
+        "project_id": project_id,
     }
+
+
+def _require_internal_evidence_shape(
+    evidence: dict[str, Any],
+    *,
+    allowed_fields: frozenset[str],
+    expected_sources: frozenset[str],
+    expected_event_types: frozenset[str],
+    scenario: str,
+) -> None:
+    if not set(evidence).issubset(allowed_fields):
+        raise GateFailure(f"{scenario} internal evidence contains unexpected fields")
+    if frozenset(evidence.get("evidence_sources") or ()) != expected_sources:
+        raise GateFailure(f"{scenario} internal evidence sources are incomplete")
+    events = evidence.get("outbox_events")
+    if not isinstance(events, list) or len(events) != len(expected_event_types):
+        raise GateFailure(f"{scenario} outbox event evidence is incomplete")
+    observed_types: set[str] = set()
+    for raw_event in events:
+        event = _mapping(raw_event, f"{scenario} outbox event evidence")
+        event_type = _text(event.get("event_type"), "outbox event type")
+        if (
+            event_type in observed_types
+            or event.get("status") != "processed"
+            or event.get("delivery_state") != "confirmed"
+            or isinstance(event.get("event_id"), bool)
+            or not isinstance(event.get("event_id"), int)
+            or int(event["event_id"]) < 1
+            or isinstance(event.get("attempt_count"), bool)
+            or not isinstance(event.get("attempt_count"), int)
+            or int(event["attempt_count"]) < 1
+            or not _text(
+                event.get("aggregate_id"),
+                "outbox event aggregate id",
+            )
+            or not _text(
+                event.get("dispatch_idempotency_key"),
+                "outbox dispatch idempotency key",
+            )
+        ):
+            raise GateFailure(f"{scenario} outbox event evidence is invalid")
+        observed_types.add(event_type)
+    if observed_types != expected_event_types:
+        raise GateFailure(f"{scenario} outbox event types are incomplete")
 
 
 def build_evidence(
     *,
     source_commit: str,
-    success: dict[str, Any],
-    cancellation: dict[str, Any],
+    success_projection: dict[str, Any],
+    success_internal: dict[str, Any],
+    cancellation_projection: dict[str, Any],
+    cancellation_internal: dict[str, Any],
 ) -> dict[str, Any]:
     if not COMMIT_PATTERN.fullmatch(source_commit):
         raise GateFailure("source commit must be an exact lowercase Git SHA")
+    try:
+        _assert_engine_neutral_projection(success_projection, path="success_projection")
+        _assert_engine_neutral_projection(
+            cancellation_projection, path="cancellation_projection"
+        )
+    except GateFailure as exc:
+        raise GateFailure(
+            "public projection contains internal engine evidence"
+        ) from exc
+
+    _require_internal_evidence_shape(
+        success_internal,
+        allowed_fields=SUCCESS_INTERNAL_EVIDENCE_FIELDS,
+        expected_sources=SUCCESS_INTERNAL_EVIDENCE_SOURCES,
+        expected_event_types=frozenset(
+            {
+                "task_run.requested",
+                "task_run.status_sync_requested",
+                "task_run.succeeded",
+            }
+        ),
+        scenario="success",
+    )
+    _require_internal_evidence_shape(
+        cancellation_internal,
+        allowed_fields=CANCELLATION_INTERNAL_EVIDENCE_FIELDS,
+        expected_sources=CANCELLATION_INTERNAL_EVIDENCE_SOURCES,
+        expected_event_types=frozenset(
+            {
+                "task_run.requested",
+                "task_run.cancel_requested",
+                "task_run.cancelled",
+            }
+        ),
+        scenario="cancellation",
+    )
+
+    success = {**success_projection, **success_internal}
+    cancellation = {**cancellation_projection, **cancellation_internal}
     if (
         success.get("status") != "success"
+        or success.get("adapter_mode") != "real"
+        or not _text(success.get("dagster_run_id"), "success engine run id")
+        or not _text(success.get("status_sync"), "success synchronized engine status")
         or success.get("signed_completion") is not True
         or success.get("outbox_confirmed") is not True
+        or frozenset(success.get("evidence_sources") or ())
+        != SUCCESS_INTERNAL_EVIDENCE_SOURCES
         or cancellation.get("status") != "cancelled"
+        or cancellation.get("adapter_mode") != "real"
+        or not _text(cancellation.get("dagster_run_id"), "cancellation engine run id")
         or cancellation.get("terminate_policy") != "SAFE_TERMINATE"
+        or not _text(
+            cancellation.get("engine_status"),
+            "cancellation engine status",
+        )
         or cancellation.get("outbox_confirmed") is not True
+        or frozenset(cancellation.get("evidence_sources") or ())
+        != CANCELLATION_INTERNAL_EVIDENCE_SOURCES
     ):
         raise GateFailure("product Dagster scenario proof is incomplete")
     return {
@@ -155,6 +366,7 @@ def build_evidence(
                     "signed_completion",
                     "outbox_confirmed",
                     "outbox_events",
+                    "evidence_sources",
                 )
                 if key in success
             },
@@ -171,6 +383,7 @@ def build_evidence(
                     "engine_status",
                     "outbox_confirmed",
                     "outbox_events",
+                    "evidence_sources",
                 )
                 if key in cancellation
             },
@@ -247,6 +460,12 @@ def _response_data(response: dict[str, Any]) -> dict[str, Any]:
     return _mapping(response.get("data"), "BFF data envelope")
 
 
+def _public_run_data(response: dict[str, Any]) -> dict[str, Any]:
+    data = _response_data(response)
+    _assert_engine_neutral_projection(data)
+    return data
+
+
 def _wait_for_run(
     client: BFFClient,
     run_id: str,
@@ -257,7 +476,7 @@ def _wait_for_run(
     deadline = time.monotonic() + timeout_seconds
     last_status = "unknown"
     while time.monotonic() < deadline:
-        data = _response_data(client.request("GET", f"/api/v1/task-runs/{run_id}"))
+        data = _public_run_data(client.request("GET", f"/api/v1/task-runs/{run_id}"))
         last_status = str(data.get("status") or "unknown")
         if last_status in expected:
             return data
@@ -271,32 +490,20 @@ def _wait_for_run(
     )
 
 
-def _real_dispatch_binding(data: dict[str, Any]) -> tuple[str, str]:
-    dispatch = _mapping(data.get("dispatch"), "task run dispatch")
-    details = _mapping(dispatch.get("details"), "task run dispatch details")
-    if (
-        dispatch.get("adapter") != "dagster"
-        or dispatch.get("operation") != "run_request"
-        or dispatch.get("status") != "success"
-        or details.get("mode") != "real"
-        or details.get("response_typename") != "LaunchRunSuccess"
-    ):
-        raise GateFailure("BFF task run is not bound to a real Dagster launch")
-    return (
-        _text(details.get("external_run_id"), "Dagster run id"),
-        _text(data.get("trace_id"), "task run trace id"),
-    )
-
-
-def _assert_cross_scope_hidden(client: BFFClient, run_id: str) -> None:
+def _assert_cross_scope_hidden(
+    client: BFFClient,
+    run_id: str,
+    *,
+    project_id: str,
+) -> None:
     response = client.request(
         "GET",
         f"/api/v1/task-runs/{run_id}",
-        project_id="outside-gate-project",
-        expected_status=403,
+        project_id=project_id,
+        expected_status=404,
     )
     error = _mapping(response.get("error"), "cross-scope error envelope")
-    if error.get("code") != "PROJECT_NOT_FOUND":
+    if error.get("code") != "NOT_FOUND":
         raise GateFailure("cross-scope task run lookup did not fail closed")
 
 
@@ -391,6 +598,90 @@ def _require_real_event_dispatch(
         or details.get("external_run_id") != external_run_id
     ):
         raise GateFailure(f"outbox did not confirm real Dagster {operation}")
+    if payload.get("run_id") != event.aggregate_id:
+        raise GateFailure(f"outbox Dagster {operation} run binding is invalid")
+    if operation == "run_request" and (
+        details.get("tenant_id") != event.tenant_id
+        or details.get("project_id") != event.project_id
+        or details.get("trace_id") != payload.get("trace_id")
+        or details.get("run_id") != event.aggregate_id
+    ):
+        raise GateFailure("outbox Dagster launch scope or trace binding is invalid")
+    if operation in {"run_status", "cancel_run"} and (
+        payload.get("external_run_id") != external_run_id
+    ):
+        raise GateFailure(f"outbox Dagster {operation} source binding is invalid")
+    return details
+
+
+def _require_record_projection_binding(
+    record: Any,
+    projection: dict[str, Any],
+) -> None:
+    payload = _mapping(record.payload, "persisted RunRecord payload")
+    if (
+        record.run_type != "task_run"
+        or record.run_id != projection.get("run_id")
+        or record.tenant_id != projection.get("tenant_id")
+        or record.project_id != projection.get("project_id")
+        or record.trace_id != projection.get("trace_id")
+        or record.status != projection.get("status")
+        or record.status_version != projection.get("status_version")
+        or payload.get("run_id") != record.run_id
+        or payload.get("trace_id") != record.trace_id
+    ):
+        raise GateFailure("persisted RunRecord projection binding is invalid")
+
+
+def _require_real_record_dispatch(
+    record: Any,
+    *,
+    operation: str,
+    expected_run_type: str,
+    expected_external_run_id: str | None,
+    source_record: Any | None = None,
+) -> dict[str, Any]:
+    payload = _mapping(record.payload, "persisted RunRecord payload")
+    dispatch = _mapping(payload.get("dispatch"), "persisted RunRecord dispatch")
+    details = _mapping(dispatch.get("details"), "persisted RunRecord dispatch details")
+    external_run_id = details.get("external_run_id")
+    if (
+        record.tenant_id != SCOPE[0]
+        or record.project_id != SCOPE[1]
+        or record.run_type != expected_run_type
+        or payload.get("run_id") != record.run_id
+        or payload.get("trace_id") != record.trace_id
+        or dispatch.get("adapter") != "dagster"
+        or dispatch.get("operation") != operation
+        or dispatch.get("status") != "success"
+        or details.get("mode") != "real"
+        or not isinstance(external_run_id, str)
+        or not external_run_id
+        or (
+            expected_external_run_id is not None
+            and external_run_id != expected_external_run_id
+        )
+    ):
+        raise GateFailure(
+            f"persisted RunRecord does not prove real Dagster {operation}"
+        )
+    if operation == "run_request" and (
+        details.get("tenant_id") != record.tenant_id
+        or details.get("project_id") != record.project_id
+        or details.get("trace_id") != record.trace_id
+        or details.get("run_id") != record.run_id
+    ):
+        raise GateFailure("persisted Dagster launch scope or trace binding is invalid")
+    if source_record is not None and (
+        source_record.run_type != "task_run"
+        or source_record.tenant_id != record.tenant_id
+        or source_record.project_id != record.project_id
+        or record.run_key != source_record.run_id
+        or payload.get("source_run_id") != source_record.run_id
+        or payload.get("source_trace_id") != source_record.trace_id
+        or payload.get("external_run_id") != external_run_id
+    ):
+        raise GateFailure(f"persisted Dagster {operation} source binding is invalid")
     return details
 
 
@@ -400,6 +691,8 @@ def _database_proof(
     success_sync_id: str,
     cancel_run_id: str,
     cancellation_id: str,
+    success_projection: dict[str, Any],
+    cancellation_projection: dict[str, Any],
     timeout_seconds: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from sqlalchemy import select
@@ -412,13 +705,25 @@ def _database_proof(
     while time.monotonic() < deadline:
         try:
             with SessionLocal() as session:
-                success = session.get(RunRecord, success_run_id)
-                sync = session.get(RunRecord, success_sync_id)
-                cancelled = session.get(RunRecord, cancel_run_id)
-                cancellation = session.get(RunRecord, cancellation_id)
+
+                def scoped_run(run_id: str) -> Any:
+                    return session.scalar(
+                        select(RunRecord).where(
+                            RunRecord.run_id == run_id,
+                            RunRecord.tenant_id == SCOPE[0],
+                            RunRecord.project_id == SCOPE[1],
+                        )
+                    )
+
+                success = scoped_run(success_run_id)
+                sync = scoped_run(success_sync_id)
+                cancelled = scoped_run(cancel_run_id)
+                cancellation = scoped_run(cancellation_id)
                 events = list(
                     session.scalars(
                         select(OutboxEvent).where(
+                            OutboxEvent.tenant_id == SCOPE[0],
+                            OutboxEvent.project_id == SCOPE[1],
                             OutboxEvent.aggregate_id.in_(
                                 [
                                     success_run_id,
@@ -426,7 +731,7 @@ def _database_proof(
                                     cancel_run_id,
                                     cancellation_id,
                                 ]
-                            )
+                            ),
                         )
                     )
                 )
@@ -446,13 +751,9 @@ def _database_proof(
                 assert cancelled is not None
                 assert cancellation is not None
                 assert receipt is not None
-                if (
-                    success.tenant_id != SCOPE[0]
-                    or success.project_id != SCOPE[1]
-                    or cancelled.tenant_id != SCOPE[0]
-                    or cancelled.project_id != SCOPE[1]
-                ):
-                    raise GateFailure("RunRecord scope binding is invalid")
+
+                _require_record_projection_binding(success, success_projection)
+                _require_record_projection_binding(cancelled, cancellation_projection)
 
                 success_requested = _require_confirmed_event(
                     events,
@@ -491,36 +792,17 @@ def _database_proof(
                     trace_id=cancelled.trace_id,
                 )
 
-                sync_dispatch = _mapping(
-                    sync.payload.get("dispatch"), "status sync dispatch"
+                success_dispatch_details = _require_real_record_dispatch(
+                    success,
+                    operation="run_request",
+                    expected_run_type="task_run",
+                    expected_external_run_id=None,
                 )
-                sync_details = _mapping(
-                    sync_dispatch.get("details"), "status sync dispatch details"
-                )
-                if (
-                    sync.status != "success"
-                    or sync_dispatch.get("adapter") != "dagster"
-                    or sync_dispatch.get("operation") != "run_status"
-                    or sync_details.get("mode") != "real"
-                    or not sync_details.get("dagster_status")
-                ):
-                    raise GateFailure(
-                        "real Dagster status synchronization proof is invalid"
-                    )
-
-                success_dispatch = _mapping(
-                    success.payload.get("dispatch"), "persisted success dispatch"
-                )
-                success_dispatch_details = _mapping(
-                    success_dispatch.get("details"),
-                    "persisted success dispatch details",
-                )
-                cancel_source_dispatch = _mapping(
-                    cancelled.payload.get("dispatch"), "persisted cancellation dispatch"
-                )
-                cancel_source_details = _mapping(
-                    cancel_source_dispatch.get("details"),
-                    "persisted cancellation dispatch details",
+                cancel_source_details = _require_real_record_dispatch(
+                    cancelled,
+                    operation="run_request",
+                    expected_run_type="task_run",
+                    expected_external_run_id=None,
                 )
                 success_external_id = _text(
                     success_dispatch_details.get("external_run_id"),
@@ -530,6 +812,17 @@ def _database_proof(
                     cancel_source_details.get("external_run_id"),
                     "persisted cancellation Dagster run id",
                 )
+                sync_details = _require_real_record_dispatch(
+                    sync,
+                    operation="run_status",
+                    expected_run_type="task_run_status_sync",
+                    expected_external_run_id=success_external_id,
+                    source_record=success,
+                )
+                if sync.status != "success" or not sync_details.get("dagster_status"):
+                    raise GateFailure(
+                        "real Dagster status synchronization proof is invalid"
+                    )
                 _require_real_event_dispatch(
                     success_requested,
                     operation="run_request",
@@ -546,17 +839,15 @@ def _database_proof(
                     external_run_id=cancel_external_id,
                 )
 
-                cancel_dispatch = _mapping(
-                    cancellation.payload.get("dispatch"), "cancellation dispatch"
-                )
-                cancel_details = _mapping(
-                    cancel_dispatch.get("details"), "cancellation dispatch details"
+                cancel_details = _require_real_record_dispatch(
+                    cancellation,
+                    operation="cancel_run",
+                    expected_run_type="task_run_cancellation",
+                    expected_external_run_id=cancel_external_id,
+                    source_record=cancelled,
                 )
                 if (
                     cancellation.status != "success"
-                    or cancel_dispatch.get("adapter") != "dagster"
-                    or cancel_dispatch.get("operation") != "cancel_run"
-                    or cancel_details.get("mode") != "real"
                     or cancel_details.get("terminate_policy") != "SAFE_TERMINATE"
                     or cancel_details.get("dagster_status")
                     not in {"CANCELED", "CANCELLED"}
@@ -587,9 +878,12 @@ def _database_proof(
                     )
 
                 success_proof = {
+                    "dagster_run_id": success_external_id,
+                    "adapter_mode": "real",
                     "status_sync": str(sync_details["dagster_status"]),
                     "signed_completion": True,
                     "outbox_confirmed": True,
+                    "evidence_sources": sorted(SUCCESS_INTERNAL_EVIDENCE_SOURCES),
                     "outbox_events": [
                         _event_summary(success_requested),
                         _event_summary(sync_event),
@@ -597,9 +891,12 @@ def _database_proof(
                     ],
                 }
                 cancellation_proof = {
+                    "dagster_run_id": cancel_external_id,
+                    "adapter_mode": "real",
                     "terminate_policy": "SAFE_TERMINATE",
                     "engine_status": str(cancel_details["dagster_status"]),
                     "outbox_confirmed": True,
+                    "evidence_sources": sorted(CANCELLATION_INTERNAL_EVIDENCE_SOURCES),
                     "outbox_events": [
                         _event_summary(cancel_requested),
                         _event_summary(cancel_control_event),
@@ -623,8 +920,23 @@ def run_gate(
 ) -> dict[str, Any]:
     client = BFFClient(base_url, timeout_seconds=min(timeout_seconds, 10.0))
     client.request("GET", "/readyz")
+    isolation_project_id = (
+        "product_gate_isolation_"
+        + hashlib.sha256(suffix.encode("utf-8")).hexdigest()[:12]
+    )
+    client.request(
+        "POST",
+        "/api/v1/projects",
+        body={
+            "project_id": isolation_project_id,
+            "name": "Product gate isolation scope",
+            "status": "active",
+        },
+        idempotency_key=f"product-dagster-gate:{suffix}:isolation-project",
+        expected_status=201,
+    )
 
-    success_created = _response_data(
+    success_created = _public_run_data(
         client.request(
             "POST",
             "/api/v1/task-runs",
@@ -644,9 +956,9 @@ def run_gate(
         expected={"submitted"},
         timeout_seconds=timeout_seconds,
     )
-    success_dagster_run_id, success_trace_id = _real_dispatch_binding(success_submitted)
+    success_trace_id = _text(success_submitted.get("trace_id"), "task run trace id")
 
-    sync_created = _response_data(
+    sync_created = _public_run_data(
         client.request(
             "POST",
             f"/api/v1/task-runs/{success_run_id}/status-syncs",
@@ -674,8 +986,6 @@ def run_gate(
         expected_scope=SCOPE,
         expected_trace_id=success_trace_id,
     )
-    if success_api_proof["dagster_run_id"] != success_dagster_run_id:
-        raise GateFailure("success Dagster run binding changed after completion")
     success_version = int(success_api_proof["status_version"])
     _terminal_rejection(
         client,
@@ -683,7 +993,7 @@ def run_gate(
         body={"reason": "product gate verifies terminal monotonicity"},
         idempotency_key=f"product-dagster-gate:{suffix}:late-cancel",
     )
-    success_after_conflict = _response_data(
+    success_after_conflict = _public_run_data(
         client.request("GET", f"/api/v1/task-runs/{success_run_id}")
     )
     if (
@@ -691,9 +1001,13 @@ def run_gate(
         or success_after_conflict.get("status_version") != success_version
     ):
         raise GateFailure("success terminal state changed after rejected cancellation")
-    _assert_cross_scope_hidden(client, success_run_id)
+    _assert_cross_scope_hidden(
+        client,
+        success_run_id,
+        project_id=isolation_project_id,
+    )
 
-    cancel_created = _response_data(
+    cancel_created = _public_run_data(
         client.request(
             "POST",
             "/api/v1/task-runs",
@@ -713,8 +1027,8 @@ def run_gate(
         expected={"submitted"},
         timeout_seconds=timeout_seconds,
     )
-    cancel_dagster_run_id, cancel_trace_id = _real_dispatch_binding(cancel_submitted)
-    cancellation_created = _response_data(
+    cancel_trace_id = _text(cancel_submitted.get("trace_id"), "task run trace id")
+    cancellation_created = _public_run_data(
         client.request(
             "POST",
             f"/api/v1/task-runs/{cancel_run_id}/cancellations",
@@ -744,8 +1058,6 @@ def run_gate(
         expected_scope=SCOPE,
         expected_trace_id=cancel_trace_id,
     )
-    if cancel_api_proof["dagster_run_id"] != cancel_dagster_run_id:
-        raise GateFailure("cancelled Dagster run binding changed after termination")
     cancel_version = int(cancel_api_proof["status_version"])
     _terminal_rejection(
         client,
@@ -753,7 +1065,7 @@ def run_gate(
         body={},
         idempotency_key=f"product-dagster-gate:{suffix}:late-sync",
     )
-    cancel_after_conflict = _response_data(
+    cancel_after_conflict = _public_run_data(
         client.request("GET", f"/api/v1/task-runs/{cancel_run_id}")
     )
     if (
@@ -763,19 +1075,27 @@ def run_gate(
         raise GateFailure(
             "cancelled terminal state changed after rejected synchronization"
         )
-    _assert_cross_scope_hidden(client, cancel_run_id)
+    _assert_cross_scope_hidden(
+        client,
+        cancel_run_id,
+        project_id=isolation_project_id,
+    )
 
     success_db, cancel_db = _database_proof(
         success_run_id=success_run_id,
         success_sync_id=success_sync_id,
         cancel_run_id=cancel_run_id,
         cancellation_id=cancellation_id,
+        success_projection=success_api_proof,
+        cancellation_projection=cancel_api_proof,
         timeout_seconds=timeout_seconds,
     )
     evidence = build_evidence(
         source_commit=source_commit,
-        success={**success_api_proof, **success_db},
-        cancellation={**cancel_api_proof, **cancel_db},
+        success_projection=success_api_proof,
+        success_internal=success_db,
+        cancellation_projection=cancel_api_proof,
+        cancellation_internal=cancel_db,
     )
     artifact.parent.mkdir(parents=True, exist_ok=True)
     temporary = artifact.with_name(f".{artifact.name}.{secrets.token_hex(8)}.tmp")

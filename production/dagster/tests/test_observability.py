@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+import pytest
 from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import StatusCode
 
 from auris_flow_dagster import observability
 from auris_flow_dagster.contracts import AurisRunContext
@@ -61,6 +63,7 @@ def test_domain_span_is_a_child_of_the_remote_bff_span(monkeypatch) -> None:
 
 def test_disabled_observability_never_constructs_an_exporter(monkeypatch) -> None:
     monkeypatch.setenv("OTEL_ENABLED", "false")
+    monkeypatch.setenv("APP_ENV", "test")
     created = False
 
     def exporter_factory(**_kwargs: object) -> SpanExporter:
@@ -74,8 +77,17 @@ def test_disabled_observability_never_constructs_an_exporter(monkeypatch) -> Non
     assert created is False
 
 
+def test_disabled_observability_is_fail_closed_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("OTEL_ENABLED", "false")
+    monkeypatch.setenv("APP_ENV", "prod")
+
+    with pytest.raises(RuntimeError, match="^OTEL_CONFIGURATION_FAILED$"):
+        configure_observability()
+
+
 def test_exporter_construction_failure_keeps_code_location_available(monkeypatch) -> None:
     monkeypatch.setenv("OTEL_ENABLED", "true")
+    monkeypatch.setenv("APP_ENV", "test")
     monkeypatch.setenv(
         "OTEL_EXPORTER_OTLP_ENDPOINT",
         "http://otel-collector:4318/v1/traces",
@@ -91,6 +103,38 @@ def test_exporter_construction_failure_keeps_code_location_available(monkeypatch
     assert runtime.error_code == "OTEL_CONFIGURATION_FAILED"
 
 
+def test_exporter_construction_failure_is_fail_closed_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("OTEL_ENABLED", "true")
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "http://otel-collector:4318/v1/traces",
+    )
+
+    def exporter_factory(**_kwargs: object) -> SpanExporter:
+        raise RuntimeError("collector token=must-not-leak")
+
+    with pytest.raises(RuntimeError, match="^OTEL_CONFIGURATION_FAILED$"):
+        configure_observability(exporter_factory=exporter_factory)
+
+
+@pytest.mark.parametrize("sample_ratio", ["0", "0.009"])
+def test_trace_sampling_below_minimum_is_fail_closed_in_production(
+    monkeypatch,
+    sample_ratio: str,
+) -> None:
+    monkeypatch.setenv("OTEL_ENABLED", "true")
+    monkeypatch.setenv("APP_ENV", "prod")
+    monkeypatch.setenv("OTEL_TRACE_SAMPLE_RATIO", sample_ratio)
+    monkeypatch.setenv(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "http://otel-collector:4318/v1/traces",
+    )
+
+    with pytest.raises(RuntimeError, match="^OTEL_CONFIGURATION_FAILED$"):
+        configure_observability()
+
+
 def test_dagster_span_attributes_drop_secret_sql_and_url_query() -> None:
     attributes = sanitize_attributes(
         {
@@ -98,13 +142,48 @@ def test_dagster_span_attributes_drop_secret_sql_and_url_query() -> None:
             "db.statement": "SELECT secret FROM users",
             "http.request.header.authorization": "Bearer canary",
             "url.full": "https://user:pass@example.test/callback?token=canary",
+            "http.route": "/api/v1/task-runs/{task_run_id}",
+            "http.target": "/api/v1/task-runs/private-run?token=canary",
+            "url.path": "/objects/private-audio.wav",
+            "client.address": "203.0.113.45",
+            "user_agent.original": "AurisClient token=canary",
         }
     )
 
     assert attributes == {
         "auris.business_trace_id": "trace-public",
-        "url.full": "https://example.test/callback",
+        "http.route": "/api/v1/task-runs/{task_run_id}",
+        "url.full": "https://example.test",
     }
+
+
+def test_dagster_final_exporter_removes_exception_description_and_raw_path() -> None:
+    delegate = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(SafeSpanExporter(delegate)))
+
+    with pytest.raises(RuntimeError, match="must-not-leave"):
+        with provider.get_tracer("test").start_as_current_span(
+            "dagster.operation",
+            attributes={
+                "http.route": "/api/v1/task-runs/{task_run_id}",
+                "http.target": "/api/v1/task-runs/private-run?token=must-not-leave",
+                "client.address": "203.0.113.46",
+                "user_agent.original": "AurisClient token=must-not-leave",
+            },
+        ):
+            raise RuntimeError("must-not-leave token=secret SQL=SELECT path=/objects/private.wav")
+
+    span = delegate.get_finished_spans()[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description is None
+    assert span.attributes == {
+        "http.route": "/api/v1/task-runs/{task_run_id}",
+    }
+    serialized = repr(span)
+    assert "must-not-leave" not in serialized
+    assert "203.0.113.46" not in serialized
+    provider.shutdown()
 
 
 def test_exporter_failure_is_contained() -> None:

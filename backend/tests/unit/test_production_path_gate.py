@@ -151,6 +151,12 @@ def _ready_gate_document() -> dict[str, object]:
                 "production-gate-embedding",
                 "production-gate-callback",
             ],
+            "audio_inference_fixture": {
+                "service": "production-gate-embedding",
+                "transport": "https",
+                "reference_protocol_only": True,
+                "model_quality_certified": False,
+            },
         },
         "services": {
             "bff": {
@@ -199,6 +205,11 @@ def _ready_gate_document() -> dict[str, object]:
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
                 "networks": ["internal"],
+                "environment": {
+                    "AUDIO_INFERENCE_API_TOKEN_FILE": ("/run/secrets/audio_inference_api_token"),
+                    "AUDIO_INFERENCE_PROVIDER": "audio_intelligence_default",
+                    "AUDIO_INFERENCE_MODEL": "audio-v2.3.1",
+                },
             },
             "production-gate-callback": {
                 "user": "10001:10001",
@@ -252,6 +263,7 @@ def _valid_evidence() -> dict[str, object]:
         "qdrant": "trace_production_path_qdrant_001",
         "external_callback": "trace_production_path_callback_001",
     }
+
     operation_otel_trace_ids = {
         "oidc": "a" * 32,
         "dagster": "d" * 32,
@@ -575,6 +587,143 @@ def _valid_evidence() -> dict[str, object]:
                 "authoritative_run_count_after": 4,
             },
         ),
+        "dead_letter_retry": raw_proof(
+            "dead_letter_retry",
+            "mysql",
+            {
+                "source_run_id_sha256": "7" * 64,
+                "retry_run_id_sha256": "8" * 64,
+                "source_event_id": 44,
+                "retry_event_id": 45,
+                "source_event_aggregate_id_sha256": "7" * 64,
+                "retry_event_aggregate_id_sha256": "8" * 64,
+                "source_payload_dead_letter_event_id": 44,
+                "retry_payload_retry_of_event_id": 44,
+                "retry_payload_retry_of_run_id_sha256": "7" * 64,
+                "source_trace_id": "trace_dead_letter_retry_001",
+                "retry_payload_retry_of_trace_id": "trace_dead_letter_retry_001",
+                "source_status_before": "failed",
+                "source_status_after": "failed",
+                "source_terminal_reason": "outbox_dispatch_dead_letter",
+                "source_status_version": 3,
+                "source_event_status": "dead_letter",
+                "source_delivery_state": "failed",
+                "source_error_code": "QDRANT_PAYLOAD_INVALID",
+                "source_last_error_sha256": "9" * 64,
+                "source_lease_generation": 1,
+                "source_dead_letter_attempt_count": 1,
+                "source_snapshot_sha256_before": "a" * 64,
+                "source_snapshot_sha256_after": "a" * 64,
+                "source_attempt_ledger_sha256_before": "b" * 64,
+                "source_attempt_ledger_sha256_after": "b" * 64,
+                "retry_response_replayed": True,
+                "first_response_sha256": "5" * 64,
+                "replay_response_sha256": "5" * 64,
+                "stored_response_sha256": "5" * 64,
+                "idempotency_record_count": 1,
+                "idempotency_state": "completed",
+                "idempotency_status_code": 202,
+                "idempotency_request_sha256": "c" * 64,
+                "expected_idempotency_request_sha256": "c" * 64,
+                "idempotency_response_run_id_sha256": "8" * 64,
+                "idempotency_user_sha256": "d" * 64,
+                "expected_retry_idempotency_key_sha256": "e" * 64,
+                "retry_run_count": 1,
+                "retry_event_count": 1,
+                "retry_dispatch_attempt_count": 1,
+                "retry_event_otel_trace_id": "f" * 32,
+                "retry_dispatch_idempotency_key_sha256": "2" * 64,
+                "retry_dispatch_request_sha256": "3" * 64,
+                "retry_attempt_request_sha256": "3" * 64,
+                "retry_attempt_id_sha256": "4" * 64,
+                "retry_expected_attempt_id_sha256": "4" * 64,
+                "retry_point_id_sha256": "f" * 64,
+                "retry_dispatch_payload_sha256": "1" * 64,
+                "retry_attempt_payload_sha256": "1" * 64,
+                "retry_event_status": "processed",
+                "retry_run_status": "success",
+                "retry_trace_inherited": True,
+                "retry_audit_count": 1,
+                "retry_audit_actor_sha256": "d" * 64,
+                "retry_audit_idempotency_key_sha256": "e" * 64,
+                "retry_audit_trace_matches": True,
+                "retry_audit_lineage_matches": True,
+                "authoritative_run_count_before": 4,
+                "authoritative_run_count_after": 4,
+            },
+        ),
+        "dead_letter_retry_qdrant": raw_proof(
+            "dead_letter_retry_qdrant",
+            "qdrant-http",
+            {
+                "http_status": 200,
+                "collection": "knowledge_chunks_v1",
+                "point_id_sha256": "f" * 64,
+                "dispatch_point_id_sha256": "f" * 64,
+                "attempt_point_id_sha256": "f" * 64,
+                "payload_sha256": "1" * 64,
+                "dispatch_payload_sha256": "1" * 64,
+                "attempt_payload_sha256": "1" * 64,
+                "retry_run_id_sha256": "8" * 64,
+                "retry_event_id": 45,
+                "dispatch_idempotency_key_sha256": "2" * 64,
+                "dispatch_request_sha256": "3" * 64,
+                "attempt_request_sha256": "3" * 64,
+                "attempt_id_sha256": "4" * 64,
+                "tenant_id": "aurora_auto",
+                "project_id": "sales_qa",
+                "trace_id": "trace_dead_letter_retry_001",
+                "filtered_point_count": 1,
+                "point_occurrences": 1,
+                "cross_tenant_count": 0,
+                "cross_project_count": 0,
+                "scope_match": True,
+                "dispatch_receipt_match": True,
+                "attempt_receipt_match": True,
+                "payload_hash_match": True,
+            },
+        ),
+        "dead_letter_retry_trace": raw_proof(
+            "dead_letter_retry_trace",
+            "tempo-http",
+            {
+                "http_status": 200,
+                "observed_business_trace_id": "trace_dead_letter_retry_001",
+                "bff_span_id_sha256": "5" * 64,
+                "outbox_parent_span_id_sha256": "5" * 64,
+                "outbox_span_id_sha256": "6" * 64,
+                "adapter_parent_span_id_sha256": "6" * 64,
+                "adapter_span_id_sha256": "7" * 64,
+                "qdrant_parent_span_id_sha256": "7" * 64,
+                "bff_server_span_count": 1,
+                "bff_server_http_method": "POST",
+                "bff_server_route": "/api/v1/runs/{id}/retries",
+                "outbox_process_span_count": 1,
+                "adapter_dispatch_span_count": 1,
+                "qdrant_client_span_count": 2,
+                "qdrant_write_span_count": 1,
+                "otel_trace_id": "f" * 32,
+                "services": ["auris-flow-bff", "auris-flow-worker"],
+                "components": [
+                    "bff",
+                    "mysql",
+                    "otel",
+                    "outbox",
+                    "qdrant",
+                    "worker",
+                ],
+                "component_signals": {
+                    "bff": ["service.name=auris-flow-bff"],
+                    "mysql": ["db.system=mysql"],
+                    "otel": ["tempo.trace"],
+                    "outbox": ["span.name=outbox.process"],
+                    "qdrant": ["client.host=qdrant"],
+                    "worker": ["service.name=auris-flow-worker"],
+                },
+                "span_count": 8,
+                "client_span_count": 3,
+            },
+        ),
         "qdrant_outage": raw_proof(
             "qdrant_outage",
             "compose-runtime",
@@ -618,11 +767,20 @@ def _valid_evidence() -> dict[str, object]:
     ).hexdigest()
 
     def recovery(proof_id: str) -> dict[str, object]:
+        proof_ids = (
+            [
+                "dead_letter_retry",
+                "dead_letter_retry_qdrant",
+                "dead_letter_retry_trace",
+            ]
+            if proof_id == "dead_letter_retry"
+            else [proof_id]
+        )
         return {
             "proven": True,
             "authority_consistent": True,
             "no_duplicate_business_outcome": True,
-            "raw_proof_ids": [proof_id],
+            "raw_proof_ids": proof_ids,
         }
 
     defined_services = [
@@ -631,6 +789,7 @@ def _valid_evidence() -> dict[str, object]:
         "mysql",
         "db-bootstrap",
         "redis",
+        "minio-volume-init",
         "minio",
         "minio-bootstrap",
         "qdrant",
@@ -643,6 +802,7 @@ def _valid_evidence() -> dict[str, object]:
         "dagster-daemon",
         "otel-collector",
         "tempo",
+        "alertmanager",
         "prometheus",
         "grafana",
         "node-exporter",
@@ -656,11 +816,13 @@ def _valid_evidence() -> dict[str, object]:
         "db-bootstrap": "mysql:8.4.5",
         "redis": "redis:7.4.2-alpine3.21",
         "minio": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+        "minio-volume-init": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
         "minio-bootstrap": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
         "qdrant": "qdrant/qdrant:v1.14.1",
         "keycloak": "quay.io/keycloak/keycloak:26.2.5",
         "otel-collector": "otel/opentelemetry-collector-contrib:0.128.0",
         "tempo": "grafana/tempo:2.8.0",
+        "alertmanager": "prom/alertmanager:v0.28.1",
         "prometheus": "prom/prometheus:v3.4.1",
         "grafana": "grafana/grafana:12.0.1",
         "node-exporter": "prom/node-exporter:v1.9.1",
@@ -708,6 +870,7 @@ def _valid_evidence() -> dict[str, object]:
             "worker",
             "otel-collector",
             "tempo",
+            "alertmanager",
             "prometheus",
             "grafana",
             "node-exporter",
@@ -720,6 +883,7 @@ def _valid_evidence() -> dict[str, object]:
         service: runtime_observation(service, completed=True)
         for service in (
             "db-bootstrap",
+            "minio-volume-init",
             "minio-bootstrap",
             "migrate",
             "identity-bootstrap",
@@ -763,6 +927,7 @@ def _valid_evidence() -> dict[str, object]:
             relative: (_sha256(ROOT / relative) if (ROOT / relative).is_file() else "e" * 64)
             for relative in (
                 "scripts/verify_production_path_runtime.py",
+                "scripts/verify_production_path_gate.py",
                 "production/tests/production_path_verifier.py",
                 "production/tests/production_gate_support.py",
                 "production/tests/production-path-keycloak-realm.template.json",
@@ -850,10 +1015,268 @@ def _valid_evidence() -> dict[str, object]:
             "worker_crash": recovery("worker_crash"),
             "duplicate_delivery": recovery("duplicate_delivery"),
             "callback_timeout": recovery("callback_timeout"),
+            "dead_letter_retry": recovery("dead_letter_retry"),
             "qdrant_outage": recovery("qdrant_outage"),
             "redis_outage": recovery("redis_outage"),
         },
     }
+
+
+def _valid_release_evidence(gate: ModuleType, root: Path) -> tuple[dict[str, object], Path, Path]:
+    for relative in (
+        "production/compose.yaml",
+        "production/tests/production-path-gate.compose.yaml",
+        *gate.REQUIRED_RUNTIME_SOURCES,
+    ):
+        source = ROOT / relative
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+
+    evidence = _valid_evidence()
+    compose = evidence["compose"]
+    assert isinstance(compose, dict)
+    runtime = compose["runtime"]
+    assert isinstance(runtime, dict)
+    running = runtime["running_services"]
+    completed = runtime["completed_services"]
+    assert isinstance(running, dict)
+    assert isinstance(completed, dict)
+    observations = {**running, **completed}
+    lock_services = set(observations) - set(gate.RELEASE_GATE_IMAGE_ALIASES)
+    release_tag = "v1.0.0-rc.1"
+    source_commit = "a" * 40
+    images = {
+        service: (
+            f"registry.example/auris/{service}:{release_tag}@sha256:"
+            + hashlib.sha256(f"release:{service}".encode()).hexdigest()
+        )
+        for service in sorted(lock_services)
+    }
+    runtime_images: dict[str, object] = {}
+    for service, raw_observation in observations.items():
+        assert isinstance(raw_observation, dict)
+        lock_service = gate.RELEASE_GATE_IMAGE_ALIASES.get(service, service)
+        configured_image = images[lock_service]
+        repository, digest = configured_image.rsplit("@", 1)
+        repository = repository.rsplit(":", 1)[0]
+        repo_digest = f"{repository}@{digest}"
+        raw_observation["configured_image"] = configured_image
+        raw_observation["repo_digests"] = [repo_digest]
+        runtime_images[service] = {
+            "lock_service": lock_service,
+            "configured_image": configured_image,
+            "repo_digest": repo_digest,
+            "image_id": raw_observation["image_id"],
+            "container_id_sha256": raw_observation["container_id_sha256"],
+        }
+
+    image_lock = root / "build" / "release" / "images.lock.json"
+    image_lock.parent.mkdir(parents=True, exist_ok=True)
+    image_lock.write_text(
+        json.dumps(
+            {
+                "schema_version": gate.RELEASE_IMAGE_LOCK_SCHEMA,
+                "release_tag": release_tag,
+                "source_commit": source_commit,
+                "images": images,
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    release_compose = root / "production" / "compose.release.json"
+    release_compose.write_text(
+        json.dumps(
+            {
+                "services": {
+                    service: {"image": reference} for service, reference in images.items()
+                },
+                "x-auris-release": {
+                    "schema_version": gate.RELEASE_IMAGE_LOCK_SCHEMA,
+                    "release_tag": release_tag,
+                    "source_commit": source_commit,
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    evidence["schema_version"] = gate.RELEASE_EVIDENCE_SCHEMA
+    evidence["release_tag"] = release_tag
+    evidence["execution_environment"] = "production-compose-prebuilt-release"
+    compose["base"] = "production/compose.release.json"
+    compose["base_sha256"] = _sha256(release_compose)
+    compose["overlay_sha256"] = _sha256(
+        root / "production" / "tests" / "production-path-gate.compose.yaml"
+    )
+    evidence["runtime_sources"] = {
+        relative: _sha256(root / relative) for relative in gate.REQUIRED_RUNTIME_SOURCES
+    }
+    evidence["release"] = {
+        "schema_version": gate.RELEASE_BINDING_SCHEMA,
+        "release_tag": release_tag,
+        "source_commit": source_commit,
+        "image_lock": "build/release/images.lock.json",
+        "image_lock_sha256": _sha256(image_lock),
+        "image_lock_schema_version": gate.RELEASE_IMAGE_LOCK_SCHEMA,
+        "release_compose": "production/compose.release.json",
+        "release_compose_sha256": _sha256(release_compose),
+        "runtime_images": runtime_images,
+    }
+    return evidence, release_compose, image_lock
+
+
+def test_release_evidence_reuses_full_runtime_semantic_validator(tmp_path: Path) -> None:
+    gate = _load_gate()
+    evidence, release_compose, image_lock = _valid_release_evidence(gate, tmp_path)
+
+    errors = gate.validate_release_evidence(
+        evidence,
+        root=tmp_path,
+        expected_commit="a" * 40,
+        expected_release_tag="v1.0.0-rc.1",
+        release_compose_path=release_compose,
+        image_lock_path=image_lock,
+    )
+
+    assert errors == []
+
+
+def test_release_evidence_cli_accepts_generated_and_transported_release_compose(
+    tmp_path: Path,
+) -> None:
+    gate = _load_gate()
+    evidence, release_compose, image_lock = _valid_release_evidence(gate, tmp_path)
+    artifact = tmp_path / "build" / "release" / "final-runtime" / "production-path-gate.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(json.dumps(evidence, sort_keys=True), encoding="utf-8")
+    transported_compose = (
+        tmp_path / "build" / "release" / "deployment" / "production" / "compose.yaml"
+    )
+    transported_compose.parent.mkdir(parents=True)
+    transported_compose.write_bytes(release_compose.read_bytes())
+
+    for compose_path in (release_compose, transported_compose):
+        completed = subprocess.run(
+            [
+                str(ROOT / "backend" / ".venv" / "bin" / "python"),
+                "scripts/verify_production_path_gate.py",
+                "release-evidence",
+                "--artifact",
+                "build/release/final-runtime/production-path-gate.json",
+                "--expected-commit",
+                "a" * 40,
+                "--expected-release-tag",
+                "v1.0.0-rc.1",
+                "--release-compose",
+                str(compose_path.relative_to(tmp_path)),
+                "--image-lock",
+                str(image_lock.relative_to(tmp_path)),
+            ],
+            cwd=tmp_path,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout)["release_evidence"] is True
+
+
+def test_release_evidence_rejects_six_minimal_runtime_sections(tmp_path: Path) -> None:
+    gate = _load_gate()
+    evidence, release_compose, image_lock = _valid_release_evidence(gate, tmp_path)
+    for section in (
+        "identity",
+        "adapters",
+        "observability",
+        "trace",
+        "raw_proofs",
+        "recovery",
+    ):
+        evidence[section] = {}
+
+    errors = gate.validate_release_evidence(
+        evidence,
+        root=tmp_path,
+        expected_commit="a" * 40,
+        expected_release_tag="v1.0.0-rc.1",
+        release_compose_path=release_compose,
+        image_lock_path=image_lock,
+    )
+
+    assert errors
+    assert any("raw proof" in error for error in errors)
+    assert any("identity" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("proof_id", "field", "replacement"),
+    [
+        ("dead_letter_retry", "source_status_after", "success"),
+        ("dead_letter_retry_qdrant", "point_occurrences", 2),
+        ("dead_letter_retry_trace", "qdrant_write_span_count", 2),
+    ],
+)
+def test_release_evidence_rejects_coherently_rehashed_dead_letter_proof_tampering(
+    tmp_path: Path,
+    proof_id: str,
+    field: str,
+    replacement: object,
+) -> None:
+    gate = _load_gate()
+    evidence, release_compose, image_lock = _valid_release_evidence(gate, tmp_path)
+    raw_proofs = evidence["raw_proofs"]
+    assert isinstance(raw_proofs, dict)
+    records = raw_proofs["records"]
+    assert isinstance(records, dict)
+    record = records[proof_id]
+    assert isinstance(record, dict)
+    facts = record["facts"]
+    assert isinstance(facts, dict)
+    facts[field] = replacement
+    _rehash_raw_proof(gate, evidence, proof_id)
+
+    errors = gate.validate_release_evidence(
+        evidence,
+        root=tmp_path,
+        expected_commit="a" * 40,
+        expected_release_tag="v1.0.0-rc.1",
+        release_compose_path=release_compose,
+        image_lock_path=image_lock,
+    )
+
+    assert errors
+    assert any(proof_id in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "proof_id",
+    ["dead_letter_retry", "dead_letter_retry_qdrant", "dead_letter_retry_trace"],
+)
+def test_release_evidence_rejects_missing_dead_letter_proof(tmp_path: Path, proof_id: str) -> None:
+    gate = _load_gate()
+    evidence, release_compose, image_lock = _valid_release_evidence(gate, tmp_path)
+    raw_proofs = evidence["raw_proofs"]
+    assert isinstance(raw_proofs, dict)
+    records = raw_proofs["records"]
+    assert isinstance(records, dict)
+    del records[proof_id]
+    raw_proofs["bundle_sha256"] = gate._canonical_sha256(records)
+
+    errors = gate.validate_release_evidence(
+        evidence,
+        root=tmp_path,
+        expected_commit="a" * 40,
+        expected_release_tag="v1.0.0-rc.1",
+        release_compose_path=release_compose,
+        image_lock_path=image_lock,
+    )
+
+    assert errors
+    assert any("raw proofs inventory" in error for error in errors)
 
 
 def test_preflight_contract_accepts_only_production_modes() -> None:
@@ -897,6 +1320,67 @@ def test_reference_embedding_is_semantic_protocol_only_not_feature_hashing() -> 
     assert unknown_a[-1] == 1.0
 
 
+def test_reference_audio_fixture_enforces_closed_hash_bound_protocol_only() -> None:
+    support = _load_gate_support()
+    request_payload = {
+        "schema_version": "auris-flow-audio-provider-request-v1",
+        "execution_contract": "auris-flow-audio-intelligence-v1",
+        "execution_envelope_sha256": "a" * 64,
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": "trace_audio_gate_001",
+        "run_id": "run_audio_gate_001",
+        "dispatch_idempotency_key": "outbox:audio:gate:001",
+        "outbox_fencing_token": "1:1",
+        "deadline_at": "2099-07-21T12:00:00+00:00",
+        "audio_session_id": "audio_session_001",
+        "recording_id": "recording_001",
+        "input_object": {
+            "storage_object_id": "sto_audio_001",
+            "storage_provider": "minio",
+            "bucket": "auris-flow",
+            "object_key": "tenants/aurora_auto/projects/sales_qa/audio/input.wav",
+            "version_id": "exact-version-1",
+            "content_sha256": "b" * 64,
+            "content_length": 64,
+            "content_type": "audio/wav",
+        },
+        "inference": {
+            "provider": "audio_intelligence_default",
+            "model": "audio-v2.3.1",
+        },
+        "capabilities": ["vad", "asr"],
+    }
+    body = support._canonical_bytes(request_payload)
+    request_sha256 = hashlib.sha256(body).hexdigest()
+    payload, record = support.reference_audio_response(
+        body,
+        provider="audio_intelligence_default",
+        model="audio-v2.3.1",
+        claimed_request_sha256=request_sha256,
+        idempotency_key="audio-inference:outbox:audio:gate:001",
+    )
+
+    assert payload["request_sha256"] == request_sha256
+    assert payload["input_object"] == request_payload["input_object"]
+    assert (
+        payload["result_sha256"]
+        == hashlib.sha256(support._canonical_bytes(payload["result"])).hexdigest()
+    )
+    assert record["request_sha256"] == request_sha256
+
+    forged = copy.deepcopy(request_payload)
+    forged["input_object"]["unknown"] = "rejected"
+    with pytest.raises(support.GateSupportError):
+        support.reference_audio_response(
+            support._canonical_bytes(forged),
+            provider="audio_intelligence_default",
+            model="audio-v2.3.1",
+            claimed_request_sha256=request_sha256,
+            idempotency_key="audio-inference:outbox:audio:gate:001",
+        )
+
+
 def test_callback_nonce_store_claim_is_atomic_and_replay_rejecting() -> None:
     support = _load_gate_support()
     nonce_store = support.AtomicNonceStore()
@@ -933,6 +1417,41 @@ def test_release_gate_mirrors_the_runtime_verifier_closed_proof_contract() -> No
     assert gate.OPERATION_OTEL_COMPONENTS == verifier.OPERATION_OTEL_COMPONENTS
     assert gate.OPERATION_OTEL_SERVICES == verifier.OPERATION_OTEL_SERVICES
     assert gate.HOST_RUNTIME_FIELDS == driver.HOST_RUNTIME_FIELDS
+
+
+def test_minio_volume_initializer_is_bound_as_an_external_one_shot() -> None:
+    gate = _load_gate()
+    runtime_driver_path = ROOT / "scripts" / "verify_production_path_runtime.py"
+    driver_spec = importlib.util.spec_from_file_location(
+        "production_path_runtime_minio_init_contract", runtime_driver_path
+    )
+    assert driver_spec and driver_spec.loader
+    driver = importlib.util.module_from_spec(driver_spec)
+    driver_spec.loader.exec_module(driver)
+
+    minio_image = "minio/minio:RELEASE.2025-04-22T22-12-26Z"
+    assert "minio-volume-init" in gate.REQUIRED_COMPLETED_SERVICES
+    assert gate.EXPECTED_EXTERNAL_SERVICE_IMAGES["minio-volume-init"] == minio_image
+    assert "minio-volume-init" in driver.REQUIRED_COMPLETED_SERVICES
+    assert "minio-volume-init" in driver.EXTERNAL_IMAGE_SERVICES
+
+
+def test_alertmanager_is_bound_as_a_required_external_runtime_service() -> None:
+    gate = _load_gate()
+    runtime_driver_path = ROOT / "scripts" / "verify_production_path_runtime.py"
+    driver_spec = importlib.util.spec_from_file_location(
+        "production_path_runtime_alertmanager_contract", runtime_driver_path
+    )
+    assert driver_spec and driver_spec.loader
+    driver = importlib.util.module_from_spec(driver_spec)
+    driver_spec.loader.exec_module(driver)
+
+    alertmanager_image = "prom/alertmanager:v0.28.1"
+    assert "alertmanager" in gate.REQUIRED_RUNNING_SERVICES
+    assert gate.EXPECTED_EXTERNAL_SERVICE_IMAGES["alertmanager"] == alertmanager_image
+    assert "alertmanager" in driver.REQUIRED_RUNNING_SERVICES
+    assert "alertmanager" in driver.EXTERNAL_IMAGE_SERVICES
+    assert driver.PINNED_EXTERNAL_IMAGES["ALERTMANAGER_IMAGE"] == alertmanager_image
 
 
 def test_release_gate_rejects_rehashed_extra_proof_fields() -> None:
@@ -985,6 +1504,20 @@ def test_release_gate_rejects_rehashed_cross_proof_and_recovery_forgeries() -> N
     errors = gate.validate_evidence(recall, root=ROOT, expected_commit="a" * 40)
     assert any("cross-bound" in error for error in errors)
 
+    duplicate_retry = _valid_evidence()
+    duplicate_retry_facts = duplicate_retry["raw_proofs"]["records"][  # type: ignore[index]
+        "dead_letter_retry"
+    ]["facts"]
+    assert isinstance(duplicate_retry_facts, dict)
+    duplicate_retry_facts["retry_run_count"] = 2
+    _rehash_raw_proof(gate, duplicate_retry, "dead_letter_retry")
+    errors = gate.validate_evidence(
+        duplicate_retry,
+        root=ROOT,
+        expected_commit="a" * 40,
+    )
+    assert any("exactly once" in error for error in errors)
+
     outage = _valid_evidence()
     outage_raw = outage["raw_proofs"]
     assert isinstance(outage_raw, dict)
@@ -1036,6 +1569,95 @@ def test_release_gate_rejects_rehashed_cross_proof_and_recovery_forgeries() -> N
     _rehash_raw_proof(gate, tempo, "tempo_trace")
     errors = gate.validate_evidence(tempo, root=ROOT, expected_commit="a" * 40)
     assert any("Tempo qdrant" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("proof_id", "field", "value", "message"),
+    [
+        (
+            "dead_letter_retry",
+            "retry_event_id",
+            44,
+            "event identities",
+        ),
+        (
+            "dead_letter_retry",
+            "source_attempt_ledger_sha256_after",
+            "0" * 64,
+            "attempt ledger",
+        ),
+        (
+            "dead_letter_retry",
+            "idempotency_record_count",
+            2,
+            "exactly once",
+        ),
+        (
+            "dead_letter_retry_qdrant",
+            "cross_tenant_count",
+            1,
+            "scope isolation",
+        ),
+    ],
+)
+def test_release_gate_rejects_rehashed_dead_letter_identity_forgeries(
+    proof_id: str, field: str, value: object, message: str
+) -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    facts = evidence["raw_proofs"]["records"][proof_id]["facts"]  # type: ignore[index]
+    assert isinstance(facts, dict)
+    facts[field] = value
+    _rehash_raw_proof(gate, evidence, proof_id)
+
+    errors = gate.validate_evidence(evidence, root=ROOT, expected_commit="a" * 40)
+
+    assert any(message in error for error in errors)
+
+
+def test_release_gate_rejects_rehashed_dead_letter_trace_without_qdrant_signal() -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    facts = evidence["raw_proofs"]["records"]["dead_letter_retry_trace"][  # type: ignore[index]
+        "facts"
+    ]
+    assert isinstance(facts, dict)
+    components = facts["components"]
+    signals = facts["component_signals"]
+    assert isinstance(components, list) and isinstance(signals, dict)
+    components.remove("qdrant")
+    signals.pop("qdrant")
+    _rehash_raw_proof(gate, evidence, "dead_letter_retry_trace")
+
+    errors = gate.validate_evidence(evidence, root=ROOT, expected_commit="a" * 40)
+
+    assert any("exact Qdrant operation chain" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("bff_server_span_count", 2),
+        ("bff_server_http_method", "GET"),
+        ("bff_server_route", "/api/v1/task-runs/{id}/retries"),
+    ],
+)
+def test_release_gate_rejects_dead_letter_trace_without_exact_bff_server_entry(
+    field: str,
+    value: object,
+) -> None:
+    gate = _load_gate()
+    evidence = _valid_evidence()
+    facts = evidence["raw_proofs"]["records"]["dead_letter_retry_trace"][  # type: ignore[index]
+        "facts"
+    ]
+    assert isinstance(facts, dict)
+    facts[field] = value
+    _rehash_raw_proof(gate, evidence, "dead_letter_retry_trace")
+
+    errors = gate.validate_evidence(evidence, root=ROOT, expected_commit="a" * 40)
+
+    assert any("BFF retry server span" in error for error in errors)
 
 
 def test_release_gate_requires_native_linux_and_closed_evidence_envelopes() -> None:
@@ -1285,7 +1907,7 @@ def test_evidence_validator_rejects_extra_recovery_proof_references() -> None:
         expected_commit="a" * 40,
     )
 
-    assert any("must reference exactly its named raw proof" in error for error in errors)
+    assert any("raw proof references are incomplete or unordered" in error for error in errors)
 
 
 def test_evidence_validator_binds_container_architecture_to_native_host() -> None:

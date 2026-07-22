@@ -21,6 +21,124 @@ def _load_verifier() -> ModuleType:
     return module
 
 
+def _valid_dead_letter_recovery_facts() -> dict[str, object]:
+    source_hash = "c" * 64
+    retry_hash = "d" * 64
+    source_trace_id = "trace_dead_letter_retry_001"
+    components = ["bff", "mysql", "otel", "outbox", "qdrant", "worker"]
+    return {
+        "source_run_id_sha256": source_hash,
+        "retry_run_id_sha256": retry_hash,
+        "source_event_id": 44,
+        "retry_event_id": 45,
+        "source_event_aggregate_id_sha256": source_hash,
+        "retry_event_aggregate_id_sha256": retry_hash,
+        "source_payload_dead_letter_event_id": 44,
+        "retry_payload_retry_of_event_id": 44,
+        "retry_payload_retry_of_run_id_sha256": source_hash,
+        "source_trace_id": source_trace_id,
+        "retry_payload_retry_of_trace_id": source_trace_id,
+        "source_status_before": "failed",
+        "source_status_after": "failed",
+        "source_terminal_reason": "outbox_dispatch_dead_letter",
+        "source_status_version": 3,
+        "source_event_status": "dead_letter",
+        "source_delivery_state": "failed",
+        "source_error_code": "QDRANT_PAYLOAD_INVALID",
+        "source_last_error_sha256": "e" * 64,
+        "source_lease_generation": 1,
+        "source_dead_letter_attempt_count": 1,
+        "source_snapshot_sha256_before": "f" * 64,
+        "source_snapshot_sha256_after": "f" * 64,
+        "source_attempt_ledger_sha256_before": "1" * 64,
+        "source_attempt_ledger_sha256_after": "1" * 64,
+        "retry_response_replayed": True,
+        "first_response_sha256": "a" * 64,
+        "replay_response_sha256": "a" * 64,
+        "stored_response_sha256": "a" * 64,
+        "idempotency_record_count": 1,
+        "idempotency_state": "completed",
+        "idempotency_status_code": 202,
+        "idempotency_request_sha256": "2" * 64,
+        "expected_idempotency_request_sha256": "2" * 64,
+        "idempotency_response_run_id_sha256": retry_hash,
+        "idempotency_user_sha256": "3" * 64,
+        "expected_retry_idempotency_key_sha256": "4" * 64,
+        "retry_run_count": 1,
+        "retry_event_count": 1,
+        "retry_dispatch_attempt_count": 1,
+        "retry_event_otel_trace_id": "a" * 32,
+        "retry_dispatch_idempotency_key_sha256": "7" * 64,
+        "retry_dispatch_request_sha256": "8" * 64,
+        "retry_attempt_request_sha256": "8" * 64,
+        "retry_attempt_id_sha256": "9" * 64,
+        "retry_expected_attempt_id_sha256": "9" * 64,
+        "retry_point_id_sha256": "5" * 64,
+        "retry_dispatch_payload_sha256": "6" * 64,
+        "retry_attempt_payload_sha256": "6" * 64,
+        "retry_event_status": "processed",
+        "retry_run_status": "success",
+        "retry_trace_inherited": True,
+        "retry_audit_count": 1,
+        "retry_audit_actor_sha256": "3" * 64,
+        "retry_audit_idempotency_key_sha256": "4" * 64,
+        "retry_audit_trace_matches": True,
+        "retry_audit_lineage_matches": True,
+        "http_status": 200,
+        "collection": "knowledge_chunks_v1",
+        "point_id_sha256": "5" * 64,
+        "dispatch_point_id_sha256": "5" * 64,
+        "attempt_point_id_sha256": "5" * 64,
+        "payload_sha256": "6" * 64,
+        "dispatch_payload_sha256": "6" * 64,
+        "attempt_payload_sha256": "6" * 64,
+        "dispatch_idempotency_key_sha256": "7" * 64,
+        "dispatch_request_sha256": "8" * 64,
+        "attempt_request_sha256": "8" * 64,
+        "attempt_id_sha256": "9" * 64,
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": source_trace_id,
+        "filtered_point_count": 1,
+        "point_occurrences": 1,
+        "cross_tenant_count": 0,
+        "cross_project_count": 0,
+        "scope_match": True,
+        "dispatch_receipt_match": True,
+        "attempt_receipt_match": True,
+        "payload_hash_match": True,
+        "observed_business_trace_id": source_trace_id,
+        "bff_span_id_sha256": "b" * 64,
+        "outbox_parent_span_id_sha256": "b" * 64,
+        "outbox_span_id_sha256": "c" * 64,
+        "adapter_parent_span_id_sha256": "c" * 64,
+        "adapter_span_id_sha256": "d" * 64,
+        "qdrant_parent_span_id_sha256": "d" * 64,
+        "bff_server_span_count": 1,
+        "bff_server_http_method": "POST",
+        "bff_server_route": "/api/v1/runs/{id}/retries",
+        "outbox_process_span_count": 1,
+        "adapter_dispatch_span_count": 1,
+        "qdrant_client_span_count": 2,
+        "qdrant_write_span_count": 1,
+        "otel_trace_id": "a" * 32,
+        "services": ["auris-flow-bff", "auris-flow-worker"],
+        "components": components,
+        "component_signals": {
+            "bff": ["service.name=auris-flow-bff"],
+            "mysql": ["db.system=mysql"],
+            "otel": ["tempo.trace"],
+            "outbox": ["span.name=outbox.process"],
+            "qdrant": ["client.host=qdrant"],
+            "worker": ["service.name=auris-flow-worker"],
+        },
+        "span_count": 8,
+        "client_span_count": 3,
+        "authoritative_run_count_before": 4,
+        "authoritative_run_count_after": 4,
+    }
+
+
 def test_phase_and_dependency_protocol_is_exact() -> None:
     verifier = _load_verifier()
 
@@ -36,6 +154,7 @@ def test_phase_and_dependency_protocol_is_exact() -> None:
         "worker_crash",
         "duplicate_delivery",
         "callback_timeout",
+        "dead_letter_retry",
         "qdrant_outage",
         "redis_outage",
     )
@@ -86,6 +205,331 @@ def test_capture_record_binds_exact_observations_and_canonical_hashes() -> None:
         verifier.capture_record(
             "oidc_discovery",
             {**observations, "unexpected": True},
+        )
+
+
+def test_dead_letter_snapshot_hashes_the_complete_attempt_ledger() -> None:
+    verifier = _load_verifier()
+    run = {
+        "run_id": "knowledge_build_source",
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "run_type": "knowledge_build",
+        "status": "failed",
+        "run_key": "knowledge_build_source_key",
+        "partition_key": None,
+        "status_version": 3,
+        "terminal_reason": "outbox_dispatch_dead_letter",
+        "submitted_at": None,
+        "started_at": "2026-07-21T01:01:00Z",
+        "finished_at": "2026-07-21T01:02:00Z",
+        "deadline_at": None,
+        "next_status_sync_at": None,
+        "monitor_generation": 0,
+        "engine_status": None,
+        "engine_status_observed_at": None,
+        "cancel_requested_at": None,
+        "cancel_reason": None,
+        "created_at": "2026-07-21T01:00:00Z",
+        "updated_at": "2026-07-21T01:02:00Z",
+        "trace_id": "trace_dead_letter_retry_001",
+        "payload": {"dead_letter_event_id": 44},
+    }
+    event = {
+        "event_id": 44,
+        "aggregate_type": "knowledge_build",
+        "aggregate_id": "knowledge_build_source",
+        "status": "dead_letter",
+        "delivery_state": "failed",
+        "attempt_count": 1,
+        "reconcile_attempt_count": 0,
+        "dispatch_idempotency_key": "dispatch-source-001",
+        "dispatch_request_sha256": "1" * 64,
+        "last_error": "QDRANT_PAYLOAD_INVALID: business_ref is missing",
+        "available_at": "2026-07-21T01:00:00Z",
+        "claim_token_cleared": 1,
+        "claimed_by_cleared": 1,
+        "claimed_at_cleared": 1,
+        "lease_generation": 1,
+        "lease_expires_at_cleared": 1,
+        "processed_at": "2026-07-21T01:02:00Z",
+        "created_at": "2026-07-21T01:00:00Z",
+        "payload": {"qdrant_payload": {"tenant_id": "aurora_auto"}},
+    }
+    attempt = {
+        "attempt_id": "outbox_attempt_44_1",
+        "event_id": 44,
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "attempt_number": 1,
+        "lease_generation": 1,
+        "claimed_by": "worker-001",
+        "claim_token_sha256": "2" * 64,
+        "delivery_mode": "dispatch",
+        "status": "dead_letter",
+        "dispatch_idempotency_key": "dispatch-source-001",
+        "request_sha256": "1" * 64,
+        "adapter": "qdrant",
+        "operation": "upsert_payload",
+        "remote_id": None,
+        "error_code": "QDRANT_PAYLOAD_INVALID",
+        "error_message": "business_ref is missing",
+        "started_at": "2026-07-21T01:01:00Z",
+        "completed_at": "2026-07-21T01:02:00Z",
+        "details": {"failed_dispatch": {"retryable": False}},
+    }
+
+    before = verifier._dead_letter_source_snapshot(run, event, [attempt])
+    mutated_attempt = {**attempt, "error_message": "changed after retry"}
+    after = verifier._dead_letter_source_snapshot(run, event, [mutated_attempt])
+
+    assert before != after
+    assert verifier._attempt_ledger_sha256([attempt]) != verifier._attempt_ledger_sha256(
+        [mutated_attempt]
+    )
+
+
+def test_dead_letter_retry_trace_is_persisted_before_external_side_effects(
+    tmp_path: Path,
+) -> None:
+    verifier = _load_verifier()
+    state_path = tmp_path / "state.json"
+    state: dict[str, Any] = {
+        "faults": {"dead_letter_retry": {}},
+        "updated_at": "2026-07-21T01:00:00Z",
+    }
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+    config = SimpleNamespace(state_path=lambda: state_path)
+
+    trace_id, persisted_prior = verifier.persist_inflight_fault_trace(
+        config,
+        json.loads(json.dumps(state)),
+        state,
+        "dead_letter_retry",
+    )
+    stored = json.loads(state_path.read_text(encoding="utf-8"))
+    replay_trace_id, unchanged_prior = verifier.persist_inflight_fault_trace(
+        config,
+        persisted_prior,
+        state,
+        "dead_letter_retry",
+    )
+
+    assert stored["faults"]["dead_letter_retry"]["retry_otel_trace_id"] == trace_id
+    assert replay_trace_id == trace_id
+    assert unchanged_prior == persisted_prior
+
+
+def test_dead_letter_fault_verify_resumes_a_persisted_proof_checkpoint_without_http(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier()
+    suffix = "resume-dead-letter-1"
+    source_commit = "a" * 40
+    state_path = tmp_path / f"state-{suffix}.json"
+    merged = _valid_dead_letter_recovery_facts()
+    proofs = {
+        proof_id: {key: merged[key] for key in verifier.PROOF_FACT_KEYS[proof_id]}
+        for proof_id in verifier.recovery_proof_ids("dead_letter_retry")
+    }
+    state: dict[str, Any] = {
+        "schema_version": verifier.STATE_SCHEMA,
+        "run_suffix": suffix,
+        "source_commit": source_commit,
+        "scope": {"tenant_id": "aurora_auto", "project_id": "sales_qa"},
+        "captures": {},
+        "operations": {},
+        "faults": {
+            "dead_letter_retry": {
+                "authoritative_run_count_before": 4,
+                "verification_checkpoint": verifier.build_fault_verification_checkpoint(
+                    "dead_letter_retry", proofs
+                ),
+            }
+        },
+        "completed_phases": ["initial", "fault-prepare:dead_letter_retry"],
+        "updated_at": "2026-07-21T01:00:00Z",
+    }
+    verifier.write_json_idempotent(state_path, state)
+    # Model a crash after the first raw proof file was published but before the
+    # verifier state/phase marker was replaced.
+    verifier.write_json_idempotent(
+        tmp_path / f"capture-{suffix}-dead_letter_retry.json",
+        verifier.capture_record("dead_letter_retry", proofs["dead_letter_retry"]),
+    )
+    config = SimpleNamespace(
+        run_suffix=suffix,
+        source_commit=source_commit,
+        state_path=lambda: state_path,
+        capture_path=lambda proof_id: tmp_path / f"capture-{suffix}-{proof_id}.json",
+    )
+
+    class NoHttpBrowser:
+        def __init__(self, _config: object) -> None:
+            raise AssertionError("checkpoint resume must not send another retry POST")
+
+    monkeypatch.setattr(verifier, "BrowserClient", NoHttpBrowser)
+
+    verifier._fault_verify(config, "dead_letter_retry")
+
+    stored = json.loads(state_path.read_text(encoding="utf-8"))
+    assert "fault-verify:dead_letter_retry" in stored["completed_phases"]
+    assert "verification_checkpoint" not in stored["faults"]["dead_letter_retry"]
+    for proof_id, expected in proofs.items():
+        record = json.loads(
+            (tmp_path / f"capture-{suffix}-{proof_id}.json").read_text(encoding="utf-8")
+        )
+        assert record["facts"] == expected
+        assert stored["captures"][proof_id] == record["capture_sha256"]
+
+
+def test_dead_letter_fault_verify_rejects_tampered_resume_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier()
+    suffix = "resume-dead-letter-2"
+    source_commit = "b" * 40
+    state_path = tmp_path / f"state-{suffix}.json"
+    merged = _valid_dead_letter_recovery_facts()
+    proofs = {
+        proof_id: {key: merged[key] for key in verifier.PROOF_FACT_KEYS[proof_id]}
+        for proof_id in verifier.recovery_proof_ids("dead_letter_retry")
+    }
+    checkpoint = verifier.build_fault_verification_checkpoint("dead_letter_retry", proofs)
+    checkpoint["proofs_sha256"] = "0" * 64
+    state = {
+        "schema_version": verifier.STATE_SCHEMA,
+        "run_suffix": suffix,
+        "source_commit": source_commit,
+        "scope": {"tenant_id": "aurora_auto", "project_id": "sales_qa"},
+        "captures": {},
+        "operations": {},
+        "faults": {
+            "dead_letter_retry": {
+                "authoritative_run_count_before": 4,
+                "verification_checkpoint": checkpoint,
+            }
+        },
+        "completed_phases": ["initial", "fault-prepare:dead_letter_retry"],
+        "updated_at": "2026-07-21T01:00:00Z",
+    }
+    verifier.write_json_idempotent(state_path, state)
+    config = SimpleNamespace(
+        run_suffix=suffix,
+        source_commit=source_commit,
+        state_path=lambda: state_path,
+        capture_path=lambda proof_id: tmp_path / f"capture-{suffix}-{proof_id}.json",
+    )
+    monkeypatch.setattr(
+        verifier,
+        "BrowserClient",
+        lambda _config: pytest.fail("tampered checkpoint must fail before HTTP"),
+    )
+
+    with pytest.raises(verifier.VerifierFailure, match="verification checkpoint"):
+        verifier._fault_verify(config, "dead_letter_retry")
+
+    assert not list(tmp_path.glob(f"capture-{suffix}-*.json"))
+
+
+def test_qdrant_retry_observation_uses_scoped_remote_cardinality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _load_verifier()
+    trace_id = "trace_dead_letter_retry_001"
+    point_id = "12345678-1234-5678-1234-567812345678"
+    qdrant_payload = {
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": trace_id,
+        "business_ref": "knowledge_source_001",
+    }
+    retry_details = {
+        "mode": "real",
+        "collection": "knowledge_chunks_v1",
+        "point_ids": [point_id],
+        "point_count": 1,
+        "qdrant_payload": qdrant_payload,
+    }
+
+    class Browser:
+        leak_cross_scope = False
+
+        def json(self, method: str, _url: str, **kwargs: object):
+            if method == "GET":
+                return 200, {
+                    "result": {
+                        "id": point_id,
+                        "payload": qdrant_payload,
+                        "vector": [0.1, 0.2],
+                    }
+                }
+            body = cast(dict[str, Any], kwargs["json_body"])
+            must = cast(dict[str, Any], body["filter"])["must"]
+            tenant = cast(dict[str, Any], must[0])["match"]["value"]
+            project = cast(dict[str, Any], must[1])["match"]["value"]
+            scoped = tenant == "aurora_auto" and project == "sales_qa"
+            points = (
+                [{"id": point_id, "payload": qdrant_payload}]
+                if scoped or self.leak_cross_scope
+                else []
+            )
+            return 200, {"result": {"points": points, "next_page_offset": None}}
+
+    monkeypatch.setattr(verifier, "_read_secret_env_file", lambda *_args: "opaque")
+    event = {
+        "event_id": 45,
+        "dispatch_idempotency_key": "dispatch-retry-001",
+        "dispatch_request_sha256": "1" * 64,
+        "payload": {
+            "tenant_id": "aurora_auto",
+            "project_id": "sales_qa",
+            "trace_id": trace_id,
+        },
+    }
+    attempt = {
+        "attempt_id": "outbox_attempt_45_1",
+        "event_id": 45,
+        "dispatch_idempotency_key": "dispatch-retry-001",
+        "request_sha256": "1" * 64,
+        "status": "succeeded",
+        "delivery_mode": "dispatch",
+        "adapter": "qdrant",
+        "operation": "upsert_payload",
+        "details": {"dispatch_details": retry_details},
+    }
+    config = SimpleNamespace(qdrant_url="http://qdrant:6333")
+
+    facts = verifier._qdrant_retry_observation(
+        Browser(),
+        config,
+        retry_run_id="knowledge_build_retry",
+        retry_event=event,
+        retry_attempt=attempt,
+        retry_details=retry_details,
+        expected_trace_id=trace_id,
+    )
+
+    assert facts["filtered_point_count"] == 1
+    assert facts["cross_tenant_count"] == 0
+    assert facts["cross_project_count"] == 0
+    assert facts["payload_hash_match"] is True
+    assert point_id not in json.dumps(facts)
+    assert qdrant_payload["business_ref"] not in json.dumps(facts)
+
+    leaking_browser = Browser()
+    leaking_browser.leak_cross_scope = True
+    with pytest.raises(verifier.VerifierFailure):
+        verifier._qdrant_retry_observation(
+            leaking_browser,
+            config,
+            retry_run_id="knowledge_build_retry",
+            retry_event=event,
+            retry_attempt=attempt,
+            retry_details=retry_details,
+            expected_trace_id=trace_id,
         )
 
 
@@ -483,6 +927,10 @@ def test_readiness_observation_proves_the_exact_failed_dependency() -> None:
             },
         ),
         (
+            "dead_letter_retry",
+            _valid_dead_letter_recovery_facts(),
+        ),
+        (
             "qdrant_outage",
             {
                 "ready_status_during": 503,
@@ -521,15 +969,61 @@ def test_recovery_matrix_is_strictly_derived_from_each_capture(
         "authoritative_run_count_after": 4,
     }
 
+    expected_proofs = (
+        [
+            "dead_letter_retry",
+            "dead_letter_retry_qdrant",
+            "dead_letter_retry_trace",
+        ]
+        if dependency == "dead_letter_retry"
+        else [dependency]
+    )
     assert verifier.recovery_case_from_facts(dependency, facts) == {
         "proven": True,
         "authority_consistent": True,
         "no_duplicate_business_outcome": True,
-        "raw_proof_ids": [dependency],
+        "raw_proof_ids": expected_proofs,
     }
     facts.pop("authoritative_run_count_after")
     with pytest.raises(verifier.VerifierFailure):
         verifier.recovery_case_from_facts(dependency, facts)
+
+
+def test_dead_letter_recovery_rejects_duplicate_retry_outcomes() -> None:
+    verifier = _load_verifier()
+    facts = {
+        **_valid_dead_letter_recovery_facts(),
+        "retry_run_count": 2,
+        "authoritative_run_count_before": 4,
+        "authoritative_run_count_after": 4,
+    }
+
+    with pytest.raises(verifier.VerifierFailure):
+        verifier.recovery_case_from_facts("dead_letter_retry", facts)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("retry_event_id", 44),
+        ("source_attempt_ledger_sha256_after", "0" * 64),
+        ("cross_tenant_count", 1),
+        ("idempotency_record_count", 2),
+    ],
+)
+def test_dead_letter_recovery_rejects_rehashed_identity_and_scope_forgeries(
+    field: str, value: object
+) -> None:
+    verifier = _load_verifier()
+    facts = {
+        **_valid_dead_letter_recovery_facts(),
+        field: value,
+        "authoritative_run_count_before": 4,
+        "authoritative_run_count_after": 4,
+    }
+
+    with pytest.raises(verifier.VerifierFailure):
+        verifier.recovery_case_from_facts("dead_letter_retry", facts)
 
 
 def test_linked_components_require_tempo_derived_database_and_redis_spans() -> None:
@@ -840,6 +1334,183 @@ def test_tempo_trace_components_come_from_client_spans_and_sanitized_attributes(
             wrong_service,
             otel_trace_id,
             "external_callback",
+        )
+
+
+def test_dead_letter_tempo_trace_proves_the_parent_chain_and_one_point_write() -> None:
+    verifier = _load_verifier()
+    otel_trace_id = "d" * 32
+    business_trace_id = "trace_dead_letter_retry_001"
+
+    def attribute(key: str, value: str) -> dict[str, object]:
+        return {"key": key, "value": {"stringValue": value}}
+
+    def span(
+        span_id: str,
+        parent_span_id: str,
+        name: str,
+        *,
+        kind: str,
+        attributes: list[dict[str, object]],
+    ) -> dict[str, object]:
+        return {
+            "traceId": otel_trace_id,
+            "spanId": span_id,
+            "parentSpanId": parent_span_id,
+            "name": name,
+            "kind": kind,
+            "attributes": attributes,
+        }
+
+    def batch(service: str, spans: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "resource": {"attributes": [attribute("service.name", service)]},
+            "scopeSpans": [{"spans": spans}],
+        }
+
+    bff_span_id = "1" * 16
+    outbox_span_id = "2" * 16
+    adapter_span_id = "3" * 16
+    payload = {
+        "batches": [
+            batch(
+                "auris-flow-bff",
+                [
+                    span(
+                        bff_span_id,
+                        "f" * 16,
+                        "POST /api/v1/runs/{id}/retries",
+                        kind="SPAN_KIND_SERVER",
+                        attributes=[
+                            attribute("http.request.method", "POST"),
+                            attribute("http.route", "/api/v1/runs/{id}/retries"),
+                        ],
+                    ),
+                    span(
+                        "6" * 16,
+                        bff_span_id,
+                        "mysql.execute",
+                        kind="SPAN_KIND_CLIENT",
+                        attributes=[attribute("db.system", "mysql")],
+                    ),
+                ],
+            ),
+            batch(
+                "auris-flow-worker",
+                [
+                    span(
+                        outbox_span_id,
+                        bff_span_id,
+                        "outbox.process",
+                        kind="SPAN_KIND_INTERNAL",
+                        attributes=[attribute("auris.business_trace_id", business_trace_id)],
+                    ),
+                    span(
+                        adapter_span_id,
+                        outbox_span_id,
+                        "outbox.adapter.dispatch",
+                        kind="SPAN_KIND_INTERNAL",
+                        attributes=[attribute("auris.business_trace_id", business_trace_id)],
+                    ),
+                    span(
+                        "4" * 16,
+                        adapter_span_id,
+                        "HTTP GET",
+                        kind="SPAN_KIND_CLIENT",
+                        attributes=[
+                            attribute(
+                                "url.full",
+                                "http://qdrant:6333/collections/knowledge_chunks_v1",
+                            ),
+                            attribute("http.request.method", "GET"),
+                        ],
+                    ),
+                    span(
+                        "5" * 16,
+                        adapter_span_id,
+                        "HTTP PUT",
+                        kind="SPAN_KIND_CLIENT",
+                        attributes=[
+                            attribute(
+                                "url.full",
+                                "http://qdrant:6333/collections/knowledge_chunks_v1/points",
+                            ),
+                            attribute("http.request.method", "PUT"),
+                        ],
+                    ),
+                ],
+            ),
+        ]
+    }
+
+    operation = verifier.tempo_trace_facts(payload, otel_trace_id, "qdrant")
+    lineage = verifier._tempo_retry_lineage_facts(payload, business_trace_id)
+
+    assert operation["components"] == [
+        "bff",
+        "mysql",
+        "otel",
+        "outbox",
+        "qdrant",
+        "worker",
+    ]
+    assert lineage["observed_business_trace_id"] == business_trace_id
+    assert lineage["bff_span_id_sha256"] == lineage["outbox_parent_span_id_sha256"]
+    assert lineage["outbox_span_id_sha256"] == lineage["adapter_parent_span_id_sha256"]
+    assert lineage["adapter_span_id_sha256"] == lineage["qdrant_parent_span_id_sha256"]
+    assert lineage["qdrant_client_span_count"] == 2
+    assert lineage["qdrant_write_span_count"] == 1
+    assert lineage["bff_server_span_count"] == 1
+    assert lineage["bff_server_http_method"] == "POST"
+    assert lineage["bff_server_route"] == "/api/v1/runs/{id}/retries"
+
+    forged = json.loads(json.dumps(payload))
+    forged["batches"][1]["scopeSpans"][0]["spans"][3]["parentSpanId"] = "9" * 16
+    with pytest.raises(verifier.VerifierFailure):
+        verifier._tempo_retry_lineage_facts(forged, business_trace_id)
+
+    for field, value in (
+        ("kind", "SPAN_KIND_CLIENT"),
+        ("http.request.method", "GET"),
+        ("http.route", "/api/v1/task-runs/{id}/retries"),
+    ):
+        forged_entry = json.loads(json.dumps(payload))
+        bff = forged_entry["batches"][0]["scopeSpans"][0]["spans"][0]
+        if field == "kind":
+            bff[field] = value
+        else:
+            for item in bff["attributes"]:
+                if item["key"] == field:
+                    item["value"]["stringValue"] = value
+        with pytest.raises(verifier.VerifierFailure):
+            verifier._tempo_retry_lineage_facts(forged_entry, business_trace_id)
+
+    duplicate_server = json.loads(json.dumps(payload))
+    duplicate = json.loads(json.dumps(duplicate_server["batches"][0]["scopeSpans"][0]["spans"][0]))
+    duplicate["spanId"] = "7" * 16
+    duplicate_server["batches"][0]["scopeSpans"][0]["spans"].append(duplicate)
+    with pytest.raises(verifier.VerifierFailure):
+        verifier._tempo_retry_lineage_facts(duplicate_server, business_trace_id)
+
+    concrete_path = "/api/v1/runs/knowledge-build-source-001/retries"
+    path_fallback = json.loads(json.dumps(payload))
+    fallback_bff = path_fallback["batches"][0]["scopeSpans"][0]["spans"][0]
+    fallback_bff["name"] = f"POST {concrete_path}"
+    fallback_bff["attributes"] = [
+        item for item in fallback_bff["attributes"] if item["key"] != "http.route"
+    ]
+    fallback_bff["attributes"].append(attribute("url.path", concrete_path))
+    fallback = verifier._tempo_retry_lineage_facts(
+        path_fallback,
+        business_trace_id,
+        concrete_path,
+    )
+    assert fallback["bff_server_route"] == "/api/v1/runs/{id}/retries"
+    with pytest.raises(verifier.VerifierFailure):
+        verifier._tempo_retry_lineage_facts(
+            path_fallback,
+            business_trace_id,
+            "/api/v1/runs/another-source/retries",
         )
 
 

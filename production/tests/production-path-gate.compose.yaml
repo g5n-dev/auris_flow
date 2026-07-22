@@ -9,6 +9,11 @@ x-auris-production-path-gate:
   required_external_stubs:
     - production-gate-embedding
     - production-gate-callback
+  audio_inference_fixture:
+    service: production-gate-embedding
+    transport: https
+    reference_protocol_only: true
+    model_quality_certified: false
 
 x-production-gate-app-environment: &production-gate-app-environment
   APP_ENV: prod
@@ -109,6 +114,9 @@ services:
     environment:
       OTEL_TRACE_SAMPLE_RATIO: "1"
       OTEL_EXPORT_TIMEOUT_SECONDS: "3"
+      SSL_CERT_FILE: /run/auris-gate-ca/ca.pem
+    volumes:
+      - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/ca.pem:/run/auris-gate-ca/ca.pem:ro
 
   production-gate-embedding:
     image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
@@ -135,8 +143,12 @@ services:
       EMBEDDING_API_KEY_FILE: /run/secrets/embedding_api_key
       EMBEDDING_MODEL: auris-production-gate-reference-semantic-v1
       EMBEDDING_DIMENSION: "8"
+      AUDIO_INFERENCE_API_TOKEN_FILE: /run/secrets/audio_inference_api_token
+      AUDIO_INFERENCE_PROVIDER: audio_intelligence_default
+      AUDIO_INFERENCE_MODEL: audio-v2.3.1
     secrets:
       - embedding_api_key
+      - audio_inference_api_token
     volumes:
       - ./tests/production_gate_support.py:/opt/auris-gate/production_gate_support.py:ro
       - ${AURIS_PRODUCTION_GATE_TLS_DIR:?set AURIS_PRODUCTION_GATE_TLS_DIR}/fullchain.pem:/run/auris-gate-tls/fullchain.pem:ro
@@ -147,6 +159,7 @@ services:
       internal:
         aliases:
           - embedding.production-gate.invalid
+          - audio-inference.production-gate.invalid
     healthcheck:
       test:
         - CMD

@@ -11,6 +11,7 @@ from urllib.request import Request
 
 import pytest
 
+from auris_flow_dagster import callback as callback_module
 from auris_flow_dagster.callback import (
     CompletionCallbackClient,
     CompletionCallbackError,
@@ -217,3 +218,50 @@ def test_production_callback_url_fails_closed(monkeypatch: pytest.MonkeyPatch, u
     monkeypatch.setenv("APP_ENV", "prod")
     with pytest.raises(CompletionCallbackError):
         CompletionCallbackClient(base_url=url)
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+def test_default_callback_opener_rejects_redirect_before_replaying_signed_request(
+    scope: AurisRunContext,
+    keyring_file: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+) -> None:
+    requests: list[Request] = []
+    installed_handlers: list[object] = []
+
+    class RedirectingDirector:
+        def open(self, request: Request, *, timeout: float) -> Any:
+            del timeout
+            requests.append(request)
+            handler = next(
+                item
+                for item in installed_handlers
+                if isinstance(item, callback_module._RejectRedirectHandler)
+            )
+            redirect = getattr(handler, f"http_error_{status}")
+            redirect(
+                request,
+                None,
+                status,
+                "redirect",
+                {"Location": "http://attacker.invalid/replay"},
+            )
+            pytest.fail("redirect handler must raise before issuing a second request")
+
+    def fake_build_opener(*handlers: object) -> RedirectingDirector:
+        installed_handlers.extend(handlers)
+        return RedirectingDirector()
+
+    monkeypatch.setattr(callback_module, "build_opener", fake_build_opener)
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        max_attempts=1,
+    )
+
+    with pytest.raises(CompletionCallbackError):
+        client.post(scope, dagster_run_id="dg-no-redirect", status="success")
+
+    assert len(requests) == 1
+    assert requests[0].get_header("X-auris-signature", "").startswith("sha256=")

@@ -32,7 +32,7 @@ commit 绑定或成功 teardown 时，入口与 finalizer 都必须 hard-fail；
 - Dagster code、webserver、daemon；
 - Keycloak、edge；
 - OpenTelemetry Collector、Tempo、Prometheus、Grafana、node-exporter；
-- 仅作为外部系统测试端点的 HTTPS embedding receiver 与 HTTPS callback receiver；
+- 仅作为外部系统测试端点的 HTTPS embedding/audio protocol receiver 与 HTTPS callback receiver；
 - 只读、去 capability 的 verifier。
 
 一次运行必须绑定干净 Git commit、base/overlay/rendered Compose 哈希、全部运行中
@@ -79,10 +79,14 @@ trace 为另一操作补齐缺失 Span，也不能把业务 `trace_id` 与 OTel 
   子网，使生产 SSRF 规则原样执行。
 - 不修改 Keycloak 正式 realm 的安全默认值。通过一次性 gate bootstrap 设置测试
   用户，再由 verifier 驱动标准浏览器授权码表单和 PKCE 回调。
-- embedding/callback receiver 只是外部依赖的协议测试端点；产品 BFF、Worker、
+- embedding/audio/callback receiver 只是外部依赖的协议测试端点；产品 BFF、Worker、
   Dagster、MinIO、Qdrant、Keycloak 和 OTel 不允许 fake/local adapter。
 - 参考 embedding endpoint 只可证明可替换的 HTTPS provider 接口和真实 Qdrant
   写入/召回，不得把 feature-hash 或其他门禁参考向量声明为生产模型质量认证。
+- 同一 TLS support service 暴露的音频 endpoint 固定标记
+  `reference_protocol_only=true`、`model_quality_certified=false`；它只保证 code-server 启动时的
+  HTTPS/provider/model/secret 配置和闭合 wire contract 可验证，不替代真实音频 Provider 的准确率、
+  容量、限流/SLA 或完整结果-manifest E2E。正式 RC 必须另留外部 Provider 证据。
 - 证据必须单独绑定 runtime driver、HTTPS support server、Keycloak gate realm、
   base/overlay/rendered Compose 的 SHA-256；仅依赖 overlay 间接引用不够。
 - 证据必须精确列出所有运行中与成功退出的一次性 Compose 服务，并绑定容器 ID
@@ -92,13 +96,26 @@ trace 为另一操作补齐缺失 Span，也不能把业务 `trace_id` 与 OTel 
 - 每条 raw proof 必须内嵌 `auris.production-path.capture.v1` 脱敏 capture；校验器
   重算 `capture_sha256`，并要求 facts 与 capture observations 完全相同且字段集合精确
   等于版本化合同。OIDC、Dagster、MinIO、Qdrant、callback、Tempo、Outbox lease
-  generation/fencing 和六类恢复场景分别执行字段级及跨 proof 语义校验；重算哈希、
-  增加自声明字段或写入 `recovered: true` 都不构成证据。
+  generation/fencing 和七类恢复场景分别执行字段级及跨 proof 语义校验。dead-letter
+  人工重放必须同时引用 MySQL 不可变账本、Qdrant scope/cardinality 与独立 Tempo trace
+  三份 proof；重算哈希、增加自声明字段或写入 `recovered: true` 都不构成证据。
 - artifact 先写同目录独占临时文件，完成成功 teardown 后再通过排他 hard-link 发布为
   `build/release-evidence/production-path-gate.json`；已存在目标永不覆盖或删除。证据
   不得包含 token、cookie、密码、key material、响应正文或个人绝对路径。
 - 任一服务未健康、任一 proof 缺失、trace 分裂、工作区不干净或 teardown 失败，
   都必须退出非零，且不得创建权威 artifact。
+- verifier phase 失败时，driver 将当前 Compose project、一次性目录和私有
+  `auris.production-path.runtime-resume.v1` checkpoint 保留在 `build/tmp`；以完全相同的
+  commit、Compose 哈希、发行模式和命令重跑时，只允许从同一个 in-flight verifier phase
+  继续。checkpoint 由当前用户持有且权限固定为 `0600`，有效期仅 6 小时，并且最多允许一次
+  跨进程续跑；续跑的同一 verifier phase 再次失败时必须 teardown 并删除 checkpoint 与临时
+  目录。若下次启动发现 checkpoint 已过期或续跑额度已耗尽，driver 只能在完整复核其 commit、
+  Compose 哈希、项目名、私有文件权限和临时目录后，对该精确 Compose project 执行 teardown；
+  不允许通配或目录级猜测清理。checkpoint 只保存显式白名单内的固定运行配置、镜像引用、回环端口和 secret **文件
+  引用**，不保存 `PATH`、`HOME`、Docker 客户端配置或任何 secret 内容；续跑时宿主执行环境从
+  当前进程重新净化构造。host action 若处于不确定的 in-flight 状态则 fail closed，禁止猜测性
+  重放。verifier 会先原子保存闭合 proof facts，再逐份发布 capture，因此 capture 发布后崩溃
+  不会再次发送 dead-letter retry POST。checkpoint 不是证据，成功 teardown 后必须删除。
 - teardown 只能清理脚本生成且名称匹配白名单的 Compose project、volume 和
   `build/tmp` 子目录。
 
@@ -106,6 +123,14 @@ trace 为另一操作补齐缺失 Span，也不能把业务 `trace_id` 与 OTel 
 
 机器可读合同位于 `production-path-gate.compose.yaml`。`status: ready` 表示生产路径
 诊断实现已纳入版本控制，绝不代表 Compose 演练已经通过。严格发布入口必须保留该门禁；
-runtime driver、verifier、capture、六类故障恢复证明或成功 teardown 任一缺失时都持续
-阻断发布。权威 `production-path-gate.json` 只能由一次全新、同进程协调、绑定干净提交
-的成功运行原子写入，不能由旧门禁 artifact 拼接，也不能由人工编辑替代。
+runtime driver、verifier、capture、七类故障恢复证明或成功 teardown 任一缺失时都持续
+阻断发布。权威 `production-path-gate.json` 只能由一次全新运行，或同一干净 commit 下由
+driver 严格 checkpoint 继续的同一 Compose project，在成功 teardown 后原子写入；不能由旧门禁
+artifact 拼接，也不能由人工编辑或 checkpoint 直接替代。
+
+预构建镜像发布另使用闭合的 `auris.production-path-release-gate.v1` 外层；它必须绑定
+release tag、source commit、digest-only image lock、最终 Compose、原生 Linux 运行环境与
+运行/校验源码。发布工作流在生成后、归档前校验一次，下载并验证签名 `SHA256SUMS` 后再
+校验一次；两次均把内嵌六个运行段投影回完整 `auris.production-path-gate.v1` 校验器，
+不会把“六个字段都是 dict”当成成功证据。`dead_letter_retry`、
+`dead_letter_retry_qdrant`、`dead_letter_retry_trace` 任一缺失或事实篡改都 fail closed。

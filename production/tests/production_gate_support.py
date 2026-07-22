@@ -38,6 +38,37 @@ from app.core.callback_signature import (
 
 MAX_BODY_BYTES = 1024 * 1024
 CALLBACK_TOLERANCE_SECONDS = 300
+AUDIO_REQUEST_FIELDS = frozenset(
+    {
+        "schema_version",
+        "execution_contract",
+        "execution_envelope_sha256",
+        "tenant_id",
+        "project_id",
+        "trace_id",
+        "run_id",
+        "dispatch_idempotency_key",
+        "outbox_fencing_token",
+        "deadline_at",
+        "audio_session_id",
+        "recording_id",
+        "input_object",
+        "inference",
+        "capabilities",
+    }
+)
+AUDIO_INPUT_FIELDS = frozenset(
+    {
+        "storage_object_id",
+        "storage_provider",
+        "bucket",
+        "object_key",
+        "version_id",
+        "content_sha256",
+        "content_length",
+        "content_type",
+    }
+)
 
 
 class GateSupportError(RuntimeError):
@@ -94,6 +125,92 @@ def reference_semantic_vector(text: str, *, dimension: int) -> list[float]:
     return [round(value / magnitude, 8) for value in values]
 
 
+def reference_audio_response(
+    body: bytes,
+    *,
+    provider: str,
+    model: str,
+    claimed_request_sha256: str,
+    idempotency_key: str,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Validate and answer the protocol contract without claiming model quality."""
+
+    payload = json.loads(body.decode("utf-8"))
+    if not isinstance(payload, dict) or set(payload) != AUDIO_REQUEST_FIELDS:
+        raise GateSupportError("audio provider request envelope is invalid")
+    input_object = payload.get("input_object")
+    inference = payload.get("inference")
+    capabilities = payload.get("capabilities")
+    if (
+        payload.get("schema_version") != "auris-flow-audio-provider-request-v1"
+        or payload.get("execution_contract") != "auris-flow-audio-intelligence-v1"
+        or not isinstance(input_object, dict)
+        or set(input_object) != AUDIO_INPUT_FIELDS
+        or not isinstance(inference, dict)
+        or set(inference) != {"provider", "model"}
+        or inference.get("provider") != provider
+        or inference.get("model") != model
+        or not isinstance(capabilities, list)
+        or not capabilities
+        or len(set(capabilities)) != len(capabilities)
+        or any(
+            capability not in {"vad", "asr", "diarization", "voiceprint", "quality"}
+            for capability in capabilities
+        )
+    ):
+        raise GateSupportError("audio provider request contract is invalid")
+    request_sha256 = _sha256(body)
+    if (
+        claimed_request_sha256 != request_sha256
+        or idempotency_key
+        != f"audio-inference:{payload.get('dispatch_idempotency_key', '')}"
+    ):
+        raise GateSupportError("audio provider request binding is invalid")
+    transcript = (
+        {
+            "language": "zh-CN",
+            "text": "reference protocol transcript",
+            "segments": [
+                {
+                    "start_ms": 0,
+                    "end_ms": 640,
+                    "speaker": "speaker-1",
+                    "text": "reference protocol transcript",
+                    "confidence": 0.99,
+                }
+            ],
+        }
+        if "asr" in capabilities
+        else None
+    )
+    analyses = [
+        {
+            "capability": capability,
+            "summary": "reference protocol result",
+            "score": 0.99,
+            "labels": [{"label": "reference", "score": 0.99}],
+        }
+        for capability in capabilities
+        if capability != "asr"
+    ]
+    result = {"transcript": transcript, "analyses": analyses}
+    response = {
+        **{key: value for key, value in payload.items() if key != "schema_version"},
+        "schema_version": "auris-flow-audio-provider-response-v1",
+        "request_sha256": request_sha256,
+        "result": result,
+        "result_sha256": _sha256(_canonical_bytes(result)),
+    }
+    record = {
+        "request_sha256": request_sha256,
+        "result_sha256": response["result_sha256"],
+        "provider": provider,
+        "model": model,
+        "capabilities": list(capabilities),
+    }
+    return response, record
+
+
 class AtomicNonceStore(CallbackNonceReplayStore):
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -119,10 +236,14 @@ class SupportState:
     embedding_api_key: str = field(default="", repr=False)
     embedding_model: str = ""
     embedding_dimension: int = 8
+    audio_api_token: str = field(default="", repr=False)
+    audio_provider: str = ""
+    audio_model: str = ""
     callback_keyring: Any | None = field(default=None, repr=False)
     nonce_store: AtomicNonceStore = field(default_factory=AtomicNonceStore, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     embedding_requests: list[dict[str, Any]] = field(default_factory=list)
+    audio_requests: list[dict[str, Any]] = field(default_factory=list)
     receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
     idempotency: dict[str, CallbackIdempotencyBinding] = field(default_factory=dict)
     last_callback: tuple[CallbackSignatureRequest, str] | None = field(
@@ -205,6 +326,12 @@ class GateSupportHandler(BaseHTTPRequestHandler):
             if self.state.mode == "embedding" and parsed.path == "/v1/embeddings":
                 self._embedding()
                 return
+            if (
+                self.state.mode == "embedding"
+                and parsed.path == "/v1/audio-intelligence"
+            ):
+                self._audio_inference()
+                return
             if self.state.mode == "callback" and parsed.path == "/callbacks/platform":
                 self._callback(parsed.query)
                 return
@@ -270,6 +397,24 @@ class GateSupportHandler(BaseHTTPRequestHandler):
                 "usage": {"input_count": 1},
             },
         )
+
+    def _audio_inference(self) -> None:
+        supplied = self.headers.get("Authorization", "")
+        expected = f"Bearer {self.state.audio_api_token}"
+        if not hmac.compare_digest(supplied, expected):
+            self._send(401, {"status": "unauthorized"})
+            return
+        body = self._body()
+        response, record = reference_audio_response(
+            body,
+            provider=self.state.audio_provider,
+            model=self.state.audio_model,
+            claimed_request_sha256=self.headers.get("X-Auris-Request-SHA256", ""),
+            idempotency_key=self.headers.get("Idempotency-Key", ""),
+        )
+        with self.state.lock:
+            self.state.audio_requests.append(record)
+        self._send(200, response)
 
     def _callback(self, query: str) -> None:
         body = self._body()
@@ -393,6 +538,7 @@ class GateSupportHandler(BaseHTTPRequestHandler):
         with self.state.lock:
             if self.state.mode == "embedding":
                 requests = list(self.state.embedding_requests)
+                audio_requests = list(self.state.audio_requests)
                 return {
                     "transport": "https",
                     "provider": "reference-semantic-protocol",
@@ -402,6 +548,20 @@ class GateSupportHandler(BaseHTTPRequestHandler):
                     "request_hashes": [item["request_sha256"] for item in requests],
                     "purposes": sorted({str(item["purpose"]) for item in requests}),
                     "dimension": self.state.embedding_dimension,
+                    "audio_inference": {
+                        "transport": "https",
+                        "provider": self.state.audio_provider,
+                        "model": self.state.audio_model,
+                        "reference_protocol_only": True,
+                        "model_quality_certified": False,
+                        "request_count": len(audio_requests),
+                        "request_hashes": [
+                            item["request_sha256"] for item in audio_requests
+                        ],
+                        "result_hashes": [
+                            item["result_sha256"] for item in audio_requests
+                        ],
+                    },
                 }
             receipts = list(self.state.receipts.values())
             return {
@@ -440,14 +600,23 @@ def _support_state(mode: str) -> SupportState:
         )
         dimension = int(os.environ.get("EMBEDDING_DIMENSION", "8"))
         model = os.environ.get("EMBEDDING_MODEL", "").strip()
-        if not model:
-            raise GateSupportError("embedding model is missing")
+        audio_api_token = _read_secret(
+            os.environ["AUDIO_INFERENCE_API_TOKEN_FILE"],
+            label="audio inference API token",
+        )
+        audio_provider = os.environ.get("AUDIO_INFERENCE_PROVIDER", "").strip()
+        audio_model = os.environ.get("AUDIO_INFERENCE_MODEL", "").strip()
+        if not model or not audio_provider or not audio_model:
+            raise GateSupportError("reference protocol model configuration is missing")
         return SupportState(
             mode=mode,
             control_secret=control_secret,
             embedding_api_key=api_key,
             embedding_model=model,
             embedding_dimension=dimension,
+            audio_api_token=audio_api_token,
+            audio_provider=audio_provider,
+            audio_model=audio_model,
         )
     key_bindings = _read_secret(
         os.environ["EXTERNAL_CALLBACK_KEY_BINDINGS_FILE"],

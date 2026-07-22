@@ -15,7 +15,7 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 import yaml  # type: ignore[import-untyped]
@@ -26,14 +26,24 @@ BASE_COMPOSE = ROOT / "production" / "compose.yaml"
 GATE_COMPOSE = ROOT / "production" / "tests" / "production-path-gate.compose.yaml"
 RUNTIME_DRIVER = ROOT / "scripts" / "verify_production_path_runtime.py"
 EVIDENCE_PATH = ROOT / "build" / "release-evidence" / "production-path-gate.json"
+RELEASE_EVIDENCE_PATH = (
+    ROOT / "build" / "release" / "final-runtime" / "production-path-gate.json"
+)
 CONTRACT_SCHEMA = "auris.production-path-gate-contract.v1"
 EVIDENCE_SCHEMA = "auris.production-path-gate.v1"
+RELEASE_EVIDENCE_SCHEMA = "auris.production-path-release-gate.v1"
+RELEASE_BINDING_SCHEMA = "auris.release-runtime-binding.v1"
+RELEASE_IMAGE_LOCK_SCHEMA = "auris.release-image-lock.v1"
 # This assertion is reviewable source, not a runtime shortcut: activation also
 # requires every checked-in runtime source below, a ready Compose contract and a
 # complete raw-proof/recovery envelope whose canonical hashes are recomputed.
 RAW_PROOF_BINDING_IMPLEMENTED = True
 COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40}$")
 SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+RELEASE_TAG_PATTERN = re.compile(
+    r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+    r"(?:-rc\.[1-9]\d*)?$"
+)
 IMAGE_ID_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 REPO_DIGEST_PATTERN = re.compile(r"^[^\s@]+@sha256:[0-9a-f]{64}$")
 OTEL_TRACE_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
@@ -52,6 +62,7 @@ REQUIRED_BASE_SERVICES = frozenset(
         "dagster-daemon",
         "otel-collector",
         "tempo",
+        "alertmanager",
         "prometheus",
         "grafana",
         "node-exporter",
@@ -82,6 +93,7 @@ REQUIRED_TRACE_COMPONENTS = frozenset(
 )
 REQUIRED_RUNTIME_SOURCES = (
     "scripts/verify_production_path_runtime.py",
+    "scripts/verify_production_path_gate.py",
     "production/tests/production_path_verifier.py",
     "production/tests/production_gate_support.py",
     "production/tests/production-path-keycloak-realm.template.json",
@@ -110,6 +122,9 @@ REQUIRED_RAW_PROOFS = frozenset(
         "worker_crash",
         "duplicate_delivery",
         "callback_timeout",
+        "dead_letter_retry",
+        "dead_letter_retry_qdrant",
+        "dead_letter_retry_trace",
         "qdrant_outage",
         "redis_outage",
     }
@@ -145,6 +160,9 @@ RAW_PROOF_SOURCE_BY_ID = {
     "worker_crash": "compose-runtime",
     "duplicate_delivery": "mysql",
     "callback_timeout": "mysql",
+    "dead_letter_retry": "mysql",
+    "dead_letter_retry_qdrant": "qdrant-http",
+    "dead_letter_retry_trace": "tempo-http",
     "qdrant_outage": "compose-runtime",
     "redis_outage": "compose-runtime",
 }
@@ -326,6 +344,122 @@ PROOF_FACT_KEYS = {
         }
     )
     | AUTHORITY_FACT_KEYS,
+    "dead_letter_retry": frozenset(
+        {
+            "source_run_id_sha256",
+            "retry_run_id_sha256",
+            "source_event_id",
+            "retry_event_id",
+            "source_event_aggregate_id_sha256",
+            "retry_event_aggregate_id_sha256",
+            "source_payload_dead_letter_event_id",
+            "retry_payload_retry_of_event_id",
+            "retry_payload_retry_of_run_id_sha256",
+            "source_trace_id",
+            "retry_payload_retry_of_trace_id",
+            "source_status_before",
+            "source_status_after",
+            "source_terminal_reason",
+            "source_status_version",
+            "source_event_status",
+            "source_delivery_state",
+            "source_error_code",
+            "source_last_error_sha256",
+            "source_lease_generation",
+            "source_dead_letter_attempt_count",
+            "source_snapshot_sha256_before",
+            "source_snapshot_sha256_after",
+            "source_attempt_ledger_sha256_before",
+            "source_attempt_ledger_sha256_after",
+            "retry_response_replayed",
+            "first_response_sha256",
+            "replay_response_sha256",
+            "stored_response_sha256",
+            "idempotency_record_count",
+            "idempotency_state",
+            "idempotency_status_code",
+            "idempotency_request_sha256",
+            "expected_idempotency_request_sha256",
+            "idempotency_response_run_id_sha256",
+            "idempotency_user_sha256",
+            "expected_retry_idempotency_key_sha256",
+            "retry_run_count",
+            "retry_event_count",
+            "retry_dispatch_attempt_count",
+            "retry_event_otel_trace_id",
+            "retry_dispatch_idempotency_key_sha256",
+            "retry_dispatch_request_sha256",
+            "retry_attempt_request_sha256",
+            "retry_attempt_id_sha256",
+            "retry_expected_attempt_id_sha256",
+            "retry_point_id_sha256",
+            "retry_dispatch_payload_sha256",
+            "retry_attempt_payload_sha256",
+            "retry_event_status",
+            "retry_run_status",
+            "retry_trace_inherited",
+            "retry_audit_count",
+            "retry_audit_actor_sha256",
+            "retry_audit_idempotency_key_sha256",
+            "retry_audit_trace_matches",
+            "retry_audit_lineage_matches",
+        }
+    )
+    | AUTHORITY_FACT_KEYS,
+    "dead_letter_retry_qdrant": frozenset(
+        {
+            "http_status",
+            "collection",
+            "point_id_sha256",
+            "dispatch_point_id_sha256",
+            "attempt_point_id_sha256",
+            "payload_sha256",
+            "dispatch_payload_sha256",
+            "attempt_payload_sha256",
+            "retry_run_id_sha256",
+            "retry_event_id",
+            "dispatch_idempotency_key_sha256",
+            "dispatch_request_sha256",
+            "attempt_request_sha256",
+            "attempt_id_sha256",
+            "tenant_id",
+            "project_id",
+            "trace_id",
+            "filtered_point_count",
+            "point_occurrences",
+            "cross_tenant_count",
+            "cross_project_count",
+            "scope_match",
+            "dispatch_receipt_match",
+            "attempt_receipt_match",
+            "payload_hash_match",
+        }
+    ),
+    "dead_letter_retry_trace": frozenset(
+        {
+            "http_status",
+            "observed_business_trace_id",
+            "bff_span_id_sha256",
+            "outbox_parent_span_id_sha256",
+            "outbox_span_id_sha256",
+            "adapter_parent_span_id_sha256",
+            "adapter_span_id_sha256",
+            "qdrant_parent_span_id_sha256",
+            "bff_server_span_count",
+            "bff_server_http_method",
+            "bff_server_route",
+            "outbox_process_span_count",
+            "adapter_dispatch_span_count",
+            "qdrant_client_span_count",
+            "qdrant_write_span_count",
+            "otel_trace_id",
+            "services",
+            "components",
+            "component_signals",
+            "span_count",
+            "client_span_count",
+        }
+    ),
     "qdrant_outage": frozenset(
         {
             "ready_status_during",
@@ -404,6 +538,7 @@ REQUIRED_RECOVERY_CASES = frozenset(
         "worker_crash",
         "duplicate_delivery",
         "callback_timeout",
+        "dead_letter_retry",
         "qdrant_outage",
         "redis_outage",
     }
@@ -422,6 +557,7 @@ REQUIRED_RUNNING_SERVICES = frozenset(
         "worker",
         "otel-collector",
         "tempo",
+        "alertmanager",
         "prometheus",
         "grafana",
         "node-exporter",
@@ -433,6 +569,7 @@ REQUIRED_RUNNING_SERVICES = frozenset(
 REQUIRED_COMPLETED_SERVICES = frozenset(
     {
         "db-bootstrap",
+        "minio-volume-init",
         "minio-bootstrap",
         "migrate",
         "identity-bootstrap",
@@ -444,11 +581,13 @@ EXPECTED_EXTERNAL_SERVICE_IMAGES = {
     "db-bootstrap": "mysql:8.4.5",
     "redis": "redis:7.4.2-alpine3.21",
     "minio": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
+    "minio-volume-init": "minio/minio:RELEASE.2025-04-22T22-12-26Z",
     "minio-bootstrap": "minio/mc:RELEASE.2025-04-16T18-13-26Z",
     "qdrant": "qdrant/qdrant:v1.14.1",
     "keycloak": "quay.io/keycloak/keycloak:26.2.5",
     "otel-collector": "otel/opentelemetry-collector-contrib:0.128.0",
     "tempo": "grafana/tempo:2.8.0",
+    "alertmanager": "prom/alertmanager:v0.28.1",
     "prometheus": "prom/prometheus:v3.4.1",
     "grafana": "grafana/grafana:12.0.1",
     "node-exporter": "prom/node-exporter:v1.9.1",
@@ -492,6 +631,35 @@ EVIDENCE_FIELDS = frozenset(
         "recovery",
     }
 )
+RELEASE_EVIDENCE_FIELDS = EVIDENCE_FIELDS | frozenset({"release_tag", "release"})
+RELEASE_BINDING_FIELDS = frozenset(
+    {
+        "schema_version",
+        "release_tag",
+        "source_commit",
+        "image_lock",
+        "image_lock_sha256",
+        "image_lock_schema_version",
+        "release_compose",
+        "release_compose_sha256",
+        "runtime_images",
+    }
+)
+RELEASE_RUNTIME_IMAGE_FIELDS = frozenset(
+    {
+        "lock_service",
+        "configured_image",
+        "repo_digest",
+        "image_id",
+        "container_id_sha256",
+    }
+)
+RELEASE_GATE_IMAGE_ALIASES = {
+    "production-gate-callback": "bff",
+    "production-gate-embedding": "bff",
+    "production-path-seed": "bff",
+    "production-path-verifier": "bff",
+}
 COMPOSE_EVIDENCE_FIELDS = frozenset(
     {
         "base",
@@ -729,7 +897,11 @@ def _expected_service_image(service: str, source_commit: str) -> str | None:
 
 
 def _validate_runtime_inventory(
-    compose: dict[str, Any], *, source_commit: str, errors: list[str]
+    compose: dict[str, Any],
+    *,
+    source_commit: str,
+    errors: list[str],
+    expected_configured_images: Mapping[str, str] | None = None,
 ) -> None:
     host_architecture = _mapping(compose.get("host_runtime")).get("architecture")
     runtime = _mapping(compose.get("runtime"))
@@ -741,6 +913,11 @@ def _validate_runtime_inventory(
         errors.append("Compose running service inventory is incomplete")
     if set(completed) != REQUIRED_COMPLETED_SERVICES:
         errors.append("Compose one-shot service inventory is incomplete")
+    observed_service_names = set(running) | set(completed)
+    if expected_configured_images is not None and set(expected_configured_images) != (
+        observed_service_names
+    ):
+        errors.append("release runtime image expectations do not match the inventory")
     common_fields = {
         "container_id_sha256",
         "configured_image",
@@ -771,7 +948,11 @@ def _validate_runtime_inventory(
                 errors.append(f"Compose container identity is invalid: {service}")
             if not IMAGE_ID_PATTERN.fullmatch(image_id):
                 errors.append(f"Compose image identity is invalid: {service}")
-            expected_image = _expected_service_image(service, source_commit)
+            expected_image = (
+                expected_configured_images.get(service)
+                if expected_configured_images is not None
+                else _expected_service_image(service, source_commit)
+            )
             if configured_image != expected_image:
                 errors.append(
                     f"Compose configured image is not pinned by the gate: {service}"
@@ -795,7 +976,20 @@ def _validate_runtime_inventory(
                     f"Compose repository digest inventory is invalid: {service}"
                 )
                 repo_digests = []
-            if service in EXPECTED_EXTERNAL_SERVICE_IMAGES:
+            if expected_configured_images is not None and isinstance(
+                expected_image, str
+            ):
+                expected_repository = _normalized_image_repository(expected_image)
+                expected_digest = expected_image.rsplit("@", 1)[-1]
+                if not repo_digests or not any(
+                    _normalized_image_repository(str(item)) == expected_repository
+                    and str(item).rsplit("@", 1)[-1] == expected_digest
+                    for item in repo_digests
+                ):
+                    errors.append(
+                        f"Compose repository digest does not match the release lock: {service}"
+                    )
+            elif service in EXPECTED_EXTERNAL_SERVICE_IMAGES:
                 expected_repository = _normalized_image_repository(
                     EXPECTED_EXTERNAL_SERVICE_IMAGES[service]
                 )
@@ -941,6 +1135,16 @@ def validate_gate_compose(document: object) -> list[str]:
         errors.append(
             "gate contract must require HTTPS embedding and callback test endpoints"
         )
+    audio_fixture = _mapping(contract.get("audio_inference_fixture"))
+    if audio_fixture != {
+        "service": "production-gate-embedding",
+        "transport": "https",
+        "reference_protocol_only": True,
+        "model_quality_certified": False,
+    }:
+        errors.append(
+            "gate audio inference fixture must be HTTPS protocol-only and must not certify model quality"
+        )
 
     missing_capabilities = contract.get("missing_capabilities")
     if isinstance(missing_capabilities, list):
@@ -980,6 +1184,16 @@ def validate_gate_compose(document: object) -> list[str]:
 
     for service_name in sorted(REQUIRED_GATE_SERVICES):
         _require_service_hardening(services, service_name, errors)
+    audio_service = _mapping(services.get("production-gate-embedding"))
+    audio_environment = _mapping(audio_service.get("environment"))
+    if (
+        audio_environment.get("AUDIO_INFERENCE_API_TOKEN_FILE")
+        != "/run/secrets/audio_inference_api_token"
+        or audio_environment.get("AUDIO_INFERENCE_PROVIDER")
+        != "audio_intelligence_default"
+        or audio_environment.get("AUDIO_INFERENCE_MODEL") != "audio-v2.3.1"
+    ):
+        errors.append("production gate audio protocol fixture configuration is invalid")
     _validate_callback_test_network(root, errors)
 
     serialized = json.dumps(root, ensure_ascii=True, sort_keys=True).lower()
@@ -1456,6 +1670,274 @@ def _validate_proof_facts(
             facts.get("remote_receipt_count") == 1,
             "callback reconciliation duplicated the receipt",
         )
+    elif proof_id == "dead_letter_retry":
+        source_hash = str(facts.get("source_run_id_sha256") or "")
+        retry_hash = str(facts.get("retry_run_id_sha256") or "")
+        snapshot_before = str(facts.get("source_snapshot_sha256_before") or "")
+        snapshot_after = str(facts.get("source_snapshot_sha256_after") or "")
+        ledger_before = str(facts.get("source_attempt_ledger_sha256_before") or "")
+        ledger_after = str(facts.get("source_attempt_ledger_sha256_after") or "")
+        source_event_id = facts.get("source_event_id")
+        retry_event_id = facts.get("retry_event_id")
+        source_trace_id = facts.get("source_trace_id")
+        required_hashes = (
+            source_hash,
+            retry_hash,
+            str(facts.get("source_event_aggregate_id_sha256") or ""),
+            str(facts.get("retry_event_aggregate_id_sha256") or ""),
+            str(facts.get("retry_payload_retry_of_run_id_sha256") or ""),
+            str(facts.get("source_last_error_sha256") or ""),
+            snapshot_before,
+            snapshot_after,
+            ledger_before,
+            ledger_after,
+            str(facts.get("idempotency_request_sha256") or ""),
+            str(facts.get("expected_idempotency_request_sha256") or ""),
+            str(facts.get("idempotency_response_run_id_sha256") or ""),
+            str(facts.get("idempotency_user_sha256") or ""),
+            str(facts.get("expected_retry_idempotency_key_sha256") or ""),
+            str(facts.get("retry_audit_actor_sha256") or ""),
+            str(facts.get("retry_audit_idempotency_key_sha256") or ""),
+            str(facts.get("first_response_sha256") or ""),
+            str(facts.get("replay_response_sha256") or ""),
+            str(facts.get("stored_response_sha256") or ""),
+            str(facts.get("retry_dispatch_idempotency_key_sha256") or ""),
+            str(facts.get("retry_dispatch_request_sha256") or ""),
+            str(facts.get("retry_attempt_request_sha256") or ""),
+            str(facts.get("retry_attempt_id_sha256") or ""),
+            str(facts.get("retry_expected_attempt_id_sha256") or ""),
+            str(facts.get("retry_point_id_sha256") or ""),
+            str(facts.get("retry_dispatch_payload_sha256") or ""),
+            str(facts.get("retry_attempt_payload_sha256") or ""),
+        )
+        require(
+            all(bool(SHA256_PATTERN.fullmatch(value)) for value in required_hashes)
+            and source_hash != retry_hash,
+            "dead-letter source and retry identities are invalid",
+        )
+        require(
+            _positive_int(source_event_id)
+            and _positive_int(retry_event_id)
+            and source_event_id != retry_event_id,
+            "dead-letter source and retry event identities are invalid",
+        )
+        require(
+            facts.get("source_event_aggregate_id_sha256") == source_hash
+            and facts.get("retry_event_aggregate_id_sha256") == retry_hash
+            and facts.get("source_payload_dead_letter_event_id") == source_event_id
+            and facts.get("retry_payload_retry_of_event_id") == source_event_id
+            and facts.get("retry_payload_retry_of_run_id_sha256") == source_hash,
+            "dead-letter source and retry lineage is not cross-bound",
+        )
+        require(
+            isinstance(source_trace_id, str)
+            and BUSINESS_TRACE_ID_PATTERN.fullmatch(source_trace_id) is not None
+            and facts.get("retry_payload_retry_of_trace_id") == source_trace_id,
+            "dead-letter retry business trace lineage is invalid",
+        )
+        require(
+            facts.get("source_status_before") == "failed"
+            and facts.get("source_status_after") == "failed"
+            and facts.get("source_terminal_reason") == "outbox_dispatch_dead_letter"
+            and _positive_int(facts.get("source_status_version"), minimum=3)
+            and facts.get("source_event_status") == "dead_letter"
+            and facts.get("source_delivery_state") == "failed"
+            and facts.get("source_error_code") == "QDRANT_PAYLOAD_INVALID"
+            and facts.get("source_lease_generation") == 1
+            and facts.get("source_dead_letter_attempt_count") == 1,
+            "source dead-letter terminal decision is invalid",
+        )
+        require(
+            bool(SHA256_PATTERN.fullmatch(snapshot_before))
+            and snapshot_after == snapshot_before
+            and bool(SHA256_PATTERN.fullmatch(ledger_before))
+            and ledger_after == ledger_before,
+            "source dead-letter decision or attempt ledger mutated after retry",
+        )
+        require(
+            facts.get("retry_response_replayed") is True
+            and facts.get("first_response_sha256")
+            == facts.get("replay_response_sha256")
+            == facts.get("stored_response_sha256")
+            and facts.get("idempotency_record_count") == 1
+            and facts.get("idempotency_state") == "completed"
+            and facts.get("idempotency_status_code") == 202
+            and facts.get("idempotency_request_sha256")
+            == facts.get("expected_idempotency_request_sha256")
+            and facts.get("idempotency_response_run_id_sha256") == retry_hash
+            and facts.get("retry_audit_actor_sha256")
+            == facts.get("idempotency_user_sha256")
+            and facts.get("retry_audit_idempotency_key_sha256")
+            == facts.get("expected_retry_idempotency_key_sha256")
+            and facts.get("retry_run_count") == 1
+            and facts.get("retry_event_count") == 1
+            and facts.get("retry_dispatch_attempt_count") == 1,
+            "manual retry was not idempotent or dispatched exactly once",
+        )
+        require(
+            OTEL_TRACE_ID_PATTERN.fullmatch(
+                str(facts.get("retry_event_otel_trace_id") or "")
+            )
+            is not None
+            and facts.get("retry_dispatch_request_sha256")
+            == facts.get("retry_attempt_request_sha256")
+            and facts.get("retry_attempt_id_sha256")
+            == facts.get("retry_expected_attempt_id_sha256")
+            and facts.get("retry_dispatch_payload_sha256")
+            == facts.get("retry_attempt_payload_sha256"),
+            "manual retry Outbox and attempt receipts are not directly bound",
+        )
+        require(
+            facts.get("retry_event_status") == "processed"
+            and facts.get("retry_run_status") == "success"
+            and facts.get("retry_trace_inherited") is True,
+            "manual retry did not complete with inherited trace lineage",
+        )
+        require(
+            facts.get("retry_audit_count") == 1
+            and facts.get("retry_audit_trace_matches") is True
+            and facts.get("retry_audit_lineage_matches") is True,
+            "manual retry audit evidence is invalid",
+        )
+        require(
+            _positive_int(facts.get("authoritative_run_count_before"))
+            and facts.get("authoritative_run_count_before")
+            == facts.get("authoritative_run_count_after"),
+            "baseline MySQL authority changed during dead-letter recovery",
+        )
+    elif proof_id == "dead_letter_retry_qdrant":
+        mysql_facts = proof_facts("dead_letter_retry")
+        hash_fields = (
+            "point_id_sha256",
+            "dispatch_point_id_sha256",
+            "attempt_point_id_sha256",
+            "payload_sha256",
+            "dispatch_payload_sha256",
+            "attempt_payload_sha256",
+            "retry_run_id_sha256",
+            "dispatch_idempotency_key_sha256",
+            "dispatch_request_sha256",
+            "attempt_request_sha256",
+            "attempt_id_sha256",
+        )
+        require(
+            all(
+                bool(SHA256_PATTERN.fullmatch(str(facts.get(field) or "")))
+                for field in hash_fields
+            ),
+            "Qdrant retry receipt hashes are invalid",
+        )
+        require(
+            facts.get("http_status") == 200
+            and isinstance(facts.get("collection"), str)
+            and bool(facts.get("collection")),
+            "Qdrant retry response is invalid",
+        )
+        require(
+            facts.get("retry_run_id_sha256") == mysql_facts.get("retry_run_id_sha256")
+            and facts.get("retry_event_id") == mysql_facts.get("retry_event_id")
+            and facts.get("trace_id") == mysql_facts.get("source_trace_id"),
+            "Qdrant retry proof is not cross-bound to the MySQL retry",
+        )
+        require(
+            (facts.get("tenant_id"), facts.get("project_id")) == scope
+            and facts.get("scope_match") is True
+            and facts.get("cross_tenant_count") == 0
+            and facts.get("cross_project_count") == 0,
+            "Qdrant retry scope isolation is invalid",
+        )
+        require(
+            facts.get("filtered_point_count") == 1
+            and facts.get("point_occurrences") == 1
+            and facts.get("dispatch_receipt_match") is True
+            and facts.get("attempt_receipt_match") is True
+            and facts.get("payload_hash_match") is True
+            and facts.get("point_id_sha256")
+            == facts.get("dispatch_point_id_sha256")
+            == facts.get("attempt_point_id_sha256")
+            == mysql_facts.get("retry_point_id_sha256")
+            and facts.get("payload_sha256")
+            == facts.get("dispatch_payload_sha256")
+            == facts.get("attempt_payload_sha256")
+            == mysql_facts.get("retry_dispatch_payload_sha256")
+            and facts.get("dispatch_idempotency_key_sha256")
+            == mysql_facts.get("retry_dispatch_idempotency_key_sha256")
+            and facts.get("dispatch_request_sha256")
+            == mysql_facts.get("retry_dispatch_request_sha256")
+            and facts.get("attempt_request_sha256")
+            == mysql_facts.get("retry_attempt_request_sha256")
+            and facts.get("attempt_id_sha256")
+            == mysql_facts.get("retry_attempt_id_sha256")
+            and facts.get("dispatch_request_sha256")
+            == facts.get("attempt_request_sha256"),
+            "Qdrant retry did not prove one cross-bound remote outcome",
+        )
+    elif proof_id == "dead_letter_retry_trace":
+        mysql_facts = proof_facts("dead_letter_retry")
+        expected_components = OPERATION_OTEL_COMPONENTS["qdrant"]
+        expected_services = OPERATION_OTEL_SERVICES["qdrant"]
+        services = _nonempty_strings(facts.get("services"))
+        components = _nonempty_strings(facts.get("components"))
+        signals = _mapping(facts.get("component_signals"))
+        otel_trace_id = str(facts.get("otel_trace_id") or "")
+        require(
+            facts.get("http_status") == 200
+            and OTEL_TRACE_ID_PATTERN.fullmatch(otel_trace_id) is not None
+            and int(otel_trace_id, 16) != 0
+            and otel_trace_id not in set(operation_otel_trace_ids.values())
+            and otel_trace_id == mysql_facts.get("retry_event_otel_trace_id"),
+            "dead-letter retry Tempo trace id is invalid or reused",
+        )
+        require(
+            facts.get("observed_business_trace_id")
+            == mysql_facts.get("source_trace_id"),
+            "dead-letter retry Tempo trace lacks the source business trace",
+        )
+        lineage_hash_fields = (
+            "bff_span_id_sha256",
+            "outbox_parent_span_id_sha256",
+            "outbox_span_id_sha256",
+            "adapter_parent_span_id_sha256",
+            "adapter_span_id_sha256",
+            "qdrant_parent_span_id_sha256",
+        )
+        require(
+            all(
+                bool(SHA256_PATTERN.fullmatch(str(facts.get(field) or "")))
+                for field in lineage_hash_fields
+            )
+            and facts.get("bff_span_id_sha256")
+            == facts.get("outbox_parent_span_id_sha256")
+            and facts.get("outbox_span_id_sha256")
+            == facts.get("adapter_parent_span_id_sha256")
+            and facts.get("adapter_span_id_sha256")
+            == facts.get("qdrant_parent_span_id_sha256")
+            and facts.get("outbox_process_span_count") == 1
+            and facts.get("adapter_dispatch_span_count") == 1
+            and _positive_int(facts.get("qdrant_client_span_count"))
+            and facts.get("qdrant_write_span_count") == 1,
+            "dead-letter retry Tempo parent chain is invalid",
+        )
+        require(
+            facts.get("bff_server_span_count") == 1
+            and facts.get("bff_server_http_method") == "POST"
+            and facts.get("bff_server_route") == "/api/v1/runs/{id}/retries",
+            "dead-letter retry Tempo BFF retry server span is invalid",
+        )
+        require(
+            len(services) == len(set(services))
+            and set(services) == expected_services
+            and len(components) == len(set(components))
+            and set(components) == expected_components
+            and set(signals) == expected_components
+            and _positive_int(facts.get("span_count"))
+            and _positive_int(facts.get("client_span_count"))
+            and all(
+                signals.get(component) == [OTEL_SIGNAL_BY_COMPONENT[component]]
+                for component in expected_components
+            ),
+            "dead-letter retry Tempo trace lacks the exact Qdrant operation chain",
+        )
     elif proof_id in {"qdrant_outage", "redis_outage"}:
         target_dependency = proof_id.removesuffix("_outage")
         require(
@@ -1579,8 +2061,17 @@ def _validate_recovery_matrix(
             _require_boolean(case, field, label=label, errors=errors)
         raw_proof_value = case.get("raw_proof_ids")
         raw_proof_ids = _string_set(raw_proof_value)
-        if raw_proof_value != [case_name]:
-            errors.append(f"{label}: must reference exactly its named raw proof")
+        expected_raw_proof_ids = (
+            [
+                "dead_letter_retry",
+                "dead_letter_retry_qdrant",
+                "dead_letter_retry_trace",
+            ]
+            if case_name == "dead_letter_retry"
+            else [case_name]
+        )
+        if raw_proof_value != expected_raw_proof_ids:
+            errors.append(f"{label}: raw proof references are incomplete or unordered")
         if not raw_proof_ids.issubset(proof_ids):
             errors.append(f"{label}: references unknown raw proof ids")
 
@@ -1610,7 +2101,14 @@ def _runtime_activation_errors(root: Path) -> list[str]:
 
 
 def validate_evidence(
-    evidence: object, *, root: Path = ROOT, expected_commit: str
+    evidence: object,
+    *,
+    root: Path = ROOT,
+    expected_commit: str,
+    expected_execution_environment: str = "production-compose",
+    expected_compose_base: str = "production/compose.yaml",
+    expected_compose_path: Path | None = None,
+    expected_configured_images: Mapping[str, str] | None = None,
 ) -> list[str]:
     """Validate one runtime artifact; legacy split artifacts can never satisfy it."""
 
@@ -1631,7 +2129,7 @@ def validate_evidence(
         errors.append(
             "production path evidence is not bound to the expected source commit"
         )
-    if payload.get("execution_environment") != "production-compose":
+    if payload.get("execution_environment") != expected_execution_environment:
         errors.append(
             "evidence must come from one single production Compose project, not legacy split gates"
         )
@@ -1646,12 +2144,12 @@ def validate_evidence(
         errors=errors,
     )
     _validate_host_runtime(compose, errors)
-    if compose.get("base") != "production/compose.yaml":
-        errors.append("evidence must bind production/compose.yaml")
+    if compose.get("base") != expected_compose_base:
+        errors.append(f"evidence must bind {expected_compose_base}")
     if compose.get("overlay") != "production/tests/production-path-gate.compose.yaml":
         errors.append("evidence must bind the production path gate overlay")
     for field, path in (
-        ("base_sha256", root / "production" / "compose.yaml"),
+        ("base_sha256", expected_compose_path or root / expected_compose_base),
         (
             "overlay_sha256",
             root / "production" / "tests" / "production-path-gate.compose.yaml",
@@ -1674,7 +2172,12 @@ def validate_evidence(
             "single production Compose evidence is missing services: "
             + ", ".join(missing_services)
         )
-    _validate_runtime_inventory(compose, source_commit=expected_commit, errors=errors)
+    _validate_runtime_inventory(
+        compose,
+        source_commit=expected_commit,
+        errors=errors,
+        expected_configured_images=expected_configured_images,
+    )
 
     runtime_sources = _mapping(payload.get("runtime_sources"))
     if set(runtime_sources) != set(REQUIRED_RUNTIME_SOURCES):
@@ -1895,6 +2398,291 @@ def validate_evidence(
     return errors
 
 
+def _release_image_reference(value: object) -> str | None:
+    if not isinstance(value, str) or "${" in value or value.count("@sha256:") != 1:
+        return None
+    name_and_tag, digest = value.rsplit("@sha256:", 1)
+    final_segment = name_and_tag.rsplit("/", 1)[-1]
+    if (
+        ":" not in final_segment
+        or not final_segment.rsplit(":", 1)[1]
+        or final_segment.rsplit(":", 1)[1].casefold() == "latest"
+        or not SHA256_PATTERN.fullmatch(digest)
+    ):
+        return None
+    return value
+
+
+def _load_release_document(
+    path: Path, *, label: str, errors: list[str]
+) -> dict[str, Any]:
+    try:
+        return _mapping(_load_json(path))
+    except ValueError as exc:
+        errors.append(f"{label} is unavailable or invalid: {exc}")
+        return {}
+
+
+def validate_release_evidence(
+    evidence: object,
+    *,
+    root: Path = ROOT,
+    expected_commit: str,
+    expected_release_tag: str,
+    release_compose_path: Path | None = None,
+    image_lock_path: Path | None = None,
+) -> list[str]:
+    """Validate the closed prebuilt-release envelope and its full runtime proof.
+
+    The release artifact embeds the same six runtime sections as the local
+    ``auris.production-path-gate.v1`` artifact.  After validating the immutable
+    release binding, this function projects those sections into the old closed
+    schema and invokes :func:`validate_evidence`; proof semantics therefore have
+    one implementation and cannot drift between local and release gates.
+    """
+
+    errors: list[str] = []
+    payload = _mapping(evidence)
+    _require_exact_fields(
+        payload,
+        RELEASE_EVIDENCE_FIELDS,
+        label="release evidence top-level",
+        errors=errors,
+    )
+    _scan_evidence_safety(payload, errors=errors)
+    if payload.get("schema_version") != RELEASE_EVIDENCE_SCHEMA:
+        errors.append(
+            f"release evidence schema_version must be {RELEASE_EVIDENCE_SCHEMA}"
+        )
+    if payload.get("status") != "ok":
+        errors.append("release production path evidence status must be ok")
+    if not COMMIT_PATTERN.fullmatch(expected_commit):
+        errors.append("expected source commit must be an exact lowercase Git SHA")
+    if payload.get("source_commit") != expected_commit:
+        errors.append("release evidence is not bound to the expected source commit")
+    if not RELEASE_TAG_PATTERN.fullmatch(expected_release_tag):
+        errors.append("expected release tag must be SemVer or an rc.N prerelease")
+    if payload.get("release_tag") != expected_release_tag:
+        errors.append("release evidence is not bound to the expected release tag")
+    if payload.get("execution_environment") != "production-compose-prebuilt-release":
+        errors.append(
+            "release evidence must come from the prebuilt production Compose path"
+        )
+    if payload.get("producer") != "scripts/verify_production_path_runtime.py":
+        errors.append(
+            "release evidence producer must be the production path runtime driver"
+        )
+
+    compose = _mapping(payload.get("compose"))
+    _require_exact_fields(
+        compose,
+        COMPOSE_EVIDENCE_FIELDS,
+        label="release Compose evidence",
+        errors=errors,
+    )
+    _validate_host_runtime(compose, errors)
+    if compose.get("base") != "production/compose.release.json":
+        errors.append("release evidence must bind production/compose.release.json")
+    if compose.get("overlay") != "production/tests/production-path-gate.compose.yaml":
+        errors.append("release evidence must bind the production path gate overlay")
+    if not SHA256_PATTERN.fullmatch(str(compose.get("rendered_config_sha256") or "")):
+        errors.append("rendered release Compose config hash is missing")
+
+    release = _mapping(payload.get("release"))
+    _require_exact_fields(
+        release,
+        RELEASE_BINDING_FIELDS,
+        label="release runtime binding",
+        errors=errors,
+    )
+    if release.get("schema_version") != RELEASE_BINDING_SCHEMA:
+        errors.append("release runtime binding schema is invalid")
+    if release.get("release_tag") != expected_release_tag:
+        errors.append(
+            "release runtime binding tag does not match the requested release"
+        )
+    if release.get("source_commit") != expected_commit:
+        errors.append(
+            "release runtime binding commit does not match the requested release"
+        )
+    if release.get("image_lock") != "build/release/images.lock.json":
+        errors.append("release runtime binding image lock path is not canonical")
+    if release.get("image_lock_schema_version") != RELEASE_IMAGE_LOCK_SCHEMA:
+        errors.append("release runtime binding image lock schema is invalid")
+    if release.get("release_compose") != "production/compose.release.json":
+        errors.append("release runtime binding Compose path is not canonical")
+
+    resolved_lock = image_lock_path or root / "build" / "release" / "images.lock.json"
+    resolved_compose = (
+        release_compose_path or root / "production" / "compose.release.json"
+    )
+    lock_document = _load_release_document(
+        resolved_lock,
+        label="release image lock",
+        errors=errors,
+    )
+    compose_document = _load_release_document(
+        resolved_compose,
+        label="rendered release Compose",
+        errors=errors,
+    )
+    if lock_document and set(lock_document) != {
+        "schema_version",
+        "release_tag",
+        "source_commit",
+        "images",
+    }:
+        errors.append("release image lock fields do not match the closed contract")
+    if lock_document.get("schema_version") != RELEASE_IMAGE_LOCK_SCHEMA:
+        errors.append("release image lock schema is invalid")
+    if lock_document.get("release_tag") != expected_release_tag:
+        errors.append("release image lock tag does not match the requested release")
+    if lock_document.get("source_commit") != expected_commit:
+        errors.append("release image lock commit does not match the requested release")
+
+    raw_images = lock_document.get("images")
+    images: dict[str, str] = {}
+    if not isinstance(raw_images, dict) or not raw_images:
+        errors.append("release image lock must contain a non-empty image map")
+    else:
+        for service, reference in sorted(raw_images.items()):
+            validated = _release_image_reference(reference)
+            if (
+                not isinstance(service, str)
+                or re.fullmatch(r"[a-z0-9][a-z0-9_-]*", service) is None
+                or validated is None
+            ):
+                errors.append("release image lock contains an invalid service image")
+                continue
+            images[service] = validated
+
+    expected_lock_services = (
+        REQUIRED_RUNNING_SERVICES | REQUIRED_COMPLETED_SERVICES
+    ) - set(RELEASE_GATE_IMAGE_ALIASES)
+    if set(images) != expected_lock_services:
+        errors.append(
+            "release image lock service set does not match the runtime contract"
+        )
+
+    if resolved_lock.is_file() and not resolved_lock.is_symlink():
+        image_lock_sha256 = _sha256_file(resolved_lock)
+        if release.get("image_lock_sha256") != image_lock_sha256:
+            errors.append("release image lock hash does not match the supplied lock")
+    if resolved_compose.is_file() and not resolved_compose.is_symlink():
+        release_compose_sha256 = _sha256_file(resolved_compose)
+        if release.get("release_compose_sha256") != release_compose_sha256:
+            errors.append("release Compose hash does not match the supplied document")
+        if compose.get("base_sha256") != release_compose_sha256:
+            errors.append(
+                "release Compose evidence hash does not match the supplied document"
+            )
+    overlay_path = root / "production" / "tests" / "production-path-gate.compose.yaml"
+    if not overlay_path.is_file() or overlay_path.is_symlink():
+        errors.append("release gate Compose overlay is missing")
+    elif compose.get("overlay_sha256") != _sha256_file(overlay_path):
+        errors.append(
+            "release gate Compose overlay hash does not match checked-in source"
+        )
+
+    release_metadata = _mapping(compose_document.get("x-auris-release"))
+    if release_metadata != {
+        "schema_version": RELEASE_IMAGE_LOCK_SCHEMA,
+        "release_tag": expected_release_tag,
+        "source_commit": expected_commit,
+    }:
+        errors.append("rendered release Compose metadata is not lock-bound")
+    compose_services = _mapping(compose_document.get("services"))
+    if set(compose_services) != set(images):
+        errors.append("rendered release Compose services do not match the image lock")
+    for service, reference in images.items():
+        service_document = _mapping(compose_services.get(service))
+        if service_document.get("image") != reference or "build" in service_document:
+            errors.append(f"rendered release Compose image is not immutable: {service}")
+
+    runtime = _mapping(compose.get("runtime"))
+    observations = {
+        **_mapping(runtime.get("running_services")),
+        **_mapping(runtime.get("completed_services")),
+    }
+    expected_runtime_images: dict[str, str] = {}
+    for service in sorted(observations):
+        lock_service = RELEASE_GATE_IMAGE_ALIASES.get(service, service)
+        reference = images.get(lock_service)
+        if reference is None:
+            errors.append(f"release runtime service has no image lock entry: {service}")
+            continue
+        expected_runtime_images[service] = reference
+    expected_rendered_services = set(images) | set(RELEASE_GATE_IMAGE_ALIASES)
+    if _string_set(compose.get("services")) != expected_rendered_services:
+        errors.append(
+            "release rendered service inventory does not match the image lock"
+        )
+
+    runtime_images = _mapping(release.get("runtime_images"))
+    if set(runtime_images) != set(observations):
+        errors.append("release runtime image binding set is incomplete")
+    for service, observation_value in observations.items():
+        observation = _mapping(observation_value)
+        binding = _mapping(runtime_images.get(service))
+        _require_exact_fields(
+            binding,
+            RELEASE_RUNTIME_IMAGE_FIELDS,
+            label=f"release runtime image binding {service}",
+            errors=errors,
+        )
+        lock_service = RELEASE_GATE_IMAGE_ALIASES.get(service, service)
+        expected_image = images.get(lock_service)
+        expected_repository = (
+            _normalized_image_repository(expected_image)
+            if isinstance(expected_image, str)
+            else None
+        )
+        expected_digest = (
+            expected_image.rsplit("@", 1)[-1]
+            if isinstance(expected_image, str)
+            else None
+        )
+        repo_digest = binding.get("repo_digest")
+        if binding.get("lock_service") != lock_service:
+            errors.append(f"release runtime lock service is invalid: {service}")
+        if binding.get("configured_image") != expected_image:
+            errors.append(
+                f"release runtime configured image is not lock-bound: {service}"
+            )
+        if (
+            not isinstance(repo_digest, str)
+            or not REPO_DIGEST_PATTERN.fullmatch(repo_digest)
+            or _normalized_image_repository(repo_digest) != expected_repository
+            or repo_digest.rsplit("@", 1)[-1] != expected_digest
+        ):
+            errors.append(
+                f"release runtime repository digest is not lock-bound: {service}"
+            )
+        for field in ("configured_image", "image_id", "container_id_sha256"):
+            if binding.get(field) != observation.get(field):
+                errors.append(
+                    f"release runtime binding does not match observed {field}: {service}"
+                )
+
+    # Reuse the complete v1 validator for every identity, adapter, trace, raw
+    # proof and recovery rule. Only the execution substrate/image expectation
+    # changes; the old local validator's public defaults remain untouched.
+    legacy_projection = {field: payload.get(field) for field in EVIDENCE_FIELDS}
+    legacy_projection["schema_version"] = EVIDENCE_SCHEMA
+    errors.extend(
+        validate_evidence(
+            legacy_projection,
+            root=root,
+            expected_commit=expected_commit,
+            expected_execution_environment="production-compose-prebuilt-release",
+            expected_compose_base="production/compose.release.json",
+            expected_compose_path=resolved_compose,
+            expected_configured_images=expected_runtime_images,
+        )
+    )
+    return errors
+
+
 def _load_yaml(path: Path) -> object:
     if not path.is_file() or path.is_symlink():
         raise ValueError("gate Compose contract must be a regular file")
@@ -1944,6 +2732,12 @@ def parse_args() -> argparse.Namespace:
     evidence = subparsers.add_parser("evidence")
     evidence.add_argument("--artifact", type=Path, required=True)
     evidence.add_argument("--expected-commit", required=True)
+    release_evidence = subparsers.add_parser("release-evidence")
+    release_evidence.add_argument("--artifact", type=Path, required=True)
+    release_evidence.add_argument("--expected-commit", required=True)
+    release_evidence.add_argument("--expected-release-tag", required=True)
+    release_evidence.add_argument("--release-compose", type=Path, required=True)
+    release_evidence.add_argument("--image-lock", type=Path, required=True)
     return parser.parse_args()
 
 
@@ -1984,19 +2778,58 @@ def main() -> int:
             if not args.artifact.is_absolute()
             else args.artifact.resolve()
         )
-        if artifact_path != EVIDENCE_PATH.resolve():
+        expected_artifact = (
+            RELEASE_EVIDENCE_PATH
+            if args.command == "release-evidence"
+            else EVIDENCE_PATH
+        )
+        if artifact_path != expected_artifact.resolve():
+            required_path = (
+                "build/release/final-runtime/production-path-gate.json"
+                if args.command == "release-evidence"
+                else "build/release-evidence/production-path-gate.json"
+            )
             return _emit_failure(
                 status="blocked",
-                blockers=[
-                    "runtime evidence must use build/release-evidence/production-path-gate.json"
-                ],
+                blockers=[f"runtime evidence must use {required_path}"],
                 exit_code=2,
             )
-        errors = validate_evidence(
-            _load_json(artifact_path),
-            root=ROOT,
-            expected_commit=args.expected_commit,
-        )
+        if args.command == "release-evidence":
+            release_compose_path = (
+                (ROOT / args.release_compose).resolve()
+                if not args.release_compose.is_absolute()
+                else args.release_compose.resolve()
+            )
+            image_lock_path = (
+                (ROOT / args.image_lock).resolve()
+                if not args.image_lock.is_absolute()
+                else args.image_lock.resolve()
+            )
+            try:
+                release_compose_path.relative_to(ROOT.resolve())
+                image_lock_path.relative_to(ROOT.resolve())
+            except ValueError:
+                return _emit_failure(
+                    status="blocked",
+                    blockers=[
+                        "release validation inputs must remain inside the repository"
+                    ],
+                    exit_code=2,
+                )
+            errors = validate_release_evidence(
+                _load_json(artifact_path),
+                root=ROOT,
+                expected_commit=args.expected_commit,
+                expected_release_tag=args.expected_release_tag,
+                release_compose_path=release_compose_path,
+                image_lock_path=image_lock_path,
+            )
+        else:
+            errors = validate_evidence(
+                _load_json(artifact_path),
+                root=ROOT,
+                expected_commit=args.expected_commit,
+            )
         if errors:
             return _emit_failure(status="failed", blockers=errors, exit_code=1)
         print(

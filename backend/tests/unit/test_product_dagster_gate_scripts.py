@@ -11,7 +11,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import yaml
 
-from app.services import adapters
+from app.services import adapters, run_service
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -49,23 +49,13 @@ def _run_payload(*, status: str = "success") -> dict[str, object]:
         "trace_id": "trace_gate_success",
         "tenant_id": "aurora_auto",
         "project_id": "sales_qa",
-        "dispatch": {
-            "adapter": "dagster",
-            "operation": "run_request",
-            "status": "success",
-            "details": {
-                "mode": "real",
-                "external_run_id": "dagster-run-success",
-                "response_typename": "LaunchRunSuccess",
-                "tenant_id": "aurora_auto",
-                "project_id": "sales_qa",
-                "trace_id": "trace_gate_success",
-            },
-        },
+        "affected_objects": [{"type": "task_run", "id": "task_run_gate_success"}],
+        "next_actions": [{"key": "view_result", "label": "View result"}],
+        "result_ref": {"type": "storage_object", "id": "result-gate-success"},
         "status_history": [
-            {"from": "pending", "to": "running", "reason": "outbox_dispatch_started"},
-            {"from": "running", "to": "submitted", "reason": "outbox_dispatch_submitted"},
-            {"from": "submitted", "to": status, "reason": "completion_receipt"},
+            {"from": "pending", "to": "running", "reason": "execution_started"},
+            {"from": "running", "to": "submitted", "reason": "execution_submitted"},
+            {"from": "submitted", "to": status, "reason": "result_confirmed"},
         ],
     }
 
@@ -86,6 +76,7 @@ def _confirmed_outbox_event() -> SimpleNamespace:
         last_error=None,
         dispatch_idempotency_key="outbox:1",
         payload={
+            "run_id": "task_run_gate_success",
             "trace_id": "trace_gate_success",
             "adapter_dispatch": {
                 "adapter": "dagster",
@@ -94,14 +85,39 @@ def _confirmed_outbox_event() -> SimpleNamespace:
                 "details": {
                     "mode": "real",
                     "external_run_id": "dagster-run-success",
+                    "tenant_id": "aurora_auto",
+                    "project_id": "sales_qa",
+                    "trace_id": "trace_gate_success",
+                    "run_id": "task_run_gate_success",
                 },
             },
         },
     )
 
 
-def test_product_gate_validates_real_scoped_dispatch_and_terminal_monotonicity() -> None:
+def _evidence_event(event_id: int, event_type: str, aggregate_id: str) -> dict[str, object]:
+    return {
+        "event_id": event_id,
+        "event_type": event_type,
+        "aggregate_id": aggregate_id,
+        "status": "processed",
+        "delivery_state": "confirmed",
+        "attempt_count": 1,
+        "dispatch_idempotency_key": f"outbox:{event_id}",
+    }
+
+
+def test_product_gate_validates_engine_neutral_scoped_projection_and_terminal_monotonicity() -> (
+    None
+):
     module = _load_driver()
+    assert (
+        module.PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS
+        == run_service.PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS
+    )
+    assert set(module.PUBLIC_RUN_FORBIDDEN_FIELD_FRAGMENTS) == set(
+        run_service.PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS
+    )
 
     proof = module.validate_run_projection(
         _run_payload(),
@@ -115,19 +131,76 @@ def test_product_gate_validates_real_scoped_dispatch_and_terminal_monotonicity()
         "status": "success",
         "status_version": 5,
         "trace_id": "trace_gate_success",
-        "dagster_run_id": "dagster-run-success",
-        "adapter_mode": "real",
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
     }
 
     forged = _run_payload()
-    forged["dispatch"]["details"]["tenant_id"] = "other"  # type: ignore[index]
-    with pytest.raises(module.GateFailure, match="scope"):
+    forged["nested"] = {
+        "dispatch": {
+            "adapter": "dagster",
+            "details": {"external_run_id": "dagster-run-success"},
+        }
+    }
+    with pytest.raises(module.GateFailure, match="engine-neutral"):
         module.validate_run_projection(
             forged,
             expected_status="success",
             expected_scope=("aurora_auto", "sales_qa"),
             expected_trace_id="trace_gate_success",
         )
+
+    forged_value = _run_payload()
+    forged_value["next_actions"] = [{"label": "Open Dagster GraphQL job"}]
+    with pytest.raises(module.GateFailure, match="engine-neutral"):
+        module.validate_run_projection(
+            forged_value,
+            expected_status="success",
+            expected_scope=("aurora_auto", "sales_qa"),
+            expected_trace_id="trace_gate_success",
+        )
+
+    for forbidden_field in (
+        "access_token",
+        "credential_bundle",
+        "engine_binding",
+        "hmac_proof",
+        "password_bundle",
+        "protocol_receipt",
+        "remote_run_id",
+    ):
+        forged_internal = _run_payload()
+        forged_internal[forbidden_field] = {"mode": "real"}
+        with pytest.raises(module.GateFailure, match="engine-neutral"):
+            module.validate_run_projection(
+                forged_internal,
+                expected_status="success",
+                expected_scope=("aurora_auto", "sales_qa"),
+                expected_trace_id="trace_gate_success",
+            )
+
+    zero_width_value = _run_payload()
+    zero_width_value["note"] = "Dag\u200bster Graph\u200bQL"
+    with pytest.raises(module.GateFailure, match="engine-neutral"):
+        module.validate_run_projection(
+            zero_width_value,
+            expected_status="success",
+            expected_scope=("aurora_auto", "sales_qa"),
+            expected_trace_id="trace_gate_success",
+        )
+
+    for non_canonical_projection in (
+        {**_run_payload(), "ｄispatch": {"mode": "real"}},
+        {**_run_payload(), "note": "Dаgster"},
+        {**_run_payload(), "score": float("nan")},
+    ):
+        with pytest.raises(module.GateFailure, match="engine-neutral"):
+            module.validate_run_projection(
+                non_canonical_projection,
+                expected_status="success",
+                expected_scope=("aurora_auto", "sales_qa"),
+                expected_trace_id="trace_gate_success",
+            )
 
     forged_top_level = _run_payload()
     forged_top_level["project_id"] = "outside-project"
@@ -179,6 +252,100 @@ def test_product_gate_requires_confirmed_outbox_delivery_and_real_dispatch() -> 
         )
 
 
+def test_product_gate_binds_persisted_dispatch_to_scope_trace_and_source() -> None:
+    module = _load_driver()
+    source = SimpleNamespace(
+        run_id="task_run_gate_success",
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        run_type="task_run",
+        run_key="task_version_v3_2_1",
+        trace_id="trace_gate_success",
+        status="success",
+        status_version=5,
+        payload={
+            "run_id": "task_run_gate_success",
+            "trace_id": "trace_gate_success",
+            "dispatch": {
+                "adapter": "dagster",
+                "operation": "run_request",
+                "status": "success",
+                "details": {
+                    "mode": "real",
+                    "external_run_id": "dagster-run-success",
+                    "tenant_id": "aurora_auto",
+                    "project_id": "sales_qa",
+                    "trace_id": "trace_gate_success",
+                    "run_id": "task_run_gate_success",
+                },
+            },
+        },
+    )
+    details = module._require_real_record_dispatch(
+        source,
+        operation="run_request",
+        expected_run_type="task_run",
+        expected_external_run_id=None,
+    )
+    assert details["external_run_id"] == "dagster-run-success"
+    module._require_record_projection_binding(source, _run_payload())
+
+    forged_scope = SimpleNamespace(**vars(source))
+    forged_scope.payload = json.loads(json.dumps(source.payload))
+    forged_scope.payload["dispatch"]["details"]["project_id"] = "other-project"
+    with pytest.raises(module.GateFailure, match="binding"):
+        module._require_real_record_dispatch(
+            forged_scope,
+            operation="run_request",
+            expected_run_type="task_run",
+            expected_external_run_id=None,
+        )
+
+    control = SimpleNamespace(
+        run_id="task_run_status_sync_gate",
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        run_type="task_run_status_sync",
+        run_key=source.run_id,
+        trace_id="trace_gate_sync",
+        status="success",
+        status_version=3,
+        payload={
+            "run_id": "task_run_status_sync_gate",
+            "trace_id": "trace_gate_sync",
+            "source_run_id": source.run_id,
+            "source_trace_id": source.trace_id,
+            "external_run_id": "dagster-run-success",
+            "dispatch": {
+                "adapter": "dagster",
+                "operation": "run_status",
+                "status": "success",
+                "details": {
+                    "mode": "real",
+                    "external_run_id": "dagster-run-success",
+                    "dagster_status": "SUCCESS",
+                },
+            },
+        },
+    )
+    module._require_real_record_dispatch(
+        control,
+        operation="run_status",
+        expected_run_type="task_run_status_sync",
+        expected_external_run_id="dagster-run-success",
+        source_record=source,
+    )
+    control.payload["source_run_id"] = "another-run"
+    with pytest.raises(module.GateFailure, match="source binding"):
+        module._require_real_record_dispatch(
+            control,
+            operation="run_status",
+            expected_run_type="task_run_status_sync",
+            expected_external_run_id="dagster-run-success",
+            source_record=source,
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -213,24 +380,59 @@ def test_product_gate_builds_commit_bound_sanitized_evidence() -> None:
 
     evidence = module.build_evidence(
         source_commit=source_commit,
-        success={
+        success_projection={
             "run_id": "task_run_success",
-            "dagster_run_id": "dagster-success",
             "trace_id": "trace-success",
             "status": "success",
             "status_version": 5,
+            "tenant_id": "aurora_auto",
+            "project_id": "sales_qa",
+        },
+        success_internal={
+            "dagster_run_id": "dagster-success",
+            "adapter_mode": "real",
             "status_sync": "SUCCESS",
             "signed_completion": True,
             "outbox_confirmed": True,
+            "evidence_sources": [
+                "run_records",
+                "outbox_events",
+                "completion_receipts",
+            ],
+            "outbox_events": [
+                _evidence_event(1, "task_run.requested", "task_run_success"),
+                _evidence_event(
+                    2,
+                    "task_run.status_sync_requested",
+                    "task_run_status_sync_success",
+                ),
+                _evidence_event(3, "task_run.succeeded", "task_run_success"),
+            ],
         },
-        cancellation={
+        cancellation_projection={
             "run_id": "task_run_cancel",
-            "dagster_run_id": "dagster-cancel",
             "trace_id": "trace-cancel",
             "status": "cancelled",
             "status_version": 5,
+            "tenant_id": "aurora_auto",
+            "project_id": "sales_qa",
+        },
+        cancellation_internal={
+            "dagster_run_id": "dagster-cancel",
+            "adapter_mode": "real",
             "terminate_policy": "SAFE_TERMINATE",
+            "engine_status": "CANCELED",
             "outbox_confirmed": True,
+            "evidence_sources": ["run_records", "outbox_events"],
+            "outbox_events": [
+                _evidence_event(4, "task_run.requested", "task_run_cancel"),
+                _evidence_event(
+                    5,
+                    "task_run.cancel_requested",
+                    "task_run_cancellation_cancel",
+                ),
+                _evidence_event(6, "task_run.cancelled", "task_run_cancel"),
+            ],
         },
     )
 
@@ -243,28 +445,80 @@ def test_product_gate_builds_commit_bound_sanitized_evidence() -> None:
     assert "/Users/" not in encoded
     assert "secret" not in encoded.lower()
 
-    injected = module.build_evidence(
-        source_commit=source_commit,
-        success={
-            **evidence["scenarios"]["success"],
-            "internal_database_url": "mysql://user:secret@database/gate",
-        },
-        cancellation={
-            **evidence["scenarios"]["cancellation"],
-            "local_path": "/srv/private/worktree",
-        },
-    )
-    injected_json = json.dumps(injected, sort_keys=True)
-    assert "internal_database_url" not in injected_json
-    assert "mysql://" not in injected_json
-    assert "local_path" not in injected_json
-    assert "/srv/private/" not in injected_json
+    with pytest.raises(module.GateFailure, match="public projection"):
+        module.build_evidence(
+            source_commit=source_commit,
+            success_projection={
+                "run_id": "task_run_success",
+                "trace_id": "trace-success",
+                "status": "success",
+                "status_version": 5,
+                "tenant_id": "aurora_auto",
+                "project_id": "sales_qa",
+                "internal_database_url": "mysql://user:secret@database/gate",
+            },
+            success_internal={
+                "dagster_run_id": "dagster-success",
+                "adapter_mode": "real",
+                "status_sync": "SUCCESS",
+                "signed_completion": True,
+                "outbox_confirmed": True,
+                "evidence_sources": [
+                    "run_records",
+                    "outbox_events",
+                    "completion_receipts",
+                ],
+            },
+            cancellation_projection={
+                "run_id": "task_run_cancel",
+                "trace_id": "trace-cancel",
+                "status": "cancelled",
+                "status_version": 5,
+                "tenant_id": "aurora_auto",
+                "project_id": "sales_qa",
+            },
+            cancellation_internal={
+                "dagster_run_id": "dagster-cancel",
+                "adapter_mode": "real",
+                "terminate_policy": "SAFE_TERMINATE",
+                "outbox_confirmed": True,
+                "evidence_sources": ["run_records", "outbox_events"],
+            },
+        )
 
     with pytest.raises(module.GateFailure, match="source commit"):
         module.build_evidence(
             source_commit="not-a-commit",
-            success=evidence["scenarios"]["success"],
-            cancellation=evidence["scenarios"]["cancellation"],
+            success_projection=_run_payload(),
+            success_internal={},
+            cancellation_projection=_run_payload(status="cancelled"),
+            cancellation_internal={},
+        )
+
+    with pytest.raises(module.GateFailure, match="public projection"):
+        module.build_evidence(
+            source_commit=source_commit,
+            success_projection={**_run_payload(), "dagster_run_id": "forged-api-proof"},
+            success_internal={
+                "dagster_run_id": "dagster-success",
+                "adapter_mode": "real",
+                "status_sync": "SUCCESS",
+                "signed_completion": True,
+                "outbox_confirmed": True,
+                "evidence_sources": [
+                    "run_records",
+                    "outbox_events",
+                    "completion_receipts",
+                ],
+            },
+            cancellation_projection=_run_payload(status="cancelled"),
+            cancellation_internal={
+                "dagster_run_id": "dagster-cancel",
+                "adapter_mode": "real",
+                "terminate_policy": "SAFE_TERMINATE",
+                "outbox_confirmed": True,
+                "evidence_sources": ["run_records", "outbox_events"],
+            },
         )
 
 

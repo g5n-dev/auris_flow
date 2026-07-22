@@ -39,6 +39,7 @@ DEPENDENCIES = (
     "worker_crash",
     "duplicate_delivery",
     "callback_timeout",
+    "dead_letter_retry",
     "qdrant_outage",
     "redis_outage",
 )
@@ -84,6 +85,9 @@ OPERATION_OTEL_FACT_KEYS = frozenset(
 )
 CAPTURE_SCHEMA = "auris.production-path.capture.v1"
 STATE_SCHEMA = "auris.production-path.state.v1"
+FAULT_VERIFICATION_CHECKPOINT_SCHEMA = (
+    "auris.production-path.fault-verification-checkpoint.v1"
+)
 HOST_OBSERVATION_SCHEMA = "auris.production-path.host-observation.v1"
 RAW_PROOFS_SCHEMA = "auris.production-path.raw-proofs.v1"
 RUNTIME_FIELDS = frozenset(
@@ -108,6 +112,9 @@ PROOF_SOURCES = {
     "worker_crash": "compose-runtime",
     "duplicate_delivery": "mysql",
     "callback_timeout": "mysql",
+    "dead_letter_retry": "mysql",
+    "dead_letter_retry_qdrant": "qdrant-http",
+    "dead_letter_retry_trace": "tempo-http",
     "qdrant_outage": "compose-runtime",
     "redis_outage": "compose-runtime",
 }
@@ -289,6 +296,117 @@ PROOF_FACT_KEYS = {
         }
     )
     | AUTHORITY_FACT_KEYS,
+    "dead_letter_retry": frozenset(
+        {
+            "source_run_id_sha256",
+            "retry_run_id_sha256",
+            "source_event_id",
+            "retry_event_id",
+            "source_event_aggregate_id_sha256",
+            "retry_event_aggregate_id_sha256",
+            "source_payload_dead_letter_event_id",
+            "retry_payload_retry_of_event_id",
+            "retry_payload_retry_of_run_id_sha256",
+            "source_trace_id",
+            "retry_payload_retry_of_trace_id",
+            "source_status_before",
+            "source_status_after",
+            "source_terminal_reason",
+            "source_status_version",
+            "source_event_status",
+            "source_delivery_state",
+            "source_error_code",
+            "source_last_error_sha256",
+            "source_lease_generation",
+            "source_dead_letter_attempt_count",
+            "source_snapshot_sha256_before",
+            "source_snapshot_sha256_after",
+            "source_attempt_ledger_sha256_before",
+            "source_attempt_ledger_sha256_after",
+            "retry_response_replayed",
+            "first_response_sha256",
+            "replay_response_sha256",
+            "stored_response_sha256",
+            "idempotency_record_count",
+            "idempotency_state",
+            "idempotency_status_code",
+            "idempotency_request_sha256",
+            "expected_idempotency_request_sha256",
+            "idempotency_response_run_id_sha256",
+            "idempotency_user_sha256",
+            "expected_retry_idempotency_key_sha256",
+            "retry_run_count",
+            "retry_event_count",
+            "retry_dispatch_attempt_count",
+            "retry_event_otel_trace_id",
+            "retry_dispatch_idempotency_key_sha256",
+            "retry_dispatch_request_sha256",
+            "retry_attempt_request_sha256",
+            "retry_attempt_id_sha256",
+            "retry_expected_attempt_id_sha256",
+            "retry_point_id_sha256",
+            "retry_dispatch_payload_sha256",
+            "retry_attempt_payload_sha256",
+            "retry_event_status",
+            "retry_run_status",
+            "retry_trace_inherited",
+            "retry_audit_count",
+            "retry_audit_actor_sha256",
+            "retry_audit_idempotency_key_sha256",
+            "retry_audit_trace_matches",
+            "retry_audit_lineage_matches",
+        }
+    )
+    | AUTHORITY_FACT_KEYS,
+    "dead_letter_retry_qdrant": frozenset(
+        {
+            "http_status",
+            "collection",
+            "point_id_sha256",
+            "dispatch_point_id_sha256",
+            "attempt_point_id_sha256",
+            "payload_sha256",
+            "dispatch_payload_sha256",
+            "attempt_payload_sha256",
+            "retry_run_id_sha256",
+            "retry_event_id",
+            "dispatch_idempotency_key_sha256",
+            "dispatch_request_sha256",
+            "attempt_request_sha256",
+            "attempt_id_sha256",
+            "tenant_id",
+            "project_id",
+            "trace_id",
+            "filtered_point_count",
+            "point_occurrences",
+            "cross_tenant_count",
+            "cross_project_count",
+            "scope_match",
+            "dispatch_receipt_match",
+            "attempt_receipt_match",
+            "payload_hash_match",
+        }
+    ),
+    "dead_letter_retry_trace": frozenset(
+        {
+            "http_status",
+            "observed_business_trace_id",
+            "bff_span_id_sha256",
+            "outbox_parent_span_id_sha256",
+            "outbox_span_id_sha256",
+            "adapter_parent_span_id_sha256",
+            "adapter_span_id_sha256",
+            "qdrant_parent_span_id_sha256",
+            "bff_server_span_count",
+            "bff_server_http_method",
+            "bff_server_route",
+            "outbox_process_span_count",
+            "adapter_dispatch_span_count",
+            "qdrant_client_span_count",
+            "qdrant_write_span_count",
+        }
+    )
+    | OPERATION_OTEL_FACT_KEYS,
     "qdrant_outage": frozenset(
         {
             "ready_status_during",
@@ -408,6 +526,32 @@ def canonical_bytes(value: object) -> bytes:
 
 def canonical_sha256(value: object) -> str:
     return hashlib.sha256(canonical_bytes(value)).hexdigest()
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _expected_request_sha256(method: str, path: str, body: Mapping[str, object]) -> str:
+    body_bytes = json.dumps(
+        body,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    fingerprint = {
+        "method": method.upper(),
+        "path": path,
+        "query": [],
+        "body_sha256": hashlib.sha256(body_bytes).hexdigest(),
+    }
+    encoded = json.dumps(
+        fingerprint,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _mapping(value: object, label: str) -> dict[str, Any]:
@@ -721,6 +865,10 @@ def _iso(value: object) -> str:
     if isinstance(value, str) and value:
         return value
     raise VerifierFailure("timestamp observation is invalid")
+
+
+def _iso_or_none(value: object) -> str | None:
+    return None if value is None else _iso(value)
 
 
 def _utc_now() -> str:
@@ -1401,7 +1549,11 @@ def _wait_run(
 
 def _run_row(config: GateConfig, run_id: str) -> dict[str, Any]:
     row = config.database.one(
-        "SELECT run_id, tenant_id, project_id, run_type, status, trace_id, payload "
+        "SELECT run_id, tenant_id, project_id, run_type, status, run_key, "
+        "partition_key, trace_id, submitted_at, started_at, finished_at, "
+        "deadline_at, next_status_sync_at, monitor_generation, engine_status, "
+        "engine_status_observed_at, status_version, cancel_requested_at, "
+        "cancel_reason, terminal_reason, created_at, updated_at, payload "
         "FROM run_records WHERE run_id=:run_id",
         {"run_id": run_id},
     )
@@ -1411,13 +1563,139 @@ def _run_row(config: GateConfig, run_id: str) -> dict[str, Any]:
 
 def _outbox_row(config: GateConfig, run_id: str) -> dict[str, Any]:
     row = config.database.one(
-        "SELECT event_id, tenant_id, project_id, event_type, aggregate_id, status, "
-        "payload, attempt_count, reconcile_attempt_count, delivery_state, processed_at, "
-        "lease_generation FROM outbox_events WHERE aggregate_id=:run_id",
-        {"run_id": run_id},
+        "SELECT event_id, tenant_id, project_id, event_type, aggregate_type, "
+        "aggregate_id, status, payload, dispatch_idempotency_key, "
+        "dispatch_request_sha256, attempt_count, reconcile_attempt_count, "
+        "delivery_state, last_error, available_at, "
+        "(claim_token IS NULL) AS claim_token_cleared, "
+        "(claimed_by IS NULL) AS claimed_by_cleared, "
+        "(claimed_at IS NULL) AS claimed_at_cleared, lease_generation, "
+        "(lease_expires_at IS NULL) AS lease_expires_at_cleared, "
+        "processed_at, created_at FROM outbox_events "
+        "WHERE tenant_id=:tenant_id AND project_id=:project_id "
+        "AND aggregate_id=:run_id",
+        {"tenant_id": SCOPE[0], "project_id": SCOPE[1], "run_id": run_id},
     )
     row["payload"] = _json_mapping(row.get("payload"), "persisted outbox payload")
     return row
+
+
+def _dead_letter_source_snapshot(
+    run: Mapping[str, Any],
+    event: Mapping[str, Any],
+    attempts: Sequence[Mapping[str, Any]],
+) -> str:
+    """Hash the immutable source decision without persisting business payloads."""
+
+    run_payload = _json_mapping(run.get("payload"), "dead-letter run payload")
+    event_payload = _json_mapping(event.get("payload"), "dead-letter event payload")
+    return canonical_sha256(
+        {
+            "run_status": run.get("status"),
+            "run_id": run.get("run_id"),
+            "run_tenant_id": run.get("tenant_id"),
+            "run_project_id": run.get("project_id"),
+            "run_type": run.get("run_type"),
+            "run_key": run.get("run_key"),
+            "run_partition_key": run.get("partition_key"),
+            "run_status_version": run.get("status_version"),
+            "run_terminal_reason": run.get("terminal_reason"),
+            "run_submitted_at": _iso_or_none(run.get("submitted_at")),
+            "run_started_at": _iso_or_none(run.get("started_at")),
+            "run_finished_at": _iso(run.get("finished_at")),
+            "run_deadline_at": _iso_or_none(run.get("deadline_at")),
+            "run_next_status_sync_at": _iso_or_none(run.get("next_status_sync_at")),
+            "run_monitor_generation": run.get("monitor_generation"),
+            "run_engine_status": run.get("engine_status"),
+            "run_engine_status_observed_at": _iso_or_none(
+                run.get("engine_status_observed_at")
+            ),
+            "run_cancel_requested_at": _iso_or_none(run.get("cancel_requested_at")),
+            "run_cancel_reason": run.get("cancel_reason"),
+            "run_created_at": _iso(run.get("created_at")),
+            "run_updated_at": _iso(run.get("updated_at")),
+            "run_trace_id": run.get("trace_id"),
+            "run_payload_sha256": canonical_sha256(run_payload),
+            "event_id": event.get("event_id"),
+            "event_aggregate_type": event.get("aggregate_type"),
+            "event_aggregate_id": event.get("aggregate_id"),
+            "event_status": event.get("status"),
+            "event_delivery_state": event.get("delivery_state"),
+            "event_attempt_count": event.get("attempt_count"),
+            "event_reconcile_attempt_count": event.get("reconcile_attempt_count"),
+            "event_dispatch_idempotency_key_sha256": _sha256_text(
+                _nonempty_text(
+                    event.get("dispatch_idempotency_key"),
+                    "dead-letter dispatch idempotency key",
+                )
+            ),
+            "event_dispatch_request_sha256": event.get("dispatch_request_sha256"),
+            "event_last_error_sha256": _sha256_text(
+                _nonempty_text(event.get("last_error"), "dead-letter last error")
+            ),
+            "event_available_at": _iso(event.get("available_at")),
+            "event_claim_token_cleared": bool(event.get("claim_token_cleared")),
+            "event_claimed_by_cleared": bool(event.get("claimed_by_cleared")),
+            "event_claimed_at_cleared": bool(event.get("claimed_at_cleared")),
+            "event_lease_generation": event.get("lease_generation"),
+            "event_lease_expires_at_cleared": bool(
+                event.get("lease_expires_at_cleared")
+            ),
+            "event_processed_at": _iso(event.get("processed_at")),
+            "event_created_at": _iso(event.get("created_at")),
+            "event_payload_sha256": canonical_sha256(event_payload),
+            "attempt_ledger_sha256": _attempt_ledger_sha256(attempts),
+        }
+    )
+
+
+def _attempt_ledger_sha256(attempts: Sequence[Mapping[str, Any]]) -> str:
+    normalized: list[dict[str, Any]] = []
+    for attempt in attempts:
+        details = _json_mapping(attempt.get("details"), "outbox attempt details")
+        claimed_by = _nonempty_text(attempt.get("claimed_by"), "attempt worker")
+        error_message = attempt.get("error_message")
+        remote_id = attempt.get("remote_id")
+        normalized.append(
+            {
+                "attempt_id_sha256": _sha256_text(
+                    _nonempty_text(attempt.get("attempt_id"), "attempt id")
+                ),
+                "event_id": attempt.get("event_id"),
+                "tenant_id": attempt.get("tenant_id"),
+                "project_id": attempt.get("project_id"),
+                "attempt_number": attempt.get("attempt_number"),
+                "lease_generation": attempt.get("lease_generation"),
+                "claimed_by_sha256": _sha256_text(claimed_by),
+                "claim_token_sha256": attempt.get("claim_token_sha256"),
+                "delivery_mode": attempt.get("delivery_mode"),
+                "status": attempt.get("status"),
+                "dispatch_idempotency_key_sha256": _sha256_text(
+                    _nonempty_text(
+                        attempt.get("dispatch_idempotency_key"),
+                        "attempt dispatch idempotency key",
+                    )
+                ),
+                "request_sha256": attempt.get("request_sha256"),
+                "adapter": attempt.get("adapter"),
+                "operation": attempt.get("operation"),
+                "remote_id_sha256": (
+                    _sha256_text(remote_id)
+                    if isinstance(remote_id, str) and remote_id
+                    else None
+                ),
+                "error_code": attempt.get("error_code"),
+                "error_message_sha256": (
+                    _sha256_text(error_message)
+                    if isinstance(error_message, str) and error_message
+                    else None
+                ),
+                "started_at": _iso(attempt.get("started_at")),
+                "completed_at": _iso(attempt.get("completed_at")),
+                "details_sha256": canonical_sha256(details),
+            }
+        )
+    return canonical_sha256(normalized)
 
 
 def _trace_bound_outbox_row(
@@ -1725,6 +2003,232 @@ def _qdrant_point_observation(
         "project_id": SCOPE[1],
         "trace_id": expected_trace_id,
         "vector_dimension": len(vector),
+    }
+
+
+def _qdrant_filtered_points(
+    browser: BrowserClient,
+    config: GateConfig,
+    *,
+    collection: str,
+    point_id: str,
+    tenant_id: str,
+    project_id: str,
+) -> tuple[int, list[dict[str, Any]], object]:
+    api_key = _read_secret_env_file("QDRANT_API_KEY_FILE", "Qdrant API credential")
+    status, payload = browser.json(
+        "POST",
+        f"{config.qdrant_url}/collections/{collection}/points/scroll",
+        expected={200},
+        headers={"api-key": api_key},
+        json_body={
+            "limit": 2,
+            "with_payload": True,
+            "with_vector": False,
+            "filter": {
+                "must": [
+                    {"key": "tenant_id", "match": {"value": tenant_id}},
+                    {"key": "project_id", "match": {"value": project_id}},
+                    {"has_id": [point_id]},
+                ]
+            },
+        },
+        label="Qdrant scoped retry point",
+    )
+    result = _mapping(payload.get("result"), "Qdrant scoped retry result")
+    raw_points = result.get("points")
+    if not isinstance(raw_points, list) or any(
+        not isinstance(point, dict) for point in raw_points
+    ):
+        raise VerifierFailure("Qdrant scoped retry points are invalid")
+    return status, raw_points, result.get("next_page_offset")
+
+
+def _qdrant_retry_observation(
+    browser: BrowserClient,
+    config: GateConfig,
+    *,
+    retry_run_id: str,
+    retry_event: Mapping[str, Any],
+    retry_attempt: Mapping[str, Any],
+    retry_details: Mapping[str, Any],
+    expected_trace_id: str,
+) -> dict[str, Any]:
+    collection = _nonempty_text(
+        retry_details.get("collection"), "dead-letter retry collection"
+    )
+    point_ids = retry_details.get("point_ids")
+    if (
+        not isinstance(point_ids, list)
+        or len(point_ids) != 1
+        or not isinstance(point_ids[0], str)
+        or not point_ids[0]
+    ):
+        raise VerifierFailure("dead-letter retry point receipt is invalid")
+    point_id = point_ids[0]
+    if (
+        re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,254}", collection) is None
+        or re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+            point_id,
+        )
+        is None
+    ):
+        raise VerifierFailure("dead-letter retry Qdrant identity is invalid")
+    expected_payload = _mapping(
+        retry_details.get("qdrant_payload"), "dead-letter retry Qdrant payload"
+    )
+    api_key = _read_secret_env_file("QDRANT_API_KEY_FILE", "Qdrant API credential")
+    status, exact_document = browser.json(
+        "GET",
+        f"{config.qdrant_url}/collections/{collection}/points/{point_id}"
+        "?with_payload=true&with_vector=true",
+        expected={200},
+        headers={"api-key": api_key},
+        label="Qdrant exact retry point",
+    )
+    exact_point = _mapping(exact_document.get("result"), "Qdrant exact retry point")
+    remote_payload = _mapping(
+        exact_point.get("payload"), "Qdrant exact retry point payload"
+    )
+    vector = exact_point.get("vector")
+    if (
+        str(exact_point.get("id") or "") != point_id
+        or not isinstance(vector, list)
+        or not vector
+        or any(
+            isinstance(item, bool) or not isinstance(item, (int, float))
+            for item in vector
+        )
+    ):
+        raise VerifierFailure("Qdrant exact retry point is invalid")
+
+    _, scoped_points, next_offset = _qdrant_filtered_points(
+        browser,
+        config,
+        collection=collection,
+        point_id=point_id,
+        tenant_id=SCOPE[0],
+        project_id=SCOPE[1],
+    )
+    _, cross_tenant_points, cross_tenant_offset = _qdrant_filtered_points(
+        browser,
+        config,
+        collection=collection,
+        point_id=point_id,
+        tenant_id=f"{SCOPE[0]}_forbidden",
+        project_id=SCOPE[1],
+    )
+    _, cross_project_points, cross_project_offset = _qdrant_filtered_points(
+        browser,
+        config,
+        collection=collection,
+        point_id=point_id,
+        tenant_id=SCOPE[0],
+        project_id=f"{SCOPE[1]}_forbidden",
+    )
+    scoped_ids = [str(point.get("id") or "") for point in scoped_points]
+    if (
+        next_offset is not None
+        or cross_tenant_offset is not None
+        or cross_project_offset is not None
+        or len(scoped_points) != 1
+        or scoped_ids != [point_id]
+        or cross_tenant_points
+        or cross_project_points
+    ):
+        raise VerifierFailure("Qdrant retry scope or cardinality proof is invalid")
+    scoped_payload = _mapping(
+        scoped_points[0].get("payload"), "Qdrant scoped retry payload"
+    )
+    payload_hash = canonical_sha256(remote_payload)
+    payload_hash_match = (
+        payload_hash == canonical_sha256(expected_payload)
+        and canonical_sha256(scoped_payload) == payload_hash
+    )
+
+    event_payload = _json_mapping(
+        retry_event.get("payload"), "dead-letter retry event payload"
+    )
+    attempt_details = _json_mapping(
+        retry_attempt.get("details"), "dead-letter retry attempt details"
+    )
+    attempt_dispatch = _mapping(
+        attempt_details.get("dispatch_details"), "dead-letter retry dispatch receipt"
+    )
+    attempt_point_ids = attempt_dispatch.get("point_ids")
+    attempt_payload = _mapping(
+        attempt_dispatch.get("qdrant_payload"),
+        "dead-letter retry attempt Qdrant payload",
+    )
+    dispatch_receipt_match = (
+        canonical_sha256(attempt_dispatch) == canonical_sha256(retry_details)
+        and attempt_dispatch.get("collection") == collection
+        and attempt_point_ids == [point_id]
+    )
+    attempt_receipt_match = (
+        retry_attempt.get("event_id") == retry_event.get("event_id")
+        and retry_attempt.get("dispatch_idempotency_key")
+        == retry_event.get("dispatch_idempotency_key")
+        and retry_attempt.get("request_sha256")
+        == retry_event.get("dispatch_request_sha256")
+        and retry_attempt.get("status") == "succeeded"
+        and retry_attempt.get("delivery_mode") == "dispatch"
+        and retry_attempt.get("adapter") == "qdrant"
+        and retry_attempt.get("operation") == "upsert_payload"
+    )
+    scope_match = (
+        remote_payload.get("tenant_id") == SCOPE[0]
+        and remote_payload.get("project_id") == SCOPE[1]
+        and remote_payload.get("trace_id") == expected_trace_id
+        and event_payload.get("tenant_id") == SCOPE[0]
+        and event_payload.get("project_id") == SCOPE[1]
+        and event_payload.get("trace_id") == expected_trace_id
+    )
+    if not all(
+        (payload_hash_match, dispatch_receipt_match, attempt_receipt_match, scope_match)
+    ):
+        raise VerifierFailure("Qdrant retry receipts are not cross-bound")
+    return {
+        "http_status": status,
+        "collection": collection,
+        "point_id_sha256": _sha256_text(point_id),
+        "dispatch_point_id_sha256": _sha256_text(point_id),
+        "attempt_point_id_sha256": _sha256_text(
+            _nonempty_text(
+                attempt_point_ids[0]
+                if isinstance(attempt_point_ids, list) and attempt_point_ids
+                else None,
+                "retry attempt point id",
+            )
+        ),
+        "payload_sha256": payload_hash,
+        "dispatch_payload_sha256": canonical_sha256(expected_payload),
+        "attempt_payload_sha256": canonical_sha256(attempt_payload),
+        "retry_run_id_sha256": _sha256_text(retry_run_id),
+        "retry_event_id": retry_event.get("event_id"),
+        "dispatch_idempotency_key_sha256": _sha256_text(
+            _nonempty_text(
+                retry_event.get("dispatch_idempotency_key"),
+                "retry dispatch idempotency key",
+            )
+        ),
+        "dispatch_request_sha256": retry_event.get("dispatch_request_sha256"),
+        "attempt_request_sha256": retry_attempt.get("request_sha256"),
+        "attempt_id_sha256": _sha256_text(
+            _nonempty_text(retry_attempt.get("attempt_id"), "retry attempt id")
+        ),
+        "tenant_id": SCOPE[0],
+        "project_id": SCOPE[1],
+        "trace_id": expected_trace_id,
+        "filtered_point_count": len(scoped_points),
+        "point_occurrences": scoped_ids.count(point_id),
+        "cross_tenant_count": len(cross_tenant_points),
+        "cross_project_count": len(cross_project_points),
+        "scope_match": scope_match,
+        "dispatch_receipt_match": dispatch_receipt_match,
+        "attempt_receipt_match": attempt_receipt_match,
+        "payload_hash_match": payload_hash_match,
     }
 
 
@@ -2273,6 +2777,108 @@ def _persist_phase_state(
     replace_json_state(config.state_path(), prior, updated)
 
 
+def persist_inflight_fault_trace(
+    config: GateConfig,
+    prior: dict[str, Any],
+    state: dict[str, Any],
+    dependency: str,
+) -> tuple[str, dict[str, Any]]:
+    fault = _mapping(state["faults"].get(dependency), "fault state")
+    persisted = fault.get("retry_otel_trace_id")
+    if persisted is not None:
+        trace_id = _nonempty_text(persisted, "persisted retry OTel trace id")
+        if not re.fullmatch(r"[0-9a-f]{32}", trace_id) or int(trace_id, 16) == 0:
+            raise VerifierFailure("persisted retry OTel trace id is invalid")
+        return trace_id, prior
+    trace_id = _new_otel_trace_id()
+    fault["retry_otel_trace_id"] = trace_id
+    state["updated_at"] = _utc_now()
+    validate_artifact_value(state)
+    replace_json_state(config.state_path(), prior, state)
+    return trace_id, _copy(state)
+
+
+def build_fault_verification_checkpoint(
+    dependency: str,
+    proofs: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    proof_ids = recovery_proof_ids(dependency)
+    if list(proofs) != proof_ids:
+        raise VerifierFailure(
+            "fault verification checkpoint proof inventory is invalid"
+        )
+    copied_proofs: dict[str, dict[str, Any]] = {}
+    recovery_facts: dict[str, Any] = {}
+    for proof_id in proof_ids:
+        observations = dict(
+            _mapping(proofs.get(proof_id), "fault verification checkpoint proof")
+        )
+        # capture_record enforces the exact versioned field set and the evidence
+        # redaction policy before these facts become resumable state.
+        capture_record(proof_id, observations)
+        if any(
+            key in recovery_facts and recovery_facts[key] != value
+            for key, value in observations.items()
+        ):
+            raise VerifierFailure("fault verification checkpoint bindings conflict")
+        recovery_facts.update(observations)
+        copied_proofs[proof_id] = observations
+    recovery_case_from_facts(dependency, recovery_facts)
+    checkpoint = {
+        "schema_version": FAULT_VERIFICATION_CHECKPOINT_SCHEMA,
+        "dependency": dependency,
+        "proof_ids": proof_ids,
+        "proofs_sha256": canonical_sha256(copied_proofs),
+        "proofs": copied_proofs,
+    }
+    validate_artifact_value(checkpoint)
+    return checkpoint
+
+
+def _validated_fault_verification_checkpoint(
+    dependency: str, value: object
+) -> dict[str, dict[str, Any]]:
+    checkpoint = _mapping(value, "fault verification checkpoint")
+    proof_ids = recovery_proof_ids(dependency)
+    proofs = _mapping(checkpoint.get("proofs"), "fault verification checkpoint proofs")
+    if (
+        set(checkpoint)
+        != {"schema_version", "dependency", "proof_ids", "proofs_sha256", "proofs"}
+        or checkpoint.get("schema_version") != FAULT_VERIFICATION_CHECKPOINT_SCHEMA
+        or checkpoint.get("dependency") != dependency
+        or checkpoint.get("proof_ids") != proof_ids
+        or list(proofs) != proof_ids
+        or checkpoint.get("proofs_sha256") != canonical_sha256(proofs)
+    ):
+        raise VerifierFailure("fault verification checkpoint is invalid")
+    # Rebuild instead of trusting a self-declared hash. This repeats the closed
+    # field, redaction and cross-proof recovery checks on every process entry.
+    rebuilt = build_fault_verification_checkpoint(dependency, proofs)
+    if rebuilt != checkpoint:
+        raise VerifierFailure("fault verification checkpoint is invalid")
+    return {
+        proof_id: dict(_mapping(proofs[proof_id], "fault verification proof"))
+        for proof_id in proof_ids
+    }
+
+
+def _complete_fault_verification_checkpoint(
+    config: GateConfig,
+    state: dict[str, Any],
+    dependency: str,
+) -> None:
+    fault = _mapping(state["faults"].get(dependency), "fault state")
+    proofs = _validated_fault_verification_checkpoint(
+        dependency, fault.get("verification_checkpoint")
+    )
+    prior = _copy(state)
+    for proof_id in recovery_proof_ids(dependency):
+        _write_capture(config, state, proof_id, proofs[proof_id])
+    fault.pop("verification_checkpoint", None)
+    fault["verified_at"] = _utc_now()
+    _persist_phase_state(config, prior, state, "fault-verify", dependency)
+
+
 def _authority_run_count(config: GateConfig, state: dict[str, Any]) -> int:
     run_ids = state["operations"].get("authoritative_run_ids")
     if not isinstance(run_ids, list):
@@ -2398,13 +3004,19 @@ def _ready_status(
 
 
 def _attempt_rows(config: GateConfig, event_id: int) -> list[dict[str, Any]]:
-    return config.database.rows(
-        "SELECT attempt_id, event_id, attempt_number, lease_generation, delivery_mode, "
-        "status, remote_id, error_code, started_at, completed_at, details "
-        "FROM outbox_delivery_attempts WHERE event_id=:event_id "
+    rows = config.database.rows(
+        "SELECT attempt_id, event_id, tenant_id, project_id, attempt_number, "
+        "lease_generation, claimed_by, claim_token_sha256, delivery_mode, status, "
+        "dispatch_idempotency_key, request_sha256, adapter, operation, remote_id, "
+        "error_code, error_message, started_at, completed_at, details "
+        "FROM outbox_delivery_attempts "
+        "WHERE tenant_id=:tenant_id AND project_id=:project_id AND event_id=:event_id "
         "ORDER BY lease_generation, started_at, attempt_id",
-        {"event_id": event_id},
+        {"tenant_id": SCOPE[0], "project_id": SCOPE[1], "event_id": event_id},
     )
+    for row in rows:
+        row["details"] = _json_mapping(row.get("details"), "outbox attempt details")
+    return rows
 
 
 def fencing_observation_from_claims(
@@ -2656,7 +3268,12 @@ def _fault_prepare(config: GateConfig, dependency: str) -> None:
             fault.update({"event_id": event_id, "run_id": run_id, "trace_id": trace_id})
         finally:
             browser.close()
-    elif dependency in {"qdrant_outage", "redis_outage", "mysql_restart"}:
+    elif dependency in {
+        "dead_letter_retry",
+        "qdrant_outage",
+        "redis_outage",
+        "mysql_restart",
+    }:
         if dependency == "qdrant_outage":
             qdrant = _mapping(
                 state["operations"].get("qdrant"), "Qdrant operation state"
@@ -2767,6 +3384,105 @@ def _fault_during(config: GateConfig, dependency: str) -> None:
         event_id = _positive_int(fault.get("event_id"), "fault event id")
         attempts = _attempt_rows(config, event_id)
         fault["delivery_attempts_observed_during"] = len(attempts)
+    elif dependency == "dead_letter_retry":
+        browser = _fresh_browser(config)
+        try:
+            created = browser.bff(
+                "POST",
+                "/api/v1/knowledge-indexes/ki_sales_policy_v1/build-runs",
+                body={
+                    "reason": "production gate dead-letter recovery",
+                    "chunk_policy": "production-gate-dead-letter",
+                    "embedding_text": "死信人工重试必须保持作用域、追踪与幂等绑定",
+                },
+                expected=202,
+                idempotency_key=(
+                    f"production-gate:{config.run_suffix}:dead-letter-source"
+                ),
+                label="dead-letter source run creation",
+            )
+            data = _response_data(created, "dead-letter source run creation")
+            run_id = _nonempty_text(data.get("run_id"), "dead-letter source run id")
+            trace_id = _nonempty_text(
+                data.get("trace_id"), "dead-letter source trace id"
+            )
+            event = _outbox_row(config, run_id)
+            event_payload = _json_mapping(
+                event.get("payload"), "dead-letter source event payload"
+            )
+            qdrant_payload = _mapping(
+                event_payload.get("qdrant_payload"),
+                "dead-letter source Qdrant payload",
+            )
+            event_data = _mapping(
+                event_payload.get("data"), "dead-letter source event data"
+            )
+            data_qdrant_payload = _mapping(
+                event_data.get("qdrant_payload"),
+                "dead-letter source event data Qdrant payload",
+            )
+            if (
+                event.get("status") != "pending"
+                or int(event.get("attempt_count") or 0) != 0
+                or not data_qdrant_payload.get("business_ref")
+            ):
+                raise VerifierFailure(
+                    "dead-letter source event was not fenced while Worker was down"
+                )
+            event_id = _positive_int(
+                event.get("event_id"), "dead-letter source event id"
+            )
+            if qdrant_payload.get("business_ref"):
+                changed = config.database.execute(
+                    "UPDATE outbox_events SET "
+                    "payload=JSON_REMOVE(payload, '$.qdrant_payload.business_ref') "
+                    "WHERE event_id=:event_id AND tenant_id=:tenant_id "
+                    "AND project_id=:project_id AND aggregate_id=:run_id "
+                    "AND event_type='knowledge_index.build_requested' "
+                    "AND status='pending' AND attempt_count=0",
+                    {
+                        "event_id": event_id,
+                        "tenant_id": SCOPE[0],
+                        "project_id": SCOPE[1],
+                        "run_id": run_id,
+                    },
+                )
+                if changed != 1:
+                    raise VerifierFailure(
+                        "dead-letter source fault injection did not update one event"
+                    )
+            injected_event = _outbox_row(config, run_id)
+            injected_payload = _json_mapping(
+                injected_event.get("payload"), "injected dead-letter source event"
+            )
+            injected_qdrant = _mapping(
+                injected_payload.get("qdrant_payload"),
+                "injected dead-letter Qdrant payload",
+            )
+            injected_data = _mapping(
+                injected_payload.get("data"), "injected dead-letter source data"
+            )
+            injected_data_qdrant = _mapping(
+                injected_data.get("qdrant_payload"),
+                "injected dead-letter source data Qdrant payload",
+            )
+            if (
+                injected_event.get("event_id") != event_id
+                or injected_event.get("status") != "pending"
+                or int(injected_event.get("attempt_count") or 0) != 0
+                or injected_qdrant.get("business_ref") is not None
+                or not injected_data_qdrant.get("business_ref")
+            ):
+                raise VerifierFailure("dead-letter source fault state is inconsistent")
+            fault.update(
+                {
+                    "source_run_id": run_id,
+                    "source_trace_id": trace_id,
+                    "source_event_id": event_id,
+                }
+            )
+        finally:
+            browser.close()
     else:
         raise VerifierFailure("fault-during dependency is unsupported")
     _persist_phase_state(config, prior, state, "fault-during", dependency)
@@ -2777,14 +3493,19 @@ def _fault_verify(config: GateConfig, dependency: str) -> None:
     if not _phase_completed(state, "fault-prepare", dependency):
         raise VerifierFailure("fault verification requires its preparation phase")
     if _phase_completed(state, "fault-verify", dependency):
-        _read_capture(config, state, dependency)
+        for proof_id in recovery_proof_ids(dependency):
+            _read_capture(config, state, proof_id)
         return
     prior = _copy(state)
     fault = _mapping(state["faults"].get(dependency), "fault state")
+    if fault.get("verification_checkpoint") is not None:
+        _complete_fault_verification_checkpoint(config, state, dependency)
+        return
     before_count = _positive_int(
         fault.get("authoritative_run_count_before"), "authoritative run count before"
     )
     browser = BrowserClient(config)
+    supplemental_facts: dict[str, dict[str, Any]] = {}
     try:
         if dependency == "mysql_restart":
             host = load_host_observation(
@@ -2949,6 +3670,558 @@ def _fault_verify(config: GateConfig, dependency: str) -> None:
                 raise VerifierFailure(
                     "callback timeout reconciliation was not confirmed"
                 )
+        elif dependency == "dead_letter_retry":
+            source_run_id = _nonempty_text(
+                fault.get("source_run_id"), "dead-letter source run id"
+            )
+            source_trace_id = _nonempty_text(
+                fault.get("source_trace_id"), "dead-letter source trace id"
+            )
+            source_event_id = _positive_int(
+                fault.get("source_event_id"), "dead-letter source event id"
+            )
+            retry_reason = "operator restored the derived Qdrant payload"
+            retry_key = f"production-gate:{config.run_suffix}:dead-letter-retry"
+            retry_body = {"reason": retry_reason}
+            retry_otel_trace_id, prior = persist_inflight_fault_trace(
+                config, prior, state, dependency
+            )
+            authenticated = _fresh_browser(config)
+            try:
+                _wait_run(
+                    authenticated,
+                    source_run_id,
+                    expected={"failed"},
+                    timeout_seconds=config.timeout_seconds,
+                )
+                source_event = _wait_outbox(
+                    config,
+                    source_run_id,
+                    statuses={"dead_letter"},
+                    timeout_seconds=config.timeout_seconds,
+                )
+                source_run = _run_row(config, source_run_id)
+                source_attempts = _attempt_rows(config, source_event_id)
+                source_payload = _json_mapping(
+                    source_run.get("payload"), "dead-letter source run payload"
+                )
+                source_event_payload = _json_mapping(
+                    source_event.get("payload"), "dead-letter source event payload"
+                )
+                source_event_data = _mapping(
+                    source_event_payload.get("data"), "dead-letter source event data"
+                )
+                source_event_data_qdrant = _mapping(
+                    source_event_data.get("qdrant_payload"),
+                    "dead-letter source event data Qdrant payload",
+                )
+                source_event_qdrant = _mapping(
+                    source_event_payload.get("qdrant_payload"),
+                    "dead-letter source event Qdrant payload",
+                )
+                if len(source_attempts) != 1:
+                    raise VerifierFailure(
+                        "source event did not produce exactly one delivery attempt"
+                    )
+                source_attempt = source_attempts[0]
+                source_attempt_details = _json_mapping(
+                    source_attempt.get("details"), "dead-letter source attempt details"
+                )
+                failed_dispatch = _mapping(
+                    source_attempt_details.get("failed_dispatch"),
+                    "dead-letter source failed dispatch",
+                )
+                failed_dispatch_details = _mapping(
+                    failed_dispatch.get("details"),
+                    "dead-letter source failure details",
+                )
+                if (
+                    source_event.get("event_id") != source_event_id
+                    or source_event.get("tenant_id") != SCOPE[0]
+                    or source_event.get("project_id") != SCOPE[1]
+                    or source_event.get("event_type")
+                    != "knowledge_index.build_requested"
+                    or source_event.get("aggregate_type") != "knowledge_build"
+                    or source_event.get("aggregate_id") != source_run_id
+                    or source_event.get("delivery_state") != "failed"
+                    or source_event.get("attempt_count") != 1
+                    or source_event.get("reconcile_attempt_count") != 0
+                    or source_event.get("lease_generation") != 1
+                    or not all(
+                        bool(source_event.get(field))
+                        for field in (
+                            "claim_token_cleared",
+                            "claimed_by_cleared",
+                            "claimed_at_cleared",
+                            "lease_expires_at_cleared",
+                        )
+                    )
+                    or not isinstance(source_event.get("last_error"), str)
+                    or not str(source_event["last_error"]).startswith(
+                        "QDRANT_PAYLOAD_INVALID:"
+                    )
+                    or source_event.get("processed_at") is None
+                    or source_run.get("tenant_id") != SCOPE[0]
+                    or source_run.get("project_id") != SCOPE[1]
+                    or source_run.get("run_type") != "knowledge_build"
+                    or source_run.get("status") != "failed"
+                    or source_run.get("terminal_reason")
+                    != "outbox_dispatch_dead_letter"
+                    or source_payload.get("dead_letter_event_id") != source_event_id
+                    or source_event_qdrant.get("business_ref") is not None
+                    or not source_event_data_qdrant.get("business_ref")
+                    or source_attempt.get("event_id") != source_event_id
+                    or source_attempt.get("tenant_id") != SCOPE[0]
+                    or source_attempt.get("project_id") != SCOPE[1]
+                    or source_attempt.get("attempt_number") != 1
+                    or source_attempt.get("lease_generation") != 1
+                    or source_attempt.get("status") != "dead_letter"
+                    or source_attempt.get("delivery_mode") != "dispatch"
+                    or source_attempt.get("adapter") != "qdrant"
+                    or source_attempt.get("operation") != "upsert_payload"
+                    or source_attempt.get("error_code") != "QDRANT_PAYLOAD_INVALID"
+                    or not isinstance(source_attempt.get("error_message"), str)
+                    or not source_attempt.get("error_message")
+                    or source_attempt.get("remote_id") is not None
+                    or source_attempt.get("started_at") is None
+                    or source_attempt.get("completed_at") is None
+                    or not isinstance(source_attempt.get("claimed_by"), str)
+                    or not source_attempt.get("claimed_by")
+                    or SHA256_PATTERN.fullmatch(
+                        str(source_attempt.get("claim_token_sha256") or "")
+                    )
+                    is None
+                    or SHA256_PATTERN.fullmatch(
+                        str(source_event.get("dispatch_request_sha256") or "")
+                    )
+                    is None
+                    or source_attempt.get("dispatch_idempotency_key")
+                    != source_event.get("dispatch_idempotency_key")
+                    or source_attempt.get("request_sha256")
+                    != source_event.get("dispatch_request_sha256")
+                    or failed_dispatch.get("adapter") != "qdrant"
+                    or failed_dispatch.get("operation") != "upsert_payload"
+                    or failed_dispatch.get("status") != "failed"
+                    or failed_dispatch.get("error_code") != "QDRANT_PAYLOAD_INVALID"
+                    or failed_dispatch.get("retryable") is not False
+                    or failed_dispatch_details.get("missing_fields") != ["business_ref"]
+                ):
+                    raise VerifierFailure(
+                        "source event did not reach one terminal Qdrant dead letter"
+                    )
+                source_attempt_ledger_before = _attempt_ledger_sha256(source_attempts)
+                source_snapshot_before = _dead_letter_source_snapshot(
+                    source_run, source_event, source_attempts
+                )
+                retry_response = authenticated.bff(
+                    "POST",
+                    f"/api/v1/runs/{source_run_id}/retries",
+                    body=retry_body,
+                    expected=202,
+                    idempotency_key=retry_key,
+                    otel_trace_id=retry_otel_trace_id,
+                    label="dead-letter manual retry",
+                )
+                retry_data = _response_data(retry_response, "dead-letter manual retry")
+                retry_run_id = _nonempty_text(
+                    retry_data.get("run_id"), "dead-letter retry run id"
+                )
+                replay_response = authenticated.bff(
+                    "POST",
+                    f"/api/v1/runs/{source_run_id}/retries",
+                    body=retry_body,
+                    expected=202,
+                    idempotency_key=retry_key,
+                    label="dead-letter manual retry replay",
+                )
+                replay_data = _response_data(
+                    replay_response, "dead-letter manual retry replay"
+                )
+                if (
+                    retry_run_id == source_run_id
+                    or replay_data.get("run_id") != retry_run_id
+                    or canonical_sha256(retry_response)
+                    != canonical_sha256(replay_response)
+                    or retry_data.get("retry_of_run_id") != source_run_id
+                    or retry_data.get("retry_of_event_id") != source_event_id
+                    or retry_data.get("retry_of_trace_id") != source_trace_id
+                    or retry_data.get("trace_id") != source_trace_id
+                ):
+                    raise VerifierFailure(
+                        "dead-letter retry did not preserve identity and trace fencing"
+                    )
+                retry_final = _wait_run(
+                    authenticated,
+                    retry_run_id,
+                    expected={"success"},
+                    timeout_seconds=config.timeout_seconds,
+                )
+            finally:
+                authenticated.close()
+
+            retry_event = _wait_outbox(
+                config,
+                retry_run_id,
+                statuses={"processed"},
+                timeout_seconds=config.timeout_seconds,
+            )
+            retry_event_id = _positive_int(
+                retry_event.get("event_id"), "dead-letter retry event id"
+            )
+            retry_attempts = _attempt_rows(config, retry_event_id)
+            retry_run = _run_row(config, retry_run_id)
+            retry_details = _dispatch_details(retry_run, adapter="qdrant")
+            retry_payload = _json_mapping(
+                retry_run.get("payload"), "dead-letter retry run payload"
+            )
+            retry_event_payload = _json_mapping(
+                retry_event.get("payload"), "dead-letter retry event payload"
+            )
+            retry_event_data = _mapping(
+                retry_event_payload.get("data"), "dead-letter retry event data"
+            )
+            retry_event_qdrant = _mapping(
+                retry_event_payload.get("qdrant_payload"),
+                "dead-letter retry event Qdrant payload",
+            )
+            retry_event_data_qdrant = _mapping(
+                retry_event_data.get("qdrant_payload"),
+                "dead-letter retry event data Qdrant payload",
+            )
+            retry_event_subject = _mapping(
+                retry_event_payload.get("subject"), "dead-letter retry event subject"
+            )
+            retry_event_otel_trace_id = otel_trace_id_from_carrier(
+                retry_event_payload.get("otel_trace_context")
+            )
+            point_ids = retry_details.get("point_ids")
+            if len(retry_attempts) != 1:
+                raise VerifierFailure(
+                    "dead-letter retry did not produce exactly one delivery attempt"
+                )
+            retry_attempt = retry_attempts[0]
+            retry_attempt_details = _json_mapping(
+                retry_attempt.get("details"), "dead-letter retry attempt details"
+            )
+            retry_attempt_dispatch = _mapping(
+                retry_attempt_details.get("dispatch_details"),
+                "dead-letter retry attempt dispatch",
+            )
+            retry_attempt_payload = _mapping(
+                retry_attempt_dispatch.get("qdrant_payload"),
+                "dead-letter retry attempt Qdrant payload",
+            )
+            retry_attempt_point_ids = retry_attempt_dispatch.get("point_ids")
+            expected_retry_attempt_id = f"outbox_attempt_{retry_event_id}_1"
+            if (
+                retry_event_id == source_event_id
+                or retry_event.get("tenant_id") != SCOPE[0]
+                or retry_event.get("project_id") != SCOPE[1]
+                or retry_event.get("event_type") != "knowledge_index.build_requested"
+                or retry_event.get("aggregate_type") != "knowledge_build"
+                or retry_event.get("aggregate_id") != retry_run_id
+                or retry_event.get("status") != "processed"
+                or retry_event.get("delivery_state") != "confirmed"
+                or retry_event.get("attempt_count") != 1
+                or retry_event.get("reconcile_attempt_count") != 0
+                or retry_event.get("lease_generation") != 1
+                or retry_event.get("last_error") is not None
+                or retry_event.get("processed_at") is None
+                or not all(
+                    bool(retry_event.get(field))
+                    for field in (
+                        "claim_token_cleared",
+                        "claimed_by_cleared",
+                        "claimed_at_cleared",
+                        "lease_expires_at_cleared",
+                    )
+                )
+                or SHA256_PATTERN.fullmatch(
+                    str(retry_event.get("dispatch_request_sha256") or "")
+                )
+                is None
+                or retry_event_subject
+                != {"type": "knowledge_build", "id": retry_run_id}
+                or retry_event_payload.get("dispatch_idempotency_key")
+                != retry_event.get("dispatch_idempotency_key")
+                or retry_event_otel_trace_id != retry_otel_trace_id
+                or retry_attempt.get("attempt_id") != expected_retry_attempt_id
+                or retry_attempt.get("event_id") != retry_event_id
+                or retry_attempt.get("tenant_id") != SCOPE[0]
+                or retry_attempt.get("project_id") != SCOPE[1]
+                or retry_attempt.get("attempt_number") != 1
+                or retry_attempt.get("lease_generation") != 1
+                or retry_attempt.get("status") != "succeeded"
+                or retry_attempt.get("delivery_mode") != "dispatch"
+                or retry_attempt.get("adapter") != "qdrant"
+                or retry_attempt.get("operation") != "upsert_payload"
+                or retry_attempt.get("error_code") is not None
+                or retry_attempt.get("error_message") is not None
+                or retry_attempt.get("started_at") is None
+                or retry_attempt.get("completed_at") is None
+                or not isinstance(retry_attempt.get("claimed_by"), str)
+                or not retry_attempt.get("claimed_by")
+                or SHA256_PATTERN.fullmatch(
+                    str(retry_attempt.get("claim_token_sha256") or "")
+                )
+                is None
+                or retry_attempt.get("dispatch_idempotency_key")
+                != retry_event.get("dispatch_idempotency_key")
+                or retry_attempt.get("request_sha256")
+                != retry_event.get("dispatch_request_sha256")
+                or retry_payload.get("retry_of_run_id") != source_run_id
+                or retry_payload.get("retry_of_event_id") != source_event_id
+                or retry_payload.get("retry_of_trace_id") != source_trace_id
+                or retry_event_payload.get("retry_of_run_id") != source_run_id
+                or retry_event_payload.get("retry_of_event_id") != source_event_id
+                or retry_event_payload.get("retry_of_trace_id") != source_trace_id
+                or not retry_event_qdrant.get("business_ref")
+                or not retry_event_data_qdrant.get("business_ref")
+                or retry_run.get("tenant_id") != SCOPE[0]
+                or retry_run.get("project_id") != SCOPE[1]
+                or retry_run.get("run_type") != "knowledge_build"
+                or not isinstance(point_ids, list)
+                or len(point_ids) != 1
+                or not isinstance(point_ids[0], str)
+                or retry_attempt_point_ids != point_ids
+                or canonical_sha256(retry_attempt_payload)
+                != canonical_sha256(
+                    _mapping(
+                        retry_details.get("qdrant_payload"),
+                        "dead-letter retry dispatch Qdrant payload",
+                    )
+                )
+            ):
+                raise VerifierFailure(
+                    "dead-letter retry produced duplicate delivery or remote outcomes"
+                )
+            supplemental_facts["dead_letter_retry_qdrant"] = _qdrant_retry_observation(
+                browser,
+                config,
+                retry_run_id=retry_run_id,
+                retry_event=retry_event,
+                retry_attempt=retry_attempt,
+                retry_details=retry_details,
+                expected_trace_id=source_trace_id,
+            )
+            supplemental_facts["dead_letter_retry_trace"] = _wait_tempo_operation(
+                browser,
+                config,
+                otel_trace_id=retry_otel_trace_id,
+                operation="qdrant",
+                expected_business_trace_id=source_trace_id,
+                expected_retry_path=f"/api/v1/runs/{source_run_id}/retries",
+            )
+            lineage_count = config.database.one(
+                "SELECT COUNT(*) AS count FROM run_records "
+                "WHERE tenant_id=:tenant_id AND project_id=:project_id "
+                "AND JSON_UNQUOTE(JSON_EXTRACT(payload, '$.retry_of_run_id'))="
+                ":source_run_id",
+                {
+                    "tenant_id": SCOPE[0],
+                    "project_id": SCOPE[1],
+                    "source_run_id": source_run_id,
+                },
+            )
+            retry_event_count = config.database.one(
+                "SELECT COUNT(*) AS count FROM outbox_events "
+                "WHERE tenant_id=:tenant_id AND project_id=:project_id "
+                "AND aggregate_id=:retry_run_id "
+                "AND event_type='knowledge_index.build_requested'",
+                {
+                    "tenant_id": SCOPE[0],
+                    "project_id": SCOPE[1],
+                    "retry_run_id": retry_run_id,
+                },
+            )
+            idempotency_rows = config.database.rows(
+                "SELECT user_id, request_hash, status_code, response_json, state "
+                "FROM idempotency_records WHERE tenant_id=:tenant_id "
+                "AND project_id=:project_id AND operation=:operation "
+                "AND idempotency_key=:idempotency_key",
+                {
+                    "tenant_id": SCOPE[0],
+                    "project_id": SCOPE[1],
+                    "operation": f"retry:knowledge_build:{source_run_id}",
+                    "idempotency_key": retry_key,
+                },
+            )
+            audit_rows = config.database.rows(
+                "SELECT actor_id, object_type, result, trace_id, idempotency_key, "
+                "before_json, after_json FROM audit_logs "
+                "WHERE tenant_id=:tenant_id AND project_id=:project_id "
+                "AND object_id=:retry_run_id AND action='knowledge_build.create' "
+                "ORDER BY audit_id",
+                {
+                    "tenant_id": SCOPE[0],
+                    "project_id": SCOPE[1],
+                    "retry_run_id": retry_run_id,
+                },
+            )
+            if len(idempotency_rows) != 1 or len(audit_rows) != 1:
+                raise VerifierFailure(
+                    "dead-letter retry persistence evidence is incomplete"
+                )
+            idempotency = idempotency_rows[0]
+            idempotency_response = _json_mapping(
+                idempotency.get("response_json"), "retry idempotency response"
+            )
+            idempotency_data = _mapping(
+                idempotency_response.get("data"), "retry idempotency response data"
+            )
+            audit = audit_rows[0]
+            audit_after = _json_mapping(audit.get("after_json"), "retry audit after")
+            audit_lineage_matches = (
+                audit.get("object_type") == "knowledge_build"
+                and audit.get("result") == "success"
+                and audit.get("before_json") is None
+                and audit_after.get("run_id") == retry_run_id
+                and audit_after.get("status") == "pending"
+                and audit_after.get("trace_id") == source_trace_id
+                and audit_after.get("retry_of_run_id") == source_run_id
+                and audit_after.get("retry_of_event_id") == source_event_id
+                and audit_after.get("retry_of_trace_id") == source_trace_id
+                and audit_after.get("retry_reason") == retry_reason
+                and audit_after.get("retry_attempt") == 1
+                and audit_after.get("trigger_type") == "retry"
+            )
+            idempotency_lineage_matches = (
+                idempotency_data.get("run_id") == retry_run_id
+                and idempotency_data.get("status") == "pending"
+                and idempotency_data.get("status_version") == 1
+                and idempotency_data.get("trace_id") == source_trace_id
+                and idempotency_data.get("retry_of_run_id") == source_run_id
+                and idempotency_data.get("retry_of_event_id") == source_event_id
+                and idempotency_data.get("retry_of_trace_id") == source_trace_id
+            )
+            source_run_after = _run_row(config, source_run_id)
+            source_event_after = _outbox_row(config, source_run_id)
+            source_attempts_after = _attempt_rows(config, source_event_id)
+            source_attempt_ledger_after = _attempt_ledger_sha256(source_attempts_after)
+            source_snapshot_after = _dead_letter_source_snapshot(
+                source_run_after, source_event_after, source_attempts_after
+            )
+            facts = {
+                "source_run_id_sha256": _sha256_text(source_run_id),
+                "retry_run_id_sha256": _sha256_text(retry_run_id),
+                "source_event_id": source_event_id,
+                "retry_event_id": retry_event_id,
+                "source_event_aggregate_id_sha256": _sha256_text(
+                    _nonempty_text(
+                        source_event_after.get("aggregate_id"),
+                        "source event aggregate id",
+                    )
+                ),
+                "retry_event_aggregate_id_sha256": _sha256_text(
+                    _nonempty_text(
+                        retry_event.get("aggregate_id"), "retry event aggregate id"
+                    )
+                ),
+                "source_payload_dead_letter_event_id": source_payload.get(
+                    "dead_letter_event_id"
+                ),
+                "retry_payload_retry_of_event_id": retry_payload.get(
+                    "retry_of_event_id"
+                ),
+                "retry_payload_retry_of_run_id_sha256": _sha256_text(
+                    _nonempty_text(
+                        retry_payload.get("retry_of_run_id"), "retry source run id"
+                    )
+                ),
+                "source_trace_id": source_trace_id,
+                "retry_payload_retry_of_trace_id": retry_payload.get(
+                    "retry_of_trace_id"
+                ),
+                "source_status_before": source_run.get("status"),
+                "source_status_after": source_run_after.get("status"),
+                "source_terminal_reason": source_run_after.get("terminal_reason"),
+                "source_status_version": source_run_after.get("status_version"),
+                "source_event_status": source_event_after.get("status"),
+                "source_delivery_state": source_event_after.get("delivery_state"),
+                "source_error_code": source_attempts[0].get("error_code"),
+                "source_last_error_sha256": _sha256_text(
+                    _nonempty_text(
+                        source_event_after.get("last_error"), "source last error"
+                    )
+                ),
+                "source_lease_generation": source_event_after.get("lease_generation"),
+                "source_dead_letter_attempt_count": len(source_attempts),
+                "source_snapshot_sha256_before": source_snapshot_before,
+                "source_snapshot_sha256_after": source_snapshot_after,
+                "source_attempt_ledger_sha256_before": source_attempt_ledger_before,
+                "source_attempt_ledger_sha256_after": source_attempt_ledger_after,
+                "retry_response_replayed": canonical_sha256(retry_response)
+                == canonical_sha256(replay_response),
+                "first_response_sha256": canonical_sha256(retry_response),
+                "replay_response_sha256": canonical_sha256(replay_response),
+                "stored_response_sha256": canonical_sha256(idempotency_response),
+                "idempotency_record_count": len(idempotency_rows),
+                "idempotency_state": idempotency.get("state"),
+                "idempotency_status_code": idempotency.get("status_code"),
+                "idempotency_request_sha256": idempotency.get("request_hash"),
+                "expected_idempotency_request_sha256": _expected_request_sha256(
+                    "POST", f"/api/v1/runs/{source_run_id}/retries", retry_body
+                ),
+                "idempotency_response_run_id_sha256": _sha256_text(
+                    _nonempty_text(
+                        idempotency_data.get("run_id"),
+                        "idempotency response retry run id",
+                    )
+                ),
+                "idempotency_user_sha256": _sha256_text(
+                    _nonempty_text(idempotency.get("user_id"), "idempotency user")
+                ),
+                "expected_retry_idempotency_key_sha256": _sha256_text(retry_key),
+                "retry_run_count": int(lineage_count.get("count") or 0),
+                "retry_event_count": int(retry_event_count.get("count") or 0),
+                "retry_dispatch_attempt_count": len(retry_attempts),
+                "retry_event_otel_trace_id": retry_event_otel_trace_id,
+                "retry_dispatch_idempotency_key_sha256": _sha256_text(
+                    _nonempty_text(
+                        retry_event.get("dispatch_idempotency_key"),
+                        "retry dispatch idempotency key",
+                    )
+                ),
+                "retry_dispatch_request_sha256": retry_event.get(
+                    "dispatch_request_sha256"
+                ),
+                "retry_attempt_request_sha256": retry_attempt.get("request_sha256"),
+                "retry_attempt_id_sha256": _sha256_text(
+                    _nonempty_text(retry_attempt.get("attempt_id"), "retry attempt id")
+                ),
+                "retry_expected_attempt_id_sha256": _sha256_text(
+                    expected_retry_attempt_id
+                ),
+                "retry_point_id_sha256": _sha256_text(
+                    _nonempty_text(point_ids[0], "retry point id")
+                ),
+                "retry_dispatch_payload_sha256": canonical_sha256(
+                    _mapping(
+                        retry_details.get("qdrant_payload"),
+                        "retry dispatch Qdrant payload",
+                    )
+                ),
+                "retry_attempt_payload_sha256": canonical_sha256(retry_attempt_payload),
+                "retry_event_status": retry_event.get("status"),
+                "retry_run_status": retry_final.get("status"),
+                "retry_trace_inherited": retry_run.get("trace_id") == source_trace_id,
+                "retry_audit_count": len(audit_rows),
+                "retry_audit_actor_sha256": _sha256_text(
+                    _nonempty_text(audit.get("actor_id"), "retry audit actor")
+                ),
+                "retry_audit_idempotency_key_sha256": _sha256_text(
+                    _nonempty_text(
+                        audit.get("idempotency_key"), "retry audit idempotency key"
+                    )
+                ),
+                "retry_audit_trace_matches": audit.get("trace_id") == source_trace_id,
+                "retry_audit_lineage_matches": bool(
+                    audit_lineage_matches
+                    and idempotency_lineage_matches
+                    and audit.get("actor_id") == idempotency.get("user_id")
+                    and audit.get("idempotency_key") == retry_key
+                ),
+            }
         elif dependency in {"qdrant_outage", "redis_outage"}:
             if not _phase_completed(state, "fault-during", dependency):
                 raise VerifierFailure(
@@ -3002,10 +4275,30 @@ def _fault_verify(config: GateConfig, dependency: str) -> None:
         # is intentionally no fallback for a missing after value.
         facts["authoritative_run_count_before"] = before_count
         facts["authoritative_run_count_after"] = _authority_run_count(config, state)
-        recovery_case_from_facts(dependency, facts)
-        _write_capture(config, state, dependency, facts)
-        fault["verified_at"] = _utc_now()
-        _persist_phase_state(config, prior, state, "fault-verify", dependency)
+        recovery_facts = dict(facts)
+        for proof_id in recovery_proof_ids(dependency):
+            if proof_id != dependency:
+                proof_observations = supplemental_facts.get(proof_id, {})
+                if any(
+                    key in recovery_facts and recovery_facts[key] != value
+                    for key, value in proof_observations.items()
+                ):
+                    raise VerifierFailure("recovery proof identity bindings conflict")
+                recovery_facts.update(proof_observations)
+        recovery_case_from_facts(dependency, recovery_facts)
+        proof_observations = {
+            proof_id: (
+                facts if proof_id == dependency else supplemental_facts[proof_id]
+            )
+            for proof_id in recovery_proof_ids(dependency)
+        }
+        fault["verification_checkpoint"] = build_fault_verification_checkpoint(
+            dependency, proof_observations
+        )
+        state["updated_at"] = _utc_now()
+        validate_artifact_value(state)
+        replace_json_state(config.state_path(), prior, state)
+        _complete_fault_verification_checkpoint(config, state, dependency)
     finally:
         browser.close()
 
@@ -3052,6 +4345,10 @@ def _otlp_span_groups(batch: Mapping[str, Any]) -> list[object]:
 
 def _client_span(kind: object) -> bool:
     return kind in {3, "3", "CLIENT", "SPAN_KIND_CLIENT"}
+
+
+def _server_span(kind: object) -> bool:
+    return kind in {2, "2", "SERVER", "SPAN_KIND_SERVER"}
 
 
 def _safe_span_hosts(attributes: Mapping[str, object]) -> set[str]:
@@ -3213,6 +4510,237 @@ def tempo_trace_facts(
     }
 
 
+def _tempo_span_id(span: Mapping[str, Any], field: str, label: str) -> str:
+    snake_field = "span_id" if field == "spanId" else "parent_span_id"
+    value = span.get(field, span.get(snake_field))
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{16}", value.casefold()) is None
+        or int(value, 16) == 0
+    ):
+        raise VerifierFailure(f"{label} span identity is invalid")
+    return value.casefold()
+
+
+def _safe_span_paths(attributes: Mapping[str, object]) -> set[str]:
+    paths: set[str] = set()
+    for key in ("http.url", "url.full", "url.original"):
+        value = attributes.get(key)
+        if not isinstance(value, str):
+            continue
+        try:
+            parsed = urlsplit(value)
+        except ValueError:
+            continue
+        if parsed.scheme in {"http", "https"} and parsed.hostname:
+            paths.add(parsed.path)
+    return paths
+
+
+RETRY_ROUTE_TEMPLATE = "/api/v1/runs/{id}/retries"
+
+
+def _retry_server_binding(
+    entry: Mapping[str, Any], expected_retry_path: str | None
+) -> tuple[str, str] | None:
+    if not _server_span(entry.get("kind")):
+        return None
+    attributes = _mapping(entry.get("attributes"), "Tempo retry server attributes")
+    raw_method = attributes.get("http.request.method", attributes.get("http.method"))
+    name = entry.get("name")
+    if raw_method is None and isinstance(name, str) and " " in name:
+        raw_method = name.split(" ", 1)[0]
+    method = str(raw_method or "").upper()
+    if method != "POST":
+        return None
+
+    route = attributes.get("http.route")
+    if route == RETRY_ROUTE_TEMPLATE:
+        return method, RETRY_ROUTE_TEMPLATE
+    if route is not None:
+        return None
+    # Some pinned OpenTelemetry/FastAPI combinations expose only the sanitized
+    # span name or concrete URL path. Accept only the exact expected path; never
+    # use a broad suffix/regex that could bind another retry endpoint.
+    controlled_paths: set[str] = set()
+    for key in ("url.path", "http.target"):
+        value = attributes.get(key)
+        if isinstance(value, str):
+            controlled_paths.add(value.split("?", 1)[0])
+    controlled_paths.update(_safe_span_paths(attributes))
+    if isinstance(name, str) and name.startswith("POST "):
+        controlled_paths.add(name.removeprefix("POST ").split("?", 1)[0])
+    if RETRY_ROUTE_TEMPLATE in controlled_paths:
+        return method, RETRY_ROUTE_TEMPLATE
+    if expected_retry_path is not None and expected_retry_path in controlled_paths:
+        return method, RETRY_ROUTE_TEMPLATE
+    return None
+
+
+def _tempo_retry_lineage_facts(
+    payload: object,
+    expected_trace_id: str,
+    expected_retry_path: str | None = None,
+) -> dict[str, Any]:
+    if expected_retry_path is not None and (
+        re.fullmatch(r"/api/v1/runs/[A-Za-z0-9_-]{1,160}/retries", expected_retry_path)
+        is None
+    ):
+        raise VerifierFailure("Tempo retry expected path is invalid")
+    root = _mapping(payload, "Tempo trace payload")
+    batches = root.get("batches")
+    if not isinstance(batches, list):
+        raise VerifierFailure("Tempo trace has no resource spans")
+    entries: list[dict[str, Any]] = []
+    for raw_batch in batches:
+        batch = _mapping(raw_batch, "Tempo resource spans")
+        resource = _mapping(batch.get("resource"), "Tempo resource")
+        resource_attributes = _otlp_attributes(
+            resource.get("attributes"), "Tempo resource"
+        )
+        service_name = resource_attributes.get("service.name")
+        if not isinstance(service_name, str) or not service_name:
+            raise VerifierFailure("Tempo retry span service is invalid")
+        for raw_group in _otlp_span_groups(batch):
+            group = _mapping(raw_group, "Tempo scope spans")
+            spans = group.get("spans")
+            if not isinstance(spans, list):
+                raise VerifierFailure("Tempo scope spans are invalid")
+            for raw_span in spans:
+                span = _mapping(raw_span, "Tempo span")
+                attributes = _otlp_attributes(span.get("attributes", []), "Tempo span")
+                span_id = _tempo_span_id(span, "spanId", "Tempo retry")
+                parent_value = span.get("parentSpanId", span.get("parent_span_id"))
+                parent_span_id = (
+                    _tempo_span_id(span, "parentSpanId", "Tempo retry parent")
+                    if parent_value not in {None, ""}
+                    else None
+                )
+                entries.append(
+                    {
+                        "service": service_name,
+                        "name": span.get("name"),
+                        "kind": span.get("kind"),
+                        "span_id": span_id,
+                        "parent_span_id": parent_span_id,
+                        "attributes": attributes,
+                    }
+                )
+
+    outbox_spans = [
+        entry
+        for entry in entries
+        if entry["service"] == "auris-flow-worker"
+        and entry["name"] == "outbox.process"
+        and entry["attributes"].get("auris.business_trace_id") == expected_trace_id
+    ]
+    adapter_spans = [
+        entry
+        for entry in entries
+        if entry["service"] == "auris-flow-worker"
+        and entry["name"] == "outbox.adapter.dispatch"
+        and entry["attributes"].get("auris.business_trace_id") == expected_trace_id
+    ]
+    qdrant_spans = [
+        entry
+        for entry in entries
+        if entry["service"] == "auris-flow-worker"
+        and _client_span(entry["kind"])
+        and "qdrant" in _safe_span_hosts(entry["attributes"])
+    ]
+    qdrant_write_spans = [
+        entry
+        for entry in qdrant_spans
+        if str(
+            entry["attributes"].get(
+                "http.request.method", entry["attributes"].get("http.method", "")
+            )
+        ).upper()
+        == "PUT"
+        and any(
+            path.endswith("/points") for path in _safe_span_paths(entry["attributes"])
+        )
+    ]
+    if len(outbox_spans) != 1 or len(adapter_spans) != 1 or not qdrant_spans:
+        raise VerifierFailure("Tempo retry trace cardinality is invalid")
+    if len(qdrant_write_spans) != 1:
+        raise VerifierFailure("Tempo retry trace lacks one Qdrant point write")
+    outbox = outbox_spans[0]
+    adapter = adapter_spans[0]
+    bff_retry_spans = [
+        entry
+        for entry in entries
+        if entry["service"] == "auris-flow-bff"
+        and _retry_server_binding(entry, expected_retry_path) is not None
+    ]
+    if (
+        len(bff_retry_spans) != 1
+        or bff_retry_spans[0]["span_id"] != outbox["parent_span_id"]
+        or adapter["parent_span_id"] != outbox["span_id"]
+        or any(entry["parent_span_id"] != adapter["span_id"] for entry in qdrant_spans)
+    ):
+        raise VerifierFailure("Tempo retry trace parent chain is invalid")
+    bff = bff_retry_spans[0]
+    server_method, server_route = _retry_server_binding(bff, expected_retry_path) or (
+        "",
+        "",
+    )
+    return {
+        "observed_business_trace_id": expected_trace_id,
+        "bff_span_id_sha256": _sha256_text(bff["span_id"]),
+        "outbox_parent_span_id_sha256": _sha256_text(outbox["parent_span_id"]),
+        "outbox_span_id_sha256": _sha256_text(outbox["span_id"]),
+        "adapter_parent_span_id_sha256": _sha256_text(adapter["parent_span_id"]),
+        "adapter_span_id_sha256": _sha256_text(adapter["span_id"]),
+        "qdrant_parent_span_id_sha256": _sha256_text(
+            qdrant_write_spans[0]["parent_span_id"]
+        ),
+        "bff_server_span_count": len(bff_retry_spans),
+        "bff_server_http_method": server_method,
+        "bff_server_route": server_route,
+        "outbox_process_span_count": len(outbox_spans),
+        "adapter_dispatch_span_count": len(adapter_spans),
+        "qdrant_client_span_count": len(qdrant_spans),
+        "qdrant_write_span_count": len(qdrant_write_spans),
+    }
+
+
+def _wait_tempo_operation(
+    browser: BrowserClient,
+    config: GateConfig,
+    *,
+    otel_trace_id: str,
+    operation: str,
+    expected_business_trace_id: str,
+    expected_retry_path: str,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + config.timeout_seconds
+    while time.monotonic() < deadline:
+        response = browser.raw(
+            "GET",
+            f"{config.tempo_url}/api/traces/{otel_trace_id}",
+            expected={200, 404},
+            label="Tempo dead-letter retry trace query",
+        )
+        if response.status_code == 200:
+            payload = _safe_json_response(
+                response, "Tempo dead-letter retry trace query"
+            )
+            try:
+                facts = tempo_trace_facts(payload, otel_trace_id, operation)
+                lineage_facts = _tempo_retry_lineage_facts(
+                    payload,
+                    expected_business_trace_id,
+                    expected_retry_path,
+                )
+            except VerifierFailure:
+                pass
+            else:
+                return {"http_status": 200, **lineage_facts, **facts}
+        time.sleep(0.5)
+    raise VerifierFailure("Tempo did not prove the dead-letter retry operation")
+
+
 def _tempo_observation(
     browser: BrowserClient,
     config: GateConfig,
@@ -3279,6 +4807,18 @@ def _all_faults_verified(state: dict[str, Any]) -> None:
     ]
     if missing:
         raise VerifierFailure("finalize requires every recovery case")
+
+
+def recovery_proof_ids(dependency: str) -> list[str]:
+    if dependency not in DEPENDENCIES:
+        raise VerifierFailure("recovery dependency is invalid")
+    if dependency == "dead_letter_retry":
+        return [
+            "dead_letter_retry",
+            "dead_letter_retry_qdrant",
+            "dead_letter_retry_trace",
+        ]
+    return [dependency]
 
 
 def recovery_case_from_facts(
@@ -3378,6 +4918,195 @@ def recovery_case_from_facts(
         no_duplicate_business_outcome = (
             authority_consistent and facts.get("remote_receipt_count") == 1
         )
+    elif dependency == "dead_letter_retry":
+        source_hash = facts.get("source_run_id_sha256")
+        retry_hash = facts.get("retry_run_id_sha256")
+        snapshot_before = facts.get("source_snapshot_sha256_before")
+        snapshot_after = facts.get("source_snapshot_sha256_after")
+        ledger_before = facts.get("source_attempt_ledger_sha256_before")
+        ledger_after = facts.get("source_attempt_ledger_sha256_after")
+        source_event_id = _positive_int(
+            facts.get("source_event_id"), "dead-letter source event id"
+        )
+        retry_event_id = _positive_int(
+            facts.get("retry_event_id"), "dead-letter retry event id"
+        )
+        source_trace_id = facts.get("source_trace_id")
+        required_hashes = (
+            source_hash,
+            retry_hash,
+            facts.get("source_event_aggregate_id_sha256"),
+            facts.get("retry_event_aggregate_id_sha256"),
+            facts.get("retry_payload_retry_of_run_id_sha256"),
+            facts.get("source_last_error_sha256"),
+            snapshot_before,
+            snapshot_after,
+            ledger_before,
+            ledger_after,
+            facts.get("idempotency_request_sha256"),
+            facts.get("expected_idempotency_request_sha256"),
+            facts.get("idempotency_response_run_id_sha256"),
+            facts.get("idempotency_user_sha256"),
+            facts.get("expected_retry_idempotency_key_sha256"),
+            facts.get("retry_audit_actor_sha256"),
+            facts.get("retry_audit_idempotency_key_sha256"),
+            facts.get("first_response_sha256"),
+            facts.get("replay_response_sha256"),
+            facts.get("stored_response_sha256"),
+            facts.get("retry_dispatch_idempotency_key_sha256"),
+            facts.get("retry_dispatch_request_sha256"),
+            facts.get("retry_attempt_request_sha256"),
+            facts.get("retry_attempt_id_sha256"),
+            facts.get("retry_expected_attempt_id_sha256"),
+            facts.get("retry_point_id_sha256"),
+            facts.get("retry_dispatch_payload_sha256"),
+            facts.get("retry_attempt_payload_sha256"),
+            facts.get("point_id_sha256"),
+            facts.get("dispatch_point_id_sha256"),
+            facts.get("attempt_point_id_sha256"),
+            facts.get("payload_sha256"),
+            facts.get("dispatch_payload_sha256"),
+            facts.get("attempt_payload_sha256"),
+            facts.get("dispatch_idempotency_key_sha256"),
+            facts.get("dispatch_request_sha256"),
+            facts.get("attempt_request_sha256"),
+            facts.get("attempt_id_sha256"),
+            facts.get("bff_span_id_sha256"),
+            facts.get("outbox_parent_span_id_sha256"),
+            facts.get("outbox_span_id_sha256"),
+            facts.get("adapter_parent_span_id_sha256"),
+            facts.get("adapter_span_id_sha256"),
+            facts.get("qdrant_parent_span_id_sha256"),
+        )
+        proven = (
+            all(
+                isinstance(value, str) and SHA256_PATTERN.fullmatch(value) is not None
+                for value in required_hashes
+            )
+            and source_hash != retry_hash
+            and source_event_id != retry_event_id
+            and facts.get("source_event_aggregate_id_sha256") == source_hash
+            and facts.get("retry_event_aggregate_id_sha256") == retry_hash
+            and facts.get("source_payload_dead_letter_event_id") == source_event_id
+            and facts.get("retry_payload_retry_of_event_id") == source_event_id
+            and facts.get("retry_payload_retry_of_run_id_sha256") == source_hash
+            and isinstance(source_trace_id, str)
+            and BUSINESS_TRACE_PATTERN.fullmatch(source_trace_id) is not None
+            and facts.get("retry_payload_retry_of_trace_id") == source_trace_id
+            and facts.get("source_status_before") == "failed"
+            and facts.get("source_status_after") == "failed"
+            and facts.get("source_terminal_reason") == "outbox_dispatch_dead_letter"
+            and _positive_int(
+                facts.get("source_status_version"), "dead-letter source status version"
+            )
+            >= 3
+            and facts.get("source_event_status") == "dead_letter"
+            and facts.get("source_delivery_state") == "failed"
+            and facts.get("source_error_code") == "QDRANT_PAYLOAD_INVALID"
+            and facts.get("source_lease_generation") == 1
+            and facts.get("source_dead_letter_attempt_count") == 1
+            and snapshot_after == snapshot_before
+            and ledger_after == ledger_before
+            and facts.get("retry_response_replayed") is True
+            and facts.get("first_response_sha256")
+            == facts.get("replay_response_sha256")
+            == facts.get("stored_response_sha256")
+            and facts.get("idempotency_record_count") == 1
+            and facts.get("idempotency_state") == "completed"
+            and facts.get("idempotency_status_code") == 202
+            and facts.get("idempotency_request_sha256")
+            == facts.get("expected_idempotency_request_sha256")
+            and facts.get("idempotency_response_run_id_sha256") == retry_hash
+            and facts.get("retry_audit_actor_sha256")
+            == facts.get("idempotency_user_sha256")
+            and facts.get("retry_audit_idempotency_key_sha256")
+            == facts.get("expected_retry_idempotency_key_sha256")
+            and facts.get("retry_run_count") == 1
+            and facts.get("retry_event_count") == 1
+            and facts.get("retry_dispatch_attempt_count") == 1
+            and facts.get("retry_event_status") == "processed"
+            and facts.get("retry_run_status") == "success"
+            and facts.get("retry_trace_inherited") is True
+            and facts.get("retry_audit_count") == 1
+            and facts.get("retry_audit_trace_matches") is True
+            and facts.get("retry_audit_lineage_matches") is True
+            and facts.get("retry_dispatch_request_sha256")
+            == facts.get("retry_attempt_request_sha256")
+            and facts.get("retry_attempt_id_sha256")
+            == facts.get("retry_expected_attempt_id_sha256")
+            and facts.get("retry_dispatch_payload_sha256")
+            == facts.get("retry_attempt_payload_sha256")
+            and facts.get("http_status") == 200
+            and isinstance(facts.get("collection"), str)
+            and bool(facts.get("collection"))
+            and facts.get("tenant_id") == SCOPE[0]
+            and facts.get("project_id") == SCOPE[1]
+            and facts.get("trace_id") == source_trace_id
+            and facts.get("filtered_point_count") == 1
+            and facts.get("point_occurrences") == 1
+            and facts.get("cross_tenant_count") == 0
+            and facts.get("cross_project_count") == 0
+            and facts.get("scope_match") is True
+            and facts.get("dispatch_receipt_match") is True
+            and facts.get("attempt_receipt_match") is True
+            and facts.get("payload_hash_match") is True
+            and facts.get("dispatch_request_sha256")
+            == facts.get("attempt_request_sha256")
+            and facts.get("point_id_sha256")
+            == facts.get("dispatch_point_id_sha256")
+            == facts.get("attempt_point_id_sha256")
+            == facts.get("retry_point_id_sha256")
+            and facts.get("payload_sha256")
+            == facts.get("dispatch_payload_sha256")
+            == facts.get("attempt_payload_sha256")
+            == facts.get("retry_dispatch_payload_sha256")
+            and facts.get("dispatch_idempotency_key_sha256")
+            == facts.get("retry_dispatch_idempotency_key_sha256")
+            and facts.get("dispatch_request_sha256")
+            == facts.get("retry_dispatch_request_sha256")
+            and facts.get("attempt_request_sha256")
+            == facts.get("retry_attempt_request_sha256")
+            and facts.get("attempt_id_sha256") == facts.get("retry_attempt_id_sha256")
+            and facts.get("observed_business_trace_id") == source_trace_id
+            and re.fullmatch(r"[0-9a-f]{32}", str(facts.get("otel_trace_id") or ""))
+            is not None
+            and facts.get("otel_trace_id") == facts.get("retry_event_otel_trace_id")
+            and facts.get("bff_span_id_sha256")
+            == facts.get("outbox_parent_span_id_sha256")
+            and facts.get("outbox_span_id_sha256")
+            == facts.get("adapter_parent_span_id_sha256")
+            and facts.get("adapter_span_id_sha256")
+            == facts.get("qdrant_parent_span_id_sha256")
+            and facts.get("bff_server_span_count") == 1
+            and facts.get("bff_server_http_method") == "POST"
+            and facts.get("bff_server_route") == RETRY_ROUTE_TEMPLATE
+            and facts.get("outbox_process_span_count") == 1
+            and facts.get("adapter_dispatch_span_count") == 1
+            and _positive_int(
+                facts.get("qdrant_client_span_count"), "retry Qdrant client span count"
+            )
+            >= 1
+            and facts.get("qdrant_write_span_count") == 1
+            and facts.get("services") == sorted(OPERATION_OTEL_SERVICES["qdrant"])
+            and facts.get("components") == sorted(OPERATION_OTEL_COMPONENTS["qdrant"])
+            and _positive_int(facts.get("span_count"), "retry trace span count") >= 1
+            and _positive_int(
+                facts.get("client_span_count"), "retry trace client span count"
+            )
+            >= 1
+        )
+        no_duplicate_business_outcome = bool(
+            authority_consistent
+            and facts.get("retry_run_count") == 1
+            and facts.get("retry_event_count") == 1
+            and facts.get("retry_dispatch_attempt_count") == 1
+            and facts.get("filtered_point_count") == 1
+            and facts.get("point_occurrences") == 1
+            and facts.get("cross_tenant_count") == 0
+            and facts.get("cross_project_count") == 0
+            and snapshot_after == snapshot_before
+            and ledger_after == ledger_before
+        )
     else:
         target_dependency = dependency.removesuffix("_outage")
         proven = (
@@ -3404,7 +5133,7 @@ def recovery_case_from_facts(
         "proven": proven,
         "authority_consistent": authority_consistent,
         "no_duplicate_business_outcome": no_duplicate_business_outcome,
-        "raw_proof_ids": [dependency],
+        "raw_proof_ids": recovery_proof_ids(dependency),
     }
 
 
@@ -3657,10 +5386,18 @@ def _finalize_phase(config: GateConfig) -> None:
         "bundle_sha256": canonical_sha256(records),
     }
 
-    recovery = {
-        dependency: recovery_case_from_facts(dependency, proof_facts[dependency])
-        for dependency in DEPENDENCIES
-    }
+    recovery: dict[str, dict[str, Any]] = {}
+    for dependency in DEPENDENCIES:
+        combined_facts: dict[str, Any] = {}
+        for proof_id in recovery_proof_ids(dependency):
+            candidate = _mapping(proof_facts.get(proof_id), f"{proof_id} facts")
+            if any(
+                key in combined_facts and combined_facts[key] != value
+                for key, value in candidate.items()
+            ):
+                raise VerifierFailure("final recovery proof identity bindings conflict")
+            combined_facts.update(candidate)
+        recovery[dependency] = recovery_case_from_facts(dependency, combined_facts)
     linked_components = linked_components_from_facts(
         proof_facts,
         trace_ids=trace_ids,

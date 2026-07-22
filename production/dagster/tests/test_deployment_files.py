@@ -54,3 +54,73 @@ def test_runtime_dependencies_match_compose_mysql_url_driver() -> None:
     source = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"pymysql==1.1.1"' in source
     assert '"cryptography==49.0.0"' in source
+
+
+def test_compose_gives_only_code_location_exact_version_audio_read_credentials() -> None:
+    compose = yaml.safe_load((ROOT.parent / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    code = services["dagster-code"]
+
+    assert (
+        code["environment"]
+        | {
+            "AURIS_AUDIO_OBJECT_STORAGE_PROVIDER": "minio",
+            "AURIS_AUDIO_OBJECT_STORAGE_ENDPOINT": "http://minio:9000",
+            "AURIS_AUDIO_OBJECT_STORAGE_REGION": "us-east-1",
+            "AURIS_AUDIO_OBJECT_STORAGE_ALLOWED_BUCKETS": "auris-flow",
+            "AURIS_AUDIO_OBJECT_STORAGE_ACCESS_KEY_FILE": (
+                "/run/secrets/object_storage_access_key"
+            ),
+            "AURIS_AUDIO_OBJECT_STORAGE_SECRET_KEY_FILE": (
+                "/run/secrets/object_storage_secret_key"
+            ),
+        }
+        == code["environment"]
+    )
+    assert {"object_storage_access_key", "object_storage_secret_key"}.issubset(set(code["secrets"]))
+    for service_name in ("dagster-webserver", "dagster-daemon"):
+        assert "object_storage_access_key" not in services[service_name].get("secrets", [])
+        assert not any(
+            name.startswith("AURIS_AUDIO_OBJECT_STORAGE_")
+            for name in services[service_name].get("environment", {})
+        )
+
+
+def test_compose_wires_https_audio_provider_and_secret_only_to_code_location() -> None:
+    compose = yaml.safe_load((ROOT.parent / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    code = services["dagster-code"]
+    environment = code["environment"]
+
+    assert environment["AURIS_AUDIO_INFERENCE_PROVIDER"] == (
+        "${AURIS_AUDIO_INFERENCE_PROVIDER:?set AURIS_AUDIO_INFERENCE_PROVIDER}"
+    )
+    assert environment["AURIS_AUDIO_INFERENCE_ALLOWED_MODELS"] == (
+        "${AURIS_AUDIO_INFERENCE_ALLOWED_MODELS:?set AURIS_AUDIO_INFERENCE_ALLOWED_MODELS}"
+    )
+    assert environment["AURIS_AUDIO_INFERENCE_ENDPOINT"] == (
+        "${AURIS_AUDIO_INFERENCE_ENDPOINT:?set AURIS_AUDIO_INFERENCE_ENDPOINT}"
+    )
+    assert environment["AURIS_AUDIO_INFERENCE_API_TOKEN_FILE"] == (
+        "/run/secrets/audio_inference_api_token"  # noqa: S105 - path, not a token
+    )
+    assert environment["AURIS_AUDIO_INFERENCE_TIMEOUT_SECONDS"] == "30"
+    assert environment["AURIS_AUDIO_INFERENCE_MAX_RESPONSE_BYTES"] == "1048576"
+    assert environment["AURIS_AUDIO_RESULT_BUCKET"] == "auris-flow"
+    assert "audio_inference_api_token" in code["secrets"]
+    assert set(code["networks"]) == {"internal", "app-egress"}
+    for service_name in ("dagster-webserver", "dagster-daemon", "bff", "worker"):
+        service = services[service_name]
+        assert "audio_inference_api_token" not in service.get("secrets", [])
+        audio_environment = {
+            name
+            for name in service.get("environment", {})
+            if name.startswith("AURIS_AUDIO_INFERENCE_")
+        }
+        if service_name in {"bff", "worker"}:
+            assert audio_environment == {
+                "AURIS_AUDIO_INFERENCE_PROVIDER",
+                "AURIS_AUDIO_INFERENCE_ALLOWED_MODELS",
+            }
+        else:
+            assert not audio_environment

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -45,6 +46,7 @@ query AurisRealDagsterDaemonHealth {
         daemonType
         required
         healthy
+        lastHeartbeatTime
       }
     }
   }
@@ -54,6 +56,8 @@ query AurisRealDagsterDaemonHealth {
 TERMINAL_STATUSES = frozenset({"SUCCESS", "FAILURE", "CANCELED"})
 COMMIT_PATTERN = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 MAX_GRAPHQL_RESPONSE_BYTES = 1_048_576
+DAGSTER_HEARTBEAT_MAX_AGE_SECONDS = 90.0
+DAGSTER_HEARTBEAT_FUTURE_SKEW_SECONDS = 5.0
 
 
 class GateFailure(RuntimeError):
@@ -186,12 +190,14 @@ def validate_daemon_health(response: dict[str, Any]) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     seen_types: set[str] = set()
     required_count = 0
+    heartbeat_now = time.time()
     for status in statuses:
         if not isinstance(status, dict):
             raise GateFailure("real Dagster daemon health entry is invalid")
         daemon_type = status.get("daemonType")
         required = status.get("required")
         healthy = status.get("healthy")
+        last_heartbeat = status.get("lastHeartbeatTime")
         if (
             not isinstance(daemon_type, str)
             or not daemon_type
@@ -200,6 +206,12 @@ def validate_daemon_health(response: dict[str, Any]) -> list[dict[str, Any]]:
             or (healthy is not None and not isinstance(healthy, bool))
         ):
             raise GateFailure("real Dagster daemon health entry is invalid")
+        if last_heartbeat is not None and (
+            isinstance(last_heartbeat, bool)
+            or not isinstance(last_heartbeat, (int, float))
+            or not math.isfinite(float(last_heartbeat))
+        ):
+            raise GateFailure("real Dagster daemon heartbeat is invalid")
         seen_types.add(daemon_type)
         if required:
             required_count += 1
@@ -207,11 +219,24 @@ def validate_daemon_health(response: dict[str, Any]) -> list[dict[str, Any]]:
                 raise GateFailure(
                     f"required real Dagster daemon is unhealthy: {daemon_type}"
                 )
+            if (
+                last_heartbeat is None
+                or float(last_heartbeat)
+                < heartbeat_now - DAGSTER_HEARTBEAT_MAX_AGE_SECONDS
+                or float(last_heartbeat)
+                > heartbeat_now + DAGSTER_HEARTBEAT_FUTURE_SKEW_SECONDS
+            ):
+                raise GateFailure(
+                    f"required real Dagster daemon heartbeat is untrusted: {daemon_type}"
+                )
         normalized.append(
             {
                 "daemon_type": daemon_type,
                 "required": required,
                 "healthy": healthy,
+                "last_heartbeat_time": (
+                    float(last_heartbeat) if last_heartbeat is not None else None
+                ),
             }
         )
     if required_count == 0:

@@ -3,11 +3,19 @@ from typing import Any
 from dagster import ConfigMapping, Definitions, Field, OpExecutionContext, Permissive, job, op
 
 from auris_flow_dagster.callback import CompletionCallbackClient
-from auris_flow_dagster.contracts import validate_auris_context
+from auris_flow_dagster.contracts import (
+    validate_audio_execution_envelope,
+    validate_auris_context,
+)
 from auris_flow_dagster.observability import configure_observability, domain_span
-from auris_flow_dagster.runtime import execute_and_report
+from auris_flow_dagster.runtime import (
+    configured_audio_runtime_dependencies,
+    execute_and_report,
+    execute_audio_intelligence_and_report,
+)
 
 _OBSERVABILITY = configure_observability()
+_AUDIO_PROVIDER, _AUDIO_RESULT_STORE = configured_audio_runtime_dependencies()
 
 
 def map_auris_run_config(config: dict[str, Any]) -> dict[str, Any]:
@@ -39,6 +47,38 @@ auris_run_config = ConfigMapping(
         }
     ),
     config_fn=map_auris_run_config,
+)
+
+
+def map_audio_intelligence_run_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Validate both scope and immutable input binding before Dagster plans the op."""
+
+    scope = validate_auris_context(config.get("auris_context"))
+    validate_audio_execution_envelope(
+        config.get("execution_envelope"),
+        auris_context=scope,
+    )
+    return {
+        "ops": {
+            "execute_auris_flow_audio_intelligence_v1": {
+                "config": {
+                    "auris_context": config["auris_context"],
+                    "execution_envelope": config["execution_envelope"],
+                }
+            }
+        }
+    }
+
+
+audio_intelligence_run_config = ConfigMapping(
+    config_schema={
+        "auris_context": Field(Permissive(), is_required=True),  # type: ignore[no-untyped-call]
+        "execution_envelope": Field(  # type: ignore[no-untyped-call]
+            Permissive(),  # type: ignore[no-untyped-call]
+            is_required=True,
+        ),
+    },
+    config_fn=map_audio_intelligence_run_config,
 )
 
 
@@ -77,6 +117,45 @@ def execute_auris_flow_domain_work(context: OpExecutionContext) -> dict[str, Any
     return dict(result)
 
 
+@op(
+    name="execute_auris_flow_audio_intelligence_v1",
+    description="验证精确版本音频，调用受策略约束的 HTTPS 推理服务并持久化结果证据。",
+    config_schema={
+        "auris_context": Field(Permissive(), is_required=True),  # type: ignore[no-untyped-call]
+        "execution_envelope": Field(  # type: ignore[no-untyped-call]
+            Permissive(),  # type: ignore[no-untyped-call]
+            is_required=True,
+        ),
+    },
+)
+def execute_auris_flow_audio_intelligence_v1(context: OpExecutionContext) -> dict[str, Any]:
+    scope = validate_auris_context(context.op_config["auris_context"])
+    envelope = validate_audio_execution_envelope(
+        context.op_config["execution_envelope"],
+        auris_context=scope,
+    )
+    with domain_span(scope):
+        context.log.info(
+            "Auris Flow audio input verification started",
+            extra={
+                "auris": {
+                    **scope.public_metadata(),
+                    "execution_contract": envelope.execution_contract,
+                    "execution_envelope_sha256": envelope.sha256,
+                }
+            },
+        )
+        result = execute_audio_intelligence_and_report(
+            scope=scope,
+            dagster_run_id=context.run_id,
+            envelope=envelope,
+            callback=CompletionCallbackClient(),
+            provider=_AUDIO_PROVIDER,
+            manifest_store=_AUDIO_RESULT_STORE,
+        )
+    return dict(result)
+
+
 @job(
     name="auris_flow_generic_job",
     description="Auris Flow 通用领域执行入口；保持租户、项目与 trace 全链路关联。",
@@ -86,4 +165,13 @@ def auris_flow_generic_job() -> None:
     execute_auris_flow_domain_work()
 
 
-defs = Definitions(jobs=[auris_flow_generic_job])
+@job(
+    name="auris_flow_audio_intelligence_v1",
+    description="Auris Flow 音频智能 v1 严格输入完整性执行入口。",
+    config=audio_intelligence_run_config,
+)
+def auris_flow_audio_intelligence_v1() -> None:
+    execute_auris_flow_audio_intelligence_v1()
+
+
+defs = Definitions(jobs=[auris_flow_generic_job, auris_flow_audio_intelligence_v1])

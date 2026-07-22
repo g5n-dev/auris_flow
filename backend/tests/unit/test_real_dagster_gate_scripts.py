@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
@@ -80,6 +81,11 @@ def _render_dagster_gate_compose() -> dict[str, object]:
             "AURIS_EXTERNAL_CALLBACK_HOST": "callback.invalid",
             "AURIS_EMBEDDING_ENDPOINT": "https://embedding.invalid/v1/embeddings",
             "AURIS_EMBEDDING_MODEL": "dagster-network-unit",
+            "AURIS_AUDIO_INFERENCE_PROVIDER": "audio_intelligence_default",
+            "AURIS_AUDIO_INFERENCE_ALLOWED_MODELS": "audio-v2.3.1",
+            "AURIS_AUDIO_INFERENCE_ENDPOINT": (
+                "https://audio-inference.invalid/v1/audio-intelligence"
+            ),
             "AURIS_SECRETS_DIR": "/tmp/auris-dagster-network-unit",
         },
         check=False,
@@ -497,11 +503,13 @@ def test_real_dagster_driver_requires_healthy_required_daemons() -> None:
                             "daemonType": "SENSOR",
                             "required": True,
                             "healthy": True,
+                            "lastHeartbeatTime": time.time(),
                         },
                         {
                             "daemonType": "SCHEDULER",
                             "required": True,
                             "healthy": True,
+                            "lastHeartbeatTime": time.time(),
                         },
                         {
                             "daemonType": "OPTIONAL_TEST_DAEMON",
@@ -515,12 +523,58 @@ def test_real_dagster_driver_requires_healthy_required_daemons() -> None:
     }
 
     assert module.validate_daemon_health(response) == [
-        {"daemon_type": "OPTIONAL_TEST_DAEMON", "required": False, "healthy": None},
-        {"daemon_type": "SCHEDULER", "required": True, "healthy": True},
-        {"daemon_type": "SENSOR", "required": True, "healthy": True},
+        {
+            "daemon_type": "OPTIONAL_TEST_DAEMON",
+            "required": False,
+            "healthy": None,
+            "last_heartbeat_time": None,
+        },
+        {
+            "daemon_type": "SCHEDULER",
+            "required": True,
+            "healthy": True,
+            "last_heartbeat_time": response["data"]["instance"]["daemonHealth"][
+                "allDaemonStatuses"
+            ][1]["lastHeartbeatTime"],
+        },
+        {
+            "daemon_type": "SENSOR",
+            "required": True,
+            "healthy": True,
+            "last_heartbeat_time": response["data"]["instance"]["daemonHealth"][
+                "allDaemonStatuses"
+            ][0]["lastHeartbeatTime"],
+        },
     ]
     response["data"]["instance"]["daemonHealth"]["allDaemonStatuses"][0]["healthy"] = False
     with pytest.raises(module.GateFailure, match="SENSOR"):
+        module.validate_daemon_health(response)
+
+
+@pytest.mark.parametrize(
+    "heartbeat",
+    [None, "invalid", True, float("nan"), time.time() - 3600, time.time() + 3600],
+)
+def test_real_dagster_driver_rejects_untrusted_required_daemon_heartbeat(
+    heartbeat: object,
+) -> None:
+    module = _load_script("verify_real_dagster.py")
+    status: dict[str, object] = {
+        "daemonType": "SENSOR",
+        "required": True,
+        "healthy": True,
+    }
+    if heartbeat is not None:
+        status["lastHeartbeatTime"] = heartbeat
+    response = {
+        "data": {
+            "instance": {
+                "daemonHealth": {"allDaemonStatuses": [status]},
+            }
+        }
+    }
+
+    with pytest.raises(module.GateFailure, match="heartbeat"):
         module.validate_daemon_health(response)
 
 

@@ -24,6 +24,7 @@ from opentelemetry.trace import (
     NonRecordingSpan,
     Span,
     SpanContext,
+    Status,
     TraceFlags,
     TraceState,
     set_span_in_context,
@@ -47,6 +48,23 @@ _SENSITIVE_ATTRIBUTE_PARTS = (
     "url.query",
 )
 _URL_ATTRIBUTE_KEYS = frozenset({"http.url", "url.full", "url.original"})
+_RAW_REQUEST_ATTRIBUTE_KEYS = frozenset(
+    {
+        "client.address",
+        "client.port",
+        "enduser.id",
+        "http.client_ip",
+        "http.target",
+        "http.user_agent",
+        "net.peer.ip",
+        "net.peer.port",
+        "network.peer.address",
+        "network.peer.port",
+        "url.path",
+        "user.id",
+        "user_agent.original",
+    }
+)
 _SAFE_HEADER_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _ACTIVE_PROVIDER: TracerProvider | None = None
 
@@ -59,7 +77,7 @@ def _safe_url(value: object) -> str:
         if not parsed.scheme or not parsed.hostname:
             return "[REDACTED]"
         port = f":{parsed.port}" if parsed.port is not None else ""
-        return urlunsplit((parsed.scheme, f"{parsed.hostname}{port}", parsed.path, "", ""))
+        return urlunsplit((parsed.scheme, f"{parsed.hostname}{port}", "", "", ""))
     except (TypeError, ValueError):
         return "[REDACTED]"
 
@@ -72,6 +90,8 @@ def sanitize_attributes(
     sanitized: dict[str, AttributeValue] = {}
     for key, value in attributes.items():
         normalized = key.casefold().replace("-", "_")
+        if key.casefold() in _RAW_REQUEST_ATTRIBUTE_KEYS:
+            continue
         if key in _URL_ATTRIBUTE_KEYS:
             sanitized[key] = _safe_url(value)
             continue
@@ -112,7 +132,9 @@ def _sanitize_span(span: ReadableSpan) -> ReadableSpan:
             for link in span.links
         ),
         kind=span.kind,
-        status=span.status,
+        # Never export SDK-generated exception descriptions: they can contain
+        # credentials, SQL values or object paths even after event redaction.
+        status=Status(span.status.status_code),
         start_time=span.start_time,
         end_time=span.end_time,
         instrumentation_scope=span.instrumentation_scope,
@@ -191,7 +213,14 @@ def configure_observability(
     *, exporter_factory: ExporterFactory = OTLPSpanExporter
 ) -> DagsterObservabilityRuntime:
     global _ACTIVE_PROVIDER
+    production = os.getenv("APP_ENV", "prod").strip().casefold() in {
+        "prod",
+        "production",
+        "release",
+    }
     if not _enabled(os.getenv("OTEL_ENABLED", "false")):
+        if production:
+            raise RuntimeError("OTEL_CONFIGURATION_FAILED")
         return DagsterObservabilityRuntime(enabled=False)
     if _ACTIVE_PROVIDER is not None:
         return DagsterObservabilityRuntime(enabled=True, provider=_ACTIVE_PROVIDER)
@@ -199,7 +228,11 @@ def configure_observability(
         endpoint = _validated_endpoint(os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", ""))
         sample_ratio = float(os.getenv("OTEL_TRACE_SAMPLE_RATIO", "0.1"))
         timeout_seconds = float(os.getenv("OTEL_EXPORT_TIMEOUT_SECONDS", "3"))
-        if not 0 <= sample_ratio <= 1 or not 0 < timeout_seconds <= 30:
+        if (
+            not 0 <= sample_ratio <= 1
+            or (production and sample_ratio < 0.01)
+            or not 0 < timeout_seconds <= 30
+        ):
             raise ValueError("invalid OTel sampling or timeout")
         delegate = exporter_factory(
             endpoint=endpoint,
@@ -219,7 +252,9 @@ def configure_observability(
         URLLibInstrumentor().instrument(tracer_provider=provider)
         _ACTIVE_PROVIDER = provider
         return DagsterObservabilityRuntime(enabled=True, provider=provider)
-    except Exception:  # noqa: BLE001 - observability cannot prevent code-location startup.
+    except Exception:  # noqa: BLE001 - emit only a stable, non-secret failure code.
+        if production:
+            raise RuntimeError("OTEL_CONFIGURATION_FAILED") from None
         return DagsterObservabilityRuntime(
             enabled=False,
             error_code="OTEL_CONFIGURATION_FAILED",

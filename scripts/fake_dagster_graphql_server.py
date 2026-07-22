@@ -7,6 +7,7 @@ import json
 import os
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,7 @@ DISPATCH_IDEMPOTENCY_TAG = "auris/dispatch_idempotency_key"
 DEFAULT_REPOSITORY_LOCATION_NAME = "auris_flow_defs"
 DEFAULT_REPOSITORY_NAME = "__repository__"
 DEFAULT_JOB_NAME = "auris_flow_generic_job"
+AUDIO_INTELLIGENCE_JOB_NAME = "auris_flow_audio_intelligence_v1"
 LAUNCH_QUERY_NAME = "LaunchAurisRun"
 ALLOWED_PAYLOAD_KEYS = frozenset({"query", "variables", "operationName"})
 OPERATION_PATTERN = re.compile(r"\A\s*(query|mutation)\s+([_A-Za-z][_0-9A-Za-z]*)\b")
@@ -47,6 +49,9 @@ class FakeDagsterState:
         )
         self.default_job_name = _configured_name(
             "DAGSTER_DEFAULT_JOB_NAME", DEFAULT_JOB_NAME
+        )
+        self.allowed_job_names = frozenset(
+            {self.default_job_name, AUDIO_INTELLIGENCE_JOB_NAME}
         )
         self._lock = threading.Lock()
 
@@ -228,6 +233,7 @@ class FakeDagsterHandler(BaseHTTPRequestHandler):
                                     "daemonType": "QUEUED_RUN_COORDINATOR",
                                     "required": True,
                                     "healthy": True,
+                                    "lastHeartbeatTime": time.time(),
                                 }
                             ]
                         }
@@ -240,7 +246,10 @@ class FakeDagsterHandler(BaseHTTPRequestHandler):
                                 "location": {
                                     "name": self.state.repository_location_name
                                 },
-                                "pipelines": [{"name": self.state.default_job_name}],
+                                "pipelines": [
+                                    {"name": name}
+                                    for name in sorted(self.state.allowed_job_names)
+                                ],
                             }
                         ],
                     },
@@ -324,9 +333,12 @@ class FakeDagsterHandler(BaseHTTPRequestHandler):
         expected_selector = {
             "repositoryLocationName": self.state.repository_location_name,
             "repositoryName": self.state.repository_name,
-            "pipelineName": self.state.default_job_name,
         }
-        if selector != expected_selector:
+        if {
+            key: selector[key] for key in expected_selector
+        } != expected_selector or selector[
+            "pipelineName"
+        ] not in self.state.allowed_job_names:
             self._reject(
                 "SELECTOR_INVALID", "selector does not match the configured workspace"
             )
