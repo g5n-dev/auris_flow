@@ -81,15 +81,22 @@ external repository controls, clean-host installation, or recovery drill below.
   applicable.
 - [ ] Start the single-host Linux candidate with the phased command sequence in
   `production/README.md`: long-lived dependencies use bounded detached wait, while
-  `db-bootstrap`, `minio-bootstrap`, `migrate`, and `identity-bootstrap` run as foreground
+  `minio-volume-init`, `db-bootstrap`, `minio-bootstrap`, `migrate`, and `identity-bootstrap` run as foreground
   one-shots and must each exit zero. Then confirm public `/healthz` reports liveness while
   public `/readyz` returns 200 only when OIDC, MySQL, Redis, MinIO, Qdrant, and real
   Dagster are ready.
-- [ ] Run the production E2E using the real Dagster code server/webserver/daemon, semantic
-  embedding provider, Qdrant, object storage, Worker, Outbox, and signed callback. A
-  protocol fake or deterministic test vector is not production evidence.
+- [ ] Run the production E2E using the real Dagster code server/webserver/daemon, selected
+  HTTPS audio inference provider, semantic embedding provider, Qdrant, versioned object
+  storage/result manifest, Worker, Outbox, and signed callback.
+  A protocol fake or deterministic test vector is not production evidence; neither can certify model
+  quality or the selected production provider.
 - [ ] Exercise Dagster submission, status synchronization, cancellation, timeout,
   completion write-back, bounded retry, restart recovery, and stale fencing rejection.
+- [ ] Force signed `task_run` and `audio_intelligence` completion callbacks to arrive
+  before the dispatch binding commit. Both must reconcile after the authoritative
+  binding appears without exposing or persisting raw result locators in the public Run,
+  completion receipt, or receipt inbox. Audio staging must use a scoped pending storage
+  object rather than copying bucket/key/version into the receipt.
 - [ ] Run `bash scripts/verify_product_dagster_path.sh` and confirm its evidence proves
   BFF submission, tenant/project isolation, confirmed Outbox dispatch, real adapter
   binding, engine status synchronization, signed completion and `SAFE_TERMINATE`
@@ -112,6 +119,9 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Route Alertmanager (or an approved external notification service) to a private
   on-call channel and test dependency-offline, dead-letter growth, disk pressure,
   authentication-failure surge, and backup-failure notifications.
+- [ ] From outside the Compose host, run an independent watchdog that detects complete
+  Prometheus or Alertmanager loss and proves a real notification receipt; in-Compose
+  self-monitoring and `observability-health` startup checks are not sufficient evidence.
 - [ ] Have a maintainer who did not author the implementation follow the installation,
   upgrade/rollback, backup/restore, key rotation, troubleshooting, and security-incident
   runbooks without undocumented local knowledge.
@@ -121,8 +131,17 @@ external repository controls, clean-host installation, or recovery drill below.
 ## P4 — Immutable Supply Chain
 
 - [ ] Confirm `.github/workflows/release-images.yml` runs from the exact candidate commit,
-  builds `linux/amd64` and `linux/arm64`, emits provenance and CycloneDX SBOMs, blocks
+  builds `linux/amd64` and `linux/arm64`, emits a GitHub-OIDC-signed SLSA v1 provenance
+  attestation and CycloneDX SBOM attestation for every exact manifest digest, blocks
   HIGH/CRITICAL vulnerabilities, and signs every image digest with keyless Cosign.
+- [ ] Confirm both local attestation bundles pass `gh attestation verify` immediately after
+  creation and again after artifact download, then independently fetch SLSA and CycloneDX
+  attestations from the authenticated GHCR digest with `--bundle-from-oci`. Bind the exact
+  repository, signer workflow, signer/source commit, tag ref, predicate type, and
+  `--deny-self-hosted-runners`; require at least one registry result and exact equality
+  between every signed CycloneDX predicate and the downloadable SBOM. Confirm each closed
+  image record binds both bundles plus local and registry verification receipts by SHA-256.
+  Treat those sanitized receipts as drift evidence, not an independent trust anchor.
 - [ ] Audit both locked Python graphs and the npm graph with no unexpired high-severity
   exception: backend `uv.lock`, production Dagster `uv.lock`, and frontend
   `package-lock.json`.
@@ -131,10 +150,15 @@ external repository controls, clean-host installation, or recovery drill below.
   `latest`, or unresolved image reference.
 - [ ] Confirm source archive, digest-pinned Compose, image lock, SBOMs, signatures,
   provenance, `CHANGELOG`, `NOTICE`, migration notes, artifact manifest, and
-  `SHA256SUMS` all name the same tag and source commit.
+  `SHA256SUMS` all name the same tag and source commit. The signed final checksum set,
+  rather than an unsigned build-job JSON record, is the release authenticity anchor.
 - [ ] Require the protected `release-publish` approval and confirm the tag-push
   workflow creates a new immutable GitHub Release; it must never overwrite an
-  existing release or publish from a manual-dispatch-only validation.
+  existing release or publish from a manual-dispatch-only validation. Confirm the signed
+  evidence archive is safely extracted and image records are reverified from the archive,
+  and that GitHub API checks immediately before and after publication peel the remote
+  annotated tag to the approved commit. Repository tag ruleset and immutable release
+  settings remain mandatory external controls.
 - [ ] Install the signed artifact on a clean external Linux host using only the published
   README/configuration, complete OIDC and the core business flow, then feed every issue
   back into a new candidate commit.
@@ -152,8 +176,13 @@ external repository controls, clean-host installation, or recovery drill below.
 
 ## Repository Administration
 
-- [ ] Branch protection requires Verify, CodeQL, dependency evidence, image scanning,
-  signed-artifact verification, and an independent release approval.
+- [ ] Default-branch ruleset requires pull requests, independent approval, resolved
+  conversations, and the Verify and CodeQL checks; it forbids force-push and deletion.
+  Required checks must be produced on every pull request.
+- [ ] Release-tag ruleset and the protected `release` / `release-publish` environments
+  require dependency evidence, image scanning, signed-artifact verification, and an
+  independent release approval. Tag-only or manual-dispatch-only jobs must not be
+  configured as default-branch required checks.
 - [ ] GitHub Private Vulnerability Reporting, secret scanning, push protection, CodeQL,
   Dependabot, immutable releases, and tag protection are enabled and tested in the hosted
   repository; local workflow files alone are not evidence.

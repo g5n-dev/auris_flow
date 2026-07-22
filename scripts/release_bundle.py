@@ -60,7 +60,9 @@ REQUIRED_BUNDLE_FILES = (
     "production/scripts/init-secrets.sh",
     "production/scripts/backup.sh",
     "production/scripts/restore.sh",
+    "production/scripts/finalize-restore.sh",
     "production/scripts/verify-backup.sh",
+    "production/backup/restore_state.py",
     "scripts/release_bundle.py",
     "scripts/run_with_deadline.py",
     "scripts/verify_production_compose.py",
@@ -559,10 +561,10 @@ def _verify_exact_bundle_members(
             )
 
     actual_directories: set[str] = set()
-    for path in bundle_root.rglob("*"):
-        metadata = path.lstat()
+    for directory_candidate in bundle_root.rglob("*"):
+        metadata = directory_candidate.lstat()
         if stat.S_ISDIR(metadata.st_mode):
-            relative = path.relative_to(bundle_root).as_posix()
+            relative = directory_candidate.relative_to(bundle_root).as_posix()
             if stat.S_IMODE(metadata.st_mode) != BUNDLE_DIRECTORY_MODE:
                 raise ReleaseBundleError(
                     f"bundle directory mode must be 0755: {relative}"

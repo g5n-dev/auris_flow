@@ -178,6 +178,8 @@ def test_failed_audit_runs_full_matrix_and_never_calls_finalizer(
     for script_name in (
         "verify_clean_clone.sh",
         "verify_all.sh",
+        "verify_observability_rules.sh",
+        "verify_alertmanager_config.sh",
         "verify_production_mysql_migrations.sh",
         "verify_real_stack.sh",
         "verify_real_dagster.sh",
@@ -282,6 +284,8 @@ def test_blocked_production_path_stops_release_before_supply_chain(
     for script_name in (
         "verify_clean_clone.sh",
         "verify_all.sh",
+        "verify_observability_rules.sh",
+        "verify_alertmanager_config.sh",
         "verify_production_mysql_migrations.sh",
         "verify_real_stack.sh",
         "verify_real_dagster.sh",

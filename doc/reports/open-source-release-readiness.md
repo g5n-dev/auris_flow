@@ -33,13 +33,15 @@
 
 - `production/compose.yaml` 包含 MySQL、Redis、MinIO、Qdrant、迁移、Keycloak、身份预置、真实
   Dagster code server/webserver/daemon、BFF、Worker、TLS edge、OTel Collector、Tempo、
-  Prometheus、Grafana 与 node-exporter。
+  Prometheus、Alertmanager、Grafana、node-exporter 与独立联合健康探针。
 - Dagster 使用独立锁图、MySQL storage、领域 job、fencing context 和受签名 completion callback；
-  生产 embedding 使用可替换的 HTTPS 语义接口并严格校验模型与向量维度。
+  生产 embedding 与音频推理使用可替换的 HTTPS 语义接口并严格校验 provider、模型、向量/结果
+  manifest、精确输入版本和 SHA-256；所有携带凭据或签名的 HTTP 客户端拒绝重定向。
 - MySQL 是权威业务事实；MinIO 保存权威对象；Redis 是可丢弃辅助状态，Qdrant 是可重建派生索引。
 - Outbox 实现 lease、fencing、指数退避、最大重试、dead-letter 和受治理重放。备份工具冻结写入后
   保存 MySQL、MinIO 版本/删除标记、Qdrant snapshot/alias，并通过规范 manifest、checksum 和
-  空环境恢复验证一致性。
+  宿主机外置 Ed25519 信任锚验证一致性；`rebuild-required` 只进入 pending 状态，必须完成真实
+  Qdrant 语义重建与严格 readiness 后才能治理化 finalize。
 
 ### P3：可观测性与运维
 
@@ -49,7 +51,14 @@
   固定拒绝 `/metrics`，公开 `/readyz` 精确反代 BFF 的严格依赖状态。
 - Prometheus 告警、Grafana 生产概览、备份 freshness textfile metric、SLO 和安装/升级/回滚/
   恢复/轮换/故障/安全事件 Runbook 已进入候选树。
-- Compose 未内置具体企业通知目标；真实 Alertmanager/私密通知和值班确认必须在 RC 环境提供证据。
+- Compose 内置使用 Docker secret 注入通用 HTTPS webhook 的 Alertmanager，但不内置任何企业通知
+  目标；真实收件、resolved 关闭、私密通知和值班确认必须在 RC 环境提供外部证据。
+- `observability-health` 访问 Collector、Tempo、Prometheus、Alertmanager 和 node-exporter 的真实
+  HTTP 端点，并在内部后台强制导出标记、等待 Collector batch、从 Tempo 按 trace ID 读回；BFF
+  `/readyz` 以 singleflight/短 TTL 导出自身 marker，并经内部精确查询证明同一 trace 已写入 Tempo。
+  查询同时匹配 service name、span name 与 trace ID，而不是仅接受任意 200/JSON。它作为 BFF/Worker/
+  Dagster 启动依赖，但 Prometheus/Alertmanager 自身完全离线仍需宿主机外 watchdog，联合探针不能
+  冒充外部通知证据。
 
 ### P4：不可变供应链
 
@@ -62,14 +71,23 @@
   人工审阅，详见 `THIRD_PARTY_NOTICES.md`，因此供应链正式发行证据会按设计 fail closed。
 - release renderer 把每个 Compose service image 固定到 `tag@sha256:digest`，删除所有 `build`，
   并产出 image lock、manifest 与 `SHA256SUMS`；源码、镜像和元数据必须绑定同一 tag/commit。
+- hosted workflow 还会从 GHCR 验证 SLSA/CycloneDX attestation 的 repository、workflow、signer、
+  source/ref、subject digest 和 predicate，并要求 CycloneDX predicate 与下载 SBOM 完全一致；本地
+  生成的 JSON 不能替代 registry attestation。
 
 ## 开发专项与生产证据边界
 
 `bash scripts/verify_real_stack.sh` 仍是快速开发专项：它真实调用 MySQL、Redis、MinIO、Qdrant，
-但 Dagster endpoint、外部 callback receiver 和 embedding 向量是协议/确定性测试夹具。这个路径可以
-防止适配器退化为本地 receipt，却不能替代 `production/compose.yaml` 中真实 Dagster、真实语义
+但外部 callback receiver、embedding 向量和音频推理 endpoint 是协议夹具；音频夹具固定声明
+`reference_protocol_only=true`、`model_quality_certified=false`。这个路径可以防止适配器退化为本地
+receipt 并验证真实 Dagster 控制面，却不能替代 `production/compose.yaml` 中真实语义/音频模型
 provider、企业 IdP、外部 callback、遥测、故障恢复和备份恢复 E2E。文档和 release 审批不得把
 两类证据混为一谈。
+
+`audio_intelligence` 的早到回执竞争已使用 tenant/project/run 绑定的 pending StorageObject 与净化
+receipt 闭合；可信 dispatch 建立后会复核 external ID、fence、执行 envelope、manifest 和精确对象
+版本，错 scope、错绑定、跨运行复用与重放均拒绝。正式 RC 仍须用真实 provider 做强制竞争 E2E，
+但不得通过重新公开 bucket/key/version 或把对象 locator 写入公共 receipt 来规避。
 
 ## 自动检查
 

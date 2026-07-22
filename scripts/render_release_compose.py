@@ -238,6 +238,8 @@ def render_source_compose(compose_file: Path) -> dict[str, Any]:
         "compose",
         "--file",
         str(compose_file),
+        "--profile",
+        "*",
         "config",
         "--no-interpolate",
         "--no-normalize",

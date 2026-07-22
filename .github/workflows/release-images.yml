@@ -18,6 +18,11 @@ concurrency:
 permissions:
   contents: read
 
+env:
+  GH_CLI_VERSION: "2.96.0"
+  GH_CLI_ASSET_URL: "https://github.com/cli/cli/releases/download/v2.96.0/gh_2.96.0_linux_amd64.tar.gz"
+  GH_CLI_LINUX_AMD64_SHA256: "83d5c2ccad5498f58bf6368acb1ab32588cf43ab3a4b1c301bf36328b1c8bd60"
+
 jobs:
   release-context:
     runs-on: ubuntu-24.04
@@ -48,6 +53,11 @@ jobs:
           expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/release-images.yml@${expected_ref}"
           if [ "${GITHUB_WORKFLOW_REF}" != "${expected_workflow_ref}" ]; then
             echo "release workflow definition must come from the exact requested tag" >&2
+            exit 2
+          fi
+          tag_object_type="$(git cat-file -t "refs/tags/${REQUESTED_TAG}" 2>/dev/null || true)"
+          if [ "${tag_object_type}" != "tag" ]; then
+            echo "release tag must be an annotated tag object" >&2
             exit 2
           fi
           if ! RESOLVED_COMMIT="$(git rev-parse --verify "refs/tags/${REQUESTED_TAG}^{commit}")"; then
@@ -147,6 +157,7 @@ jobs:
     timeout-minutes: 180
     environment: release
     permissions:
+      attestations: write
       contents: read
       id-token: write
       packages: write
@@ -167,6 +178,67 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+
+      - name: Install and verify checksum-pinned GitHub CLI
+        env:
+          GH_CLI_EVIDENCE_PATH: build/image-evidence/${{ matrix.image_id }}.gh-cli-toolchain.json
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
+          extraction="${RUNNER_TEMP}/gh-cli-extract"
+          binary_dir="${RUNNER_TEMP}/gh-cli-bin"
+          test ! -e "${archive}"
+          test ! -e "${extraction}"
+          test ! -e "${binary_dir}"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --fail --location --max-redirs 3 --silent --show-error \
+            --output "${archive}" "${GH_CLI_ASSET_URL}"
+          printf '%s  %s\n' "${GH_CLI_LINUX_AMD64_SHA256}" "${archive}" \
+            | sha256sum --check --strict
+          install -d -m 0700 "${extraction}" "${binary_dir}"
+          tar --extract --gzip --no-same-owner \
+            --file "${archive}" --directory "${extraction}" \
+            "gh_${GH_CLI_VERSION}_linux_amd64/bin/gh"
+          candidate="${extraction}/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh"
+          if [ ! -f "${candidate}" ] || [ -L "${candidate}" ]; then
+            echo "checksum-pinned GitHub CLI archive has an unsafe binary" >&2
+            exit 2
+          fi
+          install -m 0755 "${candidate}" "${binary_dir}/gh"
+          actual_version="$("${binary_dir}/gh" version \
+            | sed -nE '1s/^gh version ([^[:space:]]+) .*/\1/p')"
+          if [ "${actual_version}" != "${GH_CLI_VERSION}" ]; then
+            echo "GitHub CLI version does not match the release tool lock" >&2
+            exit 2
+          fi
+          binary_sha256="$(sha256sum "${binary_dir}/gh" | awk '{print $1}')"
+          evidence_dir="${GH_CLI_EVIDENCE_PATH%/*}"
+          install -d -m 0755 "${evidence_dir}"
+          test ! -e "${GH_CLI_EVIDENCE_PATH}"
+          python3 - "${GH_CLI_EVIDENCE_PATH}" "${actual_version}" \
+            "${GH_CLI_ASSET_URL}" "${GH_CLI_LINUX_AMD64_SHA256}" \
+            "${binary_sha256}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          output, version, asset_url, archive_sha256, binary_sha256 = sys.argv[1:]
+          document = {
+              "schema_version": "auris.release-toolchain.v1",
+              "gh": {
+                  "archive_sha256": archive_sha256,
+                  "asset_url": asset_url,
+                  "binary_sha256": binary_sha256,
+                  "platform": "linux-amd64",
+                  "version": version,
+              },
+          }
+          pathlib.Path(output).write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          echo "${binary_dir}" >> "${GITHUB_PATH}"
 
       - uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
@@ -201,8 +273,10 @@ jobs:
             org.opencontainers.image.revision=${{ needs.release-context.outputs.source_commit }}
             org.opencontainers.image.version=${{ needs.release-context.outputs.release_tag }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-          provenance: mode=max
-          sbom: true
+          # Signed GitHub attestations below replace BuildKit's independently
+          # unverified automatic metadata while retaining explicit CycloneDX.
+          provenance: false
+          sbom: false
 
       - name: Generate downloadable CycloneDX image SBOM
         uses: anchore/sbom-action@f8bdd1d8ac5e901a77a92f111440fdb1b593736b # v0.20.6
@@ -236,6 +310,95 @@ jobs:
           ignore-unfixed: false
           exit-code: "1"
 
+      - id: provenance_attestation
+        name: Generate SLSA v1 provenance attestation for exact image digest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_REPOSITORY }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+          create-storage-record: false
+
+      - id: sbom_attestation
+        name: Generate CycloneDX SBOM attestation for exact image digest
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ env.IMAGE_REPOSITORY }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: build/image-evidence/${{ matrix.image_id }}.cdx.json
+          push-to-registry: true
+          create-storage-record: false
+
+      - name: Preserve distinct local provenance and SBOM attestation bundles
+        env:
+          IMAGE_ID: ${{ matrix.image_id }}
+          PROVENANCE_BUNDLE: ${{ steps.provenance_attestation.outputs.bundle-path }}
+          SBOM_BUNDLE: ${{ steps.sbom_attestation.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PROVENANCE_BUNDLE}" ] || [ -z "${SBOM_BUNDLE}" ]; then
+            echo "both attestation actions must return a local bundle path" >&2
+            exit 2
+          fi
+          if [ "${PROVENANCE_BUNDLE}" = "${SBOM_BUNDLE}" ]; then
+            echo "provenance and SBOM attestations must not reuse one temporary bundle" >&2
+            exit 2
+          fi
+          provenance_output="build/image-evidence/${IMAGE_ID}.provenance.sigstore.json"
+          sbom_output="build/image-evidence/${IMAGE_ID}.sbom.sigstore.json"
+          test ! -e "${provenance_output}"
+          test ! -e "${sbom_output}"
+          cp -- "${PROVENANCE_BUNDLE}" "${provenance_output}"
+          cp -- "${SBOM_BUNDLE}" "${sbom_output}"
+          chmod 0444 "${provenance_output}" "${sbom_output}"
+
+      - name: Immediately verify and sanitize both local attestation bundles
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE_ID: ${{ matrix.image_id }}
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          provenance_raw="${RUNNER_TEMP}/${IMAGE_ID}.provenance.verify.raw.json"
+          sbom_raw="${RUNNER_TEMP}/${IMAGE_ID}.sbom.verify.raw.json"
+          test "${provenance_raw}" != "${sbom_raw}"
+          gh attestation verify \
+            "oci://${IMAGE_REPOSITORY}@${IMAGE_DIGEST}" \
+            --bundle "build/image-evidence/${IMAGE_ID}.provenance.sigstore.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-images.yml" \
+            --signer-digest "${SOURCE_COMMIT}" \
+            --source-digest "${SOURCE_COMMIT}" \
+            --source-ref "${GITHUB_REF}" \
+            --deny-self-hosted-runners \
+            --predicate-type https://slsa.dev/provenance/v1 \
+            --format json > "${provenance_raw}"
+          python3 scripts/release_image_evidence.py sanitize-verification \
+            --input "${provenance_raw}" \
+            --output "build/image-evidence/${IMAGE_ID}.provenance.verification.json" \
+            --repository "${IMAGE_REPOSITORY}" \
+            --image-digest "${IMAGE_DIGEST}" \
+            --predicate-type https://slsa.dev/provenance/v1
+          gh attestation verify \
+            "oci://${IMAGE_REPOSITORY}@${IMAGE_DIGEST}" \
+            --bundle "build/image-evidence/${IMAGE_ID}.sbom.sigstore.json" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-images.yml" \
+            --signer-digest "${SOURCE_COMMIT}" \
+            --source-digest "${SOURCE_COMMIT}" \
+            --source-ref "${GITHUB_REF}" \
+            --deny-self-hosted-runners \
+            --predicate-type https://cyclonedx.org/bom \
+            --format json > "${sbom_raw}"
+          python3 scripts/release_image_evidence.py sanitize-verification \
+            --input "${sbom_raw}" \
+            --output "build/image-evidence/${IMAGE_ID}.sbom.verification.json" \
+            --repository "${IMAGE_REPOSITORY}" \
+            --image-digest "${IMAGE_DIGEST}" \
+            --predicate-type https://cyclonedx.org/bom \
+            --sbom-path "build/image-evidence/${IMAGE_ID}.cdx.json"
+
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
         with:
           cosign-release: "v2.5.3"
@@ -251,23 +414,22 @@ jobs:
             --certificate-identity "${WORKFLOW_IDENTITY}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com
 
-      - name: Record signed image provenance
+      - name: Record verified image evidence and bound file digests
         env:
           IMAGE_ID: ${{ matrix.image_id }}
           IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
           RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
           SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
         run: |
-          mkdir -p build/image-evidence
-          jq -n \
-            --arg image_id "${IMAGE_ID}" \
-            --arg repository "${IMAGE_REPOSITORY}" \
-            --arg tagged_reference "${IMAGE_TAGGED_REFERENCE}" \
-            --arg image "${IMAGE_TAGGED_REFERENCE}@${IMAGE_DIGEST}" \
-            --arg release_tag "${RELEASE_TAG}" \
-            --arg source_commit "${SOURCE_COMMIT}" \
-            '{image_id: $image_id, repository: $repository, tagged_reference: $tagged_reference, image: $image, release_tag: $release_tag, source_commit: $source_commit}' \
-            > "build/image-evidence/${IMAGE_ID}.image.json"
+          python3 scripts/release_image_evidence.py create \
+            --evidence-dir build/image-evidence \
+            --record "build/image-evidence/${IMAGE_ID}.image.json" \
+            --image-id "${IMAGE_ID}" \
+            --repository "${IMAGE_REPOSITORY}" \
+            --tagged-reference "${IMAGE_TAGGED_REFERENCE}" \
+            --image-digest "${IMAGE_DIGEST}" \
+            --release-tag "${RELEASE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}"
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
@@ -276,10 +438,6 @@ jobs:
           path: build/image-evidence/
           if-no-files-found: error
           retention-days: 30
-
-      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
-        with:
-          cosign-release: "v2.5.3"
 
   assemble-release:
     needs: [release-context, dependency-evidence, build-images]
@@ -295,6 +453,67 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install and verify checksum-pinned GitHub CLI
+        env:
+          GH_CLI_EVIDENCE_PATH: build/release/gh-cli-toolchain.json
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
+          extraction="${RUNNER_TEMP}/gh-cli-extract"
+          binary_dir="${RUNNER_TEMP}/gh-cli-bin"
+          test ! -e "${archive}"
+          test ! -e "${extraction}"
+          test ! -e "${binary_dir}"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --fail --location --max-redirs 3 --silent --show-error \
+            --output "${archive}" "${GH_CLI_ASSET_URL}"
+          printf '%s  %s\n' "${GH_CLI_LINUX_AMD64_SHA256}" "${archive}" \
+            | sha256sum --check --strict
+          install -d -m 0700 "${extraction}" "${binary_dir}"
+          tar --extract --gzip --no-same-owner \
+            --file "${archive}" --directory "${extraction}" \
+            "gh_${GH_CLI_VERSION}_linux_amd64/bin/gh"
+          candidate="${extraction}/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh"
+          if [ ! -f "${candidate}" ] || [ -L "${candidate}" ]; then
+            echo "checksum-pinned GitHub CLI archive has an unsafe binary" >&2
+            exit 2
+          fi
+          install -m 0755 "${candidate}" "${binary_dir}/gh"
+          actual_version="$("${binary_dir}/gh" version \
+            | sed -nE '1s/^gh version ([^[:space:]]+) .*/\1/p')"
+          if [ "${actual_version}" != "${GH_CLI_VERSION}" ]; then
+            echo "GitHub CLI version does not match the release tool lock" >&2
+            exit 2
+          fi
+          binary_sha256="$(sha256sum "${binary_dir}/gh" | awk '{print $1}')"
+          evidence_dir="${GH_CLI_EVIDENCE_PATH%/*}"
+          install -d -m 0755 "${evidence_dir}"
+          test ! -e "${GH_CLI_EVIDENCE_PATH}"
+          python3 - "${GH_CLI_EVIDENCE_PATH}" "${actual_version}" \
+            "${GH_CLI_ASSET_URL}" "${GH_CLI_LINUX_AMD64_SHA256}" \
+            "${binary_sha256}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          output, version, asset_url, archive_sha256, binary_sha256 = sys.argv[1:]
+          document = {
+              "schema_version": "auris.release-toolchain.v1",
+              "gh": {
+                  "archive_sha256": archive_sha256,
+                  "asset_url": asset_url,
+                  "binary_sha256": binary_sha256,
+                  "platform": "linux-amd64",
+                  "version": version,
+              },
+          }
+          pathlib.Path(output).write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          echo "${binary_dir}" >> "${GITHUB_PATH}"
+
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -302,6 +521,10 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
+        with:
+          cosign-release: "v2.5.3"
 
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -314,6 +537,114 @@ jobs:
           path: build/release/images
           merge-multiple: true
 
+      - name: Reverify local and OCI registry image attestations before image lock creation
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          image_definitions=(
+            bff:auris-flow-bff
+            dagster:auris-flow-dagster
+            edge:auris-flow-edge
+          )
+          for definition in "${image_definitions[@]}"; do
+            image_id="${definition%%:*}"
+            image_name="${definition#*:}"
+            repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${image_name}"
+            record="build/release/images/${image_id}.image.json"
+            python3 scripts/release_image_evidence.py verify \
+              --evidence-dir build/release/images \
+              --record "${record}" \
+              --image-id "${image_id}" \
+              --repository "${repository}" \
+              --release-tag "${RELEASE_TAG}" \
+              --source-commit "${SOURCE_COMMIT}"
+            image_digest="$(jq -er '.image_digest' "${record}")"
+            provenance_raw="${RUNNER_TEMP}/${image_id}.assembly.provenance.raw.json"
+            sbom_raw="${RUNNER_TEMP}/${image_id}.assembly.sbom.raw.json"
+            registry_provenance_raw="${RUNNER_TEMP}/${image_id}.assembly.registry.provenance.raw.json"
+            registry_sbom_raw="${RUNNER_TEMP}/${image_id}.assembly.registry.sbom.raw.json"
+            gh attestation verify \
+              "oci://${repository}@${image_digest}" \
+              --bundle "build/release/images/${image_id}.provenance.sigstore.json" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-images.yml" \
+              --signer-digest "${SOURCE_COMMIT}" \
+              --source-digest "${SOURCE_COMMIT}" \
+              --source-ref "${GITHUB_REF}" \
+              --deny-self-hosted-runners \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --format json > "${provenance_raw}"
+            python3 scripts/release_image_evidence.py sanitize-verification \
+              --input "${provenance_raw}" \
+              --output "build/release/images/${image_id}.assembly.provenance.verification.json" \
+              --repository "${repository}" \
+              --image-digest "${image_digest}" \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify \
+              "oci://${repository}@${image_digest}" \
+              --bundle "build/release/images/${image_id}.sbom.sigstore.json" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-images.yml" \
+              --signer-digest "${SOURCE_COMMIT}" \
+              --source-digest "${SOURCE_COMMIT}" \
+              --source-ref "${GITHUB_REF}" \
+              --deny-self-hosted-runners \
+              --predicate-type https://cyclonedx.org/bom \
+              --format json > "${sbom_raw}"
+            python3 scripts/release_image_evidence.py sanitize-verification \
+              --input "${sbom_raw}" \
+              --output "build/release/images/${image_id}.assembly.sbom.verification.json" \
+              --repository "${repository}" \
+              --image-digest "${image_digest}" \
+              --predicate-type https://cyclonedx.org/bom \
+              --sbom-path "build/release/images/${image_id}.cdx.json"
+            gh attestation verify \
+              "oci://${repository}@${image_digest}" \
+              --bundle-from-oci \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-images.yml" \
+              --signer-digest "${SOURCE_COMMIT}" \
+              --source-digest "${SOURCE_COMMIT}" \
+              --source-ref "${GITHUB_REF}" \
+              --deny-self-hosted-runners \
+              --predicate-type https://slsa.dev/provenance/v1 \
+              --format json > "${registry_provenance_raw}"
+            python3 scripts/release_image_evidence.py sanitize-verification \
+              --input "${registry_provenance_raw}" \
+              --output "build/release/images/${image_id}.assembly.registry.provenance.verification.json" \
+              --repository "${repository}" \
+              --image-digest "${image_digest}" \
+              --predicate-type https://slsa.dev/provenance/v1
+            gh attestation verify \
+              "oci://${repository}@${image_digest}" \
+              --bundle-from-oci \
+              --repo "${GITHUB_REPOSITORY}" \
+              --signer-workflow "${GITHUB_REPOSITORY}/.github/workflows/release-images.yml" \
+              --signer-digest "${SOURCE_COMMIT}" \
+              --source-digest "${SOURCE_COMMIT}" \
+              --source-ref "${GITHUB_REF}" \
+              --deny-self-hosted-runners \
+              --predicate-type https://cyclonedx.org/bom \
+              --format json > "${registry_sbom_raw}"
+            python3 scripts/release_image_evidence.py sanitize-verification \
+              --input "${registry_sbom_raw}" \
+              --output "build/release/images/${image_id}.assembly.registry.sbom.verification.json" \
+              --repository "${repository}" \
+              --image-digest "${image_digest}" \
+              --predicate-type https://cyclonedx.org/bom \
+              --sbom-path "build/release/images/${image_id}.cdx.json"
+            python3 scripts/release_image_evidence.py add-assembly-verifications \
+              --evidence-dir build/release/images \
+              --record "${record}" \
+              --image-id "${image_id}" \
+              --repository "${repository}" \
+              --release-tag "${RELEASE_TAG}" \
+              --source-commit "${SOURCE_COMMIT}"
+          done
+
       - name: Resolve every Compose image to an immutable digest
         env:
           RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
@@ -322,12 +653,13 @@ jobs:
           AURIS_EXTERNAL_CALLBACK_URL: https://platform.example.com/callbacks/auris-flow
           AURIS_EXTERNAL_CALLBACK_HOST: platform.example.com
         run: |
-          export AURIS_BFF_IMAGE="$(jq -r '.image' build/release/images/bff.image.json)"
-          export AURIS_DAGSTER_IMAGE="$(jq -r '.image' build/release/images/dagster.image.json)"
-          export AURIS_EDGE_IMAGE="$(jq -r '.image' build/release/images/edge.image.json)"
+          export AURIS_BFF_IMAGE="$(jq -er '.image' build/release/images/bff.image.json)"
+          export AURIS_DAGSTER_IMAGE="$(jq -er '.image' build/release/images/dagster.image.json)"
+          export AURIS_EDGE_IMAGE="$(jq -er '.image' build/release/images/edge.image.json)"
           candidate_compose="${RUNNER_TEMP}/auris-candidate-compose.json"
           docker compose --env-file production/.env.example --file production/compose.yaml \
-            config --no-path-resolution --format json --output "${candidate_compose}"
+            --profile '*' config --no-path-resolution --format json \
+            --output "${candidate_compose}"
 
           lock_arguments=()
           while IFS=$'\t' read -r service image; do
@@ -386,35 +718,201 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Promote only verified and signed digests to immutable release tags
-        run: |
-          for image_id in bff dagster edge; do
-            record="build/release/images/${image_id}.image.json"
-            repository="$(jq -er '.repository' "${record}")"
-            tagged_reference="$(jq -er '.tagged_reference' "${record}")"
-            digest="$(jq -er '.image | split("@") | .[1]' "${record}")"
-            if existing_manifest="$(docker buildx imagetools inspect "${tagged_reference}" --format '{{json .Manifest}}' 2>/dev/null)"; then
-              existing_digest="$(jq -er '.digest' <<<"${existing_manifest}")"
-              if [[ "${existing_digest}" != "${digest}" ]]; then
-                echo "refusing to retarget immutable release image ${tagged_reference}" >&2
-                exit 1
-              fi
-            else
-              docker buildx imagetools create \
-                --tag "${tagged_reference}" \
-                "${repository}@${digest}"
-            fi
-          done
-
-      - name: Render and verify the production release bundle
+      - name: Reverify exact application digests from final image lock
         env:
           RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
           SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
           WORKFLOW_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
+          image_bindings=(
+            bff:bff,migrate,identity-bootstrap,worker,qdrant-backup-tool
+            dagster:dagster-code,dagster-webserver,dagster-daemon
+            edge:edge
+          )
+          for binding in "${image_bindings[@]}"; do
+            image_id="${binding%%:*}"
+            services_csv="${binding#*:}"
+            record="build/release/images/${image_id}.image.json"
+            case "${image_id}" in
+              bff) image_name=auris-flow-bff ;;
+              dagster) image_name=auris-flow-dagster ;;
+              edge) image_name=auris-flow-edge ;;
+              *) echo "unknown first-party image id: ${image_id}" >&2; exit 2 ;;
+            esac
+            repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${image_name}"
+            python3 scripts/release_image_evidence.py verify \
+              --evidence-dir build/release/images \
+              --record "${record}" \
+              --image-id "${image_id}" \
+              --repository "${repository}" \
+              --release-tag "${RELEASE_TAG}" \
+              --source-commit "${SOURCE_COMMIT}" \
+              --require-assembly-verifications
+            signed_image="$(jq -er '.image' "${record}")"
+            IFS=',' read -r -a services <<<"${services_csv}"
+            for service in "${services[@]}"; do
+              locked_image="$(jq -er --arg service "${service}" \
+                '.images[$service]' build/release/images.lock.json)"
+              if [ "${locked_image}" != "${signed_image}" ]; then
+                echo "final image lock diverges from signed ${image_id} digest" >&2
+                exit 2
+              fi
+            done
+            cosign verify "${signed_image}" \
+              --certificate-identity "${WORKFLOW_IDENTITY}" \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com
+          done
+
+      - name: Promote only verified and signed digests to immutable release tags
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          resolve_ghcr_manifest_digest() {
+            local repository="$1"
+            local tag="$2"
+            local repository_path token_document registry_token headers http_status
+            local -a digest_headers
+            if [[ ! "${repository}" =~ ^ghcr\.io/[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+              echo "GHCR repository is not a canonical lowercase path" >&2
+              return 2
+            fi
+            repository_path="${repository#ghcr.io/}"
+            if ! token_document="$(curl --proto '=https' --tlsv1.2 \
+              --fail --silent --show-error \
+              --user "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+              --get --data-urlencode 'service=ghcr.io' \
+              --data-urlencode "scope=repository:${repository_path}:pull" \
+              'https://ghcr.io/token')"; then
+              echo "GHCR authentication failed; refusing promotion" >&2
+              return 2
+            fi
+            if ! registry_token="$(jq -er \
+              'if type == "object" then (.token // .access_token) else empty end
+               | select(type == "string" and length > 0)' \
+              <<<"${token_document}")"; then
+              echo "GHCR returned no usable registry token; refusing promotion" >&2
+              return 2
+            fi
+            headers="$(mktemp "${RUNNER_TEMP}/ghcr-manifest-headers.XXXXXX")"
+            if ! http_status="$(curl --proto '=https' --tlsv1.2 \
+              --silent --show-error --head --output /dev/null \
+              --dump-header "${headers}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${registry_token}" \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository_path}/manifests/${tag}")"; then
+              rm -f -- "${headers}"
+              echo "GHCR manifest lookup failed at the transport layer; refusing promotion" >&2
+              return 2
+            fi
+            case "${http_status}" in
+              "200")
+                mapfile -t digest_headers < <(tr -d '\r' < "${headers}" \
+                  | awk 'tolower($1) == "docker-content-digest:" { print $2 }')
+                rm -f -- "${headers}"
+                if [ "${#digest_headers[@]}" -ne 1 ] \
+                  || [[ ! "${digest_headers[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  echo "GHCR success response has no unique canonical Docker-Content-Digest" >&2
+                  return 2
+                fi
+                printf '%s\n' "${digest_headers[0]}"
+                ;;
+              "404")
+                rm -f -- "${headers}"
+                printf '%s\n' missing
+                ;;
+              *)
+                rm -f -- "${headers}"
+                echo "GHCR manifest lookup returned HTTP ${http_status}; refusing promotion" >&2
+                return 2
+                ;;
+            esac
+          }
+
+          for image_id in bff dagster edge; do
+            record="build/release/images/${image_id}.image.json"
+            case "${image_id}" in
+              bff) image_name=auris-flow-bff ;;
+              dagster) image_name=auris-flow-dagster ;;
+              edge) image_name=auris-flow-edge ;;
+              *) echo "unknown first-party image id: ${image_id}" >&2; exit 2 ;;
+            esac
+            expected_repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${image_name}"
+            python3 scripts/release_image_evidence.py verify \
+              --evidence-dir build/release/images \
+              --record "${record}" \
+              --image-id "${image_id}" \
+              --repository "${expected_repository}" \
+              --release-tag "${RELEASE_TAG}" \
+              --source-commit "${SOURCE_COMMIT}" \
+              --require-assembly-verifications
+            repository="$(jq -er '.repository' "${record}")"
+            tagged_reference="$(jq -er '.tagged_reference' "${record}")"
+            digest="$(jq -er '.image | split("@") | .[1]' "${record}")"
+            resolved_digest="$(resolve_ghcr_manifest_digest \
+              "${repository}" "${RELEASE_TAG}")"
+            if [ "${resolved_digest}" = "missing" ]; then
+              docker buildx imagetools create \
+                --tag "${tagged_reference}" \
+                "${repository}@${digest}"
+              created_digest="$(resolve_ghcr_manifest_digest \
+                "${repository}" "${RELEASE_TAG}")"
+              if [ "${created_digest}" != "${digest}" ]; then
+                echo "created release image tag did not read back as the approved digest" >&2
+                exit 2
+              fi
+            elif [ "${resolved_digest}" != "${digest}" ]; then
+              echo "refusing to retarget immutable release image ${tagged_reference}" >&2
+              exit 1
+            fi
+          done
+
+      - name: Render final digest-pinned production release Compose
+        env:
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
           python3 scripts/render_release_compose.py render \
             --image-lock build/release/images.lock.json \
             --output production/compose.release.json
+          python3 scripts/verify_production_compose.py --release \
+            --compose-file production/compose.release.json \
+            --env-file production/.env.example
+
+      - name: Run final digest-pinned production path gate
+        env:
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          test ! -e build/release/final-runtime/production-path-gate.json
+          if [ -e build/release/final-runtime ] || [ -L build/release/final-runtime ]; then
+            echo "final runtime evidence directory must be created by this job" >&2
+            exit 2
+          fi
+          install -d -m 0755 build/release/final-runtime
+          python3 scripts/verify_production_path_runtime.py \
+            --prebuilt-release \
+            --base-compose production/compose.release.json \
+            --gate-compose production/tests/production-path-gate.compose.yaml \
+            --image-lock build/release/images.lock.json \
+            --release-tag "${RELEASE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --artifact build/release/final-runtime/production-path-gate.json
+          python3 scripts/verify_production_path_gate.py release-evidence \
+            --artifact build/release/final-runtime/production-path-gate.json \
+            --expected-commit "${SOURCE_COMMIT}" \
+            --expected-release-tag "${RELEASE_TAG}" \
+            --release-compose production/compose.release.json \
+            --image-lock build/release/images.lock.json
+
+      - name: Assemble and sign the verified production release bundle
+        env:
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+          WORKFLOW_IDENTITY: https://github.com/${{ github.workflow_ref }}
+        run: |
           test ! -e build/release/deployment
           python3 scripts/release_bundle.py assemble \
             --repository-root . \
@@ -439,6 +937,31 @@ jobs:
           python3 scripts/verify_production_compose.py --release \
             --compose-file build/release/deployment/production/compose.yaml \
             --env-file build/release/deployment/production/.env.example
+
+      - name: Reverify every image record immediately before evidence archival
+        env:
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          image_definitions=(
+            bff:auris-flow-bff
+            dagster:auris-flow-dagster
+            edge:auris-flow-edge
+          )
+          for definition in "${image_definitions[@]}"; do
+            image_id="${definition%%:*}"
+            image_name="${definition#*:}"
+            repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${image_name}"
+            python3 scripts/release_image_evidence.py verify \
+              --evidence-dir build/release/images \
+              --record "build/release/images/${image_id}.image.json" \
+              --image-id "${image_id}" \
+              --repository "${repository}" \
+              --release-tag "${RELEASE_TAG}" \
+              --source-commit "${SOURCE_COMMIT}" \
+              --require-assembly-verifications
+          done
 
       - name: Create deterministic source, deployment, and evidence archives
         env:
@@ -478,7 +1001,8 @@ jobs:
             --create \
             --file=- \
             --directory=build/release \
-            dependencies images compose-image-scans images.lock.json \
+            dependencies images compose-image-scans final-runtime images.lock.json \
+            gh-cli-toolchain.json \
             | gzip -n --best > "${evidence_staging}"
           mv -- "${evidence_staging}" \
             "build/release/auris-flow-${RELEASE_TAG}-evidence.tar.gz"
@@ -493,7 +1017,9 @@ jobs:
             --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-source.tar.gz" \
             --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-deployment.tar.gz" \
             --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-evidence.tar.gz" \
-            --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-release-metadata.sigstore.json"
+            --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-release-metadata.sigstore.json" \
+            --artifact "build/release/final-runtime/production-path-gate.json" \
+            --artifact "build/release/gh-cli-toolchain.json"
 
       - name: Keyless sign and verify the release checksum set
         env:
@@ -523,16 +1049,84 @@ jobs:
     environment: release-publish
     permissions:
       contents: write
+      packages: read
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install and verify checksum-pinned GitHub CLI
+        env:
+          GH_CLI_EVIDENCE_PATH: ${{ runner.temp }}/gh-cli-toolchain.json
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/gh_${GH_CLI_VERSION}_linux_amd64.tar.gz"
+          extraction="${RUNNER_TEMP}/gh-cli-extract"
+          binary_dir="${RUNNER_TEMP}/gh-cli-bin"
+          test ! -e "${archive}"
+          test ! -e "${extraction}"
+          test ! -e "${binary_dir}"
+          curl --proto '=https' --proto-redir '=https' --tlsv1.2 \
+            --fail --location --max-redirs 3 --silent --show-error \
+            --output "${archive}" "${GH_CLI_ASSET_URL}"
+          printf '%s  %s\n' "${GH_CLI_LINUX_AMD64_SHA256}" "${archive}" \
+            | sha256sum --check --strict
+          install -d -m 0700 "${extraction}" "${binary_dir}"
+          tar --extract --gzip --no-same-owner \
+            --file "${archive}" --directory "${extraction}" \
+            "gh_${GH_CLI_VERSION}_linux_amd64/bin/gh"
+          candidate="${extraction}/gh_${GH_CLI_VERSION}_linux_amd64/bin/gh"
+          if [ ! -f "${candidate}" ] || [ -L "${candidate}" ]; then
+            echo "checksum-pinned GitHub CLI archive has an unsafe binary" >&2
+            exit 2
+          fi
+          install -m 0755 "${candidate}" "${binary_dir}/gh"
+          actual_version="$("${binary_dir}/gh" version \
+            | sed -nE '1s/^gh version ([^[:space:]]+) .*/\1/p')"
+          if [ "${actual_version}" != "${GH_CLI_VERSION}" ]; then
+            echo "GitHub CLI version does not match the release tool lock" >&2
+            exit 2
+          fi
+          binary_sha256="$(sha256sum "${binary_dir}/gh" | awk '{print $1}')"
+          evidence_dir="${GH_CLI_EVIDENCE_PATH%/*}"
+          install -d -m 0755 "${evidence_dir}"
+          test ! -e "${GH_CLI_EVIDENCE_PATH}"
+          python3 - "${GH_CLI_EVIDENCE_PATH}" "${actual_version}" \
+            "${GH_CLI_ASSET_URL}" "${GH_CLI_LINUX_AMD64_SHA256}" \
+            "${binary_sha256}" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          output, version, asset_url, archive_sha256, binary_sha256 = sys.argv[1:]
+          document = {
+              "schema_version": "auris.release-toolchain.v1",
+              "gh": {
+                  "archive_sha256": archive_sha256,
+                  "asset_url": asset_url,
+                  "binary_sha256": binary_sha256,
+                  "platform": "linux-amd64",
+                  "version": version,
+              },
+          }
+          pathlib.Path(output).write_text(
+              json.dumps(document, indent=2, sort_keys=True) + "\n",
+              encoding="utf-8",
+          )
+          PY
+          echo "${binary_dir}" >> "${GITHUB_PATH}"
+
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: auris-flow-${{ needs.release-context.outputs.release_tag }}-${{ needs.release-context.outputs.source_commit }}
           path: build/release
+
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
         with:
@@ -541,38 +1135,210 @@ jobs:
       - name: Reverify downloaded release evidence before publication
         env:
           WORKFLOW_IDENTITY: https://github.com/${{ github.workflow_ref }}
+          RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
         run: |
           cosign verify-blob \
             --bundle build/release/SHA256SUMS.sigstore.json \
             --certificate-identity "${WORKFLOW_IDENTITY}" \
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             build/release/SHA256SUMS
-          (cd build/release && sha256sum --check SHA256SUMS)
+          evidence_archive="auris-flow-${RELEASE_TAG}-evidence.tar.gz"
+          evidence_checksum_count="$(awk -v path="${evidence_archive}" \
+            '$2 == path { count += 1 } END { print count + 0 }' build/release/SHA256SUMS)"
+          if [ "${evidence_checksum_count}" -ne 1 ]; then
+            echo "signed checksum set must bind the evidence archive exactly once" >&2
+            exit 2
+          fi
+          (cd build/release && sha256sum --check --strict SHA256SUMS)
+          if [ ! -f build/release/gh-cli-toolchain.json ] \
+            || [ -L build/release/gh-cli-toolchain.json ]; then
+            echo "signed GitHub CLI toolchain evidence is missing or unsafe" >&2
+            exit 2
+          fi
+          if ! cmp --silent "${RUNNER_TEMP}/gh-cli-toolchain.json" \
+            "build/release/gh-cli-toolchain.json"; then
+            echo "publication GitHub CLI differs from the signed assembly toolchain" >&2
+            exit 2
+          fi
+          repository_owner="${GITHUB_REPOSITORY_OWNER,,}"
+          python3 scripts/release_image_evidence.py verify-archive \
+            --archive "build/release/${evidence_archive}" \
+            --release-tag "${RELEASE_TAG}" \
+            --source-commit "${SOURCE_COMMIT}" \
+            --image "bff=ghcr.io/${repository_owner}/auris-flow-bff" \
+            --image "dagster=ghcr.io/${repository_owner}/auris-flow-dagster" \
+            --image "edge=ghcr.io/${repository_owner}/auris-flow-edge"
+          python3 scripts/verify_production_path_gate.py release-evidence \
+            --artifact build/release/final-runtime/production-path-gate.json \
+            --expected-commit "${SOURCE_COMMIT}" \
+            --expected-release-tag "${RELEASE_TAG}" \
+            --release-compose build/release/deployment/production/compose.yaml \
+            --image-lock build/release/images.lock.json
 
       - name: Publish immutable assets to the approved GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          GHCR_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
           SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+          WORKFLOW_IDENTITY: https://github.com/${{ github.workflow_ref }}
         run: |
+          set -euo pipefail
           TAG_COMMIT="$(git rev-parse --verify "refs/tags/${RELEASE_TAG}^{commit}")"
           if [ "${TAG_COMMIT}" != "${SOURCE_COMMIT}" ]; then
             echo "release tag moved after the build was approved" >&2
             exit 2
           fi
-          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            echo "refusing to replace an existing GitHub Release" >&2
-            exit 2
-          fi
+
+          verify_remote_annotated_tag() {
+            local ref_document ref_sha ref_type tag_document object_sha object_type depth
+            ref_document="$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}")"
+            if [ "$(jq -er '.ref' <<<"${ref_document}")" != "refs/tags/${RELEASE_TAG}" ]; then
+              echo "GitHub returned a different remote release tag ref" >&2
+              return 1
+            fi
+            ref_sha="$(jq -er '.object.sha' <<<"${ref_document}")"
+            ref_type="$(jq -er '.object.type' <<<"${ref_document}")"
+            if [ "${ref_type}" != "tag" ]; then
+              echo "remote release tag must be annotated, not lightweight" >&2
+              return 1
+            fi
+            object_sha="${ref_sha}"
+            object_type="tag"
+            depth=0
+            while [ "${object_type}" = "tag" ]; do
+              depth=$((depth + 1))
+              if [ "${depth}" -gt 8 ]; then
+                echo "remote annotated tag chain exceeds the supported depth" >&2
+                return 1
+              fi
+              tag_document="$(gh api --method GET \
+                "repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+              if [ "$(jq -er '.sha' <<<"${tag_document}")" != "${object_sha}" ]; then
+                echo "GitHub returned a mismatched annotated tag object" >&2
+                return 1
+              fi
+              object_sha="$(jq -er '.object.sha' <<<"${tag_document}")"
+              object_type="$(jq -er '.object.type' <<<"${tag_document}")"
+            done
+            if [ "${object_type}" != "commit" ] || [ "${object_sha}" != "${SOURCE_COMMIT}" ]; then
+              echo "remote annotated tag does not peel to the approved source commit" >&2
+              return 1
+            fi
+            if [ "$(gh api --method GET \
+              "repos/${GITHUB_REPOSITORY}/git/ref/tags/${RELEASE_TAG}" \
+              --jq '.object.sha')" != "${ref_sha}" ]; then
+              echo "remote release tag moved while it was being verified" >&2
+              return 1
+            fi
+          }
+
+          resolve_ghcr_manifest_digest() {
+            local repository="$1"
+            local tag="$2"
+            local repository_path token_document registry_token headers http_status
+            local -a digest_headers
+            if [[ ! "${repository}" =~ ^ghcr\.io/[a-z0-9]+([._-][a-z0-9]+)*/[a-z0-9]+([._-][a-z0-9]+)*$ ]]; then
+              echo "GHCR repository is not a canonical lowercase path" >&2
+              return 2
+            fi
+            repository_path="${repository#ghcr.io/}"
+            if ! token_document="$(curl --proto '=https' --tlsv1.2 \
+              --fail --silent --show-error \
+              --user "${GITHUB_ACTOR}:${GHCR_TOKEN}" \
+              --get --data-urlencode 'service=ghcr.io' \
+              --data-urlencode "scope=repository:${repository_path}:pull" \
+              'https://ghcr.io/token')"; then
+              echo "GHCR authentication failed; refusing publication" >&2
+              return 2
+            fi
+            if ! registry_token="$(jq -er \
+              'if type == "object" then (.token // .access_token) else empty end
+               | select(type == "string" and length > 0)' \
+              <<<"${token_document}")"; then
+              echo "GHCR returned no usable registry token; refusing publication" >&2
+              return 2
+            fi
+            headers="$(mktemp "${RUNNER_TEMP}/ghcr-publish-headers.XXXXXX")"
+            if ! http_status="$(curl --proto '=https' --tlsv1.2 \
+              --silent --show-error --head --output /dev/null \
+              --dump-header "${headers}" --write-out '%{http_code}' \
+              --header "Authorization: Bearer ${registry_token}" \
+              --header 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' \
+              "https://ghcr.io/v2/${repository_path}/manifests/${tag}")"; then
+              rm -f -- "${headers}"
+              echo "GHCR manifest lookup failed at the transport layer" >&2
+              return 2
+            fi
+            case "${http_status}" in
+              "200")
+                mapfile -t digest_headers < <(tr -d '\r' < "${headers}" \
+                  | awk 'tolower($1) == "docker-content-digest:" { print $2 }')
+                rm -f -- "${headers}"
+                if [ "${#digest_headers[@]}" -ne 1 ] \
+                  || [[ ! "${digest_headers[0]}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                  echo "GHCR success response has no unique canonical Docker-Content-Digest" >&2
+                  return 2
+                fi
+                printf '%s\n' "${digest_headers[0]}"
+                ;;
+              "404")
+                rm -f -- "${headers}"
+                printf '%s\n' missing
+                ;;
+              *)
+                rm -f -- "${headers}"
+                echo "GHCR manifest lookup returned HTTP ${http_status}" >&2
+                return 2
+                ;;
+            esac
+          }
+
+          verify_release_image_tags() {
+            local image_id image_name service repository locked_image digest remote_digest
+            for image_id in bff dagster edge; do
+              case "${image_id}" in
+                bff) image_name=auris-flow-bff; service=bff ;;
+                dagster) image_name=auris-flow-dagster; service=dagster-code ;;
+                edge) image_name=auris-flow-edge; service=edge ;;
+                *) echo "unknown first-party image id: ${image_id}" >&2; return 2 ;;
+              esac
+              repository="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${image_name}"
+              locked_image="$(jq -er --arg service "${service}" \
+                '.images[$service]' build/release/images.lock.json)"
+              if [[ "${locked_image}" != "${repository}:${RELEASE_TAG}@sha256:"* ]]; then
+                echo "signed image lock does not bind ${image_id} to its release tag" >&2
+                return 2
+              fi
+              digest="${locked_image##*@}"
+              if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                echo "signed image lock contains an invalid ${image_id} digest" >&2
+                return 2
+              fi
+              remote_digest="$(resolve_ghcr_manifest_digest \
+                "${repository}" "${RELEASE_TAG}")"
+              if [ "${remote_digest}" != "${digest}" ]; then
+                echo "GHCR release tag does not resolve to the signed ${image_id} digest" >&2
+                return 2
+              fi
+              cosign verify "${locked_image}" \
+                --certificate-identity "${WORKFLOW_IDENTITY}" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com
+            done
+          }
 
           assets=(
             "build/release/auris-flow-${RELEASE_TAG}-deployment.tar.gz"
             "build/release/auris-flow-${RELEASE_TAG}-source.tar.gz"
             "build/release/auris-flow-${RELEASE_TAG}-evidence.tar.gz"
             "build/release/auris-flow-${RELEASE_TAG}-release-metadata.sigstore.json"
+            "build/release/final-runtime/production-path-gate.json"
             "build/release/release-manifest.json"
             "build/release/SHA256SUMS"
             "build/release/SHA256SUMS.sigstore.json"
+            "build/release/gh-cli-toolchain.json"
           )
           for asset in "${assets[@]}"; do
             if [ ! -f "${asset}" ] || [ -L "${asset}" ] || [ ! -s "${asset}" ]; then
@@ -581,16 +1347,45 @@ jobs:
             fi
           done
 
-          release_flags=(
+          draft_flags=(
             --verify-tag
             --title "Auris Flow ${RELEASE_TAG}"
             --notes-file build/release/deployment/CHANGELOG.md
           )
+          publish_flags=(--draft=false)
           if [[ "${RELEASE_TAG}" == *-rc.* ]]; then
-            release_flags+=(--prerelease)
+            draft_flags+=(--prerelease)
+            publish_flags+=(--prerelease --latest=false)
           else
-            release_flags+=(--latest)
+            publish_flags+=(--prerelease=false --latest)
           fi
-          gh release create "${RELEASE_TAG}" \
-            "${release_flags[@]}" \
-            "${assets[@]}"
+          verify_remote_annotated_tag
+          if ! gh release create "${RELEASE_TAG}" \
+            --draft \
+            "${draft_flags[@]}" \
+            "${assets[@]}"; then
+            echo "draft creation or asset upload failed; no release was intentionally published" >&2
+            echo "if GitHub created the draft before failing, that draft remains unpublished" >&2
+            exit 2
+          fi
+          if ! verify_remote_annotated_tag; then
+            echo "remote tag changed after draft upload; draft remains unpublished" >&2
+            exit 2
+          fi
+          if ! verify_release_image_tags; then
+            echo "GHCR or Cosign revalidation failed; draft remains unpublished" >&2
+            exit 2
+          fi
+          if ! verify_remote_annotated_tag; then
+            echo "remote tag changed during image revalidation; draft remains unpublished" >&2
+            exit 2
+          fi
+          if ! gh release edit "${RELEASE_TAG}" "${publish_flags[@]}"; then
+            echo "GitHub Release promotion failed; draft remains unpublished" >&2
+            exit 2
+          fi
+          if ! verify_remote_annotated_tag; then
+            echo "remote tag changed after publication; release is retained for incident review" >&2
+            echo "the workflow will not delete or rewrite the published release automatically" >&2
+            exit 2
+          fi

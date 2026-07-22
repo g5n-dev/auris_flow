@@ -1,4 +1,5 @@
 .DS_Store
+.workbuddy/
 
 # Dependencies
 node_modules/

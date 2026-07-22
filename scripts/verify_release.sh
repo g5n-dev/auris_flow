@@ -100,6 +100,8 @@ if ! command -v docker >/dev/null 2>&1; then
   exit 2
 fi
 
+bash scripts/verify_observability_rules.sh
+bash scripts/verify_alertmanager_config.sh
 bash scripts/verify_production_mysql_migrations.sh
 bash scripts/verify_real_stack.sh
 bash scripts/verify_real_dagster.sh
