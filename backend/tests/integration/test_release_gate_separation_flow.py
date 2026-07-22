@@ -106,7 +106,7 @@ def test_settings_publish_distinct_admin_succeeds_and_replay_is_actor_bound(
     assert requested.status_code == 202, requested.text
     run_id = requested.json()["data"]["run_id"]
     assert requested.json()["data"]["release_gate"]["requested_by"] == SECOND_ADMIN_ID
-    assert process_aggregate_events([run_id]) == 1
+    assert process_aggregate_events([run_id]) == 0
 
     decision_reason = "主管理员完成独立复核，联系 13800138000。" + ("复核说明" * 80)
     decision_body = {"decision": "approved", "reason": decision_reason}
@@ -178,6 +178,156 @@ def test_settings_publish_distinct_admin_succeeds_and_replay_is_actor_bound(
     assert setting.json()["data"]["published_by"] == "u_admin_001"
 
 
+def test_control_plane_release_outbox_is_not_claimable_before_approval(
+    client,
+    auth_headers,
+) -> None:
+    second_admin_token = _promote_second_admin()
+    run_id = _request_task_publish(client, auth_headers, suffix="decision-fence")
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        assert run is not None
+        assert run.status == "blocked"
+        assert event.status == "blocked"
+        assert event.delivery_state == "confirmed"
+        assert event.attempt_count == 0
+        assert event.claim_token is None
+        assert event.claimed_by is None
+
+    # A fast worker must not obtain an old pre-decision snapshot and race the
+    # approval transaction. The decision is the only operation that requeues
+    # this durable event.
+    assert process_aggregate_events([run_id]) == 0
+
+    approved = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json={"decision": "approved", "reason": "独立管理员确认发布证据与回滚点"},
+        headers=_headers(
+            auth_headers,
+            key="release-integrity-decision-fence-approve",
+            token=second_admin_token,
+        ),
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["data"]["status"] == "pending"
+    assert approved.json()["data"]["release_gate"]["status"] == "approved"
+
+    with SessionLocal() as session:
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        assert event.status == "pending"
+        assert event.delivery_state == "ready"
+
+    assert process_aggregate_events([run_id]) == 1
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        assert run.status == "success"
+        assert run.payload["release_gate"]["status"] == "approved"
+
+
+def test_release_gate_rejects_non_human_system_actor_without_mutating_state(
+    client,
+    auth_headers,
+) -> None:
+    run_id = _request_task_publish(client, auth_headers, suffix="human-approver-only")
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        assert run is not None
+        before_run = (run.status, deepcopy(run.payload))
+        before_event = (
+            event.status,
+            event.delivery_state,
+            deepcopy(event.payload),
+            event.processed_at,
+        )
+        before_audit_count = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.action == "task_version_publish.release_gate_decided",
+                AuditLog.object_id == run_id,
+            )
+            .count()
+        )
+
+    rejected = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json={"decision": "approved", "reason": "服务身份不得代替自然人审批"},
+        headers=_headers(
+            auth_headers,
+            key="release-integrity-system-actor-rejected",
+            token="system-token",
+        ),
+    )
+
+    assert rejected.status_code == 403, rejected.text
+    assert rejected.json()["error"]["code"] == "RELEASE_APPROVAL_HUMAN_ADMIN_REQUIRED"
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        assert run is not None
+        assert (run.status, run.payload) == before_run
+        assert (
+            event.status,
+            event.delivery_state,
+            event.payload,
+            event.processed_at,
+        ) == before_event
+        assert (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.action == "task_version_publish.release_gate_decided",
+                AuditLog.object_id == run_id,
+            )
+            .count()
+            == before_audit_count
+        )
+
+
+def test_release_decision_does_not_clear_an_active_outbox_lease(
+    client,
+    auth_headers,
+) -> None:
+    second_admin_token = _promote_second_admin()
+    run_id = _request_task_publish(client, auth_headers, suffix="active-lease")
+    claim_fixture = "active-release-claim-fixture"
+
+    with SessionLocal.begin() as session:
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        event.status = "processing"
+        event.delivery_state = "dispatching"
+        event.claim_token = claim_fixture
+        event.claimed_by = "release-gate-test-worker"
+        event.claimed_at = datetime.now(UTC)
+        event.lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+        event.lease_generation += 1
+
+    decision = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json={"decision": "approved", "reason": "不能覆盖仍活跃的 Worker 租约"},
+        headers=_headers(
+            auth_headers,
+            key="release-integrity-active-lease-approve",
+            token=second_admin_token,
+        ),
+    )
+    assert decision.status_code == 409, decision.text
+    assert decision.json()["error"]["code"] == "RELEASE_GATE_EVENT_IN_FLIGHT"
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        assert run is not None
+        assert run.status == "blocked"
+        assert run.payload["release_gate"]["status"] == "awaiting_decision"
+        assert event.status == "processing"
+        assert event.claim_token == claim_fixture
+        assert event.claimed_by == "release-gate-test-worker"
+
+
 def test_decision_api_rejects_tampered_requested_by(client, auth_headers) -> None:
     run_id = _request_task_publish(client, auth_headers, suffix="api-tamper")
     with SessionLocal.begin() as session:
@@ -230,7 +380,7 @@ def test_worker_retries_until_committed_release_audit_is_visible(
 ) -> None:
     second_admin_token = _promote_second_admin()
     run_id = _request_task_publish(client, auth_headers, suffix="audit-visibility")
-    assert process_aggregate_events([run_id]) == 1
+    assert process_aggregate_events([run_id]) == 0
 
     approved = client.post(
         f"/api/v1/runs/{run_id}/decisions",

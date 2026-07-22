@@ -1576,17 +1576,33 @@ paths:
         供 Dagster、对象存储回调或外部平台通过签名头提交业务完成结果。
         该入口必须携带完成回执签名、租户/项目上下文和幂等键，服务端会校验 nonce 与 scope。
       operationId: postRunsByIdExternalCompletionReceipts
+      security:
+        - aurisCompletionSignature: []
+          aurisCompletionKeyId: []
+        - aurisCompletionSignature: []
+          aurisCompletionLegacyKeyId: []
       parameters:
         - $ref: "#/components/parameters/XTenantId"
         - $ref: "#/components/parameters/XProjectId"
         - $ref: "#/components/parameters/XRequestId"
         - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/XAurisKeyId"
+        - $ref: "#/components/parameters/XAurisSignatureId"
+        - $ref: "#/components/parameters/XAurisTimestamp"
+        - $ref: "#/components/parameters/XAurisNonce"
+        - $ref: "#/components/parameters/XAurisSource"
+        - $ref: "#/components/parameters/XAurisSignatureMode"
+        - $ref: "#/components/parameters/XAurisSignature"
         - $ref: "#/components/parameters/Id"
       requestBody:
-        $ref: "#/components/requestBodies/GenericRequest"
+        $ref: "#/components/requestBodies/ExternalRunCompletionReceipt"
       responses:
         "200":
-          $ref: "#/components/responses/GenericObject"
+          description: 已应用完成回执并返回执行引擎中立的运行详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDetailResponse"
         "202":
           description: >
             已验签 Dagster 回执早于 launch binding 到达，已持久化为 pending_binding；
@@ -1594,7 +1610,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/GenericObjectResponse"
+                $ref: "#/components/schemas/RunCompletionReceiptPendingResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6700,6 +6716,22 @@ components:
       description: >
         prod/release 的不透明 HttpOnly browser session；数据库只保存 token SHA-256。
         local/test/ci 可配置为 auris_session 以支持本地 HTTP。
+    aurisCompletionSignature:
+      type: apiKey
+      in: header
+      name: X-Auris-Signature
+      description: 规范请求消息的 HMAC-SHA256 签名。
+    aurisCompletionKeyId:
+      type: apiKey
+      in: header
+      name: X-Auris-Key-Id
+      description: 完成回执签名密钥标识。
+    aurisCompletionLegacyKeyId:
+      type: apiKey
+      in: header
+      name: X-Auris-Signature-Id
+      description: 兼容旧客户端的完成回执签名密钥标识。
+      x-deprecated: true
   parameters:
     XTenantId:
       name: X-Tenant-Id
@@ -6753,6 +6785,67 @@ components:
       schema:
         type: string
       description: 写操作和异步动作必填。
+    XAurisKeyId:
+      name: X-Auris-Key-Id
+      in: header
+      required: false
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+      description: >
+        规范签名 key 标识；必须与弃用的 X-Auris-Signature-Id 至少提供一个。
+    XAurisSignatureId:
+      name: X-Auris-Signature-Id
+      in: header
+      required: false
+      deprecated: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+      description: 兼容旧客户端的 key 标识；新客户端应使用 X-Auris-Key-Id。
+    XAurisTimestamp:
+      name: X-Auris-Timestamp
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+      description: 签名时间戳；接受 Unix 秒或带时区的 RFC 3339 时间。
+    XAurisNonce:
+      name: X-Auris-Nonce
+      in: header
+      required: true
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 128
+      description: 单次请求随机值；同一签名 key 下重放会被拒绝。
+    XAurisSource:
+      name: X-Auris-Source
+      in: header
+      required: true
+      schema:
+        type: string
+        enum: [dagster, object_storage, external_callback]
+      description: 已绑定签名 key 且与请求体 adapter 一致的真实执行来源。
+    XAurisSignatureMode:
+      name: X-Auris-Signature-Mode
+      in: header
+      required: true
+      schema:
+        type: string
+        enum: [hmac-sha256]
+      description: 完成回执签名算法；当前仅支持 hmac-sha256。
+    XAurisSignature:
+      name: X-Auris-Signature
+      in: header
+      required: true
+      schema:
+        type: string
+        pattern: '^(?:sha256=)?[0-9A-Fa-f]{64}$'
+      description: 规范请求消息的 HMAC-SHA256；接受 sha256= 前缀或裸十六进制。
     XCsrfToken:
       name: X-CSRF-Token
       in: header
@@ -6922,6 +7015,12 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/RunCompletionReceiptRequest"
+    ExternalRunCompletionReceipt:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ExternalRunCompletionReceiptRequest"
     CreateWorkItem:
       required: true
       content:
@@ -8264,6 +8363,7 @@ components:
         completion_receipt_id:
           type: string
           maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$'
         source:
           type: string
           maxLength: 128
@@ -8339,9 +8439,34 @@ components:
         error_code:
           type: string
           maxLength: 128
+          pattern: '^[A-Z][A-Z0-9_]{2,127}$'
         retryable:
           type: boolean
           default: true
+    ExternalRunCompletionReceiptRequest:
+      type: object
+      description: 已验签并绑定真实外部执行实例的完成回执；不能用于内部人工完成入口。
+      allOf:
+        - $ref: "#/components/schemas/RunCompletionReceiptRequest"
+      required: [adapter, completion_receipt_id, external_id]
+      properties:
+        adapter:
+          type: string
+          enum: [dagster, object_storage, external_callback]
+        completion_receipt_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$'
+        source:
+          type: string
+          enum: [dagster, object_storage, external_callback]
+          nullable: true
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          description: 与 dispatch adapter 对应的可信远端运行或回调引用。
     RunReleaseDecisionRequest:
       type: object
       additionalProperties: false
@@ -8384,7 +8509,7 @@ components:
       properties:
         error:
           type: object
-          required: [code, message, status, trace_id]
+          required: [code, message, status, trace_id, request_id]
           properties:
             code:
               type: string
@@ -8406,8 +8531,11 @@ components:
               type: boolean
             trace_id:
               type: string
+            request_id:
+              type: string
             idempotency_key:
               type: string
+              nullable: true
     ActionResponse:
       type: object
       required: [data, meta]
@@ -8445,6 +8573,7 @@ components:
       additionalProperties: true
       x-auris-recursively-omitted-fields: &public-run-recursive-omissions
         - access_key
+        - access_key_id
         - access_token
         - adapter
         - adapter_dispatch
@@ -8452,6 +8581,7 @@ components:
         - authenticated_source
         - auth
         - authorization
+        - artifact_uri
         - api_key
         - bearer_token
         - claim_token
@@ -8468,12 +8598,15 @@ components:
         - dispatch_state
         - engine_status
         - engine_status_observed_at
+        - error
         - execution_contract
         - execution_deadline_at
         - execution_envelope
         - endpoint
         - external_id
         - external_run_id
+        - failed_event_id
+        - dead_letter_event_id
         - graphql
         - graphql_url
         - headers
@@ -8488,6 +8621,10 @@ components:
         - password
         - pipeline_name
         - private_key
+        - partial_artifact_uri
+        - processed_event_id
+        - provider_evidence
+        - provider_artifact_ref
         - protocol_receipt
         - refresh_token
         - remote_id
@@ -8512,7 +8649,11 @@ components:
         - object_key
         - object_uri
         - storage_object_id
+        - result_storage_object_ids
+        - result_storage_object_sha256
         - token
+        - uri
+        - url
       x-auris-recursively-omitted-key-parts: &public-run-recursive-omission-key-parts
         - adapter
         - credential
@@ -8877,6 +9018,9 @@ components:
       properties:
         completion_receipt_id:
           type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$'
           description: 领域完成确认引用，不是执行引擎远端运行 ID。
         status:
           $ref: "#/components/schemas/RunStatus"
@@ -8884,16 +9028,29 @@ components:
           type: object
           additionalProperties: true
           description: 领域结果引用；其嵌套字段继续应用公开运行递归省略策略。
+          x-auris-recursively-omitted-fields:
+            - provider
+            - provider_evidence
+            - provider_run_id
+            - provider_request_sha256
+            - provider_response_sha256
+            - provider_result_sha256
+            - execution_envelope_sha256
+            - result_manifest_object_key_sha256
+            - result_manifest_version_id_sha256
+            - storage_provider
+            - version_id
+            - object_version_id
+            - etag
         metrics:
           type: object
           additionalProperties: true
           description: 领域完成指标；其嵌套字段继续应用公开运行递归省略策略。
-        note:
-          type: string
-          nullable: true
         error_code:
           type: string
           nullable: true
+          maxLength: 128
+          pattern: '^[A-Z][A-Z0-9_]{2,127}$'
           description: 稳定、执行引擎中立的领域错误码。
         retryable:
           type: boolean
@@ -8902,6 +9059,32 @@ components:
           type: string
           format: date-time
           nullable: true
+    RunCompletionReceiptPendingData:
+      type: object
+      additionalProperties: false
+      required: [run_id, status, completion_receipt_id, receipt_state, trace_id]
+      properties:
+        run_id:
+          type: string
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        completion_receipt_id:
+          type: string
+        receipt_state:
+          type: string
+          enum: [pending_binding, pending_cancellation_resolution]
+          description: 已验签回执等待可信 launch binding 或取消竞争裁决的公开状态。
+        trace_id:
+          type: string
+    RunCompletionReceiptPendingResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/RunCompletionReceiptPendingData"
+        meta:
+          $ref: "#/components/schemas/InsightResponseMeta"
     RunDetail:
       type: object
       additionalProperties: true
@@ -8958,6 +9141,9 @@ components:
           nullable: true
         business_completion_required:
           type: boolean
+        business_status:
+          type: string
+          description: 面向产品的业务阶段，不暴露底层执行引擎或 Outbox 状态。
         affected_objects:
           type: array
           items:

@@ -11,11 +11,13 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http.client import HTTPException
-from urllib.error import HTTPError, URLError
+from typing import Any
+from urllib.error import URLError
 from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request as UrlRequest
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse, Response
@@ -60,6 +62,7 @@ from app.core.observability import annotate_current_span, configure_observabilit
 from app.core.oidc import OIDCError
 from app.core.oidc_transaction import clear_authorization_transaction_cookie
 from app.core.rate_limit import build_rate_limiter
+from app.schemas import ApiErrorEnvelope
 from app.services.adapters import object_storage_client_for_provider
 
 settings = get_settings()
@@ -95,6 +98,9 @@ DAGSTER_HEARTBEAT_MAX_AGE_SECONDS = 90.0
 DAGSTER_HEARTBEAT_FUTURE_SKEW_SECONDS = 5.0
 OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS = 0.25
 READINESS_MARKER_MAX_BYTES = 2 * 1024 * 1024
+QDRANT_READINESS_MAX_BYTES = 256 * 1024
+OBSERVABILITY_READINESS_MAX_BYTES = 16 * 1024
+QDRANT_COLLECTION_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 
 
 @asynccontextmanager
@@ -103,7 +109,17 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     application.state.observability.shutdown()
 
 
-app = FastAPI(title="Auris Flow BFF", version="0.1.0", lifespan=lifespan)
+app = FastAPI(
+    title="Auris Flow BFF",
+    version="0.1.0",
+    lifespan=lifespan,
+    responses={
+        422: {
+            "model": ApiErrorEnvelope,
+            "description": "请求路径、查询、请求头或请求体校验失败",
+        }
+    },
+)
 app.state.rate_limiter = build_rate_limiter(settings)
 trusted_hosts = list(_csv_items(settings.trusted_hosts))
 if trusted_hosts:
@@ -276,6 +292,10 @@ def error_payload(request: Request, exc: ApiError) -> dict:
     if not trace_id:
         trace_id = f"trace_{uuid.uuid4().hex}"
         request.state.trace_id = trace_id
+    request_id = getattr(request.state, "request_id", None)
+    if not request_id:
+        request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+        request.state.request_id = request_id
     return {
         "error": {
             "code": exc.code,
@@ -284,6 +304,7 @@ def error_payload(request: Request, exc: ApiError) -> dict:
             "status": exc.status_code,
             "retryable": exc.retryable,
             "trace_id": trace_id,
+            "request_id": request_id,
             "idempotency_key": request.headers.get("Idempotency-Key"),
         }
     }
@@ -303,6 +324,31 @@ async def handle_api_error(request: Request, exc: ApiError) -> JSONResponse:
         trace_id=getattr(request.state, "trace_id", None),
     )
     return JSONResponse(status_code=exc.status_code, content=error_payload(request, exc))
+
+
+@app.exception_handler(RequestValidationError)
+async def handle_request_validation_error(
+    request: Request,
+    exc: RequestValidationError,
+) -> JSONResponse:
+    """Keep framework-level body/path validation inside the public error contract."""
+
+    return await handle_api_error(
+        request,
+        ApiError(
+            "VALIDATION_ERROR",
+            "请求参数校验失败",
+            422,
+            details=[
+                {
+                    "field": ".".join(str(part) for part in error["loc"]),
+                    "message": str(error["msg"]),
+                    "code": str(error["type"]),
+                }
+                for error in exc.errors()
+            ],
+        ),
+    )
 
 
 @app.exception_handler(Exception)
@@ -373,6 +419,7 @@ def probe_dagster_workspace(url: str | None) -> str:
         payload = json.loads(raw.decode("utf-8"))
     except (
         AttributeError,
+        HTTPException,
         OSError,
         URLError,
         UnicodeDecodeError,
@@ -458,6 +505,68 @@ def probe_dagster_workspace(url: str | None) -> str:
     return "not_ready"
 
 
+def probe_qdrant_collections(url: str | None, api_key: str | None = None) -> str:
+    """Require a bounded, authenticated Qdrant collections response."""
+
+    if not url:
+        return "not_configured"
+    headers = {"api-key": api_key} if api_key else {}
+    request = UrlRequest(f"{url.rstrip('/')}/collections", method="GET", headers=headers)
+    try:
+        with urlopen(request, timeout=0.25) as response:
+            if response.status != 200:
+                return "not_ready"
+            raw = response.read(QDRANT_READINESS_MAX_BYTES + 1)
+        if len(raw) > QDRANT_READINESS_MAX_BYTES:
+            return "not_ready"
+        payload = json.loads(raw.decode("utf-8"))
+    except (HTTPException, OSError, URLError, UnicodeDecodeError, ValueError):
+        return "not_ready"
+    if not isinstance(payload, dict):
+        return "not_ready"
+    result = payload.get("result")
+    collections = result.get("collections") if isinstance(result, dict) else None
+    if payload.get("status") != "ok" or not isinstance(collections, list):
+        return "not_ready"
+    collection_names: list[str] = []
+    for collection in collections:
+        name = collection.get("name") if isinstance(collection, dict) else None
+        if not isinstance(name, str) or not QDRANT_COLLECTION_NAME_PATTERN.fullmatch(name):
+            return "not_ready"
+        collection_names.append(name)
+    if len(collection_names) != len(set(collection_names)):
+        return "not_ready"
+    return "ok"
+
+
+def probe_observability_status(
+    url: str | None,
+    *,
+    expected_trace_id: str | None = None,
+    timeout_seconds: float = 0.25,
+) -> str:
+    """Require the observability sidecar's bounded, exact JSON acknowledgement."""
+
+    if not url:
+        return "not_configured"
+    try:
+        request = UrlRequest(url, method="GET", headers={"Accept": "application/json"})
+        with urlopen(request, timeout=timeout_seconds) as response:
+            if response.status != 200:
+                return "not_ready"
+            raw = response.read(OBSERVABILITY_READINESS_MAX_BYTES + 1)
+        if len(raw) > OBSERVABILITY_READINESS_MAX_BYTES:
+            return "not_ready"
+        payload = json.loads(raw.decode("utf-8"))
+    except (HTTPException, OSError, URLError, UnicodeDecodeError, ValueError):
+        return "not_ready"
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        return "not_ready"
+    if expected_trace_id is not None and payload.get("trace_id") != expected_trace_id:
+        return "not_ready"
+    return "ok"
+
+
 @app.get("/readyz")
 def readyz() -> JSONResponse:
     def required_checks() -> set[str]:
@@ -537,7 +646,7 @@ def readyz() -> JSONResponse:
             or getattr(runtime, "error_code", None) is not None
         ):
             return "not_ready"
-        if probe_http(settings.observability_health_url) != "ok":
+        if probe_observability_status(settings.observability_health_url) != "ok":
             return "not_ready"
 
         timeout_millis = min(
@@ -562,7 +671,14 @@ def readyz() -> JSONResponse:
                     "",
                 )
             )
-            return probe_http(marker_url, timeout_seconds=0.75) == "ok"
+            return (
+                probe_observability_status(
+                    marker_url,
+                    expected_trace_id=trace_id,
+                    timeout_seconds=0.75,
+                )
+                == "ok"
+            )
 
         return (
             "ok"
@@ -582,7 +698,7 @@ def readyz() -> JSONResponse:
             )
             status = result.get("status") if isinstance(result, dict) else None
             return "ok" if isinstance(status, int) and 200 <= status < 300 else "not_ready"
-        except (HTTPError, OSError, URLError, TimeoutError, ValueError):
+        except (HTTPException, OSError, URLError, TimeoutError, ValueError):
             return "not_ready"
 
     checks = {
@@ -591,11 +707,7 @@ def readyz() -> JSONResponse:
         "observability": probe_observability(),
         "redis": probe_redis(settings.redis_url),
         "object_storage": probe_object_storage(),
-        "qdrant": probe_http(
-            settings.qdrant_url,
-            "/collections",
-            {"api-key": settings.qdrant_api_key} if settings.qdrant_api_key else None,
-        ),
+        "qdrant": probe_qdrant_collections(settings.qdrant_url, settings.qdrant_api_key),
         "dagster": probe_dagster_workspace(settings.dagster_graphql_url),
     }
     try:
@@ -651,6 +763,57 @@ for router in [
     generic.router,
 ]:
     app.include_router(router, prefix=settings.api_prefix)
+
+
+_default_openapi = app.openapi
+
+
+def _openapi_with_completion_hmac_security() -> dict[str, Any]:
+    document = _default_openapi()
+    security_schemes = document.setdefault("components", {}).setdefault(
+        "securitySchemes",
+        {},
+    )
+    security_schemes.update(
+        {
+            "aurisCompletionSignature": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Auris-Signature",
+                "description": "规范请求消息的 HMAC-SHA256 签名。",
+            },
+            "aurisCompletionKeyId": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Auris-Key-Id",
+                "description": "完成回执签名密钥标识。",
+            },
+            "aurisCompletionLegacyKeyId": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-Auris-Signature-Id",
+                "description": "兼容旧客户端的完成回执签名密钥标识。",
+                "x-deprecated": True,
+            },
+        }
+    )
+    operation = document["paths"][
+        f"{settings.api_prefix}/runs/{{id}}/external-completion-receipts"
+    ]["post"]
+    operation["security"] = [
+        {
+            "aurisCompletionSignature": [],
+            "aurisCompletionKeyId": [],
+        },
+        {
+            "aurisCompletionSignature": [],
+            "aurisCompletionLegacyKeyId": [],
+        },
+    ]
+    return document
+
+
+app.openapi = _openapi_with_completion_hmac_security  # type: ignore[method-assign]
 
 
 app.state.observability = configure_observability(app, settings, engine=engine)

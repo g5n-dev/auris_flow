@@ -104,7 +104,7 @@ def test_task_publish_freezes_requester_and_requires_distinct_project_admin(
         ),
     )
     assert non_admin.status_code == 403
-    assert non_admin.json()["error"]["code"] == "FORBIDDEN"
+    assert non_admin.json()["error"]["code"] == ("RELEASE_APPROVAL_HUMAN_ADMIN_REQUIRED")
 
     self_approval = client.post(
         f"/api/v1/runs/{run_id}/decisions",

@@ -1609,8 +1609,8 @@ def test_signed_external_completion_receipt_rejects_tampered_body_and_missing_ex
         content=json.dumps(tampered_payload, ensure_ascii=False).encode("utf-8"),
         headers=missing_external_id_headers,
     )
-    assert missing_external_id.status_code == 400
-    assert missing_external_id.json()["error"]["code"] == "RUN_COMPLETION_EXTERNAL_ID_REQUIRED"
+    assert missing_external_id.status_code == 422
+    assert missing_external_id.json()["error"]["code"] == "VALIDATION_ERROR"
     with SessionLocal() as session:
         assert session.get(RunRecord, run_id).status == "submitted"
 
@@ -2638,7 +2638,7 @@ def test_outbox_worker_keeps_blocked_publish_behind_gate(client, auth_headers):
     assert response.status_code == 202
     run_id = response.json()["data"]["run_id"]
 
-    assert process_aggregate_events([run_id]) == 1
+    assert process_aggregate_events([run_id]) == 0
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
         event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
@@ -2646,6 +2646,7 @@ def test_outbox_worker_keeps_blocked_publish_behind_gate(client, auth_headers):
         assert run.status == "blocked"
         assert "dispatch" not in run.payload
         assert event.status == "blocked"
+        assert event.attempt_count == 0
         assert event.last_error == "run is blocked by release gate or human confirmation"
 
 
@@ -2674,7 +2675,7 @@ def test_task_version_publish_gate_approval_requeues_and_materializes_version(cl
     assert requested.json()["data"]["status"] == "blocked"
     assert requested.json()["data"]["release_gate"]["status"] == "awaiting_decision"
 
-    assert process_aggregate_events([run_id]) == 1
+    assert process_aggregate_events([run_id]) == 0
     second_admin_token = _release_second_admin_token()
     approved = client.post(
         f"/api/v1/runs/{run_id}/decisions",
@@ -2725,7 +2726,7 @@ def test_settings_publish_gate_rejects_without_mutating_target_and_approval_mate
     )
     assert rejected_request.status_code == 202, rejected_request.text
     rejected_run_id = rejected_request.json()["data"]["run_id"]
-    assert process_aggregate_events([rejected_run_id]) == 1
+    assert process_aggregate_events([rejected_run_id]) == 0
     rejected = client.post(
         f"/api/v1/runs/{rejected_run_id}/decisions",
         json={"decision": "rejected", "reason": "影子评测未达到门槛"},

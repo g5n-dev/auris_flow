@@ -581,7 +581,13 @@ def test_real_eval_run_projection_is_consumed_by_explicit_label_publish(
         assert projection.status == "success"
         assert projection.data["status"] == "success"
         assert projection.data["metrics"] == metrics
-        assert projection.data["result_ref"] == result_ref
+        # The authoritative RunRecord retains the signed storage locator for
+        # internal recovery, while the eval_runs domain projection must not
+        # expose it through a resource that can feed public policy responses.
+        assert projection.data["result_ref"] == {}
+        run_record = session.get(RunRecord, run_id)
+        assert run_record is not None
+        assert run_record.payload["result_ref"] == result_ref
 
     published = client.post(
         f"/api/v1/label-versions/{LABEL_VERSION_ID}/publish",
@@ -669,7 +675,10 @@ def test_failed_eval_run_and_retry_have_independent_authoritative_projections(
         assert failed_projection.status == "failed"
         assert failed_projection.data["status"] == "failed"
         assert failed_projection.data["metrics"] == metrics
-        assert failed_projection.data["result_ref"] == result_ref
+        assert failed_projection.data["result_ref"] == {}
+        failed_run_record = session.get(RunRecord, run_id)
+        assert failed_run_record is not None
+        assert failed_run_record.payload["result_ref"] == result_ref
 
     retry = client.post(
         f"/api/v1/runs/{run_id}/retries",

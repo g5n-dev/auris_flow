@@ -3,16 +3,25 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncIterator
 from io import BytesIO
-from typing import Any
+from typing import Annotated, Any, Literal
 from urllib.error import HTTPError, URLError
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Header, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
 from starlette.types import Receive, Scope, Send
 
 from app.api.deps import ContextDep, PaginationDep, SessionDep, SignedCompletionContextDep
+from app.core.completion_signature import (
+    KEY_ID_HEADER,
+    NONCE_HEADER,
+    SIGNATURE_HEADER,
+    SIGNATURE_ID_HEADER,
+    SIGNATURE_MODE_HEADER,
+    SOURCE_HEADER,
+    TIMESTAMP_HEADER,
+)
 from app.core.config import get_settings
 from app.core.errors import ApiError
 from app.core.http_headers import content_disposition_header
@@ -26,7 +35,9 @@ from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
 from app.models import Project, RunRecord, Tenant
 from app.schemas import (
+    ApiErrorEnvelope,
     ExternalCallbackRequest,
+    ExternalRunCompletionReceiptRequest,
     KnowledgeBuildRequest,
     KnowledgeRecallRequest,
     RunCompletionReceiptRequest,
@@ -34,7 +45,12 @@ from app.schemas import (
     TaskRunRetryRequest,
     parse_payload,
 )
-from app.schemas.public_runs import ExportJob, PublicRunEnvelope
+from app.schemas.public_runs import (
+    ExportJob,
+    PublicRunDetail,
+    PublicRunEnvelope,
+    RunCompletionReceiptPendingResponse,
+)
 from app.services.adapters import object_storage_client_for_provider
 from app.services.audit_service import record_audit
 from app.services.idempotency_service import (
@@ -68,6 +84,75 @@ from app.services.run_service import (
 from app.services.scene_profile_service import bind_active_scene_profile_lock
 
 router = APIRouter(tags=["generic"])
+
+
+def _document_external_completion_hmac_headers(
+    timestamp: Annotated[
+        str,
+        Header(
+            alias=TIMESTAMP_HEADER,
+            min_length=1,
+            description="签名时间戳；接受 Unix 秒或带时区的 RFC 3339 时间。",
+        ),
+    ],
+    nonce: Annotated[
+        str,
+        Header(
+            alias=NONCE_HEADER,
+            min_length=1,
+            max_length=128,
+            description="单次请求随机值；同一签名 key 下重放会被拒绝。",
+        ),
+    ],
+    source: Annotated[
+        Literal["dagster", "object_storage", "external_callback"],
+        Header(
+            alias=SOURCE_HEADER,
+            description="已绑定签名 key 且与请求体 adapter 一致的真实执行来源。",
+        ),
+    ],
+    signature_mode: Annotated[
+        Literal["hmac-sha256"],
+        Header(
+            alias=SIGNATURE_MODE_HEADER,
+            description="完成回执签名算法；当前仅支持 hmac-sha256。",
+        ),
+    ],
+    signature: Annotated[
+        str,
+        Header(
+            alias=SIGNATURE_HEADER,
+            pattern=r"^(?:sha256=)?[0-9A-Fa-f]{64}$",
+            description="规范请求消息的 HMAC-SHA256；接受 sha256= 前缀或裸十六进制。",
+        ),
+    ],
+    key_id: Annotated[
+        str | None,
+        Header(
+            alias=KEY_ID_HEADER,
+            min_length=1,
+            max_length=128,
+            description=("规范签名 key 标识；必须与弃用的 X-Auris-Signature-Id 至少提供一个。"),
+        ),
+    ] = None,
+    signature_id: Annotated[
+        str | None,
+        Header(
+            alias=SIGNATURE_ID_HEADER,
+            min_length=1,
+            max_length=128,
+            deprecated=True,
+            description="兼容旧客户端的 key 标识；新客户端应使用 X-Auris-Key-Id。",
+        ),
+    ] = None,
+) -> None:
+    """Expose headers in OpenAPI; SignedCompletionContextDep performs verification."""
+
+
+ExternalCompletionHmacHeadersDep = Annotated[
+    None,
+    Depends(_document_external_completion_hmac_headers),
+]
 
 SCENE_LOCK_EXEMPT_EXPORT_MODULES = frozenset({"tenants", "projects", "settings"})
 EXPORT_PUBLIC_FIELDS = frozenset(
@@ -1544,19 +1629,28 @@ async def post_runs_by_id_retries(id: str, request: Request, session: SessionDep
     return await retry_run(session, ctx, request, id, body)
 
 
-@router.post("/runs/{id}/external-completion-receipts")
+@router.post(
+    "/runs/{id}/external-completion-receipts",
+    response_model=PublicRunEnvelope[PublicRunDetail],
+    responses={
+        202: {"model": RunCompletionReceiptPendingResponse},
+        422: {"model": ApiErrorEnvelope, "description": "请求参数校验失败"},
+    },
+)
 async def post_runs_by_id_external_completion_receipts(
-    id: str, request: Request, session: SessionDep, ctx: SignedCompletionContextDep
+    id: str,
+    body: ExternalRunCompletionReceiptRequest,
+    request: Request,
+    session: SessionDep,
+    ctx: SignedCompletionContextDep,
+    _signature_headers: ExternalCompletionHmacHeadersDep,
 ):
-    body = parse_payload(RunCompletionReceiptRequest, await request.json()).model_dump(
-        exclude_none=True
-    )
     return await complete_run_from_receipt(
         session,
         ctx,
         request,
         id,
-        body,
+        body.model_dump(exclude_none=True),
         strict_external_receipt=True,
         completion_auth=getattr(request.state, "completion_signature", None),
     )

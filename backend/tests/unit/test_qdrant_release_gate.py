@@ -91,6 +91,9 @@ def test_readyz_sends_qdrant_api_key(client, monkeypatch):
         def __exit__(self, *_args: Any) -> None:
             return None
 
+        def read(self, _limit: int = -1) -> bytes:
+            return b'{"result":{"collections":[]},"status":"ok"}'
+
     def fake_urlopen(request, timeout):
         del timeout
         if request.full_url.endswith("/collections"):

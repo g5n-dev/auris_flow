@@ -446,10 +446,10 @@ def _external_completion_user_id(key_id: str) -> str:
 async def signed_completion_context(
     request: Request,
     session: ContextSessionDep,
-    x_tenant_id: str | None = Header(default=None, alias="X-Tenant-Id"),
-    x_project_id: str | None = Header(default=None, alias="X-Project-Id"),
+    x_tenant_id: str = Header(alias="X-Tenant-Id"),
+    x_project_id: str = Header(alias="X-Project-Id"),
     x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> RequestContext:
     trace = initialize_server_trace(request)
     if not x_tenant_id:

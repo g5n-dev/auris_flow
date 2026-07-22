@@ -323,6 +323,12 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "services/release_gate_service.py",
             "decide_release_gate",
             "select",
+            "OutboxEvent",
+        ): 1,
+        (
+            "services/release_gate_service.py",
+            "decide_release_gate",
+            "select",
             "RunRecord",
         ): 1,
         ("services/run_service.py", "complete_run_from_receipt", "select", "RunRecord"): 1,

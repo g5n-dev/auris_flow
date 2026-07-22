@@ -13,7 +13,9 @@ import {
 import {
   hasForbiddenPublicDispatchEvidence,
   isPublicDispatchBoundary,
+  isValidTerminalBusinessState,
   publicDispatchIdentityMatches,
+  readTrustedE2eCompletionEvidence,
   readTrustedE2eDispatchEvidence
 } from "../scripts/e2e-dispatch-evidence.mjs";
 
@@ -455,7 +457,7 @@ async function assertCompletionStorageProof(
   page,
   completion,
   descriptors,
-  { sourceType, sourceId, rootTraceId }
+  { sourceType, sourceId, rootTraceId, trustedStorageEvidence }
 ) {
   const registered = completion?.data?.registered_storage_objects;
   const acceptedDescriptors = completion?.data?.result_ref?.storage_objects;
@@ -468,35 +470,38 @@ async function assertCompletionStorageProof(
     Array.isArray(registered) &&
       registered.length === descriptors.length &&
       Array.isArray(acceptedDescriptors) &&
-      acceptedDescriptors.length === descriptors.length,
-    "completion receipt must return every accepted and registered storage descriptor",
-    { registered, acceptedDescriptors, descriptors }
+      acceptedDescriptors.length === descriptors.length &&
+      Array.isArray(trustedStorageEvidence) &&
+      trustedStorageEvidence.length === descriptors.length,
+    "completion receipt must return safe summaries backed by every trusted storage registration",
+    { registered, acceptedDescriptors, descriptors, trustedStorageEvidence }
   );
 
-  const proof = descriptors.map((descriptor) => {
-    const accepted = acceptedDescriptors.find(
-      (item) => item.storage_object_id === descriptor.storage_object_id
-    );
-    const registration = registered.find(
-      (item) => item.storage_object_id === descriptor.storage_object_id
-    );
+  const proof = descriptors.map((descriptor, index) => {
+    const accepted = acceptedDescriptors[index];
+    const registration = registered[index];
+    const trusted = trustedStorageEvidence[index];
     assert(
       accepted?.role === descriptor.role &&
-        accepted?.provider === descriptor.provider &&
-        accepted?.bucket === descriptor.bucket &&
-        accepted?.object_key === descriptor.object_key &&
         accepted?.content_sha256 === descriptor.content_sha256 &&
         descriptor.object_key.startsWith(expectedPrefix),
-      "completion receipt must preserve the governed storage id, hash, role, and scoped locator",
+      "public completion receipt must preserve only the safe storage role and content hash",
       { descriptor, accepted, expectedPrefix }
     );
     assert(
       registration?.source_type === sourceType &&
         registration?.source_id === sourceId &&
         registration?.status === "verified" &&
-        registration?.trace_id === rootTraceId,
-      "completion storage registration must bind source, verified state, and root trace",
-      { registration, sourceType, sourceId, rootTraceId }
+        registration?.trace_id === rootTraceId &&
+        trusted?.ordinal === index &&
+        trusted?.role === descriptor.role &&
+        trusted?.contentSha256 === descriptor.content_sha256 &&
+        trusted?.sourceType === sourceType &&
+        trusted?.sourceId === sourceId &&
+        trusted?.status === "verified" &&
+        trusted?.traceId === rootTraceId,
+      "completion storage registration must bind safe public summary to trusted scoped evidence",
+      { registration, trusted, sourceType, sourceId, rootTraceId }
     );
     return {
       storageObjectId: descriptor.storage_object_id,
@@ -507,10 +512,10 @@ async function assertCompletionStorageProof(
       objectKey: descriptor.object_key,
       tenantId: scope.tenantId,
       projectId: scope.projectId,
-      sourceType: registration.source_type,
-      sourceId: registration.source_id,
-      status: registration.status,
-      traceId: registration.trace_id
+      sourceType: trusted.sourceType,
+      sourceId: trusted.sourceId,
+      status: trusted.status,
+      traceId: trusted.traceId
     };
   });
 
@@ -608,20 +613,37 @@ async function waitForBackendRunStatus(
   const expected = new Set(expectedStatuses);
   const started = Date.now();
   let lastResponse = null;
+  let lastSuccessfulResponse = null;
+  const observedStatuses = new Set();
   while (Date.now() - started < timeoutMs) {
     lastResponse = await browserApi(page, `/api/v1/runs/${encodeURIComponent(runIdValue)}`);
     const status = lastResponse?.json?.data?.status;
+    if (lastResponse.status === 200) {
+      lastSuccessfulResponse = lastResponse;
+      if (typeof status === "string") observedStatuses.add(status);
+      assert(
+        lastResponse?.json?.data?.release_gate?.status === "approved",
+        "approved release gate regressed while waiting for materialization",
+        { runId: runIdValue, response: lastResponse }
+      );
+    }
     if (lastResponse.status === 200 && expected.has(status)) return lastResponse.json.data;
     assert(
       !["failed", "dead_letter", "cancelled"].includes(status),
       "release run entered an unexpected terminal state",
       { runId: runIdValue, status, response: lastResponse }
     );
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    const retryAfterMs =
+      lastResponse.status === 429
+        ? Math.max(1000, Number(lastResponse.retryAfterSeconds || 1) * 1000)
+        : 500;
+    await new Promise((resolve) => setTimeout(resolve, retryAfterMs));
   }
   assert(false, "timed out waiting for backend run status", {
     runId: runIdValue,
     expectedStatuses,
+    observedStatuses: [...observedStatuses],
+    lastSuccessfulResponse,
     lastResponse
   });
 }
@@ -1243,7 +1265,8 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     {
       sourceType: "hotword_build",
       sourceId: buildRunId,
-      rootTraceId: buildRunDetail.data.root_trace_id
+      rootTraceId: buildRunDetail.data.root_trace_id,
+      trustedStorageEvidence: buildCompletionReceipt.completionStorage
     }
   );
   const readyCandidate = await waitForApiState(
@@ -1385,9 +1408,9 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     evaluated_terms: evaluatedTerms,
     eval_dataset_id: evalRunDetail.data.eval_dataset_id,
     content_sha256: evalRunDetail.data.content_sha256,
-    manifest_storage_object_id: evalRunDetail.data.manifest_storage_object_id,
+    manifest_storage_object_id: buildManifestId,
     provider: evalRunDetail.data.provider,
-    provider_artifact_ref: evalRunDetail.data.provider_artifact_ref,
+    provider_artifact_ref: buildArtifactId,
     artifact_sha256: evalRunDetail.data.artifact_sha256,
     baseline_metrics: baselineMetrics,
     candidate_metrics: candidateMetrics,
@@ -1415,15 +1438,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
       evalCompletion.data.status === "success" &&
       evalCompletion.data.hotword_eval?.locked === true &&
       evalCompletion.data.hotword_eval?.gate?.passed === true &&
-      evalStorageDescriptors.every(
-        (descriptor) =>
-          evalCompletion.data.hotword_eval?.result_storage_object_ids?.includes(
-            descriptor.storage_object_id
-          ) &&
-          evalCompletion.data.hotword_eval?.result_storage_object_sha256?.[
-            descriptor.storage_object_id
-          ] === descriptor.content_sha256
-      ),
+      !hasForbiddenPublicDispatchEvidence(evalCompletion.data),
     "hotword EvalRun must be locked, pass every gate, and retain both manifest and JSONL results",
     evalCompletion
   );
@@ -1434,7 +1449,8 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     {
       sourceType: "hotword_eval",
       sourceId: evalRunId,
-      rootTraceId: evalRunDetail.data.root_trace_id
+      rootTraceId: evalRunDetail.data.root_trace_id,
+      trustedStorageEvidence: evalCompletionReceipt.completionStorage
     }
   );
   const reviewedCandidate = await waitForApiState(
@@ -1522,18 +1538,24 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     "read submitted hotword publish run",
     200
   );
-  const publishResultRef = Object.fromEntries(
-    [
-      "version_id",
-      "pack_id",
-      "eval_run_id",
-      "content_sha256",
-      "manifest_storage_object_id",
-      "compiled_provider",
-      "provider_artifact_ref",
-      "artifact_sha256"
-    ].map((field) => [field, publishRunDetail.data[field]])
+  assert(
+    publishRunDetail.data.status === "submitted" &&
+      publishRunDetail.data.business_status === "awaiting_completion" &&
+      publishRunDetail.data.business_completion_required === true &&
+      !hasForbiddenPublicDispatchEvidence(publishRunDetail.data),
+    "hotword publish must expose only the public awaiting-completion boundary",
+    publishRunDetail
   );
+  const publishResultRef = {
+    version_id: candidateVersionId,
+    pack_id: validatingCandidateDetail.data.pack_id,
+    eval_run_id: evalRunId,
+    content_sha256: buildRunDetail.data.content_sha256,
+    manifest_storage_object_id: buildManifestId,
+    compiled_provider: buildRunDetail.data.provider,
+    provider_artifact_ref: buildArtifactId,
+    artifact_sha256: artifactSha256
+  };
   const publishCompletionReceipt = await completeRunFromExternalReceipt(page, publishRunId, {
       key: `${runId}:hotword-publish-completion`,
       body: {
@@ -1818,15 +1840,21 @@ async function runHotwordGovernanceUiBffSmoke(page) {
   const taskPublishJson = await responseEnvelope(taskPublishResponse, "create hotword TaskVersion publish gate", 202);
   const taskPublishRunId = taskPublishJson.data.run_id ?? taskPublishJson.data.id;
   assert(taskPublishJson.data.status === "blocked", "TaskVersion publish must require a human release decision", taskPublishJson);
-  await waitForApiState(
+  const initialTaskReleaseGate = await waitForApiState(
     page,
     `/api/v1/runs/${encodeURIComponent(taskPublishRunId)}`,
     (data) =>
       data?.status === "blocked" &&
-      data?.dispatch_state === "release_gate_blocked" &&
-      data?.release_dispatch_gate?.reason === "release_gate_not_approved",
-    "hotword TaskVersion release gate initial outbox block",
+      data?.release_gate?.status === "awaiting_decision" &&
+      data?.next_actions?.some((item) => item?.key === "approve_release") &&
+      data?.next_actions?.some((item) => item?.key === "reject_release"),
+    "hotword TaskVersion public release gate block",
     15000
+  );
+  assert(
+    !hasForbiddenPublicDispatchEvidence(initialTaskReleaseGate.data),
+    "hotword TaskVersion release gate leaked internal dispatch evidence",
+    initialTaskReleaseGate
   );
   const taskApproveButton = page.locator('[data-testid="task-version-approve-release"]');
   await waitForEnabled(taskApproveButton, "hotword TaskVersion release approval button");
@@ -1985,7 +2013,8 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     {
       sourceType: "asset_backfill",
       sourceId: backfillRunId,
-      rootTraceId: backfillRunDetail.data.root_trace_id
+      rootTraceId: backfillRunDetail.data.root_trace_id,
+      trustedStorageEvidence: backfillCompletionReceipt.completionStorage
     }
   );
   const newMaterializationId = backfillCompletion.data.materialized_assets?.[0]?.materialization_id;
@@ -2097,7 +2126,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
       completionTraceId: buildCompletion.meta.trace_id,
       completionRoute: buildCompletionReceipt.completionRoute,
       completionAuth: buildCompletionReceipt.completionAuth,
-      registeredStorageObjectIds: buildCompletion.data.registered_storage_objects.map((item) => item.storage_object_id),
+      registeredStorageObjectIds: buildStorageObjects.map((item) => item.storageObjectId),
       registeredStorageObjects: buildStorageObjects,
       remoteStorageProofs: buildRemoteStorageProofs,
       finalReadHttpStatus: 200,
@@ -2120,7 +2149,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
       finalStatus: evalCompletion.data.hotword_eval.version_status,
       locked: evalCompletion.data.hotword_eval.locked,
       gatePassed: evalCompletion.data.hotword_eval.gate.passed,
-      resultStorageObjectIds: evalCompletion.data.hotword_eval.result_storage_object_ids,
+      resultStorageObjectIds: evalStorageObjects.map((item) => item.storageObjectId),
       registeredStorageObjects: evalStorageObjects,
       remoteStorageProofs: evalRemoteStorageProofs
     },
@@ -5359,15 +5388,21 @@ async function runCanvasToolbarClosedLoopSmoke(page) {
   await assertBodyText(page, shortTrace(publishJson.meta.trace_id), "canvas publish should show backend trace");
 
   const publishRunId = publishJson.data.run_id || publishJson.data.id;
-  await waitForApiState(
+  const initialCanvasReleaseGate = await waitForApiState(
     page,
     `/api/v1/runs/${encodeURIComponent(publishRunId)}`,
     (data) =>
       data?.status === "blocked" &&
-      data?.dispatch_state === "release_gate_blocked" &&
-      data?.release_dispatch_gate?.reason === "release_gate_not_approved",
-    "canvas release gate initial outbox block",
+      data?.release_gate?.status === "awaiting_decision" &&
+      data?.next_actions?.some((item) => item?.key === "approve_release") &&
+      data?.next_actions?.some((item) => item?.key === "reject_release"),
+    "canvas public release gate block",
     15000
+  );
+  assert(
+    !hasForbiddenPublicDispatchEvidence(initialCanvasReleaseGate.data),
+    "canvas release gate leaked internal dispatch evidence",
+    initialCanvasReleaseGate
   );
   const approveButton = page.locator('[data-action-key="publish-version"]').filter({ hasText: "审批发布" }).first();
   assert(await approveButton.count() === 0, "canvas requester must not be offered self-approval");
@@ -6000,7 +6035,12 @@ async function browserApi(page, path, { method = "GET", body, key, headers: head
         credentials: "include"
       });
       const json = await response.json().catch(() => ({}));
-      return { status: response.status, ok: response.ok, json };
+      return {
+        status: response.status,
+        ok: response.ok,
+        json,
+        retryAfterSeconds: Number(response.headers.get("Retry-After") || 0)
+      };
     },
     { path, method, body, key, defaultHeaders, headerOverrides }
   );
@@ -6039,6 +6079,14 @@ async function approveReleaseRunAsSecondAdmin(runIdValue, scope, reason) {
   assert(
     response.json?.data?.release_gate?.decision?.actor_id === "u_release_admin_001",
     `${scope} release approval must be attributed to the independent reviewer`,
+    response.json
+  );
+  assert(
+    response.json?.data?.run_id === runIdValue &&
+      response.json?.data?.status === "pending" &&
+      response.json?.data?.release_gate?.status === "approved" &&
+      /^[0-9a-f]{64}$/.test(response.json?.data?.release_gate?.request_sha256 || ""),
+    `${scope} release approval must atomically bind and requeue the requested run`,
     response.json
   );
   return response.json;
@@ -6119,18 +6167,69 @@ async function completeRunFromExternalReceipt(
     body: rawBody
   });
   const json = await response.json().catch(() => ({}));
-  const auth = json?.data?.completion_receipt?.auth;
-  if (response.ok) {
+  let completionEvidence = null;
+  if (response.status === 200) {
+    const data = json?.data;
+    const publicReceipt = data?.completion_receipt;
     assert(
-      auth?.auth_mode === "signed_external_completion" &&
-        auth?.signature_binding_mode === "scoped_key_map" &&
-        auth?.signature_key_id === completionHmacKeyId &&
-        auth?.authenticated_source === source &&
-        auth?.authenticated_tenant_id === defaultHeaders["X-Tenant-Id"] &&
-        auth?.authenticated_project_id === defaultHeaders["X-Project-Id"] &&
-        auth?.body_sha256 === bodySha256,
-      "external completion must return scoped signed authentication evidence",
-      { auth, source, bodySha256, runIdValue }
+      data?.run_id === runIdValue &&
+        data?.tenant_id === defaultHeaders["X-Tenant-Id"] &&
+        data?.project_id === defaultHeaders["X-Project-Id"] &&
+        data?.business_completion_required === false &&
+        publicReceipt?.completion_receipt_id === body.completion_receipt_id &&
+        publicReceipt?.status === data?.status,
+      "external completion must return the scoped public business result",
+      { runIdValue, data }
+    );
+    assert(
+      !hasForbiddenPublicDispatchEvidence(data),
+      "external completion public response leaked internal authentication or dispatch evidence",
+      { runIdValue, data }
+    );
+    assert(
+      isValidTerminalBusinessState(data?.run_type, data?.status, data?.business_status),
+      "external completion returned an invalid terminal business state",
+      { runIdValue, data }
+    );
+    completionEvidence = await readTrustedE2eCompletionEvidence({
+      runId: runIdValue,
+      tenantId: defaultHeaders["X-Tenant-Id"],
+      projectId: defaultHeaders["X-Project-Id"],
+      completionReceiptId: body.completion_receipt_id,
+      adapter: source,
+      externalId: body.external_id,
+      signatureKeyId: completionHmacKeyId,
+      source,
+      bodySha256,
+      nonce,
+      databaseUrl: dispatchEvidenceDatabaseUrl,
+      pythonPath: dispatchEvidencePython,
+      helperPath: dispatchEvidenceHelper,
+      timeoutMs: Math.min(asyncDispatchTimeoutMs, 10000)
+    });
+    assert(
+      isValidTerminalBusinessState(
+        completionEvidence.runType,
+        completionEvidence.runStatus,
+        completionEvidence.businessStatus
+      ) &&
+        completionEvidence.runType === data.run_type &&
+        completionEvidence.runStatus === data.status &&
+        completionEvidence.businessStatus === data.business_status,
+      "trusted completion evidence does not match the public business result",
+      { runIdValue, completionEvidence, data }
+    );
+  } else if (response.ok) {
+    assert(
+      response.status === 202 &&
+        json?.data?.run_id === runIdValue &&
+        json?.data?.completion_receipt_id === body.completion_receipt_id &&
+        ["pending_binding", "pending_cancellation_resolution"].includes(
+          json?.data?.receipt_state
+        ) &&
+        !hasForbiddenPublicDispatchEvidence(json?.data),
+      "staged external completion must return only its safe pending receipt state",
+      { runIdValue, data: json?.data }
     );
   }
   const result = {
@@ -6138,19 +6237,8 @@ async function completeRunFromExternalReceipt(
     ok: response.ok,
     json,
     completionRoute: path,
-    completionAuth: auth
-      ? {
-          authMode: auth.auth_mode,
-          bindingMode: auth.signature_binding_mode,
-          signatureMode: auth.signature_mode,
-          keyId: auth.signature_key_id,
-          source: auth.authenticated_source,
-          tenantId: auth.authenticated_tenant_id,
-          projectId: auth.authenticated_project_id,
-          bodySha256: auth.body_sha256,
-          nonce: auth.nonce
-        }
-      : null
+    completionAuth: completionEvidence?.completionAuth || null,
+    completionStorage: completionEvidence?.storageObjects || []
   };
   completionReceiptObservations.push({
     runId: runIdValue,
@@ -7452,7 +7540,21 @@ try {
   assert(consoleErrors.length === 0, "browser console has errors", result);
   enterArtifactStage("completed");
   writeFileSync(artifactPath, JSON.stringify(result, null, 2), "utf8");
-  console.log(JSON.stringify(result, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        status: result.status,
+        stage: result.stage,
+        runId: result.runId,
+        artifactPath,
+        completionReceiptCount: result.completionReceiptObservations.length,
+        uiMutationCount: result.uiMutations.length,
+        failedResponseCount: result.failedResponses.length
+      },
+      null,
+      2
+    )
+  );
 } catch (error) {
   writeFailedArtifact(error, {
     consoleErrors,

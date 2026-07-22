@@ -24,19 +24,14 @@ class ApiEnvelope(BaseModel, Generic[T]):
     links: dict[str, str] | None = None
 
 
-class ApiErrorDetail(BaseModel):
-    field: str | None = None
-    message: str
-    code: str | None = None
-
-
 class ApiErrorBody(BaseModel):
     code: str
     message: str
-    details: list[ApiErrorDetail] = Field(default_factory=list)
+    details: list[dict[str, Any]] = Field(default_factory=list)
     status: int
     retryable: bool = False
     trace_id: str
+    request_id: str
     idempotency_key: str | None = None
 
 

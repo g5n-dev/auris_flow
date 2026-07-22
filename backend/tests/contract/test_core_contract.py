@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import time
-from http.client import BadStatusLine
+from http.client import BadStatusLine, IncompleteRead
 from urllib.parse import quote
 
+import pytest
 from sqlalchemy import select
 
 from app.api.routers import audio_sessions as audio_sessions_router
@@ -135,7 +136,7 @@ def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch
             return None
 
         def read(self, _limit: int = -1) -> bytes:
-            return b"node_exporter_build_info 1\n"
+            return b'{"status":"ok"}'
 
     class UnavailableOIDCFlow:
         def discover(self, *, force_refresh: bool = False):
@@ -174,6 +175,9 @@ def test_readyz_production_probes_live_observability_dependencies(client, monkey
     class HealthyResponse:
         status = 200
 
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
         def __enter__(self):
             return self
 
@@ -181,12 +185,17 @@ def test_readyz_production_probes_live_observability_dependencies(client, monkey
             return None
 
         def read(self, _limit: int = -1) -> bytes:
-            return b"node_exporter_build_info 1\n"
+            return self._body
 
     def healthy_open(request, *, timeout: float):
         observed_urls.append(request.full_url)
         assert timeout == (0.75 if f"/traces/{readiness_trace_id}" in request.full_url else 0.25)
-        return HealthyResponse()
+        body = (
+            f'{{"status":"ok","trace_id":"{readiness_trace_id}"}}'.encode()
+            if f"/traces/{readiness_trace_id}" in request.full_url
+            else b'{"status":"ok"}'
+        )
+        return HealthyResponse(body)
 
     monkeypatch.setattr(settings, "app_env", "prod")
     monkeypatch.setattr(settings, "dependency_check_mode", "strict")
@@ -227,7 +236,7 @@ def test_readyz_production_fails_when_live_observability_dependency_is_down(
             return None
 
         def read(self, _limit: int = -1) -> bytes:
-            return b"node_exporter_build_info 1\n"
+            return b'{"status":"not_ready"}' if self.status != 200 else b'{"status":"ok"}'
 
     def partially_unavailable(request, *, timeout: float):
         assert timeout == 0.25
@@ -277,7 +286,7 @@ def test_readyz_production_fails_when_the_application_export_pipeline_fails(
             return None
 
         def read(self, _limit: int = -1) -> bytes:
-            return b"node_exporter_build_info 1\n"
+            return b'{"status":"ok"}'
 
     monkeypatch.setattr(settings, "app_env", "prod")
     monkeypatch.setattr(settings, "dependency_check_mode", "strict")
@@ -299,7 +308,7 @@ def test_readyz_production_fails_when_the_application_export_pipeline_fails(
     assert response.json()["data"]["missing_required"] == {"observability": "not_ready"}
 
 
-def test_readyz_maps_a_malformed_dependency_http_response_to_stable_503(
+def test_readyz_maps_malformed_dependency_http_responses_to_stable_503(
     client,
     monkeypatch,
 ) -> None:
@@ -311,15 +320,70 @@ def test_readyz_maps_a_malformed_dependency_http_response_to_stable_503(
     monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
     monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
 
+    _failure_kind = "bad_status_line"
+
     def malformed_response(*_args, **_kwargs):
-        raise BadStatusLine("malformed readiness peer")
+        if _failure_kind == "bad_status_line":
+            raise BadStatusLine("malformed readiness peer")
+        raise IncompleteRead(b"partial", 42)
 
     monkeypatch.setattr("app.main.urlopen", malformed_response)
+
+    for _failure_kind in ("bad_status_line", "incomplete_read"):
+        response = client.get("/readyz")
+        assert response.status_code == 503
+        assert response.json()["data"]["missing_required"] == {"observability": "not_ready"}
+
+
+@pytest.mark.parametrize(
+    "malformed_response",
+    (BadStatusLine("malformed object-store status line"), IncompleteRead(b"partial", 42)),
+)
+def test_readyz_maps_malformed_object_storage_response_to_stable_503(
+    client,
+    monkeypatch,
+    malformed_response: Exception,
+) -> None:
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int = -1) -> bytes:
+            return b'{"status":"ok"}'
+
+    class MalformedObjectStorageClient:
+        bucket = "auris-flow"
+
+        def head_bucket(self, *_args: object, **_kwargs: object) -> None:
+            raise malformed_response
+
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database,object_storage")
+    monkeypatch.setattr(app.state.observability, "enabled", True)
+    monkeypatch.setattr(app.state.observability, "error_code", None)
+    monkeypatch.setattr(
+        app.state.observability,
+        "readiness_pipeline_is_live",
+        lambda *, timeout_millis, trace_visible: True,
+    )
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+    monkeypatch.setattr("app.main.urlopen", lambda *_args, **_kwargs: HealthyResponse())
+    monkeypatch.setattr(
+        "app.main.object_storage_client_for_provider",
+        lambda _provider: MalformedObjectStorageClient(),
+    )
 
     response = client.get("/readyz")
 
     assert response.status_code == 503
-    assert response.json()["data"]["missing_required"] == {"observability": "not_ready"}
+    assert response.json()["data"]["missing_required"] == {"object_storage": "not_ready"}
 
 
 def test_ops_summary_contract(client, auth_headers):

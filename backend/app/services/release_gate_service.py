@@ -958,6 +958,27 @@ async def decide_release_gate(
     run_id: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    # A release decision is a natural-person control, not a general privileged
+    # write. The global RBAC helper intentionally lets system actors perform
+    # maintenance operations, so enforce the human project-admin boundary
+    # before idempotency reservation, row locks, audit, or state mutation.
+    if (
+        ctx.actor_kind != "human"
+        or ctx.user_id == "system"
+        or "system" in ctx.roles
+        or PROJECT_ADMIN_ROLE not in ctx.roles
+    ):
+        raise ApiError(
+            "RELEASE_APPROVAL_HUMAN_ADMIN_REQUIRED",
+            "发布审批必须由当前项目的自然人管理员完成",
+            403,
+            details=[
+                {
+                    "actor_kind": ctx.actor_kind,
+                    "required_role": PROJECT_ADMIN_ROLE,
+                }
+            ],
+        )
     require_any_role(ctx, (PROJECT_ADMIN_ROLE,), "runs.release_gate_decide")
     body_hash = await request_hash(request)
     operation = f"run.release_gate_decision:{run_id}"
@@ -966,6 +987,21 @@ async def decide_release_gate(
     _assert_decision_idempotency_actor(session, ctx, operation=operation)
     if replay is not None:
         return public_run_response(replay, ctx)
+    # Match the worker's event -> run lock order. Locking every scoped event for
+    # this run first avoids the run -> event inversion that can deadlock on
+    # MySQL. A release run has only its request event before the decision.
+    locked_events = list(
+        session.scalars(
+            select(OutboxEvent)
+            .where(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.tenant_id == ctx.tenant_id,
+                OutboxEvent.project_id == ctx.project_id,
+            )
+            .order_by(OutboxEvent.event_id)
+            .with_for_update()
+        )
+    )
     record = session.scalar(
         select(RunRecord)
         .where(
@@ -990,6 +1026,47 @@ async def decide_release_gate(
             "只有 blocked 状态的发布门禁可以审批",
             409,
             details=[{"run_id": run_id, "status": record.status}],
+        )
+    expected_event_type = RELEASE_EVENT_TYPES[record.run_type]
+    event = next(
+        (
+            candidate
+            for candidate in locked_events
+            if candidate.aggregate_type == record.run_type
+            and candidate.event_type == expected_event_type
+        ),
+        None,
+    )
+    if event is None:
+        raise ApiError(
+            "RELEASE_GATE_EVENT_MISSING",
+            "发布门禁缺少可恢复的 outbox 事件",
+            409,
+            details=[{"run_id": run_id}],
+        )
+    if event.status == "processing" or any(
+        value is not None
+        for value in (
+            event.claim_token,
+            event.claimed_by,
+            event.claimed_at,
+            event.lease_expires_at,
+        )
+    ):
+        raise ApiError(
+            "RELEASE_GATE_EVENT_IN_FLIGHT",
+            "发布门禁事件仍由 Worker 处理，请稍后重试审批",
+            409,
+            details=[{"run_id": run_id}],
+            retryable=True,
+        )
+    if event.status != "blocked" or event.delivery_state != "confirmed":
+        raise ApiError(
+            "RELEASE_GATE_EVENT_NOT_SETTLED",
+            "发布门禁事件尚未稳定进入待审批状态，请稍后重试",
+            409,
+            details=[{"run_id": run_id}],
+            retryable=True,
         )
     decision = str(payload.get("decision") or "")
     if record.run_type == "hotword_rollback" and decision == "approved":
@@ -1029,14 +1106,6 @@ async def decide_release_gate(
             "发布门禁发起人与项目管理员决策人必须是不同自然人",
             409,
             details=[{"run_id": run_id, "requested_by": gate.get("requested_by")}],
-        )
-    event = _release_event(session, record, for_update=True)
-    if event is None:
-        raise ApiError(
-            "RELEASE_GATE_EVENT_MISSING",
-            "发布门禁缺少可恢复的 outbox 事件",
-            409,
-            details=[{"run_id": run_id}],
         )
     release_decision = {
         "value": decision,

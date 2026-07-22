@@ -420,7 +420,7 @@ def test_experiment_closes_assignment_metric_and_decision_loop(client, auth_head
         "task_version_v3_2_1"
     )
 
-    assert process_aggregate_events([release_run["run_id"]]) == 1
+    assert process_aggregate_events([release_run["run_id"]]) == 0
     approved = client.post(
         f"/api/v1/runs/{release_run['run_id']}/decisions",
         json={"decision": "approved", "reason": "独立管理员确认实验事实与发布影响"},

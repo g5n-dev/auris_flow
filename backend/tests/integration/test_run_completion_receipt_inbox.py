@@ -360,6 +360,50 @@ def test_signed_completion_receipt_persists_auth_and_trace_evidence(
         assert trace_link.payload["correlation_id"] == request_trace_id
 
 
+def test_signed_completion_receipt_validation_keeps_the_stable_error_envelope(
+    client,
+    monkeypatch,
+) -> None:
+    _configure_key_bindings(monkeypatch)
+    monkeypatch.setattr(get_settings(), "app_env", "prod")
+    run_id = "receipt-inbox-signed-validation-run"
+    external_run_id = _add_submitted_run(
+        run_id,
+        trace_id="trace-original-signed-validation-run",
+    )
+    payload = {
+        **_receipt_payload(
+            completion_receipt_id="receipt-inbox-signed-validation",
+            external_run_id=external_run_id,
+        ),
+        "unexpected_internal_field": "must-be-rejected",
+    }
+    encoded = json.dumps(payload, ensure_ascii=False).encode()
+    path = f"/api/v1/runs/{run_id}/external-completion-receipts"
+
+    response = client.post(
+        path,
+        content=encoded,
+        headers=_signed_headers(
+            path=path,
+            encoded_body=encoded,
+            idempotency_key="receipt-signed-validation-request",
+            nonce="nonce-signed-validation-request",
+            trace_id="trace-signed-validation-request",
+            key_id=TEST_DAGSTER_KEY_ID,
+            hmac_value=TEST_DAGSTER_HMAC_VALUE,
+        ),
+    )
+
+    assert response.status_code == 422, response.text
+    assert response.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert response.json()["error"]["trace_id"]
+    assert response.json()["error"]["request_id"] == ("request-trace-signed-validation-request")
+    with SessionLocal() as session:
+        assert session.get(RunRecord, run_id).status == "submitted"
+        assert session.scalar(select(func.count()).select_from(RunCompletionReceipt)) == 0
+
+
 def test_external_callback_key_cannot_complete_dagster_run(client, monkeypatch) -> None:
     _configure_key_bindings(monkeypatch)
     run_id = "receipt-inbox-callback-key-dagster-run"

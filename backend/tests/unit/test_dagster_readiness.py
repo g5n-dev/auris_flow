@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+from http.client import BadStatusLine, IncompleteRead
 from typing import Any
 
 import pytest
@@ -184,5 +185,21 @@ def test_dagster_readiness_rejects_non_200_response(
         "app.main.urlopen",
         lambda _request, timeout: _Response(_workspace_payload(), status=401),
     )
+
+    assert probe_dagster_workspace("http://dagster:3000/graphql") == "not_ready"
+
+
+@pytest.mark.parametrize(
+    "malformed_response",
+    (BadStatusLine("malformed dagster status line"), IncompleteRead(b"partial", 42)),
+)
+def test_dagster_readiness_maps_malformed_http_responses_to_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+    malformed_response: Exception,
+) -> None:
+    def fail_readiness_probe(*_args: object, **_kwargs: object) -> None:
+        raise malformed_response
+
+    monkeypatch.setattr("app.main.urlopen", fail_readiness_probe)
 
     assert probe_dagster_workspace("http://dagster:3000/graphql") == "not_ready"

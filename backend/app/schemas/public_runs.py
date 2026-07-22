@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Generic, Literal, TypeVar
+from typing import Annotated, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 
 class _ClosedPublicModel(BaseModel):
@@ -49,6 +49,78 @@ class PublicRunNextAction(_ClosedPublicModel):
 
 PublicFilterScalar = str | int | float | bool
 PublicFilterValue = PublicFilterScalar | list[PublicFilterScalar]
+PublicRunStatus = Literal[
+    "queued",
+    "pending",
+    "running",
+    "submitted",
+    "completion_pending",
+    "cancelling",
+    "success",
+    "failed",
+    "blocked",
+    "cancelled",
+]
+
+
+class RunCompletionSummary(_ClosedPublicModel):
+    """Engine-neutral, recursively sanitized completion evidence."""
+
+    completion_receipt_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$",
+    )
+    status: PublicRunStatus
+    result_ref: dict[str, JsonValue] = Field(default_factory=dict)
+    metrics: dict[str, JsonValue] = Field(default_factory=dict)
+    error_code: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Z][A-Z0-9_]{2,127}$",
+    )
+    retryable: bool | None = None
+    received_at: (
+        Annotated[
+            str,
+            Field(json_schema_extra={"format": "date-time"}),
+        ]
+        | None
+    ) = None
+
+
+class PublicRunDetail(BaseModel):
+    """Runtime schema for the recursively sanitized public Run projection.
+
+    Run types add domain-specific fields, so compatibility requires allowing those
+    fields here. The service projection remains the authority that removes internal
+    execution and storage evidence before response-model serialization.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    run_id: str
+    id: str | None = None
+    run_type: str
+    status: PublicRunStatus
+    tenant_id: str
+    project_id: str
+    trace_id: str
+    business_status: str | None = None
+    business_completion_required: bool | None = None
+    completion_receipt: RunCompletionSummary | None = None
+
+
+class RunCompletionReceiptPendingData(_ClosedPublicModel):
+    run_id: str
+    status: PublicRunStatus
+    completion_receipt_id: str
+    receipt_state: Literal["pending_binding", "pending_cancellation_resolution"]
+    trace_id: str
+
+
+class RunCompletionReceiptPendingResponse(PublicRunEnvelope[RunCompletionReceiptPendingData]):
+    pass
 
 
 class ExportScope(_ClosedPublicModel):

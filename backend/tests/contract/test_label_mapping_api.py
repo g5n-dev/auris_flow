@@ -502,6 +502,7 @@ def test_mapping_service_conflicts_keep_the_shared_error_contract(
         ],
         "status": 409,
         "retryable": False,
+        "request_id": auth_headers["X-Request-Id"],
         "trace_id": response.headers["X-Trace-Id"],
         "idempotency_key": "mapping-http-conflict",
     }

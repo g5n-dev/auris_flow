@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 from collections import Counter
+from http.client import BadStatusLine, IncompleteRead
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -528,10 +529,15 @@ def test_observability_health_uses_live_endpoints_instead_of_version_commands() 
         assert job in target_down
 
 
-def test_observability_pipeline_monitor_recovers_in_background(monkeypatch) -> None:
+def test_observability_pipeline_monitor_survives_malformed_http_responses(
+    monkeypatch,
+) -> None:
     probe = _load_observability_health_probe()
     first_attempt = threading.Event()
-    recovered_attempt = threading.Event()
+    second_attempt = threading.Event()
+    third_attempt = threading.Event()
+    release_second_attempt = threading.Event()
+    release_third_attempt = threading.Event()
     calls = 0
 
     def deep_probe(_exporter, _tracer) -> None:
@@ -539,8 +545,13 @@ def test_observability_pipeline_monitor_recovers_in_background(monkeypatch) -> N
         calls += 1
         if calls == 1:
             first_attempt.set()
-            raise KeyError("simulated unexpected collector response")
-        recovered_attempt.set()
+            raise BadStatusLine("malformed collector status line")
+        if calls == 2:
+            second_attempt.set()
+            assert release_second_attempt.wait(timeout=1.0)
+            raise IncompleteRead(b"partial", 42)
+        third_attempt.set()
+        assert release_third_attempt.wait(timeout=1.0)
 
     monkeypatch.setattr(probe, "_deep_probe", deep_probe)
     monkeypatch.setattr(probe, "_MONITOR_INTERVAL_SECONDS", 0.01)
@@ -548,7 +559,18 @@ def test_observability_pipeline_monitor_recovers_in_background(monkeypatch) -> N
     monitor.start()
     try:
         assert first_attempt.wait(timeout=1.0)
-        assert recovered_attempt.wait(timeout=1.0)
+        assert second_attempt.wait(timeout=1.0)
+        ready, age = monitor.snapshot()
+        assert ready is False
+        assert 0.0 <= age < 1.0
+
+        release_second_attempt.set()
+        assert third_attempt.wait(timeout=1.0)
+        ready, age = monitor.snapshot()
+        assert ready is False
+        assert 0.0 <= age < 1.0
+
+        release_third_attempt.set()
         deadline = time.monotonic() + 1.0
         ready, age = monitor.snapshot()
         while not ready and time.monotonic() < deadline:
@@ -557,6 +579,8 @@ def test_observability_pipeline_monitor_recovers_in_background(monkeypatch) -> N
         assert ready is True
         assert 0.0 <= age < 1.0
     finally:
+        release_second_attempt.set()
+        release_third_attempt.set()
         monitor.stop()
 
 

@@ -658,7 +658,7 @@ def test_canvas_task_bound_to_seeded_hotword_version_releases_after_gate(
     assert requested.status_code == 202, requested.text
     publish_run_id = requested.json()["data"]["run_id"]
     assert requested.json()["data"]["status"] == "blocked"
-    assert process_aggregate_events([publish_run_id]) == 1
+    assert process_aggregate_events([publish_run_id]) == 0
 
     second_admin_token = _release_second_admin_token()
     approved = client.post(
@@ -1217,7 +1217,7 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
     assert task_publish.status_code == 202, task_publish.text
     task_publish_run_id = task_publish.json()["data"]["run_id"]
     assert task_publish.json()["data"]["status"] == "blocked"
-    assert process_aggregate_events([task_publish_run_id]) == 1
+    assert process_aggregate_events([task_publish_run_id]) == 0
     second_admin_token = _release_second_admin_token()
     task_publish_approval = client.post(
         f"/api/v1/runs/{task_publish_run_id}/decisions",

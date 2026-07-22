@@ -345,7 +345,10 @@ def _handler(monitor: _PipelineMonitor) -> type[BaseHTTPRequestHandler]:
                 visible = False
             self._respond(
                 200 if visible else 503,
-                {"status": "ok" if visible else "not_ready"},
+                {
+                    "status": "ok" if visible else "not_ready",
+                    "trace_id": trace_id,
+                },
             )
 
         def _respond(self, status: int, body: dict[str, object]) -> None:

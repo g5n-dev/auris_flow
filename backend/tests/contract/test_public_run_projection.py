@@ -25,6 +25,7 @@ FORBIDDEN_FIELD_FINGERPRINTS = {
         "adapter",
         "adapter_dispatch",
         "adapter_mode",
+        "artifact_uri",
         "access_token",
         "api_key",
         "dagster_run_id",
@@ -46,6 +47,20 @@ FORBIDDEN_FIELD_FINGERPRINTS = {
         "monitor_generation",
         "next_status_sync_at",
         "observed_engine_status",
+        "processed_event_id",
+        "failed_event_id",
+        "dead_letter_event_id",
+        "provider_evidence",
+        "provider_run_id",
+        "provider_request_sha256",
+        "provider_response_sha256",
+        "provider_result_sha256",
+        "execution_envelope_sha256",
+        "result_manifest_object_key_sha256",
+        "result_manifest_version_id_sha256",
+        "storage_provider",
+        "object_version_id",
+        "etag",
         "input_object",
         "repository_location_name",
         "repository_name",
@@ -58,7 +73,10 @@ FORBIDDEN_FIELD_FINGERPRINTS = {
         "bucket",
         "object_key",
         "object_uri",
+        "partial_artifact_uri",
         "storage_object_id",
+        "uri",
+        "url",
     )
 }
 FORBIDDEN_FIELD_FRAGMENTS = (
@@ -120,6 +138,18 @@ def _assert_engine_neutral(value: Any, *, path: str = "data") -> None:
         for key, child in value.items():
             fingerprint = json_key_fingerprint(str(key))
             assert fingerprint not in FORBIDDEN_FIELD_FINGERPRINTS, f"{path}.{key}"
+            if fingerprint == "storageobjects":
+                assert isinstance(child, list), f"{path}.{key}"
+                assert all(
+                    isinstance(item, Mapping)
+                    and set(item) == {"role", "content_sha256"}
+                    and isinstance(item["role"], str)
+                    and re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", item["role"])
+                    and isinstance(item["content_sha256"], str)
+                    and re.fullmatch(r"[0-9a-f]{64}", item["content_sha256"])
+                    for item in child
+                ), f"{path}.{key}"
+                continue
             assert not any(fragment in fingerprint for fragment in FORBIDDEN_FIELD_FRAGMENTS), (
                 f"{path}.{key}"
             )
@@ -140,6 +170,14 @@ def _unsafe_internal_evidence(payload: dict[str, Any]) -> dict[str, Any]:
         "tenant_id": "aurora_auto",
         "project_id": "sales_qa",
         "dispatch_state": "submitted",
+        "processed_event_id": 13800138000,
+        "failed_event_id": 13800138001,
+        "dead_letter_event_id": 13800138002,
+        "provider_artifact_ref": "provider-artifact-internal-canary",
+        "result_storage_object_ids": ["storage-object-list-internal-canary"],
+        "result_storage_object_sha256": {
+            "storage-object-list-internal-canary": "c" * 64,
+        },
         "accessToken": "legacy-access-token-canary",
         "api-key": "legacy-api-key-canary",
         "remote_run_id": "remote-run-proof-canary",
@@ -173,8 +211,62 @@ def _unsafe_internal_evidence(payload: dict[str, Any]) -> dict[str, Any]:
             "result_ref": {
                 "type": "storage_object",
                 "id": "result_13800138000",
+                "provider_evidence": {
+                    "provider": "promptfoo",
+                    "provider_run_id": "provider-run-internal-canary",
+                    "config_artifact": {
+                        "object_type": "storage_object",
+                        "object_id": "storage-object-config-internal-canary",
+                    },
+                    "result_artifact": {
+                        "object_type": "storage_object",
+                        "object_id": "storage-object-result-internal-canary",
+                    },
+                },
+                "provider_request_sha256": "d" * 64,
+                "provider_response_sha256": "e" * 64,
+                "provider_result_sha256": "f" * 64,
+                "execution_envelope_sha256": "1" * 64,
+                "result_manifest_object_key_sha256": "2" * 64,
+                "result_manifest_version_id_sha256": "3" * 64,
+                "storage_provider": "minio",
+                "version_id": "storage-version-internal-canary",
+                "object_version_id": "storage-version-internal-canary",
+                "etag": "storage-etag-internal-canary",
+                "checks": {
+                    "url": "http://metadata.internal/admin",
+                    "uri": "s3://internal-bucket-canary/nested-result.json",
+                    "artifact_uri": "s3://internal-bucket-canary/artifact.json",
+                    "artifact_url": "http://metadata.internal/artifact",
+                    "manifest_uri": "s3://internal-bucket-canary/manifest.json",
+                    "artifactUrl": "s3://internal-bucket-canary/camel.json",
+                    "safe_check": "passed",
+                },
+                "artifact_id": "s3://internal-bucket-canary/private-artifact.json",
+                "action_id": "storage.private.lan",
+                "draft_ref": "tenant/secret.json",
+                "asset_key": "auris/task/login_risk_review_task_v3",
+                "content_type": "application/json",
+                "cloud_locator_evidence": "unknown-locator-internal-canary",
+                "storage_objects": [
+                    {
+                        "storage_object_id": "storage-object-descriptor-internal-canary",
+                        "role": "manifest",
+                        "provider": "minio",
+                        "bucket": "internal-bucket-canary",
+                        "object_key": "tenants/internal/manifest.json",
+                        "version_id": "storage-version-internal-canary",
+                        "etag": "storage-etag-internal-canary",
+                        "content_sha256": "5" * 64,
+                    },
+                    {"role": "Dagster artifact", "content_sha256": "6" * 64},
+                    {"role": "manifest", "content_sha256": "not-a-sha256"},
+                ],
             },
-            "metrics": {"materialized_partitions": 1},
+            "metrics": {
+                "materialized_partitions": 1,
+                "unknown_provider_locator": "metric-internal-canary",
+            },
             "note": "领域结果已确认",
             "error_code": None,
             "retryable": False,
@@ -228,7 +320,17 @@ def _unsafe_internal_evidence(payload: dict[str, Any]) -> dict[str, Any]:
                 "href": "/runs/obj_13800138000",
             }
         ],
-        "result_ref": {"type": "storage_object", "id": "obj_13800138000"},
+        "result_ref": {
+            "type": "storage_object",
+            "id": "obj_13800138000",
+            "provider_evidence": {
+                "provider": "promptfoo",
+                "provider_run_id": "provider-run-top-level-internal-canary",
+            },
+            "execution_envelope_sha256": "4" * 64,
+            "version_id": "storage-version-top-level-internal-canary",
+            "etag": "storage-etag-top-level-internal-canary",
+        },
         "content_sha256": "a13800138000b" + "c" * 51,
         "display_note": "Dag\u200bster Graph\u200bQL",
         "error": "Dagster GraphQL adapter failed in audio_intelligence_pipeline",
@@ -301,6 +403,11 @@ def test_public_run_endpoints_recursively_hide_execution_engine_evidence(
             "id": "obj_13800138000",
         }
         assert projection["content_sha256"] == "a13800138000b" + "c" * 51
+        assert "provider_artifact_ref" not in projection
+        assert "result_storage_object_ids" not in projection
+        assert "result_storage_object_sha256" not in projection
+        assert "failed_event_id" not in projection
+        assert "dead_letter_event_id" not in projection
         assert projection["display_note"] == "execution engine protocol"
         assert projection["completion_receipt"] == {
             "completion_receipt_id": "receipt-domain-summary-001",
@@ -308,13 +415,27 @@ def test_public_run_endpoints_recursively_hide_execution_engine_evidence(
             "result_ref": {
                 "type": "storage_object",
                 "id": "result_13800138000",
+                "asset_key": "auris/task/login_risk_review_task_v3",
+                "content_type": "application/json",
+                "storage_objects": [{"role": "manifest", "content_sha256": "5" * 64}],
             },
             "metrics": {"materialized_partitions": 1},
-            "note": "领域结果已确认",
             "error_code": None,
             "retryable": False,
             "received_at": "2026-07-21T12:00:00Z",
         }
+        assert projection["completion_receipt"]["metrics"] == {"materialized_partitions": 1}
+        encoded_projection = json.dumps(projection, sort_keys=True)
+        assert "provider-run-internal-canary" not in encoded_projection
+        assert "storage-object-config-internal-canary" not in encoded_projection
+        assert "storage-version-internal-canary" not in encoded_projection
+        assert "storage-etag-internal-canary" not in encoded_projection
+        assert "metadata.internal" not in encoded_projection
+        assert "internal-bucket-canary/nested-result" not in encoded_projection
+        assert "internal-bucket-canary/manifest" not in encoded_projection
+        assert "internal-bucket-canary/camel" not in encoded_projection
+        assert "storage.private.lan" not in encoded_projection
+        assert "tenant/secret.json" not in encoded_projection
         assert not any("\u200b" in str(key) for key in projection)
 
     with SessionLocal() as session:

@@ -151,18 +151,29 @@ class RunReleaseDecisionRequest(BaseModel):
         return normalized
 
 
+CompletionReceiptAdapter = Literal["dagster", "object_storage", "external_callback"]
+
+
 class RunCompletionReceiptRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     status: Literal["success", "failed"] = "success"
-    adapter: Literal["dagster", "object_storage", "external_callback"] | None = None
-    completion_receipt_id: str | None = Field(default=None, max_length=128)
+    adapter: CompletionReceiptAdapter | None = None
+    completion_receipt_id: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$",
+    )
     source: str | None = Field(default=None, max_length=128)
     external_id: str | None = Field(default=None, max_length=256)
     result_ref: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
     note: str | None = Field(default=None, max_length=1000)
-    error_code: str | None = Field(default=None, max_length=128)
+    error_code: str | None = Field(
+        default=None,
+        max_length=128,
+        pattern=r"^[A-Z][A-Z0-9_]{2,127}$",
+    )
     retryable: bool = True
 
     @field_validator("completion_receipt_id")
@@ -176,6 +187,26 @@ class RunCompletionReceiptRequest(BaseModel):
     @classmethod
     def result_references_are_canonical(cls, value: Any) -> Any:
         return _normalize_completion_references(value)
+
+
+class ExternalRunCompletionReceiptRequest(RunCompletionReceiptRequest):
+    """Signed completion contract for a concrete external dispatch binding."""
+
+    adapter: CompletionReceiptAdapter
+    completion_receipt_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,127}$",
+    )
+    source: CompletionReceiptAdapter | None = None
+    external_id: str = Field(min_length=1, max_length=256)
+
+    @field_validator("external_id")
+    @classmethod
+    def external_id_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("external_id must not be blank")
+        return value
 
 
 HumanReviewDecision = Literal[

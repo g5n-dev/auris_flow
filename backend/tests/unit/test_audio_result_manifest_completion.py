@@ -672,9 +672,17 @@ def test_signed_audio_completion_can_arrive_before_launch_and_materialize_exact_
     replayed_while_pending = client.post(path, content=encoded, headers=headers)
 
     assert staged.status_code == 202, staged.text
-    assert replayed_while_pending.status_code == 200, replayed_while_pending.text
+    assert replayed_while_pending.status_code == 202, replayed_while_pending.text
     assert staged.json()["data"]["receipt_state"] == "pending_binding"
     assert replayed_while_pending.json()["data"]["receipt_state"] == "pending_binding"
+    assert replayed_while_pending.json() == staged.json()
+    assert set(staged.json()["data"]) == {
+        "run_id",
+        "status",
+        "completion_receipt_id",
+        "receipt_state",
+        "trace_id",
+    }
     assert result_object_key not in staged.text
     assert result_version_id not in staged.text
     with SessionLocal() as session:

@@ -419,7 +419,11 @@ def public_run_response(
     if not isinstance(projected, dict):
         return {}
     data = projected.get("data")
-    if isinstance(data, dict) and isinstance(data.get("run_id"), str):
+    if (
+        isinstance(data, dict)
+        and isinstance(data.get("run_id"), str)
+        and isinstance(data.get("run_type"), str)
+    ):
         projected["data"] = {
             **data,
             "tenant_id": ctx.tenant_id,
@@ -1548,6 +1552,12 @@ async def complete_run_from_receipt(
     if replay is not None:
         public_replay = public_run_response(replay, ctx)
         raise_replayed_api_error(public_replay)
+        replay_data = public_replay.get("data")
+        if isinstance(replay_data, dict) and replay_data.get("receipt_state") in {
+            "pending_binding",
+            "pending_cancellation_resolution",
+        }:
+            return JSONResponse(status_code=202, content=public_replay)
         return public_replay
 
     if record.run_type == "task_run" and record.status in {"success", "failed", "cancelled"}:
@@ -2357,7 +2367,7 @@ async def create_run(
             correlation_id=ctx.correlation_id or trace_id,
         )
     )
-    enqueue_event(
+    event = enqueue_event(
         session,
         event_ctx,
         event_type=event_type,
@@ -2365,6 +2375,17 @@ async def create_run(
         aggregate_id=run_id,
         payload=record.payload,
     )
+    if status == "blocked":
+        # A run that already requires an explicit human decision must not leave
+        # a claimable event behind. Otherwise a fast worker can claim the
+        # pre-decision snapshot while the approver concurrently requeues the
+        # same event, allowing stale gate state to overwrite the approval.
+        # The decision transaction is the sole path that moves this event back
+        # to pending/ready through _reset_outbox_for_approval().
+        event.status = "blocked"
+        event.delivery_state = "confirmed"
+        event.processed_at = now
+        event.last_error = "run is blocked by release gate or human confirmation"
     record_audit(
         session,
         ctx,

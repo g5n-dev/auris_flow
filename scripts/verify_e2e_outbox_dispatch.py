@@ -40,7 +40,10 @@ from app.models import (  # noqa: E402
     ToolCall,
     TraceRef,
 )
-from app.services.adapters import RealObjectStorageClient  # noqa: E402
+from app.services.adapters import (  # noqa: E402
+    RealObjectStorageClient,
+    object_storage_client_for_provider,
+)
 
 
 ARTIFACT_PATH = (
@@ -749,55 +752,226 @@ def required_qdrant_payload_fields(run_id: str, label: str) -> tuple[str, ...]:
     return tuple(fields)
 
 
+def _strong_object_etag(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized.startswith("W/"):
+        return None
+    if normalized.startswith('"') or normalized.endswith('"'):
+        if len(normalized) < 2 or not (
+            normalized.startswith('"') and normalized.endswith('"')
+        ):
+            return None
+        normalized = normalized[1:-1]
+    if (
+        not normalized
+        or '"' in normalized
+        or any(
+            ord(character) < 0x21 or ord(character) == 0x7F for character in normalized
+        )
+    ):
+        return None
+    return normalized
+
+
+def _real_object_storage_binding(label: str, details: dict[str, Any]) -> dict[str, Any]:
+    provider_value = details.get("provider")
+    provider = provider_value.strip().lower() if isinstance(provider_value, str) else ""
+    bucket = details.get("bucket")
+    object_key = details.get("object_key")
+    object_uri = details.get("object_uri")
+    etag = _strong_object_etag(details.get("etag"))
+    content_type = details.get("content_type")
+    content_sha256 = details.get("content_sha256")
+    content_length = details.get("content_length")
+    version_value = details.get("version_id")
+    version_id = version_value if isinstance(version_value, str) else None
+
+    invalid_fields: list[str] = []
+    if not provider or provider_value != provider:
+        invalid_fields.append("provider")
+    if not isinstance(bucket, str) or not bucket or bucket != bucket.strip():
+        invalid_fields.append("bucket")
+    if (
+        not isinstance(object_key, str)
+        or not object_key
+        or object_key != object_key.strip()
+        or object_key.startswith("/")
+        or "\\" in object_key
+        or any(part in {"", ".", ".."} for part in object_key.split("/"))
+    ):
+        invalid_fields.append("object_key")
+    if etag is None:
+        invalid_fields.append("etag")
+    if (
+        not isinstance(content_type, str)
+        or not content_type
+        or content_type != content_type.strip()
+        or "/" not in content_type
+        or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in content_type
+        )
+    ):
+        invalid_fields.append("content_type")
+    if (
+        not isinstance(content_sha256, str)
+        or len(content_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in content_sha256)
+    ):
+        invalid_fields.append("content_sha256")
+    if (
+        not isinstance(content_length, int)
+        or isinstance(content_length, bool)
+        or content_length <= 0
+    ):
+        invalid_fields.append("content_length")
+    if version_value is not None and (
+        version_id is None
+        or not version_id
+        or version_id != version_id.strip()
+        or version_id.casefold() == "null"
+        or len(version_id) > 1024
+        or any(
+            ord(character) < 0x20 or ord(character) == 0x7F for character in version_id
+        )
+    ):
+        invalid_fields.append("version_id")
+
+    if invalid_fields:
+        fail(
+            "Real object storage receipt has invalid immutable locator fields",
+            {"label": label, "invalid_fields": sorted(set(invalid_fields))},
+        )
+
+    assert isinstance(bucket, str)
+    assert isinstance(object_key, str)
+    assert isinstance(content_type, str)
+    assert isinstance(content_sha256, str)
+    assert isinstance(content_length, int)
+    assert etag is not None
+    expected_scheme = "s3" if provider in {"minio", "s3"} else provider
+    expected_uri = f"{expected_scheme}://{bucket}/{object_key}"
+    if object_uri != expected_uri:
+        fail(
+            "Real object storage receipt object_uri does not match its locator",
+            {
+                "label": label,
+                "expected_object_uri": expected_uri,
+                "actual_object_uri": object_uri,
+            },
+        )
+    return {
+        "provider": provider,
+        "bucket": bucket,
+        "object_key": object_key,
+        "object_uri": expected_uri,
+        "etag": etag,
+        "content_type": content_type,
+        "content_sha256": content_sha256,
+        "content_length": content_length,
+        "version_id": version_id,
+    }
+
+
+def _validate_object_response_metadata(
+    *,
+    label: str,
+    operation: str,
+    response: object,
+    binding: dict[str, Any],
+) -> dict[str, Any]:
+    if not isinstance(response, dict):
+        fail(
+            f"Real object storage {operation} returned an invalid response",
+            {"label": label},
+        )
+    try:
+        status = int(response.get("status") or 0)
+        content_length = int(response.get("content_length"))
+    except (TypeError, ValueError):
+        fail(
+            f"Real object storage {operation} returned invalid status or length metadata",
+            {"label": label},
+        )
+    mismatches: list[str] = []
+    if status != 200:
+        mismatches.append("status")
+    if _strong_object_etag(response.get("etag")) != binding["etag"]:
+        mismatches.append("etag")
+    if content_length != binding["content_length"]:
+        mismatches.append("content_length")
+    if response.get("content_type") != binding["content_type"]:
+        mismatches.append("content_type")
+    expected_version = binding.get("version_id")
+    if expected_version is not None and response.get("version_id") != expected_version:
+        mismatches.append("version_id")
+    if operation == "GET" and response.get("content_range") not in (None, ""):
+        mismatches.append("content_range")
+    if mismatches:
+        fail(
+            f"Real object storage {operation} metadata does not match dispatch receipt",
+            {"label": label, "mismatches": mismatches},
+        )
+    return response
+
+
 def validate_real_object_storage_object(
     expected: ExpectedRun, details: dict[str, Any]
 ) -> None:
     if details.get("mode") != "real":
         return
-    bucket = details.get("bucket")
-    object_key = details.get("object_key")
-    object_uri = details.get("object_uri")
-    expected_sha256 = details.get("content_sha256")
-    expected_length = details.get("content_length")
-    if not isinstance(bucket, str) or not bucket:
-        fail(
-            "Real object storage dispatch receipt is missing bucket",
-            {"label": expected.label, "details": details},
-        )
-    if not isinstance(object_key, str) or not object_key:
-        fail(
-            "Real object storage dispatch receipt is missing object_key",
-            {"label": expected.label, "details": details},
-        )
-    if not isinstance(object_uri, str) or not object_uri.startswith(f"s3://{bucket}/"):
-        fail(
-            "Real object storage dispatch receipt has invalid object_uri",
-            {"label": expected.label, "details": details},
-        )
-    if not isinstance(expected_sha256, str) or len(expected_sha256) != 64:
-        fail(
-            "Real object storage dispatch receipt is missing content_sha256",
-            {"label": expected.label, "details": details},
-        )
-    if not isinstance(expected_length, int) or expected_length <= 0:
-        fail(
-            "Real object storage dispatch receipt is missing positive content_length",
-            {"label": expected.label, "details": details},
-        )
+    binding = _real_object_storage_binding(expected.label, details)
+    bucket = binding["bucket"]
+    object_key = binding["object_key"]
+    conditional_etag = f'"{binding["etag"]}"'
     try:
-        client = RealObjectStorageClient()
-        client.head_object(bucket, object_key)
-        response = client.get_object(bucket, object_key)
-    except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:
+        client = object_storage_client_for_provider(binding["provider"])
+        if not client.allows_bucket(bucket):
+            fail(
+                "Real object storage receipt bucket is not allowed for its provider",
+                {
+                    "label": expected.label,
+                    "provider": binding["provider"],
+                    "bucket": bucket,
+                },
+            )
+        head = client.head_object(
+            bucket,
+            object_key,
+            if_match=conditional_etag,
+            version_id=binding["version_id"],
+        )
+        response = client.get_object(
+            bucket,
+            object_key,
+            if_match=conditional_etag,
+            version_id=binding["version_id"],
+        )
+    except (OSError, URLError, HTTPError, TimeoutError, TypeError, ValueError) as exc:
         fail(
             "Real object storage dispatch receipt could not be verified against object storage",
             {
                 "label": expected.label,
+                "provider": binding["provider"],
                 "bucket": bucket,
                 "object_key": object_key,
                 "error": str(exc),
             },
         )
+    _validate_object_response_metadata(
+        label=expected.label,
+        operation="HEAD",
+        response=head,
+        binding=binding,
+    )
+    response = _validate_object_response_metadata(
+        label=expected.label,
+        operation="GET",
+        response=response,
+        binding=binding,
+    )
     body = response.get("body")
     if not isinstance(body, bytes):
         fail(
@@ -805,25 +979,25 @@ def validate_real_object_storage_object(
             {"label": expected.label, "bucket": bucket, "object_key": object_key},
         )
     actual_sha256 = hashlib.sha256(body).hexdigest()
-    if actual_sha256 != expected_sha256:
+    if actual_sha256 != binding["content_sha256"]:
         fail(
             "Real object storage object content hash does not match dispatch receipt",
             {
                 "label": expected.label,
                 "bucket": bucket,
                 "object_key": object_key,
-                "expected_sha256": expected_sha256,
+                "expected_sha256": binding["content_sha256"],
                 "actual_sha256": actual_sha256,
             },
         )
-    if len(body) != expected_length:
+    if len(body) != binding["content_length"]:
         fail(
             "Real object storage object length does not match dispatch receipt",
             {
                 "label": expected.label,
                 "bucket": bucket,
                 "object_key": object_key,
-                "expected_length": expected_length,
+                "expected_length": binding["content_length"],
                 "actual_length": len(body),
             },
         )
@@ -1320,7 +1494,15 @@ def validate_dispatch(
         if details.get("mode") == "real":
             missing += [
                 key
-                for key in ("bucket", "object_key", "content_sha256", "content_length")
+                for key in (
+                    "provider",
+                    "bucket",
+                    "object_key",
+                    "etag",
+                    "content_type",
+                    "content_sha256",
+                    "content_length",
+                )
                 if not details.get(key)
             ]
     elif expected.adapter == "external_callback":
@@ -1688,22 +1870,119 @@ def verify_export_reserved(run: RunRecord) -> None:
                 "download_ref": download_ref,
             },
         )
-    for key in ("storage_object_id", "object_uri", "content_type"):
-        if download_ref.get(key) != details.get(key):
-            fail(
-                "Reserved export download_ref does not match object storage dispatch",
-                {
-                    "run_id": run.run_id,
-                    "field": key,
-                    "expected": details.get(key),
-                    "actual": download_ref.get(key),
-                    "download_ref": download_ref,
-                    "details": details,
-                },
-            )
+    if (
+        download_ref.get("kind") != "bff_download"
+        or download_ref.get("href") is not None
+        or download_ref.get("content_type") != details.get("content_type")
+    ):
+        fail(
+            "Reserved export does not expose the safe BFF download boundary",
+            {
+                "run_id": run.run_id,
+                "expected_content_type": details.get("content_type"),
+                "download_ref": download_ref,
+            },
+        )
+    forbidden = {
+        "storage_object_id",
+        "object_uri",
+        "provider",
+        "bucket",
+        "object_key",
+        "etag",
+    }
+    leaked = sorted(forbidden.intersection(download_ref))
+    if leaked:
+        fail(
+            "Reserved export leaked an internal object-storage locator",
+            {"run_id": run.run_id, "leaked_fields": leaked},
+        )
+
+
+def _verify_real_export_download(
+    run_id: str,
+    details: dict[str, Any],
+    trace_id: str,
+    href: str,
+) -> None:
+    binding = _real_object_storage_binding(run_id, details)
+    expected_length = binding["content_length"]
+    expected_content_type = binding["content_type"]
+    expected_etag = f'"{binding["etag"]}"'
+    trace_headers = {"X-Trace-Id": trace_id}
+
+    head = bff_binary_request("HEAD", href, extra_headers=trace_headers)
+    head_headers = head.get("headers") if isinstance(head, dict) else None
+    head_body = head.get("body") if isinstance(head, dict) else None
+    if not isinstance(head_headers, dict):
+        fail(
+            "Completed real export HEAD response is missing headers",
+            {"run_id": run_id, "response": head},
+        )
+    head_mismatches: list[str] = []
+    if head.get("status") != 200:
+        head_mismatches.append("status")
+    if str(head_headers.get("accept-ranges") or "").lower() != "bytes":
+        head_mismatches.append("accept-ranges")
+    if head_headers.get("content-type") != expected_content_type:
+        head_mismatches.append("content-type")
+    if head_headers.get("content-length") != str(expected_length):
+        head_mismatches.append("content-length")
+    if head_headers.get("etag") != expected_etag:
+        head_mismatches.append("etag")
+    if head_body != b"":
+        head_mismatches.append("body")
+    if head_mismatches:
+        fail(
+            "Completed real export HEAD response does not match its immutable receipt",
+            {"run_id": run_id, "mismatches": head_mismatches},
+        )
+
+    range_header = f"bytes=0-{expected_length - 1}"
+    expected_content_range = f"bytes 0-{expected_length - 1}/{expected_length}"
+    ranged = bff_binary_request(
+        "GET",
+        href,
+        extra_headers={**trace_headers, "Range": range_header},
+    )
+    range_headers = ranged.get("headers") if isinstance(ranged, dict) else None
+    range_body = ranged.get("body") if isinstance(ranged, dict) else None
+    if not isinstance(range_headers, dict):
+        fail(
+            "Completed real export Range response is missing headers",
+            {"run_id": run_id, "response": ranged},
+        )
+    range_mismatches: list[str] = []
+    if ranged.get("status") != 206:
+        range_mismatches.append("status")
+    if str(range_headers.get("accept-ranges") or "").lower() != "bytes":
+        range_mismatches.append("accept-ranges")
+    if range_headers.get("content-range") != expected_content_range:
+        range_mismatches.append("content-range")
+    if range_headers.get("content-type") != expected_content_type:
+        range_mismatches.append("content-type")
+    if range_headers.get("content-length") != str(expected_length):
+        range_mismatches.append("content-length")
+    if range_headers.get("etag") != expected_etag:
+        range_mismatches.append("etag")
+    if not isinstance(range_body, bytes):
+        range_mismatches.append("body_type")
+    else:
+        if len(range_body) != expected_length:
+            range_mismatches.append("body_length")
+        if hashlib.sha256(range_body).hexdigest() != binding["content_sha256"]:
+            range_mismatches.append("body_sha256")
+    if range_mismatches:
+        fail(
+            "Completed real export Range response does not match its immutable receipt",
+            {"run_id": run_id, "mismatches": range_mismatches},
+        )
 
 
 def verify_export_ready(run_id: str, details: dict[str, Any], trace_id: str) -> None:
+    real_mode = details.get("mode") == "real"
+    if real_mode:
+        _real_object_storage_binding(run_id, details)
     response = bff_json_request("GET", f"/api/v1/exports/{run_id}", trace_id=trace_id)
     data = response.get("data") if isinstance(response, dict) else None
     if not isinstance(data, dict):
@@ -1717,28 +1996,54 @@ def verify_export_ready(run_id: str, details: dict[str, Any], trace_id: str) -> 
             "Completed export detail is missing download_ref",
             {"run_id": run_id, "data": data},
         )
-    if data.get("status") != "success" or download_ref.get("status") != "ready":
+    has_streamable_locator = all(
+        details.get(field) not in {None, ""}
+        for field in ("provider", "bucket", "object_key", "etag", "content_length")
+    )
+    if real_mode and not has_streamable_locator:
         fail(
-            "Completed export did not become ready",
+            "Completed real export is missing a streamable immutable locator",
+            {"run_id": run_id},
+        )
+    expected_download_status = "ready" if has_streamable_locator else "unavailable"
+    expected_href = (
+        f"/api/v1/exports/{run_id}/download" if has_streamable_locator else None
+    )
+    if (
+        data.get("status") != "success"
+        or download_ref.get("kind") != "bff_download"
+        or download_ref.get("status") != expected_download_status
+        or download_ref.get("href") != expected_href
+        or download_ref.get("content_type") != details.get("content_type")
+    ):
+        fail(
+            "Completed export did not expose the expected safe BFF download boundary",
             {
                 "run_id": run_id,
                 "status": data.get("status"),
+                "expected_download_status": expected_download_status,
+                "expected_href": expected_href,
+                "expected_content_type": details.get("content_type"),
                 "download_ref": download_ref,
             },
         )
-    for key in ("storage_object_id", "object_uri", "content_type"):
-        if download_ref.get(key) != details.get(key):
-            fail(
-                "Completed export download_ref does not match object storage dispatch",
-                {
-                    "run_id": run_id,
-                    "field": key,
-                    "expected": details.get(key),
-                    "actual": download_ref.get(key),
-                    "download_ref": download_ref,
-                    "details": details,
-                },
-            )
+    forbidden = {
+        "storage_object_id",
+        "object_uri",
+        "provider",
+        "bucket",
+        "object_key",
+        "etag",
+    }
+    leaked = sorted(forbidden.intersection(download_ref))
+    if leaked:
+        fail(
+            "Completed export leaked an internal object-storage locator",
+            {"run_id": run_id, "leaked_fields": leaked},
+        )
+    if real_mode:
+        assert isinstance(expected_href, str)
+        _verify_real_export_download(run_id, details, trace_id, expected_href)
 
 
 def verify_trace_completion(run: RunRecord) -> None:
@@ -3448,15 +3753,15 @@ def verify_voiceprint_enrollment_gate(result: dict[str, Any]) -> dict[str, Any]:
 
 def verify_approved_voiceprint_qdrant_index(started_at: datetime) -> dict[str, Any]:
     enrollment_id = (
-        "vp_e2e_qdrant_"
+        "vp_e2e_vector_recall_"
         f"{hashlib.sha1(started_at.isoformat().encode()).hexdigest()[:12]}"
     )
-    voiceprint_id = "VP-E2E-QDRANT"
+    voiceprint_id = "VP-E2E-VOICEPRINT"
     payload = {
         "enrollment_id": enrollment_id,
         "voiceprint_id": voiceprint_id,
         "employee_ref": "销售A / A-1001",
-        "speaker_id": "spk_e2e_qdrant",
+        "speaker_id": "spk_e2e_voiceprint",
         "audio_session_id": "S20250526-000128",
         "recording_id": "A-1001_20250526_122300",
         "asset_key": "auris/audio/raw_recordings",
