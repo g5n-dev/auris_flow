@@ -10,6 +10,12 @@ import {
   governedAssetReadTarget,
   validateExpectedAssetReadCancellations
 } from "../scripts/platform-bff-request-failure-policy.mjs";
+import {
+  hasForbiddenPublicDispatchEvidence,
+  isPublicDispatchBoundary,
+  publicDispatchIdentityMatches,
+  readTrustedE2eDispatchEvidence
+} from "../scripts/e2e-dispatch-evidence.mjs";
 
 const baseUrl = process.env.AURIS_E2E_URL || "http://127.0.0.1:5173/";
 const frontendRoot = new URL("../", import.meta.url).pathname;
@@ -37,6 +43,9 @@ const objectStorageRegion = process.env.OBJECT_STORAGE_REGION || "us-east-1";
 const completionHmacKeyId = process.env.AURIS_E2E_COMPLETION_HMAC_KEY_ID || "auris-e2e-completion";
 const completionHmacSecret =
   process.env.AURIS_E2E_COMPLETION_HMAC_SECRET || "auris-e2e-completion-secret-32chars-minimum";
+const dispatchEvidenceDatabaseUrl = process.env.DATABASE_URL || "";
+const dispatchEvidencePython = process.env.AURIS_E2E_DISPATCH_EVIDENCE_PYTHON || "";
+const dispatchEvidenceHelper = process.env.AURIS_E2E_DISPATCH_EVIDENCE_HELPER || "";
 mkdirSync(artifactDir, { recursive: true });
 
 const runId =
@@ -6169,11 +6178,44 @@ async function dispatchAsyncRunForUi(page, runIdValue) {
     lastObservation = response;
     if (response.status === 200) {
       const data = response.json?.data;
-      const adapterDispatch = data?.dispatch;
-      if (data?.status === "submitted" && adapterDispatch?.adapter) {
+      assert(
+        publicDispatchIdentityMatches(data, {
+          runId: runIdValue,
+          tenantId: defaultHeaders["X-Tenant-Id"],
+          projectId: defaultHeaders["X-Project-Id"]
+        }),
+        "public run identity does not match the requested scoped run",
+        { runId: runIdValue, data }
+      );
+      if (isPublicDispatchBoundary(data)) {
+        assert(
+          !hasForbiddenPublicDispatchEvidence(data),
+          "public run projection leaked internal dispatch evidence",
+          { runId: runIdValue, data }
+        );
+        const trustedEvidence = await readTrustedE2eDispatchEvidence({
+          runId: runIdValue,
+          tenantId: defaultHeaders["X-Tenant-Id"],
+          projectId: defaultHeaders["X-Project-Id"],
+          databaseUrl: dispatchEvidenceDatabaseUrl,
+          pythonPath: dispatchEvidencePython,
+          helperPath: dispatchEvidenceHelper,
+          timeoutMs: Math.min(asyncDispatchTimeoutMs, 10000)
+        });
+        assert(
+          trustedEvidence.run_type === data?.run_type,
+          "trusted dispatch evidence run type does not match the public run",
+          {
+            runId: runIdValue,
+            publicRunType: data?.run_type,
+            trustedRunType: trustedEvidence.run_type
+          }
+        );
+        const adapterDispatch = trustedEvidence.dispatch;
         const observation = {
           runId: runIdValue,
-          adapter: adapterDispatch.adapter,
+          adapter: trustedEvidence.adapter,
+          eventId: trustedEvidence.event_id,
           polls,
           elapsedMs: Date.now() - started,
           observedAt: new Date().toISOString()
@@ -6184,7 +6226,7 @@ async function dispatchAsyncRunForUi(page, runIdValue) {
           run_type: data.run_type,
           run_status: data.status,
           business_status: data.business_status,
-          adapter: adapterDispatch.adapter,
+          adapter: trustedEvidence.adapter,
           dispatch: adapterDispatch,
           observation
         };

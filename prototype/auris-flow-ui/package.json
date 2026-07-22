@@ -25,7 +25,7 @@
     "precompress:build": "node scripts/precompressed-assets.mjs",
     "bundle-budget:test": "node --test scripts/frontend-bundle-budget-policy.test.mjs scripts/frontend-bundle-lock.test.mjs scripts/frontend-bundle-candidate.test.mjs ../../scripts/verify_frontend_bundle.test.mjs",
     "bundle-scenarios:test": "node --test scripts/bundle-route-scenarios.test.mjs",
-    "e2e-policy:test": "node --test scripts/platform-bff-request-failure-policy.test.mjs",
+    "e2e-policy:test": "node --test scripts/platform-bff-request-failure-policy.test.mjs scripts/e2e-dispatch-evidence.test.mjs",
     "architecture:debt:update": "node scripts/update-frontend-architecture-debt.mjs",
     "css:split": "node scripts/split-frontend-css.mjs",
     "css:manifest:refresh-trimmed-eof": "node scripts/split-frontend-css.mjs --refresh-trimmed-eof",
