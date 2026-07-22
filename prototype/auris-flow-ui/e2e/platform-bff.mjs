@@ -14,6 +14,7 @@ import {
   hasForbiddenPublicDispatchEvidence,
   isPublicDispatchBoundary,
   isValidTerminalBusinessState,
+  projectDemoUiEvidenceProof,
   publicDispatchIdentityMatches,
   readTrustedE2eCompletionEvidence,
   readTrustedE2eDispatchEvidence
@@ -317,8 +318,19 @@ function completionStorageDescriptor(
   };
 }
 
+function publicCompletionStorageRole(role) {
+  return role === "provider_artifact" ? "compiled_artifact" : role;
+}
+
 function sha256Hex(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function sha256LetterDigest(value) {
+  const alphabet = "abcdefghijklmnop";
+  return [...sha256Hex(value)]
+    .map((nibble) => alphabet[Number.parseInt(nibble, 16)])
+    .join("");
 }
 
 function stableJson(value) {
@@ -482,7 +494,7 @@ async function assertCompletionStorageProof(
     const registration = registered[index];
     const trusted = trustedStorageEvidence[index];
     assert(
-      accepted?.role === descriptor.role &&
+      accepted?.role === publicCompletionStorageRole(descriptor.role) &&
         accepted?.content_sha256 === descriptor.content_sha256 &&
         descriptor.object_key.startsWith(expectedPrefix),
       "public completion receipt must preserve only the safe storage role and content hash",
@@ -941,7 +953,9 @@ async function runEvaluationPromptUiClosedLoopSmoke(page) {
     evalTraceId: evalRunJson.meta.trace_id,
     feedbackTaskId,
     feedbackTraceId: feedbackJson.meta.trace_id,
-    contentSource: "mock"
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
   };
 }
 
@@ -1161,6 +1175,12 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     "candidate must remain validating until a registered artifact completion is supplied",
     validatingCandidateDetail
   );
+  const candidateProvider = validatingCandidateDetail.data.compiled_provider;
+  assert(
+    typeof candidateProvider === "string" && candidateProvider.length > 0,
+    "hotword candidate must expose its governed domain provider binding",
+    validatingCandidateDetail
+  );
 
   const buildManifestId = `sto_hw_manifest_${buildRunId}`;
   const buildArtifactId = `sto_hw_artifact_${buildRunId}`;
@@ -1197,7 +1217,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     stableJson({
       artifact_type: "provider_hotword_bundle",
       content_sha256: buildRunDetail.data.content_sha256,
-      provider: buildRunDetail.data.provider,
+      provider: candidateProvider,
       run_id: buildRunId,
       version_id: candidateVersionId
     })
@@ -1230,7 +1250,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
   const buildResultRef = {
     hotword_pack_version_id: candidateVersionId,
     content_sha256: buildRunDetail.data.content_sha256,
-    provider: buildRunDetail.data.provider,
+    provider: candidateProvider,
     manifest_storage_object_id: buildManifestId,
     provider_artifact_ref: buildArtifactId,
     artifact_sha256: artifactSha256,
@@ -1409,7 +1429,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     eval_dataset_id: evalRunDetail.data.eval_dataset_id,
     content_sha256: evalRunDetail.data.content_sha256,
     manifest_storage_object_id: buildManifestId,
-    provider: evalRunDetail.data.provider,
+    provider: candidateProvider,
     provider_artifact_ref: buildArtifactId,
     artifact_sha256: evalRunDetail.data.artifact_sha256,
     baseline_metrics: baselineMetrics,
@@ -1552,7 +1572,7 @@ async function runHotwordGovernanceUiBffSmoke(page) {
     eval_run_id: evalRunId,
     content_sha256: buildRunDetail.data.content_sha256,
     manifest_storage_object_id: buildManifestId,
-    compiled_provider: buildRunDetail.data.provider,
+    compiled_provider: candidateProvider,
     provider_artifact_ref: buildArtifactId,
     artifact_sha256: artifactSha256
   };
@@ -2091,6 +2111,8 @@ async function runHotwordGovernanceUiBffSmoke(page) {
   return {
     coverageStatus: "verified",
     contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff",
     statistics: {
       httpStatus: statisticsResponse.status(),
       traceId: statisticsJson.meta.trace_id,
@@ -2221,6 +2243,12 @@ async function waitForLocatorCount(locator, expected, message) {
 }
 
 async function runBlindCalibrationUiClosedLoopSmoke(page) {
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "评测",
+    expectedText: "评测中心",
+    fixtureSelector: '[data-testid="calibration-workspace"]',
+    actionSelectors: [".evaluation-manual-mode-switch button"]
+  });
   await enterDemoModule(page, "评测", "评测中心");
   await clickModuleTab(page, "人工评测");
   await page.locator(".evaluation-manual-mode-switch button").filter({ hasText: "盲审校准" }).click();
@@ -2504,7 +2532,9 @@ async function runBlindCalibrationUiClosedLoopSmoke(page) {
     goldTraceId: releaseJson.meta.trace_id,
     observedAgreementPpm: releaseJson.data.observed_agreement_ppm,
     cohenKappaMicros: releaseJson.data.cohen_kappa_micros,
-    contentSource: "mock"
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
   };
 }
 
@@ -2985,7 +3015,7 @@ async function runLabelVersionPageUiClosedLoopSmoke(page) {
   const optimizationDispatch = await dispatchAsyncRunForUi(page, optimizationRunId);
   assert(optimizationDispatch.adapter === "dagster", "LabelOptimizationRun must dispatch through Dagster", optimizationDispatch);
   const promptCandidateIds = [1, 2].map(
-    (index) => `prompt_opt_${sha256Hex(`${runId}:${optimizationRunId}:${index}`).slice(0, 24)}`
+    (index) => `prompt_opt_${sha256LetterDigest(`${runId}:${optimizationRunId}:${index}`).slice(0, 24)}`
   );
   const optimizedPromptCandidate = (promptCandidateId, seed) => ({
     prompt_version_id: promptCandidateId,
@@ -4008,6 +4038,12 @@ async function runLabelVersionPageUiClosedLoopSmoke(page) {
 }
 
 async function runEvaluationBadcaseUiClosedLoopSmoke(page) {
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "评测",
+    expectedText: "评测中心",
+    fixtureSelector: ".eval-grid",
+    actionSelectors: ["button.evaluation-primary-action"]
+  });
   await enterDemoModule(page, "评测", "评测中心");
   await clickModuleTab(page, "自动化评测");
   const evalRunResponsePromise = page.waitForResponse(
@@ -4088,7 +4124,9 @@ async function runEvaluationBadcaseUiClosedLoopSmoke(page) {
     feedbackTraceId: feedbackJson.meta.trace_id,
     feedbackStatus: feedbackJson.data.status,
     feedbackRunType: feedbackJson.data.run_type,
-    contentSource: "mock"
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
   };
 }
 
@@ -4096,6 +4134,15 @@ async function runInsightReportUiClosedLoopSmoke(page) {
   await ensureInsightMetricProjection(page, {
     idempotencyScope: "insight-projection-bootstrap",
     source: "ui_e2e_projection_bootstrap"
+  });
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "洞察",
+    expectedText: "业务洞察",
+    fixtureSelector: ".insight-command-shell",
+    actionSelectors: [
+      ".insight-dashboard-actions button",
+      ".insight-agent-summary button"
+    ]
   });
   await enterDemoModule(page, "洞察", "业务洞察");
   const metricRunResponsePromise = page.waitForResponse(
@@ -4218,7 +4265,9 @@ async function runInsightReportUiClosedLoopSmoke(page) {
     runType: json.data.run_type,
     adapter: reportCompletion.adapter,
     metricRun,
-    contentSource: "mock"
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
   };
 }
 
@@ -4341,7 +4390,9 @@ async function runInsightActionUiClosedLoopSmoke(page) {
     reportId: requestBody.report_id,
     metricResultId: requestBody.metric_result_id,
     experiment,
-    contentSource: "mock"
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
   };
 }
 
@@ -5646,7 +5697,9 @@ async function runKnowledgeAndSettingsClosedLoopSmoke(page) {
       traceId: providerTestJson.meta.trace_id,
       status: providerTestJson.data.status,
       runType: providerTestJson.data.run_type,
-      contentSource: "mock"
+      contentSource: "mock",
+      productionTruthMode: "fail_closed",
+      backendInteractionSource: "bff"
     }
   };
 }
@@ -5877,6 +5930,12 @@ async function runAssetExportPackageClosedLoopSmoke(page) {
 }
 
 async function runSettingsPublishGateUiClosedLoopSmoke(page) {
+  await assertProductionFixtureModuleFailClosed(page, {
+    moduleLabel: "设置",
+    expectedText: "设置",
+    fixtureSelector: ".settings-flow",
+    actionSelectors: [".settings-smart-actions button"]
+  });
   await enterDemoModule(page, "设置", "设置");
   await assertBodyText(page, "Policy Guard", "settings page should show policy guard before publish");
   const draftResponsePromise = page.waitForResponse(
@@ -5962,7 +6021,9 @@ async function runSettingsPublishGateUiClosedLoopSmoke(page) {
     traceId: json.meta.trace_id,
     status: publishedRun.status,
     runType: json.data.run_type,
-    contentSource: "mock"
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
   };
 }
 
@@ -6922,7 +6983,6 @@ try {
         key: `${runId}:audio-intelligence`,
         body: {
           source: "platform_bff_e2e",
-          recording_id: "A-1001_20250526_122300",
           capabilities: ["vad", "asr", "diarization", "voiceprint", "quality"],
           provider: "audio_intelligence_default",
           model_version: "audio-v2.3.1",
@@ -7421,7 +7481,8 @@ try {
     executionProfile: {
       realStack: realStackE2e,
       completionReceiptPolicy: "signed-external-only",
-      objectStorageVerification: realStackE2e ? "minio-sigv4-put-head-get" : "descriptor-contract-only"
+      objectStorageVerification: realStackE2e ? "minio-sigv4-put-head-get" : "descriptor-contract-only",
+      uiEvidencePolicy: "production-fail-closed-plus-demo-fixture-bff"
     },
     completionReceiptObservations,
     uiMutations: [
@@ -7509,7 +7570,8 @@ try {
     },
     insightAction: {
       id: uiInsightAction.id,
-      traceId: uiInsightAction.traceId
+      traceId: uiInsightAction.traceId,
+      ...projectDemoUiEvidenceProof(uiInsightAction)
     },
     insightMetricRun: {
       id: uiInsightReport.metricRun.id,
@@ -7522,7 +7584,8 @@ try {
       id: uiInsightReport.id,
       runId: uiInsightReport.runId,
       traceId: uiInsightReport.traceId,
-      status: uiInsightReport.status
+      status: uiInsightReport.status,
+      ...projectDemoUiEvidenceProof(uiInsightReport)
     },
     consoleErrors,
     expectedConsoleErrors,

@@ -374,6 +374,7 @@ def test_release_gate_creates_real_evidence_directories_before_clean_tree_gate(
 def test_real_stack_bootstraps_the_authenticated_minio_bucket_before_strict_readyz() -> None:
     compose = (ROOT / "docker" / "local" / "docker-compose.yml").read_text(encoding="utf-8")
     gate = (ROOT / "scripts" / "verify_real_stack.sh").read_text(encoding="utf-8")
+    artifact_gate = (ROOT / "scripts" / "check_real_stack_artifact.sh").read_text(encoding="utf-8")
     ui_gate = (ROOT / "scripts" / "verify_ui_bff_e2e.sh").read_text(encoding="utf-8")
 
     assert "  minio-bootstrap:" in compose
@@ -394,6 +395,26 @@ def test_real_stack_bootstraps_the_authenticated_minio_bucket_before_strict_read
     assert 'run_with_deadline 60 "real-stack migration MySQL security check"' in gate
     assert 'run_with_deadline 60 "real-stack runtime MySQL security check"' in gate
     assert "mysql --protocol=socket --user=root --connect-timeout=5" in gate
+    assert 'REAL_AUDIO_STORAGE_OBJECT_ID="sto_rec_A_1001_20250526_122300"' in gate
+    assert 'REAL_AUDIO_RECORDING_ID="rec_A_1001_20250526_122300"' in gate
+    assert 'REAL_AUDIO_STORAGE_PROVIDER="minio"' in gate
+    assert 'REAL_AUDIO_STORAGE_BUCKET="auris-flow-local"' in gate
+    assert "storage.storage_object_id = '${REAL_AUDIO_STORAGE_OBJECT_ID}'" in gate
+    assert "source_type = 'audio_recording'" in gate
+    assert "storage.source_id = '${REAL_AUDIO_RECORDING_ID}'" in gate
+    assert "storage.provider = '${REAL_AUDIO_STORAGE_PROVIDER}'" in gate
+    assert "storage.bucket = '${REAL_AUDIO_STORAGE_BUCKET}'" in gate
+    assert "status = 'verified'" in gate
+    assert "audio_recording.object_registered" in gate
+    assert "status = 'processed'" in gate
+    assert "$.seeded" in gate
+    assert "AURIS_REAL_STACK_MYSQL_AUDIO_STORAGE_OBJECT_PROOF" in gate
+    assert "AURIS_REAL_STACK_MYSQL_STORAGE_OBJECT_COUNT" not in gate
+    assert "registered_storage_object_count" not in artifact_gate
+    assert "verified_audio_storage_object" in artifact_gate
+    assert "auris.real-stack-gate.v2" in artifact_gate
+    assert "sto_rec_A_1001_20250526_122300" in artifact_gate
+    assert "auris-flow-local" in artifact_gate
 
     outer_health = gate.index("assert_compose_health")
     outer_bootstrap = gate.index("run_minio_bootstrap", outer_health)

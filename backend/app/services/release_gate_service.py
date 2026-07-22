@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.redaction import trusted_sha256
 from app.core.response import envelope
 from app.models import (
     AuditLog,
@@ -519,14 +520,24 @@ def _release_decision_audit_proof(
     gate: dict[str, Any],
     decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    request_sha256 = gate.get("request_sha256")
     proof: dict[str, Any] = {
-        "request_sha256": gate.get("request_sha256"),
+        **(
+            {"request_sha256": trusted_sha256(request_sha256)}
+            if isinstance(request_sha256, str)
+            else {}
+        ),
         "status": gate.get("status"),
     }
     if decision is not None:
+        decision_sha256 = decision.get("decision_sha256")
         proof.update(
             {
-                "decision_sha256": decision.get("decision_sha256"),
+                **(
+                    {"decision_sha256": trusted_sha256(decision_sha256)}
+                    if isinstance(decision_sha256, str)
+                    else {}
+                ),
                 "decision_value": decision.get("value"),
                 "actor_id": decision.get("actor_id"),
             }
@@ -539,7 +550,7 @@ def _release_decision_audit_matches(
     record: RunRecord,
     gate: dict[str, Any],
     decision: dict[str, Any],
-) -> bool:
+) -> bool | None:
     audit = session.scalar(
         select(AuditLog)
         .where(
@@ -553,10 +564,10 @@ def _release_decision_audit_matches(
         )
         .order_by(AuditLog.audit_id.desc())
     )
+    if audit is None:
+        return None
     proof = (
-        audit.after_json.get("release_gate_proof")
-        if audit is not None and isinstance(audit.after_json, dict)
-        else None
+        audit.after_json.get("release_gate_proof") if isinstance(audit.after_json, dict) else None
     )
     expected_decision_sha256 = _release_decision_sha256(gate, decision)
     return (
@@ -628,8 +639,11 @@ def revalidate_control_plane_release(
         _release_decision_sha256(gate, decision),
     ):
         return {"allowed": False, "reason": "release_decision_binding_changed"}
-    if not _release_decision_audit_matches(session, record, gate, decision):
+    audit_matches = _release_decision_audit_matches(session, record, gate, decision)
+    if audit_matches is None:
         return {"allowed": False, "reason": "release_decision_audit_missing"}
+    if audit_matches is False:
+        return {"allowed": False, "reason": "release_decision_audit_mismatch"}
     return {
         "allowed": True,
         "target": target,

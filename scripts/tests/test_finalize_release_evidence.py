@@ -18,6 +18,12 @@ CANDIDATE_REPOSITORY_TREE = "3" * 40
 FRONTEND_TREE = "4" * 40
 SHA256 = "a" * 64
 TIMESTAMP = "2026-07-18T08:00:00+00:00"
+AUDIO_STORAGE_OBJECT_PROOF = {
+    "storage_object_id": "sto_rec_A_1001_20250526_122300",
+    "provider": "minio",
+    "bucket": "auris-flow-local",
+    "status": "verified",
+}
 FRONTEND_BUNDLE_VERIFIED_CHECKS = [
     "approval-cosign-signature",
     "approval-statement-binding",
@@ -434,8 +440,8 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "database": {
                     "artifact_ref": "artifact-1",
                     "backend": "mysql",
-                    "registered_storage_object_count": 1,
                     "run_record_count": 1,
+                    "verified_audio_storage_object": AUDIO_STORAGE_OBJECT_PROOF,
                 },
                 "execution_environment": "compose-dependencies",
                 "http_range": {
@@ -451,7 +457,9 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                     "metadata_registered": True,
                     "mode": "real",
                     "provider": "minio",
-                    "storage_object_id": "sto_1",
+                    "bucket": "auris-flow-local",
+                    "metadata_status": "verified",
+                    "storage_object_id": "sto_rec_A_1001_20250526_122300",
                 },
                 "qdrant": {
                     "dispatch_count": 1,
@@ -460,7 +468,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 },
                 "rejected_fallback_markers": ["sqlite", "memory", "mock"],
                 "run_id": "run-1",
-                "schema_version": "auris.real-stack-gate.v1",
+                "schema_version": "auris.real-stack-gate.v2",
                 "source_artifacts": {
                     "outbox_sha256": SHA256,
                     "ui_bff_sha256": SHA256,
@@ -1048,6 +1056,37 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         self._write_valid_fixture()
         (self.repository / SOURCE_INPUTS[0]).write_text("drift\n", encoding="utf-8")
         with self.assertRaisesRegex(self.module.EvidenceError, "source input sha256"):
+            self._finalize()
+
+    def test_rejects_real_stack_audio_storage_proof_drift(self) -> None:
+        path = self.evidence / "real-stack-gate.json"
+        for field, invalid_value in (
+            ("storage_object_id", "storage_badcase_a_4107_evidence"),
+            ("provider", "s3"),
+            ("bucket", "seed-only-bucket"),
+            ("status", "active"),
+        ):
+            with self.subTest(field=field):
+                self._write_valid_fixture()
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                payload["database"]["verified_audio_storage_object"][field] = (
+                    invalid_value
+                )
+                _write_json(path, payload)
+                with self.assertRaisesRegex(
+                    self.module.EvidenceError,
+                    "MySQL audio storage proof is invalid",
+                ):
+                    self._finalize()
+
+        self._write_valid_fixture()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["object_storage"]["metadata_status"] = "active"
+        _write_json(path, payload)
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "object-storage proof is invalid",
+        ):
             self._finalize()
 
     def test_rejects_absolute_paths_symlinks_and_unrecognized_artifacts(self) -> None:

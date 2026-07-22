@@ -1517,7 +1517,7 @@ def _validate_real_stack(payload: dict[str, Any], *, source_commit: str) -> None
     _require_common(
         payload,
         filename=filename,
-        schema_version="auris.real-stack-gate.v1",
+        schema_version="auris.real-stack-gate.v2",
         source_commit=source_commit,
     )
     if payload.get("execution_environment") != "compose-dependencies":
@@ -1536,12 +1536,26 @@ def _validate_real_stack(payload: dict[str, Any], *, source_commit: str) -> None
     database = payload.get("database")
     if (
         not isinstance(database, dict)
+        or set(database)
+        != {
+            "backend",
+            "artifact_ref",
+            "run_record_count",
+            "verified_audio_storage_object",
+        }
         or database.get("backend") != "mysql"
         or not _nonempty_text(database.get("artifact_ref"))
         or not _positive_int(database.get("run_record_count"))
-        or not _positive_int(database.get("registered_storage_object_count"))
     ):
         raise EvidenceError(f"{filename} MySQL proof is invalid")
+    expected_audio_storage_object = {
+        "storage_object_id": "sto_rec_A_1001_20250526_122300",
+        "provider": "minio",
+        "bucket": "auris-flow-local",
+        "status": "verified",
+    }
+    if database.get("verified_audio_storage_object") != expected_audio_storage_object:
+        raise EvidenceError(f"{filename} MySQL audio storage proof is invalid")
     qdrant = payload.get("qdrant")
     if (
         not isinstance(qdrant, dict)
@@ -1554,10 +1568,13 @@ def _validate_real_stack(payload: dict[str, Any], *, source_commit: str) -> None
     if (
         not isinstance(storage, dict)
         or storage.get("mode") != "real"
-        or storage.get("provider") != "minio"
+        or storage.get("provider") != expected_audio_storage_object["provider"]
+        or storage.get("bucket") != expected_audio_storage_object["bucket"]
+        or storage.get("metadata_status") != expected_audio_storage_object["status"]
         or storage.get("metadata_registered") is not True
         or not _positive_int(storage.get("dispatch_count"))
-        or not _nonempty_text(storage.get("storage_object_id"))
+        or storage.get("storage_object_id")
+        != expected_audio_storage_object["storage_object_id"]
     ):
         raise EvidenceError(f"{filename} object-storage proof is invalid")
     http_range = payload.get("http_range")

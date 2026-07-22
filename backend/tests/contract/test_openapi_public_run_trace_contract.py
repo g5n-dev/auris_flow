@@ -417,6 +417,68 @@ def test_runtime_external_completion_receipt_contract_declares_request_and_both_
     }
 
 
+def test_runtime_audio_intelligence_request_and_playback_range_contract_are_typed() -> None:
+    document = app.openapi()
+
+    intelligence_operation = document["paths"]["/api/v1/audio-sessions/{id}/intelligence-runs"][
+        "post"
+    ]
+    request_schema = intelligence_operation["requestBody"]["content"]["application/json"]["schema"]
+    assert request_schema["$ref"].endswith("/AudioIntelligenceRunRequest")
+    intelligence_schema = document["components"]["schemas"][
+        request_schema["$ref"].rsplit("/", 1)[-1]
+    ]
+    assert {
+        "capabilities",
+        "recording_id",
+        "provider",
+        "model_version",
+        "execution_mode",
+        "language",
+    }.issubset(intelligence_schema["properties"])
+    accepted_schema = intelligence_operation["responses"]["202"]["content"]["application/json"][
+        "schema"
+    ]
+    assert accepted_schema["$ref"].endswith("/PublicRunEnvelope_PublicRunDetail_")
+
+    playback_operations = (
+        ("/api/v1/audio-playback", "get", True),
+        ("/api/v1/audio-playback", "head", False),
+        ("/api/v1/audio-sessions/{id}/recording", "get", True),
+        ("/api/v1/audio-sessions/{id}/recording", "head", False),
+    )
+    for path, method, has_body in playback_operations:
+        operation = document["paths"][path][method]
+        parameters = {
+            (parameter["in"], parameter["name"]): parameter for parameter in operation["parameters"]
+        }
+        for header_name in ("Range", "If-Range"):
+            header = parameters[("header", header_name)]
+            assert header["required"] is False
+            assert header["schema"]["anyOf"][0]["type"] == "string"
+
+        partial = operation["responses"]["206"]
+        assert partial["headers"]["Accept-Ranges"]["schema"] == {
+            "type": "string",
+            "enum": ["bytes"],
+        }
+        assert partial["headers"]["Content-Range"]["required"] is True
+        if has_body:
+            assert partial["content"]["audio/wav"]["schema"] == {
+                "type": "string",
+                "format": "binary",
+            }
+        else:
+            assert "content" not in partial
+
+        unsatisfiable = operation["responses"]["416"]
+        assert unsatisfiable["headers"]["Accept-Ranges"]["schema"] == {
+            "type": "string",
+            "enum": ["bytes"],
+        }
+        assert unsatisfiable["headers"]["Content-Range"]["required"] is True
+
+
 def test_runtime_public_completion_summary_is_closed_and_engine_neutral() -> None:
     document = app.openapi()
     schemas = document["components"]["schemas"]

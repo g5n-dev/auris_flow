@@ -619,20 +619,30 @@ def test_task_run_allows_draft_diagnostic_mode_with_immutable_version_snapshot(
     assert data["external_outputs_enabled"] is False
     assert data["writeback_mode"] == "disabled"
     assert data["callback_mode"] == "disabled"
-    assert data["business_context"] == {
-        "provider": "crm-master-data",
-        "language": "zh-CN",
-    }
+    assert data["business_context"] == {"language": "zh-CN"}
+    assert "provider" not in data["business_context"]
     snapshot = data["task_version_snapshot"]
     assert snapshot["task_version_id"] == "task_version_diagnostic_guard"
     assert snapshot["status"] == "draft"
     assert snapshot["version"] == "diagnostic-guard"
     assert len(snapshot["sha256"]) == 64
+    assert "provider" not in snapshot
 
     with SessionLocal() as session:
+        run = session.get(RunRecord, data["run_id"])
+        assert run is not None
+        assert run.payload["business_context"] == {
+            "provider": "crm-master-data",
+            "language": "zh-CN",
+        }
+        assert run.payload["task_version_snapshot"]["provider"] == "auris-audio-stack"
         event = session.query(OutboxEvent).filter_by(aggregate_id=data["run_id"]).one()
         assert event.payload["external_outputs_enabled"] is False
-        assert event.payload["task_version_snapshot"] == snapshot
+        internal_snapshot = event.payload["task_version_snapshot"]
+        assert internal_snapshot["provider"] == "auris-audio-stack"
+        assert {
+            key: value for key, value in internal_snapshot.items() if key != "provider"
+        } == snapshot
 
 
 def test_idempotency_key_cannot_replay_across_resource_paths(client, auth_headers):
@@ -1553,7 +1563,7 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
     intelligence_run = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["vad", "asr", "diarization", "voiceprint", "quality"],
             "model_version": "audio-v2.3.1",
         },
@@ -1609,7 +1619,7 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
         "employee_ref": "销售A / A-1001",
         "speaker_id": "spk_emp_a1001_v3",
         "audio_session_id": "S20250526-000128",
-        "recording_id": "A-1001_20250526_122300",
+        "recording_id": "rec_A_1001_20250526_122300",
         "wav_file": "A-1001_20250526_122300.wav",
         "asset_key": "auris/audio/raw_recordings",
         "voice_asset_key": "auris/voiceprint/enrollment_templates",

@@ -278,7 +278,7 @@ def _early_audio_run_and_binding(
     created = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["vad", "asr", "diarization", "voiceprint", "quality"],
             "reason": f"forced_early_completion_{key}",
         },

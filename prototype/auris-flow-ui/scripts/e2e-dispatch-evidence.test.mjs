@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  collectScopedDemoUiEvidence,
+  demoUiContentSourceMarkerPaths,
+  findInvalidScopedDemoUiEvidence,
   hasForbiddenPublicDispatchEvidence,
   isValidTerminalBusinessState,
   isPublicDispatchBoundary,
+  projectDemoUiEvidenceProof,
   publicDispatchIdentityMatches,
   readTrustedE2eCompletionEvidence,
   readTrustedE2eDispatchEvidence
@@ -83,6 +87,7 @@ test("public dispatch boundary rejects leaked adapter protocol evidence", () => 
     "uri",
     "downloadUrl",
     "adapterDispatch",
+    "agent_tool_plan",
     "artifact_url",
     "artifactUrl",
     "manifest_uri",
@@ -100,6 +105,7 @@ test("public dispatch boundary rejects leaked adapter protocol evidence", () => 
     "result_storage_object_sha256",
     "storage-object-id",
     "callback_receipt_id",
+    "error",
     "objectUri",
     "graphql_url",
     "signatureNonce"
@@ -126,6 +132,7 @@ test("public dispatch boundary rejects sensitive evidence hidden in scalar value
     "callback target localhost:9000",
     "backend endpoint 10.0.0.8:8080",
     "minio.internal:9000",
+    "service.example.com",
     "dagster run dg-private-001",
     "provider_evidence=openai:request-private-001"
   ]) {
@@ -146,6 +153,7 @@ test("public dispatch boundary keeps canonical business identifiers and same-ori
       label_version_id: "label_version_v1_9_0",
       store_id: "BJ-AURORA-001",
       model_version: "model.v1",
+      schema_version: "auris.insight-report.v2",
       error_code: "RUN_DEPENDENCY_BLOCKED",
       asset_key: "auris/label/event_tags",
       content_type: "application/json",
@@ -153,6 +161,105 @@ test("public dispatch boundary keeps canonical business identifiers and same-ori
       href: "/runs/task_run_001"
     }),
     false
+  );
+  assert.equal(
+    hasForbiddenPublicDispatchEvidence({
+      status: "submitted",
+      display_value: "auris.insight-report.v2"
+    }),
+    true,
+    "schema-version exception must remain scoped to the schema_version field"
+  );
+});
+
+test("schema_version exception accepts only explicit Auris schema identifiers", () => {
+  assert.equal(
+    hasForbiddenPublicDispatchEvidence({
+      status: "submitted",
+      schema_version: "auris.insight-report.v2"
+    }),
+    false
+  );
+  for (const schemaVersion of [
+    "service.example.com.v2",
+    "vault.corp.v9",
+    "api.internal.v2"
+  ]) {
+    assert.equal(
+      hasForbiddenPublicDispatchEvidence({
+        status: "submitted",
+        schema_version: schemaVersion
+      }),
+      true,
+      `non-Auris schema-like hostname must be rejected: ${schemaVersion}`
+    );
+  }
+});
+
+test("demo-only UI evidence stays limited to eight exact fail-closed BFF paths", () => {
+  const proof = {
+    contentSource: "mock",
+    productionTruthMode: "fail_closed",
+    backendInteractionSource: "bff"
+  };
+  const result = {
+    evaluationPromptUi: { ...proof },
+    evaluationBadcaseUi: { ...proof },
+    blindCalibration: { ...proof },
+    hotwordGovernance: { ...proof },
+    domainPageActions: { settingsProviderTest: { ...proof } },
+    coreFlows: { settingsPublish: { ...proof } },
+    insightAction: { id: "insight_action_001", ...proof },
+    insightReport: { id: "insight_report_001", ...proof },
+    arbitraryEvidence: { ...proof }
+  };
+  const expectedPaths = [
+    "$platform.evaluationPromptUi",
+    "$platform.evaluationBadcaseUi",
+    "$platform.blindCalibration",
+    "$platform.hotwordGovernance",
+    "$platform.domainPageActions.settingsProviderTest",
+    "$platform.coreFlows.settingsPublish",
+    "$platform.insightAction",
+    "$platform.insightReport"
+  ];
+
+  assert.deepEqual(
+    collectScopedDemoUiEvidence(result).map(([path]) => path),
+    expectedPaths
+  );
+  assert.deepEqual(findInvalidScopedDemoUiEvidence(result), []);
+  assert.deepEqual(
+    [...demoUiContentSourceMarkerPaths],
+    expectedPaths.map((path) => `${path}.contentSource`)
+  );
+  assert.equal(
+    demoUiContentSourceMarkerPaths.has("$platform.arbitraryEvidence.contentSource"),
+    false,
+    "the mock marker exception must not expand to arbitrary result paths"
+  );
+
+  result.insightReport.backendInteractionSource = "local";
+  assert.deepEqual(
+    findInvalidScopedDemoUiEvidence(result).map(([path]) => path),
+    ["$platform.insightReport"]
+  );
+});
+
+test("demo-only insight proof projection preserves all required artifact fields", () => {
+  assert.deepEqual(
+    projectDemoUiEvidenceProof({
+      id: "insight_report_001",
+      contentSource: "mock",
+      productionTruthMode: "fail_closed",
+      backendInteractionSource: "bff",
+      ignored: "not-public-proof"
+    }),
+    {
+      contentSource: "mock",
+      productionTruthMode: "fail_closed",
+      backendInteractionSource: "bff"
+    }
   );
 });
 

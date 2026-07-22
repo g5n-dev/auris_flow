@@ -162,6 +162,48 @@ def test_hotword_rollback_blocks_then_two_person_approval_materializes_atomicall
         assert audit.trace_id == "trace_hotword_pack_auto_sales"
 
 
+def test_hotword_rollback_rejection_is_audited_without_control_plane_digest(
+    client,
+    auth_headers,
+) -> None:
+    requested = _request_rollback(client, auth_headers, key="rollback-rejection")
+    assert requested.status_code == 202, requested.text
+    run_id = requested.json()["data"]["run_id"]
+    assert process_aggregate_events([run_id]) == 1
+
+    rejected = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json={"decision": "rejected", "reason": "项目管理员拒绝恢复该历史词包"},
+        headers=_headers(
+            auth_headers,
+            key="rollback-admin-rejection",
+            token="dev-token",
+        ),
+    )
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "cancelled"
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        audit = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.action == "hotword_rollback.release_gate_decided",
+                AuditLog.object_id == run_id,
+            )
+            .one()
+        )
+        assert run is not None
+        assert run.status == "cancelled"
+        assert event.status == "cancelled"
+        proof = audit.after_json["release_gate_proof"]
+        assert proof["decision_value"] == "rejected"
+        assert proof["actor_id"] == "u_admin_001"
+        assert "request_sha256" not in proof
+        assert "decision_sha256" not in proof
+
+
 def test_hotword_rollback_fails_closed_when_frozen_target_drifts_before_approval(
     client,
     auth_headers,

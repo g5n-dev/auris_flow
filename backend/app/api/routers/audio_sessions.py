@@ -10,7 +10,7 @@ from io import BytesIO
 from typing import Any
 from urllib.error import HTTPError, URLError
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Header, Request
 from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
 from starlette.concurrency import run_in_threadpool
@@ -42,6 +42,7 @@ from app.schemas.manual_label_drafts import (
     ManualLabelDraftRebaseRequest,
     ManualLabelDraftSubmitRequest,
 )
+from app.schemas.public_runs import PublicRunDetail, PublicRunEnvelope
 from app.services.adapters import object_storage_client_for_provider
 from app.services.asr_annotation_correction_service import (
     ASR_CORRECTION_WRITE_ROLES,
@@ -105,6 +106,102 @@ MANUAL_LABEL_DRAFT_WRITE_ROLES = (
 _MANUAL_LABEL_CREATE_HTTP_OPERATION = "http.manual_label_drafts.create"
 _MANUAL_LABEL_SUBMIT_HTTP_OPERATION = "http.manual_label_drafts.submit"
 _MANUAL_LABEL_REBASE_HTTP_OPERATION = "http.manual_label_drafts.rebase"
+
+_AUDIO_PLAYBACK_COMMON_RESPONSE_HEADERS: dict[str, dict[str, Any]] = {
+    "Accept-Ranges": {
+        "schema": {"type": "string", "enum": ["bytes"]},
+    },
+    "Content-Length": {
+        "schema": {"type": "integer"},
+    },
+    "ETag": {
+        "schema": {"type": "string"},
+    },
+}
+_AUDIO_PLAYBACK_PARTIAL_RESPONSE_HEADERS: dict[str, dict[str, Any]] = {
+    **_AUDIO_PLAYBACK_COMMON_RESPONSE_HEADERS,
+    "Content-Range": {
+        "required": True,
+        "schema": {
+            "type": "string",
+            "example": "bytes 0-65535/320044",
+        },
+    },
+}
+_AUDIO_PLAYBACK_UNSATISFIABLE_RESPONSE_HEADERS: dict[str, dict[str, Any]] = {
+    "Accept-Ranges": {
+        "schema": {"type": "string", "enum": ["bytes"]},
+    },
+    "Content-Range": {
+        "required": True,
+        "schema": {
+            "type": "string",
+            "example": "bytes */320044",
+        },
+    },
+}
+_AUDIO_BINARY_CONTENT: dict[str, dict[str, Any]] = {
+    "audio/wav": {
+        "schema": {
+            "type": "string",
+            "format": "binary",
+        }
+    }
+}
+_AUDIO_PLAYBACK_GET_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "完整音频字节",
+        "headers": _AUDIO_PLAYBACK_COMMON_RESPONSE_HEADERS,
+        "content": _AUDIO_BINARY_CONTENT,
+    },
+    206: {
+        "description": "满足单区间请求的音频字节",
+        "headers": _AUDIO_PLAYBACK_PARTIAL_RESPONSE_HEADERS,
+        "content": _AUDIO_BINARY_CONTENT,
+    },
+    416: {
+        "description": "多区间、格式错误或不可满足的 Range",
+        "headers": _AUDIO_PLAYBACK_UNSATISFIABLE_RESPONSE_HEADERS,
+    },
+}
+_AUDIO_PLAYBACK_HEAD_RESPONSES: dict[int | str, dict[str, Any]] = {
+    200: {
+        "description": "完整音频表示的元数据，不包含响应正文",
+        "headers": {
+            **_AUDIO_PLAYBACK_COMMON_RESPONSE_HEADERS,
+            "Content-Length": {
+                "required": True,
+                "schema": {"type": "integer"},
+            },
+        },
+    },
+    206: {
+        "description": "满足单区间请求的音频元数据，不包含响应正文",
+        "headers": {
+            **_AUDIO_PLAYBACK_PARTIAL_RESPONSE_HEADERS,
+            "Content-Length": {
+                "required": True,
+                "schema": {"type": "integer"},
+            },
+        },
+    },
+    416: {
+        "description": "多区间、格式错误或不可满足的 Range",
+        "headers": _AUDIO_PLAYBACK_UNSATISFIABLE_RESPONSE_HEADERS,
+    },
+}
+_AUDIO_RANGE_HEADER = Header(
+    default=None,
+    alias="Range",
+    description=(
+        "RFC 9110 单字节区间。支持闭区间、开放尾端和后缀区间；多区间与无效或不可满足区间返回 416。"
+    ),
+)
+_AUDIO_IF_RANGE_HEADER = Header(
+    default=None,
+    alias="If-Range",
+    description="登记对象的 ETag；不匹配时忽略 Range 并返回完整表示。",
+)
 
 
 async def _begin_manual_label_http_operation(
@@ -532,11 +629,13 @@ def _storage_response_headers(recording: dict) -> dict[str, str]:
     return headers
 
 
-def _effective_range_header(request: Request, recording: dict) -> str | None:
-    range_header = request.headers.get("range")
+def _effective_range_header(
+    range_header: str | None,
+    if_range: str | None,
+    recording: dict,
+) -> str | None:
     if not range_header:
         return None
-    if_range = request.headers.get("if-range")
     if not if_range:
         return range_header
     response_etag = _storage_response_headers(recording).get("ETag")
@@ -1447,27 +1546,41 @@ def get_audio_sessions(
     )
 
 
-@router.get("/audio-sessions/{id}/recording")
+@router.get(
+    "/audio-sessions/{id}/recording",
+    response_class=Response,
+    responses=_AUDIO_PLAYBACK_GET_RESPONSES,
+)
 def get_audio_sessions_by_id_recording(
     id: str,
     request: Request,
     session: SessionDep,
     grant: str | None = None,
+    range_header: str | None = _AUDIO_RANGE_HEADER,
+    if_range: str | None = _AUDIO_IF_RANGE_HEADER,
 ):
     return _stream_audio_with_playback_grant(
         grant,
         request,
         session,
         expected_audio_session_id=id,
+        range_header=range_header,
+        if_range=if_range,
     )
 
 
-@router.head("/audio-sessions/{id}/recording")
+@router.head(
+    "/audio-sessions/{id}/recording",
+    response_class=Response,
+    responses=_AUDIO_PLAYBACK_HEAD_RESPONSES,
+)
 def head_audio_sessions_by_id_recording(
     id: str,
     request: Request,
     session: SessionDep,
     grant: str | None = None,
+    range_header: str | None = _AUDIO_RANGE_HEADER,
+    if_range: str | None = _AUDIO_IF_RANGE_HEADER,
 ):
     return _stream_audio_with_playback_grant(
         grant,
@@ -1475,6 +1588,8 @@ def head_audio_sessions_by_id_recording(
         session,
         expected_audio_session_id=id,
         head_only=True,
+        range_header=range_header,
+        if_range=if_range,
     )
 
 
@@ -1570,6 +1685,8 @@ def _stream_audio_with_playback_grant(
     *,
     expected_audio_session_id: str | None = None,
     head_only: bool = False,
+    range_header: str | None = None,
+    if_range: str | None = None,
 ) -> Response:
     playback_grant, ctx = authorize_audio_playback_grant(
         session,
@@ -1600,7 +1717,7 @@ def _stream_audio_with_playback_grant(
             409,
             retryable=True,
         )
-    range_header = _effective_range_header(request, recording)
+    range_header = _effective_range_header(range_header, if_range, recording)
     real_object_storage = _real_object_storage_enabled()
     if real_object_storage:
         if (
@@ -1665,14 +1782,47 @@ def _stream_audio_with_playback_grant(
     return response
 
 
-@router.get("/audio-playback")
-def get_audio_playback(grant: str, request: Request, session: SessionDep):
-    return _stream_audio_with_playback_grant(grant, request, session)
+@router.get(
+    "/audio-playback",
+    response_class=Response,
+    responses=_AUDIO_PLAYBACK_GET_RESPONSES,
+)
+def get_audio_playback(
+    grant: str,
+    request: Request,
+    session: SessionDep,
+    range_header: str | None = _AUDIO_RANGE_HEADER,
+    if_range: str | None = _AUDIO_IF_RANGE_HEADER,
+):
+    return _stream_audio_with_playback_grant(
+        grant,
+        request,
+        session,
+        range_header=range_header,
+        if_range=if_range,
+    )
 
 
-@router.head("/audio-playback")
-def head_audio_playback(grant: str, request: Request, session: SessionDep):
-    return _stream_audio_with_playback_grant(grant, request, session, head_only=True)
+@router.head(
+    "/audio-playback",
+    response_class=Response,
+    responses=_AUDIO_PLAYBACK_HEAD_RESPONSES,
+)
+def head_audio_playback(
+    grant: str,
+    request: Request,
+    session: SessionDep,
+    range_header: str | None = _AUDIO_RANGE_HEADER,
+    if_range: str | None = _AUDIO_IF_RANGE_HEADER,
+):
+    return _stream_audio_with_playback_grant(
+        grant,
+        request,
+        session,
+        head_only=True,
+        range_header=range_header,
+        if_range=if_range,
+    )
 
 
 @router.put("/audio-sessions/{id}/recording-object")
@@ -2328,13 +2478,27 @@ async def post_manual_label_draft_rebase(
     )
 
 
-@router.post("/audio-sessions/{id}/intelligence-runs", status_code=202)
+@router.post(
+    "/audio-sessions/{id}/intelligence-runs",
+    status_code=202,
+    response_model=PublicRunEnvelope[PublicRunDetail],
+)
 async def post_audio_sessions_by_id_intelligence_runs(
-    id: str, request: Request, session: SessionDep, ctx: ContextDep
+    id: str,
+    body: AudioIntelligenceRunRequest,
+    request: Request,
+    session: SessionDep,
+    ctx: ContextDep,
 ):
     session_data = get_resource(session, ctx, "audio_sessions", id).data
-    raw_body = await request.json()
-    body = parse_payload(AudioIntelligenceRunRequest, raw_body)
+    session_recording_id = session_data.get("recording_id")
+    if body.recording_id is not None and body.recording_id != session_recording_id:
+        raise ApiError(
+            "AUDIO_SESSION_RECORDING_MISMATCH",
+            "音频智能任务的录音必须与路径中的音频会话绑定一致",
+            409,
+            retryable=False,
+        )
     body_data = body.model_dump(exclude_none=True)
     task_binding = resolve_audio_hotword_task_binding(
         session,
@@ -2343,9 +2507,9 @@ async def post_audio_sessions_by_id_intelligence_runs(
         task_version_id=body.task_version_id,
         hotword_pack_version_id=body.hotword_pack_version_id,
         provider=body.provider,
-        provider_explicit="provider" in raw_body,
+        provider_explicit="provider" in body.model_fields_set,
         model_version=body.model_version,
-        model_version_explicit="model_version" in raw_body,
+        model_version_explicit="model_version" in body.model_fields_set,
         language=body.language,
     )
     effective_hotword_version_id = (
@@ -2391,7 +2555,7 @@ async def post_audio_sessions_by_id_intelligence_runs(
         provider=final_provider,
         model=effective_model_version,
     )
-    recording_id = body.recording_id or session_data.get("recording_id")
+    recording_id = session_recording_id
     storage_object = _storage_object_for_recording(session, ctx, str(recording_id or ""))
     input_object: dict[str, Any] | None = None
     if storage_object is not None:

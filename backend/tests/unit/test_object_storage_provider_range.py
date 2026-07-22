@@ -1300,7 +1300,6 @@ def test_audio_intelligence_run_freezes_registered_exact_object_version_for_outb
     response = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["vad", "asr"],
             "provider": "audio_intelligence_default",
             "model_version": "audio-v2.3.1",
@@ -1336,6 +1335,32 @@ def test_audio_intelligence_run_freezes_registered_exact_object_version_for_outb
         assert event.payload["input_object"] == run.payload["input_object"]
         assert event.payload["dispatch_idempotency_key"]
         assert event.payload["trace_id"] == run.trace_id
+
+
+def test_audio_intelligence_run_rejects_recording_outside_session_binding_without_writes(
+    client: Any,
+    auth_headers: dict[str, str],
+) -> None:
+    with SessionLocal() as session:
+        run_ids_before = set(session.scalars(select(RunRecord.run_id)))
+        event_ids_before = set(session.scalars(select(OutboxEvent.event_id)))
+
+    response = client.post(
+        "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
+        json={
+            "recording_id": "rec_unrelated_recording",
+            "capabilities": ["vad", "asr"],
+            "provider": "audio_intelligence_default",
+            "model_version": "audio-v2.3.1",
+        },
+        headers={**auth_headers, "Idempotency-Key": "reject-audio-session-recording-drift"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "AUDIO_SESSION_RECORDING_MISMATCH"
+    with SessionLocal() as session:
+        assert set(session.scalars(select(RunRecord.run_id))) == run_ids_before
+        assert set(session.scalars(select(OutboxEvent.event_id))) == event_ids_before
 
 
 def test_real_registration_streams_version_bound_sha256_when_head_checksum_is_missing(

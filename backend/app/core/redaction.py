@@ -72,9 +72,7 @@ PII_COMPOUND_FIELDS = {
     "order_number",
 }
 SAFE_REFERENCE_FIELDS = {
-    "asset_key",
     "evidence_id",
-    "partition_key",
     "root_trace_id",
     "run_id",
     "source_id",
@@ -123,6 +121,17 @@ COOKIE_VALUE_PATTERN = re.compile(
     r"(?i)\b(?:cookie|set-cookie)\s*:\s*[^\r\n]+|\b(?:session|sessionid)=[^;\s]+"
 )
 INTERNAL_REFERENCE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/|-]{0,511}$")
+SHA256_VALUE_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
+
+
+class TrustedSha256(str):
+    """Server-validated digest marker for integrity-sensitive audit fields."""
+
+
+def trusted_sha256(value: str) -> TrustedSha256:
+    if SHA256_VALUE_PATTERN.fullmatch(value) is None:
+        raise ValueError("trusted SHA-256 values must be exactly 64 hexadecimal characters")
+    return TrustedSha256(value)
 
 
 @dataclass
@@ -264,6 +273,11 @@ def _redact(
     if isinstance(value, str):
         if _contains_secret_value(value):
             return "[REDACTED_SECRET]"
+        if isinstance(value, TrustedSha256):
+            # Only internal code can attach this marker after strict format
+            # validation. Arbitrary user-controlled *_sha256 field names do
+            # not gain an exemption from inline PII redaction.
+            return str(value)
         if any(
             _matches_field_name(field_path, name) for name in SAFE_REFERENCE_FIELDS
         ) and INTERNAL_REFERENCE_PATTERN.fullmatch(value):

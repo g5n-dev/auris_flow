@@ -1,5 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 
+import {
+  demoUiContentSourceMarkerPaths,
+  findInvalidScopedDemoUiEvidence
+} from "./e2e-dispatch-evidence.mjs";
 import { validateExpectedAssetReadCancellations } from "./platform-bff-request-failure-policy.mjs";
 
 const resultPath =
@@ -24,14 +28,16 @@ const outboxResult =
     ? JSON.parse(readFileSync(outboxResultPath, "utf8"))
     : null;
 
-function collectForbiddenRuntimeMarkers(value, path = "$", findings = []) {
+function collectForbiddenRuntimeMarkers(value, path = "$", findings = [], allowedPaths = new Set()) {
   if (Array.isArray(value)) {
-    value.forEach((item, index) => collectForbiddenRuntimeMarkers(item, `${path}[${index}]`, findings));
+    value.forEach((item, index) =>
+      collectForbiddenRuntimeMarkers(item, `${path}[${index}]`, findings, allowedPaths)
+    );
     return findings;
   }
   if (value && typeof value === "object") {
     for (const [key, item] of Object.entries(value)) {
-      collectForbiddenRuntimeMarkers(item, `${path}.${key}`, findings);
+      collectForbiddenRuntimeMarkers(item, `${path}.${key}`, findings, allowedPaths);
     }
     return findings;
   }
@@ -51,7 +57,7 @@ function collectForbiddenRuntimeMarkers(value, path = "$", findings = []) {
   const manualCompletionRoute =
     /\/api\/v1\/runs\/[^/]+\/completion-receipts(?:\?|$)/.test(normalized) &&
     !normalized.includes("/external-completion-receipts");
-  if (exactForbidden.has(normalized) || unsafeUri || manualCompletionRoute) {
+  if (!allowedPaths.has(path) && (exactForbidden.has(normalized) || unsafeUri || manualCompletionRoute)) {
     findings.push({ path, value });
   }
   return findings;
@@ -117,9 +123,10 @@ if (outboxResultPath && !outboxResult) {
 }
 if (requireRealStack) {
   if (
-    result.executionProfile?.realStack !== true ||
-    result.executionProfile?.completionReceiptPolicy !== "signed-external-only" ||
-    result.executionProfile?.objectStorageVerification !== "minio-sigv4-put-head-get"
+      result.executionProfile?.realStack !== true ||
+      result.executionProfile?.completionReceiptPolicy !== "signed-external-only" ||
+      result.executionProfile?.objectStorageVerification !== "minio-sigv4-put-head-get" ||
+      result.executionProfile?.uiEvidencePolicy !== "production-fail-closed-plus-demo-fixture-bff"
   ) {
     fail("real-stack platform artifact is missing its external-completion and MinIO proof profile", {
       executionProfile: result.executionProfile
@@ -147,7 +154,18 @@ if (requireRealStack) {
     });
   }
 
-  const markerFindings = collectForbiddenRuntimeMarkers(result, "$platform");
+  const invalidDemoUiEvidence = findInvalidScopedDemoUiEvidence(result);
+  if (invalidDemoUiEvidence.length) {
+    fail("real-stack demo UI evidence is not paired with production fail-closed and BFF proof", {
+      invalidDemoUiEvidence
+    });
+  }
+  const markerFindings = collectForbiddenRuntimeMarkers(
+    result,
+    "$platform",
+    [],
+    demoUiContentSourceMarkerPaths
+  );
   if (outboxResult) collectForbiddenRuntimeMarkers(outboxResult, "$outbox", markerFindings);
   if (markerFindings.length) {
     fail("real-stack artifacts contain mock/local/manual completion markers", { markerFindings });

@@ -345,7 +345,7 @@ def test_audio_completion_rejects_untrusted_artifact_storage_reference(
     requested = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["asr"],
             "task_version_id": "task_version_v3_2_1",
             "provider": "auris-audio-stack",
@@ -378,7 +378,7 @@ def test_audio_completion_rejects_untrusted_artifact_storage_reference(
         run_id,
         {
             "audio_session_id": "S20250526-000128",
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capability_statuses": {"asr": {"status": "success"}},
             "asr_segments": [
                 {
@@ -1200,7 +1200,7 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
     before_task_publish = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["asr"],
             "task_version_id": published_task_version_id,
         },
@@ -1266,7 +1266,7 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
     production_audio = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["asr"],
             "task_version_id": published_task_version_id,
         },
@@ -1279,7 +1279,7 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
     superseded_audio = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["asr"],
             "task_version_id": "task_version_v3_2_1",
         },
@@ -1938,7 +1938,7 @@ def test_audio_production_task_rejects_explicit_model_override(client, auth_head
     response = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["asr"],
             "task_version_id": "task_version_v3_2_1",
             "model_version": "audio-v2.3.1",
@@ -1958,7 +1958,7 @@ def test_audio_completion_receipt_persists_only_hotword_diagnostic_summary(clien
     requested = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["asr"],
             "task_version_id": "task_version_v3_2_1",
             "execution_mode": "production",
@@ -1986,7 +1986,7 @@ def test_audio_completion_receipt_persists_only_hotword_diagnostic_summary(clien
         run_id,
         {
             "audio_session_id": "S20250526-000128",
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capability_statuses": {"asr": {"status": "success"}},
             "asr_segments": [
                 {

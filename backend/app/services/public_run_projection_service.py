@@ -8,7 +8,7 @@ from ipaddress import ip_address
 from typing import Any
 
 from app.core.json_keys import json_key_fingerprint, normalize_json_key
-from app.core.redaction import redact_structured_value
+from app.core.redaction import PHONE_PATTERN, redact_structured_value
 
 # RunRecord.payload is an internal evidence ledger. Every HTTP projection that
 # derives from it must pass this module rather than serializing the ledger.
@@ -21,12 +21,14 @@ PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS = frozenset(
         "adapter",
         "adapter_dispatch",
         "adapter_mode",
+        "agent_tool_plan",
         "authenticated_source",
         "auth",
         "authorization",
         "artifact_uri",
         "api_key",
         "bearer_token",
+        "callback_receipt_id",
         "claim_token",
         "cookie",
         "cookies",
@@ -66,6 +68,7 @@ PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS = frozenset(
         "private_key",
         "partial_artifact_uri",
         "processed_event_id",
+        "provider",
         "provider_evidence",
         "provider_artifact_ref",
         "protocol_receipt",
@@ -114,6 +117,7 @@ PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS = frozenset(
         "internal",
         "password",
         "protocol",
+        "provider",
         "remote",
         "secret",
         "signature",
@@ -157,15 +161,33 @@ _ENGINE_VALUE_PATTERNS = (
     (re.compile("dispatch", re.IGNORECASE), "execution", "EXECUTION"),
 )
 _CANONICAL_FIELD_PATTERN = re.compile(r"^[A-Za-z0-9_.:/ -]+$")
-_OPAQUE_VALUE_PATTERN = re.compile(
-    r"^(?:[A-Za-z0-9][A-Za-z0-9._:/|+-]{0,511}|/[A-Za-z0-9._~:/?#&=%+|-]{0,2047})$"
-)
 _PUBLIC_NAVIGATION_PATH_PATTERN = re.compile(
     r"^/?[A-Za-z0-9][A-Za-z0-9._~/-]*"
     r"(?:\?[A-Za-z0-9._~!$&'()*+,;=:@/?-]*)?$"
 )
+_PUBLIC_PHONE_LIKE_SHA256_FIELDS = frozenset(
+    {
+        "artifact_sha256",
+        "bundle_sha256",
+        "command_sha256",
+        "content_sha256",
+        "decision_sha256",
+        "executed_task_version_binding_sha256",
+        "request_sha256",
+        "result_manifest_sha256",
+    }
+)
 _STABLE_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _PUBLIC_STORAGE_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
+_PUBLIC_STORAGE_ROLE_ALIASES = {
+    "asset_materialization": "asset_materialization",
+    "badcase_evidence": "badcase_evidence",
+    "diagnostics": "diagnostics",
+    "eval_result": "eval_result",
+    "manifest": "manifest",
+    "provider_artifact": "compiled_artifact",
+    "word_timestamps": "word_timestamps",
+}
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _URI_SCHEME_PATTERN = re.compile(r"^[a-z][a-z0-9+.-]*:", re.IGNORECASE)
 _HOSTNAME_PATTERN = re.compile(
@@ -205,6 +227,7 @@ _PUBLIC_TERMINAL_REASON_PATTERN = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,127}$")
 _FORBIDDEN_FIELD_SUFFIX_TOKENS = (
     ("url",),
     ("uri",),
+    ("access", "key", "id"),
     ("storage", "object", "id"),
     ("storage", "object", "ids"),
     ("storage", "object", "sha256"),
@@ -520,10 +543,40 @@ def _visible_string(value: str) -> str:
     return "".join(char for char in normalized if unicodedata.category(char) != "Cf")
 
 
-def _is_opaque_field(field_name: str) -> bool:
+def _is_identifier_field(field_name: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "_", normalize_json_key(field_name)).strip("_")
-    return normalized in {"href", "id", "route"} or normalized.endswith(
-        ("_checksum", "_etag", "_hash", "_id", "_key", "_ref", "_sha256")
+    return normalized in {"id", "key", "ref"} or normalized.endswith(
+        ("_id", "_ids", "_key", "_keys", "_ref", "_refs")
+    )
+
+
+def _is_safe_phone_like_sha256(
+    value: str,
+    *,
+    field_name: str,
+    redacted: str,
+) -> bool:
+    """Keep a canonical SHA-256 stable when digits resemble a phone number."""
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", normalize_json_key(field_name)).strip("_")
+    if (
+        normalized not in _PUBLIC_PHONE_LIKE_SHA256_FIELDS
+        or _SHA256_PATTERN.fullmatch(value) is None
+    ):
+        return False
+    if "[REDACTED_SECRET]" in redacted:
+        return False
+    if re.sub(r"\[REDACTED_PHONE\]", "", redacted).find("[REDACTED_") >= 0:
+        return False
+    phone_matches = tuple(PHONE_PATTERN.finditer(value))
+    if not phone_matches or redacted.count("[REDACTED_PHONE]") != len(phone_matches):
+        return False
+    return all(
+        phone_match.start() > 0
+        and phone_match.end() < len(value)
+        and value[phone_match.start() - 1] in "abcdef"
+        and value[phone_match.end()] in "abcdef"
+        for phone_match in phone_matches
     )
 
 
@@ -553,14 +606,19 @@ def sanitize_public_run_string(value: str, *, field_name: str) -> str:
     for pattern, plain, upper in _ENGINE_VALUE_PATTERNS:
         sanitized = pattern.sub(_replacement(plain, upper), sanitized)
     redacted = redact_structured_value(sanitized, field_name=field_name)
-    if (
-        _is_opaque_field(field_name)
-        and _OPAQUE_VALUE_PATTERN.fullmatch(sanitized)
-        and isinstance(redacted, str)
-        and "[REDACTED_" in redacted
-        and "[REDACTED_SECRET]" not in redacted
-    ):
-        return sanitized
+    if isinstance(redacted, str):
+        if _is_safe_phone_like_sha256(
+            sanitized,
+            field_name=field_name,
+            redacted=redacted,
+        ):
+            return sanitized
+        if _is_identifier_field(field_name) and PHONE_PATTERN.search(sanitized):
+            # Some shared redaction paths intentionally preserve trusted
+            # correlation references. A public run boundary cannot assume an
+            # arbitrary identifier is server-generated, so phone-like values
+            # remain redacted unless they match a narrowly validated hash form.
+            return PHONE_PATTERN.sub("[REDACTED_PHONE]", sanitized)
     return redacted if isinstance(redacted, str) else "[REDACTED]"
 
 
@@ -673,15 +731,18 @@ def _project_value(
                 if not isinstance(child, dict):
                     continue
                 role = child.get("role")
+                public_role = (
+                    _PUBLIC_STORAGE_ROLE_ALIASES.get(role) if isinstance(role, str) else None
+                )
                 content_sha256 = child.get("content_sha256")
                 if (
-                    isinstance(role, str)
-                    and _PUBLIC_STORAGE_ROLE_PATTERN.fullmatch(role)
-                    and sanitize_public_run_string(role, field_name="role") == role
+                    isinstance(public_role, str)
+                    and _PUBLIC_STORAGE_ROLE_PATTERN.fullmatch(public_role)
+                    and sanitize_public_run_string(public_role, field_name="role") == public_role
                     and isinstance(content_sha256, str)
                     and _SHA256_PATTERN.fullmatch(content_sha256)
                 ):
-                    summaries.append({"role": role, "content_sha256": content_sha256})
+                    summaries.append({"role": public_role, "content_sha256": content_sha256})
             return summaries
         projected_items = []
         for child in value:
@@ -704,6 +765,8 @@ def _project_value(
         if normalize_json_key(field_name) not in {"href", "route"} and (
             _contains_network_locator(visible_value)
         ):
+            return _OMITTED
+        if _is_identifier_field(field_name) and _HOSTNAME_PATTERN.fullmatch(visible_value):
             return _OMITTED
         if field_fingerprint == "errorcode":
             public_error_code = _public_error_code(value)

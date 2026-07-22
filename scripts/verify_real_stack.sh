@@ -22,6 +22,10 @@ DATABASE_USER="auris_e2e_$$"
 DATABASE_PASSWORD="auris_e2e"
 MIGRATION_DATABASE_USER="auris_migrate_$$"
 MIGRATION_DATABASE_PASSWORD="auris_migrate"
+REAL_AUDIO_STORAGE_OBJECT_ID="sto_rec_A_1001_20250526_122300"
+REAL_AUDIO_RECORDING_ID="rec_A_1001_20250526_122300"
+REAL_AUDIO_STORAGE_PROVIDER="minio"
+REAL_AUDIO_STORAGE_BUCKET="auris-flow-local"
 DATABASE_CREATED=0
 RUN_STARTED_AT="$(date +%s)"
 COMPOSE=(docker compose -f "${COMPOSE_FILE}")
@@ -277,7 +281,7 @@ env \
   QDRANT_URL=http://127.0.0.1:6333 \
   QDRANT_API_KEY="${QDRANT_API_KEY}" \
   OBJECT_STORAGE_ENDPOINT=http://127.0.0.1:9000 \
-  OBJECT_STORAGE_BUCKET=auris-flow-local \
+  OBJECT_STORAGE_BUCKET="${REAL_AUDIO_STORAGE_BUCKET}" \
   OBJECT_STORAGE_ACCESS_KEY=minioadmin \
   OBJECT_STORAGE_SECRET_KEY=minioadmin \
   OBJECT_STORAGE_REGION=us-east-1 \
@@ -304,9 +308,32 @@ if ! [[ "${MYSQL_RUN_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
   echo "Real-stack MySQL proof is invalid: run_records=${MYSQL_RUN_COUNT}" >&2
   exit 1
 fi
-MYSQL_STORAGE_OBJECT_COUNT="$(mysql_exec --database="${DATABASE_NAME}" --execute "SELECT COUNT(*) FROM storage_objects WHERE status = 'registered';")"
-if ! [[ "${MYSQL_STORAGE_OBJECT_COUNT}" =~ ^[1-9][0-9]*$ ]]; then
-  echo "Real-stack MySQL storage metadata proof is invalid: storage_objects=${MYSQL_STORAGE_OBJECT_COUNT}" >&2
+MYSQL_AUDIO_STORAGE_OBJECT_PROOF="$(mysql_exec --database="${DATABASE_NAME}" --execute "
+SELECT JSON_OBJECT(
+  'storage_object_id', storage.storage_object_id,
+  'provider', storage.provider,
+  'bucket', storage.bucket,
+  'status', storage.status
+)
+FROM storage_objects AS storage
+WHERE storage.storage_object_id = '${REAL_AUDIO_STORAGE_OBJECT_ID}'
+  AND storage.tenant_id = 'aurora_auto'
+  AND storage.project_id = 'sales_qa'
+  AND storage.source_type = 'audio_recording'
+  AND storage.source_id = '${REAL_AUDIO_RECORDING_ID}'
+  AND storage.provider = '${REAL_AUDIO_STORAGE_PROVIDER}'
+  AND storage.bucket = '${REAL_AUDIO_STORAGE_BUCKET}'
+  AND storage.status = 'verified'
+  AND COALESCE(JSON_UNQUOTE(JSON_EXTRACT(storage.payload, '$.seeded')), 'false') <> 'true'
+  AND EXISTS (
+    SELECT 1
+    FROM outbox_events AS registration_event
+    WHERE registration_event.aggregate_id = storage.storage_object_id
+      AND registration_event.event_type = 'audio_recording.object_registered'
+      AND registration_event.status = 'processed'
+  );")"
+if [ -z "${MYSQL_AUDIO_STORAGE_OBJECT_PROOF}" ]; then
+  echo "Real-stack MySQL proof is missing the current verified MinIO audio object: ${REAL_AUDIO_STORAGE_OBJECT_ID}" >&2
   exit 1
 fi
 
@@ -316,7 +343,7 @@ AURIS_REAL_STACK_PLATFORM_RESULT="${PLATFORM_RESULT}" \
   AURIS_REAL_STACK_VERIFICATION_RESULT="${VERIFICATION_RESULT}" \
   AURIS_REAL_STACK_EXPECTED_DATABASE_REF="127.0.0.1:3306/${DATABASE_NAME}" \
   AURIS_REAL_STACK_MYSQL_RUN_COUNT="${MYSQL_RUN_COUNT}" \
-  AURIS_REAL_STACK_MYSQL_STORAGE_OBJECT_COUNT="${MYSQL_STORAGE_OBJECT_COUNT}" \
+  AURIS_REAL_STACK_MYSQL_AUDIO_STORAGE_OBJECT_PROOF="${MYSQL_AUDIO_STORAGE_OBJECT_PROOF}" \
   AURIS_REAL_STACK_STARTED_AT="${RUN_STARTED_AT}" \
   AURIS_REAL_STACK_SOURCE_COMMIT="${SOURCE_COMMIT}" \
   bash "${ROOT}/scripts/check_real_stack_artifact.sh"

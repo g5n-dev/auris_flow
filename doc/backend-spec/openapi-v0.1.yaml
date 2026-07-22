@@ -8318,6 +8318,9 @@ components:
           default: [vad, asr, diarization, quality]
         recording_id:
           type: string
+          nullable: true
+          maxLength: 128
+          description: 可选一致性断言；若提供，必须与路径中音频会话绑定的权威录音 ID 完全一致。
         provider:
           type: string
           default: audio_intelligence_default
@@ -8578,12 +8581,14 @@ components:
         - adapter
         - adapter_dispatch
         - adapter_mode
+        - agent_tool_plan
         - authenticated_source
         - auth
         - authorization
         - artifact_uri
         - api_key
         - bearer_token
+        - callback_receipt_id
         - claim_token
         - cookie
         - cookies
@@ -8623,6 +8628,7 @@ components:
         - private_key
         - partial_artifact_uri
         - processed_event_id
+        - provider
         - provider_evidence
         - provider_artifact_ref
         - protocol_receipt
@@ -8668,6 +8674,7 @@ components:
         - internal
         - password
         - protocol
+        - provider
         - remote
         - secret
         - signature

@@ -7,7 +7,7 @@ import pytest
 
 from app.core.context import RequestContext
 from app.core.logging import LOGGER_NAME, get_logger, log_event
-from app.core.redaction import redact_structured_value
+from app.core.redaction import redact_structured_value, trusted_sha256
 
 
 @pytest.mark.parametrize(
@@ -56,11 +56,68 @@ def test_redaction_keeps_opaque_trace_reference_with_phone_like_digits() -> None
     assert redact_structured_value({"trace_id": trace_id}) == {"trace_id": trace_id}
 
 
+def test_redaction_preserves_strict_sha256_proofs_with_phone_like_digits() -> None:
+    digest = "a13800138000b" + ("c" * 51)
+
+    assert redact_structured_value(
+        {
+            "release_gate_proof": {
+                "request_sha256": trusted_sha256(digest),
+                "decision_sha256": trusted_sha256(digest.upper()),
+                "note": f"审计摘要旁的普通文本仍需脱敏：{digest}",
+            }
+        }
+    ) == {
+        "release_gate_proof": {
+            "request_sha256": digest,
+            "decision_sha256": digest.upper(),
+            "note": "审计摘要旁的普通文本仍需脱敏：a[REDACTED_PHONE]b" + ("c" * 51),
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_digest"),
+    (
+        ("request_sha256", "a13800138000b" + ("c" * 51)),
+        ("note_sha256", "a13800138000b" + ("c" * 51)),
+        ("customer_sha256", "a13800138000b" + ("c" * 51)),
+        ("private_key_sha256", "a13800138000b" + ("c" * 51)),
+        ("request_sha256", "a13800138000b" + ("c" * 50)),
+        ("request_sha256", "a13800138000b" + ("c" * 52)),
+        ("request_sha256", "g13800138000b" + ("c" * 51)),
+    ),
+)
+def test_redaction_does_not_trust_unmarked_or_noncanonical_sha256_values(
+    field_name: str,
+    invalid_digest: str,
+) -> None:
+    redacted = redact_structured_value({field_name: invalid_digest})
+
+    assert "13800138000" not in redacted[field_name]
+    assert "[REDACTED_PHONE]" in redacted[field_name]
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    (
+        "a13800138000b" + ("c" * 50),
+        "a13800138000b" + ("c" * 52),
+        "g13800138000b" + ("c" * 51),
+    ),
+)
+def test_trusted_sha256_rejects_invalid_values(invalid_digest: str) -> None:
+    with pytest.raises(ValueError, match="exactly 64 hexadecimal"):
+        trusted_sha256(invalid_digest)
+
+
 def test_redaction_scans_untrusted_reference_values() -> None:
     redacted = redact_structured_value(
         {
             "customer_ref": "owner@example.com",
             "object_key": "tenant/138-0013-8000/京A12345.wav",
+            "asset_key": "customer/13800138000",
+            "partition_key": "tenant/13800138000",
             "callback_ref": "https://user:pass@example.test/callback",
         }
     )
@@ -68,6 +125,8 @@ def test_redaction_scans_untrusted_reference_values() -> None:
     assert redacted == {
         "customer_ref": "[REDACTED_EMAIL]",
         "object_key": "tenant/[REDACTED_PHONE]/[REDACTED_PLATE].wav",
+        "asset_key": "customer/[REDACTED_PHONE]",
+        "partition_key": "tenant/[REDACTED_PHONE]",
         "callback_ref": "[REDACTED_SECRET]",
     }
 

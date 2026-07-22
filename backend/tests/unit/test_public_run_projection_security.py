@@ -175,6 +175,30 @@ def test_run_payload_closes_top_level_completion_aliases() -> None:
     assert "terminal_reason" not in projection
 
 
+def test_completion_storage_summaries_alias_internal_roles_and_omit_unknown_roles() -> None:
+    projection = public_run_projection(
+        {
+            "completion_receipt": {
+                "completion_receipt_id": "receipt-safe-001",
+                "status": "success",
+                "result_ref": {
+                    "storage_objects": [
+                        {"role": "provider_artifact", "content_sha256": "a" * 64},
+                        {"role": "manifest", "content_sha256": "b" * 64},
+                        {"role": "provider_private", "content_sha256": "c" * 64},
+                    ]
+                },
+                "metrics": {},
+            }
+        }
+    )
+
+    assert projection["completion_receipt"]["result_ref"]["storage_objects"] == [
+        {"role": "compiled_artifact", "content_sha256": "a" * 64},
+        {"role": "manifest", "content_sha256": "b" * 64},
+    ]
+
+
 def test_public_projection_omits_credential_and_network_locator_canaries() -> None:
     projection = public_run_projection(
         {
@@ -191,6 +215,143 @@ def test_public_projection_omits_credential_and_network_locator_canaries() -> No
     assert projection == {
         "note": "[REDACTED_SECRET]",
         "business_message": "evaluation completed",
+    }
+
+
+def test_public_projection_does_not_trust_phone_like_candidate_hash_shapes() -> None:
+    # Candidate identifiers can originate in an external completion callback.
+    # A hash-looking prefix alone is not proof that the value is server-derived.
+    candidate_ids = [
+        "prompt_opt_01e9cf247401778c920bb022",
+        "prompt_opt_a13800138000bcccccccccccc",
+    ]
+
+    projection = public_run_projection({"prompt_candidate_ids": candidate_ids})
+
+    assert projection["prompt_candidate_ids"][0] == candidate_ids[0]
+    assert projection["prompt_candidate_ids"][1] == ("prompt_opt_a[REDACTED_PHONE]bcccccccccccc")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("id", "customer_13800138000"),
+        ("customer_id", "customer_13800138000"),
+        ("customer_ids", "customer_13800138000"),
+        ("customerId", "customer_13800138000"),
+        ("customer-id", "customer_13800138000"),
+        ("user_id", "user_13800138000"),
+        ("contact_id", "contact_13800138000"),
+        ("order_id", "13800138000"),
+        ("recording_id", "rec_13800138000"),
+        ("run_id", "run_13800138000"),
+        ("source_id", "source_13800138000"),
+        ("asset_key", "customer/13800138000"),
+        ("partition_key", "tenant/13800138000"),
+    ),
+)
+def test_public_projection_does_not_use_identifier_fields_as_phone_pii_bypass(
+    field_name: str,
+    value: str,
+) -> None:
+    projection = public_run_projection({field_name: value})
+
+    assert "13800138000" not in projection[field_name]
+    assert "[REDACTED_PHONE]" in projection[field_name]
+
+
+def test_public_projection_rejects_phone_pii_disguised_as_a_hash_identifier() -> None:
+    projection = public_run_projection({"customer_id": "customer_ab13800138000abcdef123456"})
+
+    assert projection["customer_id"] == "customer_ab[REDACTED_PHONE]abcdef123456"
+
+
+def test_public_projection_continues_to_redact_ordinary_phone_values() -> None:
+    projection = public_run_projection(
+        {
+            "phone": "13800138000",
+            "note": "联系 13800138000 复核候选",
+        }
+    )
+
+    assert projection == {
+        "phone": "[REDACTED_PII]",
+        "note": "联系 [REDACTED_PHONE] 复核候选",
+    }
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("note_sha256", "customer_sha256", "private_key_sha256"),
+)
+def test_public_projection_does_not_trust_arbitrary_sha256_field_names(
+    field_name: str,
+) -> None:
+    digest = "a13800138000b" + ("c" * 51)
+
+    projection = public_run_projection({field_name: digest})
+
+    assert "13800138000" not in projection[field_name]
+    assert "[REDACTED_PHONE]" in projection[field_name]
+
+
+def test_public_projection_identifier_arrays_omit_hosts_and_never_restore_secrets() -> None:
+    credential_canary = "".join(("ghp", "_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ", "123456"))
+
+    projection = public_run_projection(
+        {
+            "prompt_candidate_ids": ["attacker.example", credential_canary],
+            "promptCandidateIds": ["attacker.example"],
+        }
+    )
+
+    assert projection["prompt_candidate_ids"] == ["[REDACTED_SECRET]"]
+    assert projection["promptCandidateIds"] == []
+    assert credential_canary not in str(projection)
+
+
+def test_public_projection_omits_internal_agent_tool_plan() -> None:
+    projection = public_run_projection(
+        {
+            "status": "submitted",
+            "agent_tool_plan": [
+                {
+                    "key": "write_candidate_version",
+                    "tool": "mysql.write_draft",
+                    "purpose": "只写候选版本",
+                }
+            ],
+            "agent_policy": {
+                "allowed_writes": ["candidate", "draft"],
+                "forbidden_writes": ["production_prompt"],
+            },
+        }
+    )
+
+    assert projection == {
+        "status": "submitted",
+        "agent_policy": {
+            "allowed_writes": ["candidate", "draft"],
+            "forbidden_writes": ["production_prompt"],
+        },
+    }
+
+
+def test_public_projection_recursively_omits_execution_provider() -> None:
+    projection = public_run_projection(
+        {
+            "status": "submitted",
+            "provider": "auris-audio-stack",
+            "task_version_snapshot": {
+                "provider": "auris-audio-stack",
+                "version": "v3.2.1",
+            },
+        }
+    )
+
+    assert projection == {
+        "status": "submitted",
+        "task_version_snapshot": {"version": "v3.2.1"},
     }
 
 

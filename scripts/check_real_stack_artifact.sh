@@ -149,16 +149,27 @@ except ValueError:
     fail("AURIS_REAL_STACK_MYSQL_RUN_COUNT must be an integer")
 if mysql_run_count <= 0:
     fail("script-managed MySQL database contains no run_records", {"count": mysql_run_count})
+expected_audio_storage_object = {
+    "storage_object_id": "sto_rec_A_1001_20250526_122300",
+    "provider": "minio",
+    "bucket": "auris-flow-local",
+    "status": "verified",
+}
+raw_audio_storage_object = os.environ.get(
+    "AURIS_REAL_STACK_MYSQL_AUDIO_STORAGE_OBJECT_PROOF",
+    "",
+)
 try:
-    mysql_storage_object_count = int(
-        os.environ.get("AURIS_REAL_STACK_MYSQL_STORAGE_OBJECT_COUNT", "0")
-    )
-except ValueError:
-    fail("AURIS_REAL_STACK_MYSQL_STORAGE_OBJECT_COUNT must be an integer")
-if mysql_storage_object_count <= 0:
+    mysql_audio_storage_object = json.loads(raw_audio_storage_object)
+except json.JSONDecodeError:
+    fail("AURIS_REAL_STACK_MYSQL_AUDIO_STORAGE_OBJECT_PROOF must be valid JSON")
+if mysql_audio_storage_object != expected_audio_storage_object:
     fail(
-        "script-managed MySQL database contains no registered storage_objects",
-        {"count": mysql_storage_object_count},
+        "script-managed MySQL database is missing the exact verified MinIO audio object",
+        {
+            "expected": expected_audio_storage_object,
+            "actual": mysql_audio_storage_object,
+        },
     )
 
 dispatches = outbox.get("checked_dispatches")
@@ -241,7 +252,7 @@ range_mismatches = {
 if range_mismatches or not isinstance(range_check.get("content_length"), int) or range_check["content_length"] <= 16:
     fail("audio Range proof is not backed by real object storage and HTTP 206", {"mismatches": range_mismatches, "proof": range_check})
 storage_object_id = range_check.get("storage_object_id")
-if not isinstance(storage_object_id, str) or not storage_object_id.startswith("sto_"):
+if storage_object_id != mysql_audio_storage_object["storage_object_id"]:
     fail("audio Range proof is not linked to governed MySQL storage metadata", range_check)
 
 coverage = outbox.get("coverage")
@@ -251,7 +262,7 @@ if coverage.get("qdrant_recall_count") != len(recalls) or coverage.get("audio_ra
     fail("outbox artifact coverage does not match real-stack proofs", {"coverage": coverage})
 
 verification = {
-    "schema_version": "auris.real-stack-gate.v1",
+    "schema_version": "auris.real-stack-gate.v2",
     "status": "ok",
     "source_commit": source_commit,
     "execution_environment": "compose-dependencies",
@@ -265,7 +276,7 @@ verification = {
         "backend": "mysql",
         "artifact_ref": database_ref,
         "run_record_count": mysql_run_count,
-        "registered_storage_object_count": mysql_storage_object_count,
+        "verified_audio_storage_object": mysql_audio_storage_object,
     },
     "qdrant": {
         "mode": "real_qdrant",
@@ -274,7 +285,9 @@ verification = {
     },
     "object_storage": {
         "mode": "real",
-        "provider": "minio",
+        "provider": mysql_audio_storage_object["provider"],
+        "bucket": mysql_audio_storage_object["bucket"],
+        "metadata_status": mysql_audio_storage_object["status"],
         "dispatch_count": len(object_dispatches),
         "range_source": range_check.get("source"),
         "storage_object_id": storage_object_id,

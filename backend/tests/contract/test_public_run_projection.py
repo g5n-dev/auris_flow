@@ -395,12 +395,11 @@ def test_public_run_endpoints_recursively_hide_execution_engine_evidence(
             {
                 "key": "view_result",
                 "label": "Open execution engine protocol integration workflow",
-                "href": "/runs/obj_13800138000",
             }
         ]
         assert projection["result_ref"] == {
             "type": "storage_object",
-            "id": "obj_13800138000",
+            "id": "obj_[REDACTED_PHONE]",
         }
         assert projection["content_sha256"] == "a13800138000b" + "c" * 51
         assert "provider_artifact_ref" not in projection
@@ -414,7 +413,7 @@ def test_public_run_endpoints_recursively_hide_execution_engine_evidence(
             "status": "success",
             "result_ref": {
                 "type": "storage_object",
-                "id": "result_13800138000",
+                "id": "result_[REDACTED_PHONE]",
                 "asset_key": "auris/task/login_risk_review_task_v3",
                 "content_type": "application/json",
                 "storage_objects": [{"role": "manifest", "content_sha256": "5" * 64}],
@@ -476,7 +475,7 @@ def test_run_payload_is_engine_neutral_without_mutating_persisted_evidence() -> 
     assert projection["tenant_id"] == "tenant_projection_unit"
     assert projection["project_id"] == "project_projection_unit"
     assert projection["terminal_reason"] == "EXECUTION_PROTOCOL_INTEGRATION_FAILURE"
-    assert projection["affected_objects"] == [{"type": "task_run", "id": "task_13800138000"}]
+    assert projection["affected_objects"] == [{"type": "task_run", "id": "task_[REDACTED_PHONE]"}]
     assert record.payload == original
     assert record.engine_status == "FAILURE"
 
@@ -506,7 +505,7 @@ def test_run_payload_omits_non_json_containers_and_noncanonical_unicode_keys() -
 
     projection = run_payload(record)
 
-    assert projection["stable_domain_ref"] == "domain_13800138000"
+    assert projection["stable_domain_ref"] == "domain_[REDACTED_PHONE]"
     assert "unknown_mapping" not in projection
     assert "unknown_sequence" not in projection
     assert "unknown_set" not in projection

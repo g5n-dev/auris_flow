@@ -400,7 +400,7 @@ def test_worker_retries_until_committed_release_audit_is_visible(
         nonlocal audit_reads
         audit_reads += 1
         if audit_reads == 1:
-            return False
+            return None
         return original_audit_match(*args, **kwargs)
 
     monkeypatch.setattr(
@@ -434,3 +434,89 @@ def test_worker_retries_until_committed_release_audit_is_visible(
         )
         assert event.status == "processed"
         assert audit_reads >= 2
+
+
+def test_worker_accepts_canonical_sha256_proof_with_phone_like_digits(
+    client,
+    auth_headers,
+    monkeypatch,
+) -> None:
+    digest = "a13800138000b" + ("c" * 51)
+    monkeypatch.setattr(
+        release_gate_service,
+        "_release_decision_sha256",
+        lambda *_args, **_kwargs: digest,
+    )
+    second_admin_token = _promote_second_admin()
+    run_id = _request_task_publish(client, auth_headers, suffix="sha256-phone-canary")
+    assert process_aggregate_events([run_id]) == 0
+
+    approved = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json={"decision": "approved", "reason": "独立管理员确认摘要完整性"},
+        headers=_headers(
+            auth_headers,
+            key="release-integrity-sha256-phone-canary-approve",
+            token=second_admin_token,
+        ),
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["data"]["release_gate"]["decision"]["decision_sha256"] == digest
+    with SessionLocal() as session:
+        audit = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.action == "task_version_publish.release_gate_decided",
+                AuditLog.object_id == run_id,
+            )
+            .one()
+        )
+        assert audit.after_json["release_gate_proof"]["decision_sha256"] == digest
+
+    assert process_aggregate_events([run_id]) == 1
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        assert run.status == "success"
+
+
+def test_worker_fail_closes_on_release_audit_proof_mismatch(client, auth_headers) -> None:
+    second_admin_token = _promote_second_admin()
+    run_id = _request_task_publish(client, auth_headers, suffix="audit-mismatch")
+    assert process_aggregate_events([run_id]) == 0
+
+    approved = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json={"decision": "approved", "reason": "独立管理员确认发布证据"},
+        headers=_headers(
+            auth_headers,
+            key="release-integrity-audit-mismatch-approve",
+            token=second_admin_token,
+        ),
+    )
+    assert approved.status_code == 200, approved.text
+
+    with SessionLocal.begin() as session:
+        audit = (
+            session.query(AuditLog)
+            .filter(
+                AuditLog.action == "task_version_publish.release_gate_decided",
+                AuditLog.object_id == run_id,
+            )
+            .one()
+        )
+        after_json = deepcopy(audit.after_json)
+        after_json["release_gate_proof"]["decision_sha256"] = "f" * 64
+        audit.after_json = after_json
+
+    assert process_aggregate_events([run_id]) == 1
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.query(OutboxEvent).filter(OutboxEvent.aggregate_id == run_id).one()
+        assert run is not None
+        assert run.status == "blocked"
+        assert run.payload["release_dispatch_gate"]["reason"] == ("release_decision_audit_mismatch")
+        assert event.status == "blocked"
+        assert event.delivery_state == "confirmed"
+        assert event.attempt_count == 1
+        assert event.last_error == "run is blocked by release gate or human confirmation"

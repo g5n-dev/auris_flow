@@ -399,7 +399,7 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
     response = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["vad", "asr", "diarization", "voiceprint", "quality"],
             "reason": "integration_audio_intelligence",
         },
@@ -428,7 +428,7 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
             "external_id": external_run_id,
             "result_ref": {
                 "audio_session_id": "S20250526-000128",
-                "recording_id": "A-1001_20250526_122300",
+                "recording_id": "rec_A_1001_20250526_122300",
                 "capability_statuses": {
                     "vad": {"status": "success"},
                     "asr": {"status": "success"},
@@ -527,7 +527,7 @@ def test_audio_intelligence_rejects_missing_outputs_and_accepts_explicit_no_cont
     response = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
-            "recording_id": "A-1001_20250526_122300",
+            "recording_id": "rec_A_1001_20250526_122300",
             "capabilities": ["vad", "asr", "diarization"],
             "reason": "validate_explicit_audio_outputs",
         },
@@ -552,7 +552,7 @@ def test_audio_intelligence_rejects_missing_outputs_and_accepts_explicit_no_cont
             "external_id": external_run_id,
             "result_ref": {
                 "audio_session_id": "S20250526-000128",
-                "recording_id": "A-1001_20250526_122300",
+                "recording_id": "rec_A_1001_20250526_122300",
             },
         },
         headers={**auth_headers, "Idempotency-Key": "audio-empty-output-invalid"},
@@ -575,7 +575,7 @@ def test_audio_intelligence_rejects_missing_outputs_and_accepts_explicit_no_cont
             "external_id": external_run_id,
             "result_ref": {
                 "audio_session_id": "S20250526-000128",
-                "recording_id": "A-1001_20250526_122300",
+                "recording_id": "rec_A_1001_20250526_122300",
                 "capability_statuses": {
                     "vad": {"status": "no_content", "reason": "no_speech_detected"},
                     "asr": {"status": "no_content", "reason": "no_speech_detected"},
@@ -2029,11 +2029,7 @@ def test_eval_feedback_agent_run_records_tools_refs_and_decision(client, auth_he
         "production_prompt",
         "source_asset",
     ]
-    assert {item["key"] for item in feedback_data["agent_tool_plan"]} == {
-        "retrieve_badcases",
-        "diagnose_prompt_gap",
-        "write_feedback_draft",
-    }
+    assert "agent_tool_plan" not in feedback_data
     assert {"type": "badcase", "id": "B-2031", "source_field": "badcase_refs"} in feedback_data[
         "agent_input_refs"
     ]
@@ -2043,6 +2039,18 @@ def test_eval_feedback_agent_run_records_tools_refs_and_decision(client, auth_he
         assert agent is not None
         assert agent.status == "pending"
         assert agent.trace_id == feedback_trace_id
+        assert {item["key"] for item in agent.payload["tool_plan"]} == {
+            "retrieve_badcases",
+            "diagnose_prompt_gap",
+            "write_feedback_draft",
+        }
+        run = session.get(RunRecord, feedback_run_id)
+        assert run is not None
+        assert {item["key"] for item in run.payload["agent_tool_plan"]} == {
+            "retrieve_badcases",
+            "diagnose_prompt_gap",
+            "write_feedback_draft",
+        }
         planned_tools = (
             session.query(ToolCall)
             .filter(ToolCall.payload["agent_run_id"].as_string() == agent_run_id)

@@ -11,6 +11,7 @@ const forbiddenPublicKeyFingerprints = new Set(
     "adapter",
     "adapter_dispatch",
     "adapter_mode",
+    "agent_tool_plan",
     "authenticated_source",
     "auth",
     "authorization",
@@ -35,6 +36,7 @@ const forbiddenPublicKeyFingerprints = new Set(
     "endpoint",
     "engine_status",
     "engine_status_observed_at",
+    "error",
     "execution_contract",
     "execution_deadline_at",
     "execution_envelope",
@@ -138,6 +140,8 @@ const bearerCredentialPattern = /\bbearer\s+[A-Za-z0-9._~+/=-]+/i;
 const absoluteNetworkUriPattern = /\b[a-z][a-z0-9+.-]*:\/\/[^\s]+/i;
 const hostnameCandidatePattern =
   /\b(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z][a-z0-9-]{1,62}(?::\d{1,5})?\b/gi;
+const canonicalSchemaVersionPattern =
+  /^auris\.[a-z][a-z0-9-]*(?:\.[a-z][a-z0-9-]*)*\.v\d+(?:[._-]\d+)*$/;
 const locatorTlds = new Set([
   "ai",
   "app",
@@ -205,6 +209,46 @@ const terminalCompletionRunTypes = new Set([
   "task_run",
   "task_version_publish"
 ]);
+
+const scopedDemoUiEvidenceSelectors = Object.freeze([
+  ["$platform.evaluationPromptUi", (result) => result?.evaluationPromptUi],
+  ["$platform.evaluationBadcaseUi", (result) => result?.evaluationBadcaseUi],
+  ["$platform.blindCalibration", (result) => result?.blindCalibration],
+  ["$platform.hotwordGovernance", (result) => result?.hotwordGovernance],
+  [
+    "$platform.domainPageActions.settingsProviderTest",
+    (result) => result?.domainPageActions?.settingsProviderTest
+  ],
+  ["$platform.coreFlows.settingsPublish", (result) => result?.coreFlows?.settingsPublish],
+  ["$platform.insightAction", (result) => result?.insightAction],
+  ["$platform.insightReport", (result) => result?.insightReport]
+]);
+
+export const demoUiContentSourceMarkerPaths = new Set(
+  scopedDemoUiEvidenceSelectors.map(([path]) => `${path}.contentSource`)
+);
+
+export function collectScopedDemoUiEvidence(result) {
+  return scopedDemoUiEvidenceSelectors.map(([path, select]) => [path, select(result)]);
+}
+
+export function findInvalidScopedDemoUiEvidence(result) {
+  return collectScopedDemoUiEvidence(result).filter(
+    ([, evidence]) =>
+      evidence?.contentSource !== "mock" ||
+      evidence?.productionTruthMode !== "fail_closed" ||
+      evidence?.backendInteractionSource !== "bff"
+  );
+}
+
+export function projectDemoUiEvidenceProof(evidence) {
+  return {
+    contentSource: evidence?.contentSource,
+    productionTruthMode: evidence?.productionTruthMode,
+    backendInteractionSource: evidence?.backendInteractionSource
+  };
+}
+
 const businessBlockedCompletionRunTypes = new Set(["eval_run", "release_command"]);
 
 function requiredText(value, label) {
@@ -311,12 +355,22 @@ function containsHostLocator(value) {
   );
 }
 
+function isCanonicalSchemaVersion(value, fieldName) {
+  return (
+    normalizedKeyTokens(fieldName).join("") === "schemaversion" &&
+    canonicalSchemaVersionPattern.test(value)
+  );
+}
+
 function stringContainsForbiddenPublicEvidence(value, fieldName) {
   const visibleValue = value.normalize("NFKC").replace(/\p{Cf}/gu, "").trim();
   if (!visibleValue) return false;
   if (bearerCredentialPattern.test(visibleValue)) return true;
   if (absoluteNetworkUriPattern.test(visibleValue)) return true;
-  if (containsIpLocator(visibleValue) || containsHostLocator(visibleValue)) return true;
+  if (containsIpLocator(visibleValue)) return true;
+  if (!isCanonicalSchemaVersion(visibleValue, fieldName) && containsHostLocator(visibleValue)) {
+    return true;
+  }
   if (isSafeSameOriginRoute(visibleValue, fieldName)) return false;
   return normalizedKeyTokens(visibleValue).some((token) => forbiddenPublicValueTokens.has(token));
 }
