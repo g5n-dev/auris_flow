@@ -387,7 +387,13 @@ class ObjectStorageClient(Protocol):
         """Reserve or materialize an object-storage reference."""
 
     def get_object(
-        self, bucket: str, object_key: str, *, byte_range: str | None = None
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        byte_range: str | None = None,
+        if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
         """Read an object, optionally using an HTTP Range header."""
 
@@ -489,6 +495,9 @@ class LocalDagsterClient:
 
 MAX_DAGSTER_GRAPHQL_RESPONSE_BYTES = 1_048_576
 DAGSTER_RECONCILIATION_ABSENCE_PROOF = "dagster-exact-dispatch-tag-absent-v1"
+AUDIO_INTELLIGENCE_EXECUTION_CONTRACT = "auris-flow-audio-intelligence-v1"
+AUDIO_INTELLIGENCE_EXECUTION_ENVELOPE_SCHEMA = "auris-flow-execution-envelope-v1"
+AUDIO_INTELLIGENCE_JOB_NAME = "auris_flow_audio_intelligence_v1"
 DAGSTER_RUN_REQUEST_EVENT_TYPES = frozenset(
     {
         "task_run.requested",
@@ -508,6 +517,155 @@ DAGSTER_RUN_REQUEST_EVENT_TYPES = frozenset(
         "provider_test.requested",
     }
 )
+_DAGSTER_CONTROL_PLANE_EVENT_TYPES = DAGSTER_RUN_REQUEST_EVENT_TYPES - {
+    "audio_intelligence.requested"
+}
+_DAGSTER_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
+_DAGSTER_BUCKET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,254}$")
+_DAGSTER_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_AUDIO_CAPABILITIES = frozenset({"vad", "asr", "diarization", "voiceprint", "quality"})
+
+
+class DagsterExecutionContractError(ValueError):
+    """Sanitized, non-retryable failure before a Dagster request is emitted."""
+
+    def __init__(self, field: str) -> None:
+        super().__init__(f"invalid Dagster execution contract field: {field}")
+        self.field = field
+
+
+def _required_dagster_text(
+    source: dict[str, Any],
+    field: str,
+    *,
+    maximum: int = 256,
+    pattern: re.Pattern[str] = _DAGSTER_IDENTIFIER_PATTERN,
+) -> str:
+    value = source.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise DagsterExecutionContractError(field)
+    normalized = value.strip()
+    if len(normalized) > maximum or not pattern.fullmatch(normalized):
+        raise DagsterExecutionContractError(field)
+    return normalized
+
+
+def _required_bounded_printable_text(source: dict[str, Any], field: str, *, maximum: int) -> str:
+    value = source.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise DagsterExecutionContractError(field)
+    normalized = value.strip()
+    if len(normalized) > maximum or any(ord(char) < 0x21 for char in normalized):
+        raise DagsterExecutionContractError(field)
+    return normalized
+
+
+def _audio_execution_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    event_type = _required_dagster_text(payload, "event_type", maximum=128)
+    if event_type != "audio_intelligence.requested":
+        raise DagsterExecutionContractError("event_type")
+    contract = _required_dagster_text(payload, "execution_contract", maximum=128)
+    if contract != AUDIO_INTELLIGENCE_EXECUTION_CONTRACT:
+        raise DagsterExecutionContractError("execution_contract")
+
+    tenant_id = _required_dagster_text(payload, "tenant_id", maximum=128)
+    project_id = _required_dagster_text(payload, "project_id", maximum=128)
+    deadline_at = _required_bounded_printable_text(payload, "execution_deadline_at", maximum=64)
+    try:
+        parsed_deadline = datetime.fromisoformat(deadline_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise DagsterExecutionContractError("execution_deadline_at") from exc
+    if parsed_deadline.tzinfo is None or parsed_deadline.astimezone(UTC) <= datetime.now(UTC):
+        raise DagsterExecutionContractError("execution_deadline_at")
+    normalized_deadline = parsed_deadline.astimezone(UTC).isoformat()
+
+    raw_input = payload.get("input_object")
+    if not isinstance(raw_input, dict):
+        raise DagsterExecutionContractError("input_object")
+    storage_provider = _required_dagster_text(raw_input, "storage_provider", maximum=32)
+    if storage_provider not in SUPPORTED_OBJECT_STORAGE_PROVIDERS:
+        raise DagsterExecutionContractError("input_object.storage_provider")
+    bucket = _required_dagster_text(
+        raw_input,
+        "bucket",
+        maximum=255,
+        pattern=_DAGSTER_BUCKET_PATTERN,
+    )
+    object_key = _required_bounded_printable_text(raw_input, "object_key", maximum=1024)
+    object_parts = object_key.strip("/").split("/")
+    expected_prefix = ["tenants", tenant_id, "projects", project_id]
+    if (
+        object_key != object_key.strip("/")
+        or object_parts[:4] != expected_prefix
+        or any(part in {"", ".", ".."} for part in object_parts)
+    ):
+        raise DagsterExecutionContractError("input_object.object_key")
+    version_id = _required_bounded_printable_text(raw_input, "version_id", maximum=1024)
+    if version_id.casefold() == "null":
+        raise DagsterExecutionContractError("input_object.version_id")
+    content_sha256 = _required_dagster_text(
+        raw_input,
+        "content_sha256",
+        maximum=64,
+        pattern=_DAGSTER_SHA256_PATTERN,
+    )
+    raw_content_length = raw_input.get("content_length")
+    if (
+        isinstance(raw_content_length, bool)
+        or not isinstance(raw_content_length, int)
+        or not 44 <= raw_content_length <= 5 * 1024**3
+    ):
+        raise DagsterExecutionContractError("input_object.content_length")
+    content_type = _required_bounded_printable_text(raw_input, "content_type", maximum=128)
+    if content_type not in {"audio/wav", "audio/x-wav"}:
+        raise DagsterExecutionContractError("input_object.content_type")
+
+    raw_capabilities = payload.get("capabilities")
+    if (
+        not isinstance(raw_capabilities, list)
+        or not raw_capabilities
+        or len(raw_capabilities) > len(_AUDIO_CAPABILITIES)
+        or any(
+            not isinstance(item, str) or item not in _AUDIO_CAPABILITIES
+            for item in raw_capabilities
+        )
+        or len(set(raw_capabilities)) != len(raw_capabilities)
+    ):
+        raise DagsterExecutionContractError("capabilities")
+
+    return {
+        "schema_version": AUDIO_INTELLIGENCE_EXECUTION_ENVELOPE_SCHEMA,
+        "execution_contract": contract,
+        "tenant_id": tenant_id,
+        "project_id": project_id,
+        "trace_id": _required_dagster_text(payload, "trace_id"),
+        "run_id": _required_dagster_text(payload, "run_id"),
+        "dispatch_idempotency_key": _required_dagster_text(payload, "dispatch_idempotency_key"),
+        "outbox_fencing_token": _required_dagster_text(
+            payload,
+            "outbox_fencing_token",
+            maximum=64,
+            pattern=re.compile(r"^[1-9][0-9]*:[1-9][0-9]*$"),
+        ),
+        "deadline_at": normalized_deadline,
+        "audio_session_id": _required_dagster_text(payload, "audio_session_id"),
+        "recording_id": _required_dagster_text(payload, "recording_id"),
+        "input_object": {
+            "storage_object_id": _required_dagster_text(raw_input, "storage_object_id"),
+            "storage_provider": storage_provider,
+            "bucket": bucket,
+            "object_key": object_key,
+            "version_id": version_id,
+            "content_sha256": content_sha256,
+            "content_length": raw_content_length,
+            "content_type": content_type,
+        },
+        "inference": {
+            "provider": _required_dagster_text(payload, "provider", maximum=128),
+            "model": _required_dagster_text(payload, "model_version", maximum=128),
+        },
+        "capabilities": list(raw_capabilities),
+    }
 
 
 DAGSTER_LAUNCH_MUTATION = """
@@ -663,7 +821,22 @@ class RealDagsterClient:
         failure = _maybe_failure("dagster", "run_request", payload)
         if failure:
             return failure
-        job_name = self._job_name(payload)
+        try:
+            job_name = self._job_name(payload)
+            run_config = self._run_config(payload)
+        except DagsterExecutionContractError as exc:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_request",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "invalid_field": exc.field,
+                },
+                error_code="DAGSTER_EXECUTION_CONTRACT_INVALID",
+                error_message="Dagster execution contract is invalid",
+                retryable=False,
+            )
         run_key = str(
             payload.get("dispatch_idempotency_key")
             or payload.get("run_key")
@@ -676,9 +849,9 @@ class RealDagsterClient:
                 "repositoryName": self.repository_name,
                 "pipelineName": job_name,
             },
-            "runConfigData": self._run_config(payload),
+            "runConfigData": run_config,
             "executionMetadata": {
-                "tags": self._tags(payload, run_key),
+                "tags": self._tags(payload, run_key, run_config=run_config),
             },
         }
         graphql_payload = {
@@ -813,6 +986,10 @@ class RealDagsterClient:
         ):
             protocol_receipt = extensions["auris_protocol_receipt"]
 
+        execution_envelope = run_config.get("execution_envelope")
+        envelope_sha256 = (
+            _structured_sha256(execution_envelope) if isinstance(execution_envelope, dict) else None
+        )
         return DispatchResult(
             adapter="dagster",
             operation="run_request",
@@ -831,6 +1008,11 @@ class RealDagsterClient:
                 "project_id": payload.get("project_id"),
                 "graphql_payload_sha256": graphql_payload_sha256,
                 "request_sha256": graphql_payload_sha256,
+                **(
+                    {"execution_envelope_sha256": envelope_sha256}
+                    if envelope_sha256 is not None
+                    else {}
+                ),
                 "response_typename": response_typename,
                 "dagster_run_status": run.get("status"),
                 "protocol_receipt": protocol_receipt,
@@ -1194,7 +1376,15 @@ class RealDagsterClient:
         )
 
     def _job_name(self, payload: dict[str, Any]) -> str:
-        del payload
+        event_type = _required_dagster_text(payload, "event_type", maximum=128)
+        if event_type == "audio_intelligence.requested":
+            if payload.get("execution_contract") != AUDIO_INTELLIGENCE_EXECUTION_CONTRACT:
+                raise DagsterExecutionContractError("execution_contract")
+            if self.execution_mode != "control-plane-acknowledgement":
+                raise DagsterExecutionContractError("execution_mode")
+            return AUDIO_INTELLIGENCE_JOB_NAME
+        if event_type not in _DAGSTER_CONTROL_PLANE_EVENT_TYPES:
+            raise DagsterExecutionContractError("event_type")
         return self.default_job_name
 
     def _run_config(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1223,14 +1413,36 @@ class RealDagsterClient:
                 "otel_trace_flags": otel_context.get("otel_trace_flags"),
             },
         }
+        if payload.get("event_type") == "audio_intelligence.requested":
+            return {
+                "auris_context": authoritative_context,
+                "execution_envelope": _audio_execution_envelope(payload),
+            }
         return {
             "auris_context": authoritative_context,
             "execution": {"mode": self.execution_mode},
         }
 
-    def _tags(self, payload: dict[str, Any], run_key: str) -> list[dict[str, str]]:
+    def _tags(
+        self,
+        payload: dict[str, Any],
+        run_key: str,
+        *,
+        run_config: dict[str, Any] | None = None,
+    ) -> list[dict[str, str]]:
+        execution_envelope = (run_config or {}).get("execution_envelope")
         tag_values = {
             "auris/dispatch_idempotency_key": run_key,
+            "auris/execution_contract": (
+                execution_envelope.get("execution_contract")
+                if isinstance(execution_envelope, dict)
+                else None
+            ),
+            "auris/execution_envelope_sha256": (
+                _structured_sha256(execution_envelope)
+                if isinstance(execution_envelope, dict)
+                else None
+            ),
             "tenant_id": payload.get("tenant_id"),
             "project_id": payload.get("project_id"),
             "trace_id": payload.get("trace_id"),
@@ -1299,13 +1511,21 @@ class LocalObjectStorageClient:
         )
 
     def get_object(
-        self, bucket: str, object_key: str, *, byte_range: str | None = None
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        byte_range: str | None = None,
+        if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
         body = json.dumps(
             {
                 "bucket": bucket,
                 "object_key": object_key,
                 "byte_range": byte_range,
+                "if_match": if_match,
+                "version_id": version_id,
                 "mode": "local",
             },
             ensure_ascii=True,
@@ -1492,6 +1712,7 @@ class RealObjectStorageClient:
         object_key: str,
         *,
         if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
         # S3-compatible providers return their validated SHA-256 only when
         # checksum mode is requested. This header is signed and does not trust
@@ -1505,6 +1726,7 @@ class RealObjectStorageClient:
             "HEAD",
             f"/{bucket}/{object_key}",
             extra_headers=extra_headers or None,
+            query=self._exact_version_query(version_id),
         )
 
     def head_bucket(
@@ -1581,17 +1803,78 @@ class RealObjectStorageClient:
         return bucket in self.allowed_buckets
 
     def get_object(
-        self, bucket: str, object_key: str, *, byte_range: str | None = None
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        byte_range: str | None = None,
+        if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
-        headers = {"Range": byte_range} if byte_range else None
-        return self._request("GET", f"/{bucket}/{object_key}", extra_headers=headers)
+        headers: dict[str, str] = {}
+        if byte_range:
+            headers["Range"] = byte_range
+        if if_match:
+            headers["If-Match"] = if_match
+        return self._request(
+            "GET",
+            f"/{bucket}/{object_key}",
+            extra_headers=headers or None,
+            query=self._exact_version_query(version_id),
+        )
+
+    def get_object_version(
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        version_id: str,
+        max_response_bytes: int,
+    ) -> dict[str, Any]:
+        """Read one immutable S3/MinIO object version with a bounded body."""
+
+        if self.provider not in {"minio", "s3"} or self.signature_mode != "s3v4":
+            raise ValueError("exact version reads are supported only for MinIO/S3")
+        if not self.allows_bucket(bucket):
+            raise ValueError("exact version read bucket is not allowed")
+        query = self._exact_version_query(version_id)
+        assert query is not None
+        if not 0 < max_response_bytes <= 4 * 1024 * 1024:
+            raise ValueError("exact version response bound is invalid")
+        return self._request(
+            "GET",
+            f"/{bucket}/{object_key}",
+            query=query,
+            max_response_bytes=max_response_bytes,
+        )
 
     def open_object(
-        self, bucket: str, object_key: str, *, byte_range: str | None = None
+        self,
+        bucket: str,
+        object_key: str,
+        *,
+        byte_range: str | None = None,
+        if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
-        headers = {"Range": byte_range} if byte_range else None
-        request = self._signed_request("GET", f"/{bucket}/{object_key}", extra_headers=headers)
+        headers: dict[str, str] = {}
+        if byte_range:
+            headers["Range"] = byte_range
+        if if_match:
+            headers["If-Match"] = if_match
+        request = self._signed_request(
+            "GET",
+            f"/{bucket}/{object_key}",
+            extra_headers=headers,
+            query=self._exact_version_query(version_id),
+        )
         response = urlopen(request, timeout=5)
+        version_header = {
+            "minio": "x-amz-version-id",
+            "s3": "x-amz-version-id",
+            "oss": "x-oss-version-id",
+            "obs": "x-obs-version-id",
+        }[self.provider]
         return {
             "status": response.status,
             "headers": dict(response.headers.items()),
@@ -1599,8 +1882,24 @@ class RealObjectStorageClient:
             "content_length": response.headers.get("Content-Length"),
             "content_range": response.headers.get("Content-Range"),
             "content_type": response.headers.get("Content-Type"),
+            "version_id": response.headers.get(version_header),
             "stream": response,
         }
+
+    @staticmethod
+    def _exact_version_query(version_id: str | None) -> dict[str, str] | None:
+        if version_id is None:
+            return None
+        if (
+            not isinstance(version_id, str)
+            or not version_id
+            or version_id.casefold() == "null"
+            or len(version_id) > 1024
+            or version_id != version_id.strip()
+            or any(ord(character) < 0x20 or ord(character) == 0x7F for character in version_id)
+        ):
+            raise ValueError("exact version id is invalid")
+        return {"versionId": version_id}
 
     def _ensure_bucket(self) -> None:
         if self.provider != "minio":
@@ -1640,6 +1939,8 @@ class RealObjectStorageClient:
         content_type: str = "application/json",
         extra_headers: dict[str, str] | None = None,
         timeout_seconds: float = 5.0,
+        query: dict[str, str] | None = None,
+        max_response_bytes: int | None = None,
     ) -> dict[str, Any]:
         if timeout_seconds <= 0:
             raise ValueError("object storage request timeout must be positive")
@@ -1649,13 +1950,28 @@ class RealObjectStorageClient:
             body=body,
             content_type=content_type,
             extra_headers=extra_headers,
+            query=query,
         )
         with urlopen(request, timeout=timeout_seconds) as response:
-            raw = b"" if method == "HEAD" else response.read()
+            if method == "HEAD":
+                raw = b""
+            elif max_response_bytes is None:
+                raw = response.read()
+            else:
+                raw = response.read(max_response_bytes + 1)
+                if len(raw) > max_response_bytes:
+                    raise ValueError("object storage response exceeds configured bound")
+            version_header = {
+                "minio": "x-amz-version-id",
+                "s3": "x-amz-version-id",
+                "oss": "x-oss-version-id",
+                "obs": "x-obs-version-id",
+            }[self.provider]
             return {
                 "status": response.status,
                 "headers": dict(response.headers.items()),
                 "etag": response.headers.get("ETag", "").strip('"'),
+                "version_id": response.headers.get(version_header),
                 "content_length": response.headers.get("Content-Length"),
                 "content_range": response.headers.get("Content-Range"),
                 "content_type": response.headers.get("Content-Type"),
@@ -1669,6 +1985,7 @@ class RealObjectStorageClient:
         body: bytes | None = None,
         content_type: str = "application/json",
         extra_headers: dict[str, str] | None = None,
+        query: dict[str, str] | None = None,
     ) -> Request:
         parsed = urlparse(self.endpoint)
         if not parsed.scheme or not parsed.netloc:
@@ -1676,6 +1993,12 @@ class RealObjectStorageClient:
         if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
             raise ValueError("object storage endpoint must not contain path, query, or fragment")
         url, host, canonical_uri, canonical_resource = self._request_target(parsed, path)
+        canonical_query = "&".join(
+            f"{quote(str(key), safe='-_.~')}={quote(str(value), safe='-_.~')}"
+            for key, value in sorted((query or {}).items())
+        )
+        if canonical_query:
+            url = f"{url}?{canonical_query}"
         payload = body or b""
         payload_hash = hashlib.sha256(payload).hexdigest()
         timestamp = (
@@ -1696,7 +2019,11 @@ class RealObjectStorageClient:
                 headers["x-obs-security-token"] = self.session_token
             headers["Authorization"] = self._obs_authorization_header(
                 method=method,
-                canonical_resource=canonical_resource,
+                canonical_resource=(
+                    f"{canonical_resource}?{canonical_query}"
+                    if canonical_query
+                    else canonical_resource
+                ),
                 headers=headers,
             )
         elif self.signature_mode == "ossv4":
@@ -1713,6 +2040,7 @@ class RealObjectStorageClient:
                 headers=headers,
                 date_stamp=date_stamp,
                 timestamp=timestamp,
+                canonical_query=canonical_query,
                 additional_headers=tuple(
                     sorted(
                         key.lower()
@@ -1730,6 +2058,7 @@ class RealObjectStorageClient:
             headers["Authorization"] = self._authorization_header(
                 method=method,
                 canonical_uri=canonical_uri,
+                canonical_query=canonical_query,
                 headers=headers,
                 payload_hash=payload_hash,
                 date_stamp=date_stamp,
@@ -1806,6 +2135,7 @@ class RealObjectStorageClient:
         headers: dict[str, str],
         date_stamp: str,
         timestamp: str,
+        canonical_query: str = "",
         additional_headers: tuple[str, ...] = (),
     ) -> str:
         required_names = {
@@ -1833,7 +2163,7 @@ class RealObjectStorageClient:
             [
                 method,
                 canonical_resource,
-                "",
+                canonical_query,
                 canonical_headers,
                 additional_header_value,
                 hashed_payload,
@@ -1870,6 +2200,7 @@ class RealObjectStorageClient:
         payload_hash: str,
         date_stamp: str,
         timestamp: str,
+        canonical_query: str = "",
     ) -> str:
         canonical_header_items = {
             key.lower(): " ".join(str(value).strip().split())
@@ -1884,7 +2215,7 @@ class RealObjectStorageClient:
             [
                 method,
                 canonical_uri,
-                "",
+                canonical_query,
                 canonical_headers,
                 signed_headers,
                 payload_hash,

@@ -5,7 +5,7 @@ from copy import deepcopy
 from app.core.auth import DevAuthProfile, issue_dev_auth_token
 from app.core.config import get_settings
 from app.core.database import SessionLocal
-from app.models import Project, User
+from app.models import IdempotencyRecord, Project, User
 
 SECOND_ADMIN_ID = "u_annotator_001"
 
@@ -160,3 +160,84 @@ def test_settings_publish_rejects_requester_self_approval(client, auth_headers) 
     )
     assert self_approval.status_code == 409
     assert self_approval.json()["error"]["code"] == ("RELEASE_APPROVAL_SEPARATION_REQUIRED")
+
+
+def test_release_decision_reprojects_legacy_idempotency_response(
+    client,
+    auth_headers,
+) -> None:
+    requested = _request_task_publish(client, auth_headers, suffix="legacy-replay")
+    run_id = requested.json()["data"]["run_id"]
+    second_admin_token = _promote_second_admin()
+    body = {"decision": "approved", "reason": "验证历史发布审批响应重新投影"}
+    headers = _headers(
+        auth_headers,
+        key="release-decision-legacy-run-response",
+        token=second_admin_token,
+    )
+    approved = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json=body,
+        headers=headers,
+    )
+    assert approved.status_code == 200, approved.text
+
+    operation = f"run.release_gate_decision:{run_id}"
+    with SessionLocal.begin() as session:
+        stored = (
+            session.query(IdempotencyRecord)
+            .filter(
+                IdempotencyRecord.operation == operation,
+                IdempotencyRecord.idempotency_key == "release-decision-legacy-run-response",
+            )
+            .one()
+        )
+        legacy_response = dict(stored.response_json)
+        legacy_data = dict(legacy_response["data"])
+        legacy_data.update(
+            {
+                "tenant_id": "legacy_wrong_tenant",
+                "project_id": "legacy_wrong_project",
+                "adapter_mode": "real",
+                "external_run_id": "legacy-external-id-canary",
+                "legacy_transport": {
+                    "result_ref": {"artifact_id": "release-domain-safe"},
+                    "dispatch": {
+                        "adapter": "dagster_graphql",
+                        "job_name": "auris_release_job",
+                        "signature": "legacy-signature-canary",
+                        "secret_ref": "legacy-secret-canary",
+                    },
+                },
+            }
+        )
+        legacy_response["data"] = legacy_data
+        stored.response_json = legacy_response
+
+    replay = client.post(
+        f"/api/v1/runs/{run_id}/decisions",
+        json=body,
+        headers=headers,
+    )
+    assert replay.status_code == 200, replay.text
+    data = replay.json()["data"]
+    assert data["tenant_id"] == "aurora_auto"
+    assert data["project_id"] == "sales_qa"
+    assert data["legacy_transport"] == {"result_ref": {"artifact_id": "release-domain-safe"}}
+    assert "adapter_mode" not in data
+    assert "external_run_id" not in data
+
+    with SessionLocal() as session:
+        stored = (
+            session.query(IdempotencyRecord)
+            .filter(
+                IdempotencyRecord.operation == operation,
+                IdempotencyRecord.idempotency_key == "release-decision-legacy-run-response",
+            )
+            .one()
+        )
+        assert stored.response_json["data"]["adapter_mode"] == "real"
+        assert (
+            stored.response_json["data"]["legacy_transport"]["dispatch"]["signature"]
+            == "legacy-signature-canary"
+        )

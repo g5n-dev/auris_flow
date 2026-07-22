@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import re
 from dataclasses import dataclass, replace
 from typing import Any
@@ -22,6 +23,8 @@ PROVIDER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 BUCKET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 MAX_COMPLETION_OBJECTS = 32
 MAX_STORAGE_OBJECT_SIZE_BYTES = 5 * 1024 * 1024 * 1024
+AUDIO_PENDING_COMPLETION_STATUS = "pending_completion_binding"
+AUDIO_REJECTED_COMPLETION_STATUS = "rejected"
 
 _DESCRIPTOR_FIELDS = frozenset(
     {
@@ -34,6 +37,7 @@ _DESCRIPTOR_FIELDS = frozenset(
         "size_bytes",
         "content_sha256",
         "etag",
+        "version_id",
         # These fields are intentionally accepted but never trusted. The server
         # replaces them with values frozen on the run and request context.
         "tenant_id",
@@ -85,6 +89,7 @@ class _Descriptor:
     size_bytes: int
     content_sha256: str
     etag: str | None
+    version_id: str | None
 
 
 def _text(raw: Any, *, field: str, max_length: int) -> str:
@@ -133,6 +138,24 @@ def _expected_objects(
     record: RunRecord,
     result_ref: dict[str, Any],
 ) -> dict[str, _ExpectedObject]:
+    if record.run_type == "audio_intelligence":
+        storage_object_id = result_ref.get("result_manifest_storage_object_id")
+        manifest_sha256 = result_ref.get("result_manifest_sha256")
+        if (
+            not isinstance(storage_object_id, str)
+            or not STORAGE_OBJECT_ID_PATTERN.fullmatch(storage_object_id)
+            or not isinstance(manifest_sha256, str)
+            or not SHA256_PATTERN.fullmatch(manifest_sha256)
+        ):
+            raise ApiError(
+                "RUN_COMPLETION_STORAGE_REFERENCES_INVALID",
+                "音频结果 manifest 必须绑定对象 ID 和 SHA-256",
+                422,
+            )
+        return {
+            storage_object_id: _ExpectedObject("manifest", manifest_sha256),
+        }
+
     if record.run_type in {"asset_backfill", "asset_check_retry"}:
         raw_asset_ids: list[Any] = []
         direct_id = result_ref.get("storage_object_id")
@@ -473,6 +496,20 @@ def _descriptor(
 
     raw_etag = raw.get("etag")
     etag = None if raw_etag is None else _text(raw_etag, field="etag", max_length=255)
+    raw_version_id = raw.get("version_id")
+    version_id = (
+        None
+        if raw_version_id is None
+        else _text(raw_version_id, field="version_id", max_length=1024)
+    )
+    if record.run_type == "audio_intelligence" and (
+        version_id is None or version_id.casefold() == "null"
+    ):
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_VERSION_REQUIRED",
+            "音频结果 manifest 必须绑定精确对象版本",
+            422,
+        )
     return _Descriptor(
         storage_object_id=storage_object_id,
         role=role,
@@ -483,6 +520,7 @@ def _descriptor(
         size_bytes=size_bytes,
         content_sha256=content_sha256,
         etag=etag,
+        version_id=version_id,
     )
 
 
@@ -509,9 +547,121 @@ def _matches_existing(
             existing.size_bytes == descriptor.size_bytes,
             str(existing.content_sha256 or "").lower() == descriptor.content_sha256,
             existing.etag == descriptor.etag,
+            (existing.payload or {}).get("object_version_id") == descriptor.version_id,
             existing.status == "verified",
             existing.trace_id == trace_id,
         )
+    )
+
+
+def _matches_pending_audio_completion(
+    existing: StorageObject,
+    *,
+    record: RunRecord,
+    descriptor: _Descriptor,
+    completion_receipt_id: str,
+    trace_id: str,
+) -> bool:
+    payload = existing.payload if isinstance(existing.payload, dict) else {}
+    return all(
+        (
+            record.run_type == "audio_intelligence",
+            existing.storage_object_id == descriptor.storage_object_id,
+            existing.tenant_id == record.tenant_id,
+            existing.project_id == record.project_id,
+            existing.provider == descriptor.provider,
+            existing.bucket == descriptor.bucket,
+            existing.object_key == descriptor.object_key,
+            existing.object_key_sha256
+            == hashlib.sha256(descriptor.object_key.encode("utf-8")).hexdigest(),
+            existing.source_type == record.run_type,
+            existing.source_id == record.run_id,
+            existing.content_type == descriptor.content_type,
+            existing.size_bytes == descriptor.size_bytes,
+            str(existing.content_sha256 or "").lower() == descriptor.content_sha256,
+            existing.etag == descriptor.etag,
+            payload.get("object_version_id") == descriptor.version_id,
+            payload.get("completion_receipt_id") == completion_receipt_id,
+            payload.get("role") == descriptor.role,
+            existing.status == AUDIO_PENDING_COMPLETION_STATUS,
+            existing.trace_id == trace_id,
+        )
+    )
+
+
+def _storage_registration_payload(
+    storage_object: StorageObject,
+    *,
+    role: str,
+    root_trace_id: str,
+    expose_locator_context: bool,
+) -> dict[str, Any]:
+    """Build the audit/outbox projection without ever exposing an object key.
+
+    Objects first accepted before a launch binding are even stricter: the bucket
+    and provider remain solely in the scoped StorageObject ledger until the
+    receipt is either verified or rejected.
+    """
+
+    return {
+        "storage_object_id": storage_object.storage_object_id,
+        "role": role,
+        **(
+            {
+                "provider": storage_object.provider,
+                "bucket": storage_object.bucket,
+            }
+            if expose_locator_context
+            else {}
+        ),
+        "object_key_sha256": storage_object.object_key_sha256,
+        "content_type": storage_object.content_type,
+        "size_bytes": storage_object.size_bytes,
+        "content_sha256": storage_object.content_sha256,
+        "source_type": storage_object.source_type,
+        "source_id": storage_object.source_id,
+        "status": storage_object.status,
+        "root_trace_id": root_trace_id,
+    }
+
+
+def _emit_storage_object_registered(
+    session: Session,
+    ctx: RequestContext,
+    storage_object: StorageObject,
+    *,
+    role: str,
+    root_trace_id: str,
+    expose_locator_context: bool,
+) -> None:
+    storage_payload = _storage_registration_payload(
+        storage_object,
+        role=role,
+        root_trace_id=root_trace_id,
+        expose_locator_context=expose_locator_context,
+    )
+    lineage_ctx = replace(
+        ctx,
+        trace_id=root_trace_id,
+        correlation_id=ctx.correlation_id or root_trace_id,
+    )
+    record_audit(
+        session,
+        ctx,
+        action="storage_object.registered",
+        object_type="storage_object",
+        object_id=storage_object.storage_object_id,
+        result="success",
+        after=storage_payload,
+        trace_id=root_trace_id,
+    )
+    enqueue_event(
+        session,
+        lineage_ctx,
+        event_type="storage_object.registered",
+        aggregate_type="storage_object",
+        aggregate_id=storage_object.storage_object_id,
+        payload=storage_payload,
     )
 
 
@@ -520,6 +670,7 @@ def _register_descriptor(
     ctx: RequestContext,
     record: RunRecord,
     descriptor: _Descriptor,
+    staged_completion_receipt_id: str | None = None,
 ) -> StorageObject:
     object_key_sha256 = hashlib.sha256(descriptor.object_key.encode("utf-8")).hexdigest()
     root_trace_id = str(record.payload.get("root_trace_id") or record.trace_id or ctx.trace_id)
@@ -540,6 +691,29 @@ def _register_descriptor(
         .with_for_update()
     )
     if existing is not None:
+        if staged_completion_receipt_id and _matches_pending_audio_completion(
+            existing,
+            record=record,
+            descriptor=descriptor,
+            completion_receipt_id=staged_completion_receipt_id,
+            trace_id=root_trace_id,
+        ):
+            existing.status = "verified"
+            existing.payload = {
+                **(existing.payload or {}),
+                "registration_mode": "trusted_staged_run_completion",
+                "verified_completion_receipt_id": staged_completion_receipt_id,
+                "verified_completion_trace_id": ctx.trace_id,
+            }
+            _emit_storage_object_registered(
+                session,
+                ctx,
+                existing,
+                role=descriptor.role,
+                root_trace_id=root_trace_id,
+                expose_locator_context=False,
+            )
+            return existing
         if _matches_existing(
             existing,
             record=record,
@@ -582,6 +756,11 @@ def _register_descriptor(
             "run_type": record.run_type,
             "root_trace_id": root_trace_id,
             "completion_trace_id": ctx.trace_id,
+            **(
+                {"object_version_id": descriptor.version_id}
+                if descriptor.version_id is not None
+                else {}
+            ),
         },
     )
     try:
@@ -616,58 +795,21 @@ def _register_descriptor(
             409,
             details=[{"storage_object_id": descriptor.storage_object_id}],
         ) from exc
-    storage_payload = {
-        "storage_object_id": storage_object.storage_object_id,
-        "role": descriptor.role,
-        "provider": storage_object.provider,
-        "bucket": storage_object.bucket,
-        "object_key_sha256": storage_object.object_key_sha256,
-        "content_type": storage_object.content_type,
-        "size_bytes": storage_object.size_bytes,
-        "content_sha256": storage_object.content_sha256,
-        "source_type": storage_object.source_type,
-        "source_id": storage_object.source_id,
-        "status": storage_object.status,
-        "root_trace_id": root_trace_id,
-    }
-    lineage_ctx = replace(
-        ctx,
-        trace_id=root_trace_id,
-        correlation_id=ctx.correlation_id or root_trace_id,
-    )
-    record_audit(
+    _emit_storage_object_registered(
         session,
         ctx,
-        action="storage_object.registered",
-        object_type="storage_object",
-        object_id=storage_object.storage_object_id,
-        result="success",
-        after=storage_payload,
-        trace_id=root_trace_id,
-    )
-    enqueue_event(
-        session,
-        lineage_ctx,
-        event_type="storage_object.registered",
-        aggregate_type="storage_object",
-        aggregate_id=storage_object.storage_object_id,
-        payload=storage_payload,
+        storage_object,
+        role=descriptor.role,
+        root_trace_id=root_trace_id,
+        expose_locator_context=True,
     )
     return storage_object
 
 
-def register_hotword_completion_storage_objects(
-    session: Session,
-    ctx: RequestContext,
+def _validated_completion_descriptors(
     record: RunRecord,
     raw_result_ref: Any,
-) -> list[dict[str, Any]]:
-    """Register trusted completion artifacts in the completion transaction.
-
-    Legacy build/eval and already-governed asset workers may pre-register objects. Analysis
-    requires descriptors; every supplied reference is bound to the immutable RunRecord.
-    """
-
+) -> list[_Descriptor]:
     if not isinstance(raw_result_ref, dict):
         return []
     if "storage_objects" not in raw_result_ref:
@@ -707,9 +849,291 @@ def register_hotword_completion_storage_objects(
             422,
             details=[{"missing_storage_object_ids": missing_ids}],
         )
+    return descriptors
+
+
+def _validate_pending_audio_receipt_binding(
+    raw_result_ref: Any,
+    descriptor: _Descriptor,
+) -> None:
+    if not isinstance(raw_result_ref, dict):
+        raise ApiError(
+            "AUDIO_RESULT_MANIFEST_RECEIPT_INVALID",
+            "早到音频完成回执缺少 manifest 引用",
+            422,
+        )
+    manifest_sha256 = str(raw_result_ref.get("result_manifest_sha256") or "")
+    object_key_sha256 = str(raw_result_ref.get("result_manifest_object_key_sha256") or "")
+    version_id_sha256 = str(raw_result_ref.get("result_manifest_version_id_sha256") or "")
+    expected_storage_object_id = f"sto_audio_manifest_{manifest_sha256[:32]}"
+    expected_key_sha256 = hashlib.sha256(descriptor.object_key.encode("utf-8")).hexdigest()
+    expected_version_sha256 = hashlib.sha256(str(descriptor.version_id).encode("utf-8")).hexdigest()
+    if (
+        raw_result_ref.get("manifest_version") != "auris-flow-audio-result-receipt-v1"
+        or raw_result_ref.get("status") != "materialized"
+        or raw_result_ref.get("result_manifest_schema") != "auris-flow-audio-result-manifest-v1"
+        or descriptor.storage_object_id != expected_storage_object_id
+        or raw_result_ref.get("result_manifest_storage_object_id") != descriptor.storage_object_id
+        or descriptor.role != "manifest"
+        or descriptor.content_type != "application/json"
+        or descriptor.content_sha256 != manifest_sha256
+        or not hmac.compare_digest(object_key_sha256, expected_key_sha256)
+        or not hmac.compare_digest(version_id_sha256, expected_version_sha256)
+    ):
+        raise ApiError(
+            "AUDIO_RESULT_MANIFEST_PENDING_BINDING_MISMATCH",
+            "早到音频 manifest 描述符与签名回执哈希绑定不一致",
+            409,
+        )
+
+
+def stage_audio_completion_storage_object(
+    session: Session,
+    ctx: RequestContext,
+    record: RunRecord,
+    raw_result_ref: Any,
+    *,
+    completion_receipt_id: str,
+) -> StorageObject:
+    """Persist an untrusted locator behind the run scope until launch binding exists."""
+
+    if record.run_type != "audio_intelligence":
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_DESCRIPTORS_NOT_ALLOWED",
+            "只有音频智能运行允许暂存早到结果对象",
+            422,
+        )
+    descriptors = _validated_completion_descriptors(record, raw_result_ref)
+    if len(descriptors) != 1:
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_DESCRIPTORS_REQUIRED",
+            "早到音频完成回执必须携带唯一 manifest 对象描述符",
+            422,
+        )
+    descriptor = descriptors[0]
+    _validate_pending_audio_receipt_binding(raw_result_ref, descriptor)
+    if descriptor.etag is not None:
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_DESCRIPTOR_INVALID",
+            "早到音频 manifest 描述符不得携带未纳入结果协议的 etag",
+            422,
+        )
+    object_key_sha256 = hashlib.sha256(descriptor.object_key.encode("utf-8")).hexdigest()
+    root_trace_id = str(record.payload.get("root_trace_id") or record.trace_id or ctx.trace_id)
+    existing = session.scalar(
+        select(StorageObject)
+        .where(
+            or_(
+                StorageObject.storage_object_id == descriptor.storage_object_id,
+                (
+                    (StorageObject.tenant_id == record.tenant_id)
+                    & (StorageObject.project_id == record.project_id)
+                    & (StorageObject.provider == descriptor.provider)
+                    & (StorageObject.bucket == descriptor.bucket)
+                    & (StorageObject.object_key_sha256 == object_key_sha256)
+                ),
+            )
+        )
+        .with_for_update()
+    )
+    if existing is not None:
+        if _matches_pending_audio_completion(
+            existing,
+            record=record,
+            descriptor=descriptor,
+            completion_receipt_id=completion_receipt_id,
+            trace_id=root_trace_id,
+        ):
+            return existing
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_COLLISION",
+            "早到音频对象 ID 或 locator 已被其他运行、作用域或回执占用",
+            409,
+            details=[{"storage_object_id": descriptor.storage_object_id}],
+        )
+
+    pending = StorageObject(
+        storage_object_id=descriptor.storage_object_id,
+        tenant_id=record.tenant_id,
+        project_id=record.project_id,
+        provider=descriptor.provider,
+        bucket=descriptor.bucket,
+        object_key=descriptor.object_key,
+        object_key_sha256=object_key_sha256,
+        source_type=record.run_type,
+        source_id=record.run_id,
+        content_type=descriptor.content_type,
+        size_bytes=descriptor.size_bytes,
+        content_sha256=descriptor.content_sha256,
+        etag=descriptor.etag,
+        status=AUDIO_PENDING_COMPLETION_STATUS,
+        trace_id=root_trace_id,
+        payload={
+            "registration_mode": "signed_completion_pending_binding",
+            "role": descriptor.role,
+            "run_id": record.run_id,
+            "run_type": record.run_type,
+            "root_trace_id": root_trace_id,
+            "completion_receipt_id": completion_receipt_id,
+            "completion_trace_id": ctx.trace_id,
+            "object_version_id": descriptor.version_id,
+        },
+    )
+    try:
+        with session.begin_nested():
+            session.add(pending)
+            session.flush([pending])
+    except IntegrityError as exc:
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_COLLISION",
+            "早到音频对象并发暂存冲突",
+            409,
+            details=[{"storage_object_id": descriptor.storage_object_id}],
+        ) from exc
+    return pending
+
+
+def hydrate_staged_audio_result_ref(
+    session: Session,
+    record: RunRecord,
+    sanitized_result_ref: Any,
+    *,
+    completion_receipt_id: str,
+) -> dict[str, Any]:
+    """Reconstruct the sole internal locator after the trusted launch is committed."""
+
+    if record.run_type != "audio_intelligence" or not isinstance(sanitized_result_ref, dict):
+        raise ApiError(
+            "AUDIO_RESULT_MANIFEST_PENDING_OBJECT_INVALID",
+            "早到音频完成回执缺少受控 manifest 引用",
+            409,
+        )
+    storage_object_id = sanitized_result_ref.get("result_manifest_storage_object_id")
+    if not isinstance(storage_object_id, str) or not storage_object_id:
+        raise ApiError(
+            "AUDIO_RESULT_MANIFEST_PENDING_OBJECT_INVALID",
+            "早到音频完成回执缺少 manifest StorageObject ID",
+            409,
+        )
+    pending = session.scalar(
+        select(StorageObject)
+        .where(
+            StorageObject.storage_object_id == storage_object_id,
+            StorageObject.tenant_id == record.tenant_id,
+            StorageObject.project_id == record.project_id,
+            StorageObject.source_type == record.run_type,
+            StorageObject.source_id == record.run_id,
+        )
+        .with_for_update()
+    )
+    payload = pending.payload if pending is not None and isinstance(pending.payload, dict) else {}
+    version_id = payload.get("object_version_id")
+    if (
+        pending is None
+        or pending.status != AUDIO_PENDING_COMPLETION_STATUS
+        or payload.get("completion_receipt_id") != completion_receipt_id
+        or payload.get("role") != "manifest"
+        or not isinstance(version_id, str)
+        or not version_id
+        or pending.object_key_sha256
+        != sanitized_result_ref.get("result_manifest_object_key_sha256")
+        or hashlib.sha256(version_id.encode("utf-8")).hexdigest()
+        != sanitized_result_ref.get("result_manifest_version_id_sha256")
+        or str(pending.content_sha256 or "").lower()
+        != sanitized_result_ref.get("result_manifest_sha256")
+    ):
+        raise ApiError(
+            "AUDIO_RESULT_MANIFEST_PENDING_OBJECT_MISMATCH",
+            "暂存 manifest 与当前租户、项目、运行或签名回执绑定不一致",
+            409,
+            details=[{"storage_object_id": storage_object_id}],
+        )
+    hydrated = {
+        **sanitized_result_ref,
+        "storage_objects": [
+            {
+                "storage_object_id": pending.storage_object_id,
+                "role": "manifest",
+                "provider": pending.provider,
+                "bucket": pending.bucket,
+                "object_key": pending.object_key,
+                "version_id": version_id,
+                "content_type": pending.content_type,
+                "size_bytes": pending.size_bytes,
+                "content_sha256": pending.content_sha256,
+            }
+        ],
+    }
+    # Run the full descriptor policy again after reconstructing the private
+    # locator so a mutated ledger row cannot bypass prefix, bucket or hash gates.
+    _validated_completion_descriptors(record, hydrated)
+    return hydrated
+
+
+def reject_staged_audio_completion_storage_object(
+    session: Session,
+    record: RunRecord,
+    sanitized_result_ref: Any,
+    *,
+    completion_receipt_id: str,
+    rejection_code: str,
+) -> None:
+    if record.run_type != "audio_intelligence" or not isinstance(sanitized_result_ref, dict):
+        return
+    storage_object_id = sanitized_result_ref.get("result_manifest_storage_object_id")
+    if not isinstance(storage_object_id, str) or not storage_object_id:
+        return
+    pending = session.scalar(
+        select(StorageObject)
+        .where(
+            StorageObject.storage_object_id == storage_object_id,
+            StorageObject.tenant_id == record.tenant_id,
+            StorageObject.project_id == record.project_id,
+            StorageObject.source_type == record.run_type,
+            StorageObject.source_id == record.run_id,
+            StorageObject.status == AUDIO_PENDING_COMPLETION_STATUS,
+        )
+        .with_for_update()
+    )
+    if pending is None:
+        return
+    payload = pending.payload if isinstance(pending.payload, dict) else {}
+    if payload.get("completion_receipt_id") != completion_receipt_id:
+        return
+    pending.status = AUDIO_REJECTED_COMPLETION_STATUS
+    pending.payload = {
+        **payload,
+        "rejection_code": rejection_code,
+    }
+
+
+def register_hotword_completion_storage_objects(
+    session: Session,
+    ctx: RequestContext,
+    record: RunRecord,
+    raw_result_ref: Any,
+    *,
+    staged_completion_receipt_id: str | None = None,
+) -> list[dict[str, Any]]:
+    """Register trusted completion artifacts in the completion transaction.
+
+    Legacy build/eval and already-governed asset workers may pre-register objects. Analysis
+    requires descriptors; every supplied reference is bound to the immutable RunRecord.
+    """
+
+    descriptors = _validated_completion_descriptors(record, raw_result_ref)
+    if not descriptors:
+        return []
 
     registered = [
-        _register_descriptor(session, ctx, record, descriptor) for descriptor in descriptors
+        _register_descriptor(
+            session,
+            ctx,
+            record,
+            descriptor,
+            staged_completion_receipt_id=staged_completion_receipt_id,
+        )
+        for descriptor in descriptors
     ]
     return [
         {

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from http.client import BadStatusLine
 from urllib.parse import quote
 
 from sqlalchemy import select
@@ -42,7 +43,7 @@ def test_readyz_reports_real_dependency_probe_states(client):
     assert checks["database"] == "ok"
     assert body["data"]["required_checks"] == ["database"]
     assert body["data"]["missing_required"] == {}
-    for dependency in ("redis", "object_storage", "qdrant", "dagster"):
+    for dependency in ("redis", "object_storage", "qdrant", "dagster", "observability"):
         assert checks[dependency] in {"ok", "not_ready", "not_configured"}
         assert checks[dependency] != "configured"
 
@@ -96,6 +97,7 @@ def test_readyz_production_alias_is_strict_by_default(client, monkeypatch):
         "dagster",
         "database",
         "object_storage",
+        "observability",
         "qdrant",
         "redis",
     ]
@@ -113,11 +115,28 @@ def test_readyz_production_cannot_omit_dagster_from_explicit_dependencies(
     response = client.get("/readyz")
 
     assert response.status_code == 503
-    assert response.json()["data"]["required_checks"] == ["auth", "dagster", "database"]
+    assert response.json()["data"]["required_checks"] == [
+        "auth",
+        "dagster",
+        "database",
+        "observability",
+    ]
     assert response.json()["data"]["missing_required"]["dagster"] == "not_ready"
 
 
 def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch):
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int = -1) -> bytes:
+            return b"node_exporter_build_info 1\n"
+
     class UnavailableOIDCFlow:
         def discover(self, *, force_refresh: bool = False):
             assert force_refresh is True
@@ -127,6 +146,14 @@ def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch
     monkeypatch.setattr(settings, "auth_provider", "oidc")
     monkeypatch.setattr(settings, "dependency_check_mode", "strict")
     monkeypatch.setattr(settings, "required_dependency_checks", "database")
+    monkeypatch.setattr(app.state.observability, "enabled", True)
+    monkeypatch.setattr(app.state.observability, "error_code", None)
+    monkeypatch.setattr(
+        app.state.observability,
+        "readiness_pipeline_is_live",
+        lambda *, timeout_millis, trace_visible: True,
+    )
+    monkeypatch.setattr("app.main.urlopen", lambda *_args, **_kwargs: HealthyResponse())
     monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
     monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
     monkeypatch.setattr(
@@ -138,6 +165,161 @@ def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch
 
     assert response.status_code == 503
     assert response.json()["data"]["missing_required"] == {"auth": "not_ready"}
+
+
+def test_readyz_production_probes_live_observability_dependencies(client, monkeypatch):
+    observed_urls: list[str] = []
+    readiness_trace_id = "a" * 32
+
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int = -1) -> bytes:
+            return b"node_exporter_build_info 1\n"
+
+    def healthy_open(request, *, timeout: float):
+        observed_urls.append(request.full_url)
+        assert timeout == (0.75 if f"/traces/{readiness_trace_id}" in request.full_url else 0.25)
+        return HealthyResponse()
+
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database,observability")
+    monkeypatch.setattr(app.state.observability, "enabled", True)
+    monkeypatch.setattr(app.state.observability, "error_code", None)
+    monkeypatch.setattr(
+        app.state.observability,
+        "readiness_pipeline_is_live",
+        lambda *, timeout_millis, trace_visible: trace_visible(readiness_trace_id),
+    )
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+    monkeypatch.setattr("app.main.urlopen", healthy_open)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    assert response.json()["data"]["checks"]["observability"] == "ok"
+    assert settings.observability_health_url in observed_urls
+    assert any(f"/traces/{readiness_trace_id}" in url for url in observed_urls)
+
+
+def test_readyz_production_fails_when_live_observability_dependency_is_down(
+    client,
+    monkeypatch,
+):
+    dependency_state = {"pipeline_ready": False}
+
+    class Response:
+        def __init__(self, status: int) -> None:
+            self.status = status
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int = -1) -> bytes:
+            return b"node_exporter_build_info 1\n"
+
+    def partially_unavailable(request, *, timeout: float):
+        assert timeout == 0.25
+        pipeline_is_down = (
+            "observability-health:8080" in request.full_url
+            and not dependency_state["pipeline_ready"]
+        )
+        return Response(503 if pipeline_is_down else 200)
+
+    monkeypatch.setattr(settings, "app_env", "release")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database,observability")
+    monkeypatch.setattr(app.state.observability, "enabled", True)
+    monkeypatch.setattr(app.state.observability, "error_code", None)
+    monkeypatch.setattr(
+        app.state.observability,
+        "readiness_pipeline_is_live",
+        lambda *, timeout_millis, trace_visible: True,
+    )
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+    monkeypatch.setattr("app.main.urlopen", partially_unavailable)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["missing_required"] == {"observability": "not_ready"}
+
+    dependency_state["pipeline_ready"] = True
+    recovered_response = client.get("/readyz")
+
+    assert recovered_response.status_code == 200
+    assert recovered_response.json()["data"]["checks"]["observability"] == "ok"
+
+
+def test_readyz_production_fails_when_the_application_export_pipeline_fails(
+    client,
+    monkeypatch,
+):
+    class HealthyResponse:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int = -1) -> bytes:
+            return b"node_exporter_build_info 1\n"
+
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database,observability")
+    monkeypatch.setattr(app.state.observability, "enabled", True)
+    monkeypatch.setattr(app.state.observability, "error_code", None)
+    monkeypatch.setattr(
+        app.state.observability,
+        "readiness_pipeline_is_live",
+        lambda *, timeout_millis, trace_visible: False,
+    )
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+    monkeypatch.setattr("app.main.urlopen", lambda *_args, **_kwargs: HealthyResponse())
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["missing_required"] == {"observability": "not_ready"}
+
+
+def test_readyz_maps_a_malformed_dependency_http_response_to_stable_503(
+    client,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database,observability")
+    monkeypatch.setattr(app.state.observability, "enabled", True)
+    monkeypatch.setattr(app.state.observability, "error_code", None)
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+
+    def malformed_response(*_args, **_kwargs):
+        raise BadStatusLine("malformed readiness peer")
+
+    monkeypatch.setattr("app.main.urlopen", malformed_response)
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 503
+    assert response.json()["data"]["missing_required"] == {"observability": "not_ready"}
 
 
 def test_ops_summary_contract(client, auth_headers):
@@ -962,6 +1144,39 @@ def test_audio_playback_grant_is_bound_to_registered_storage_version(client, aut
     assert stale.json()["error"]["code"] == "AUDIO_PLAYBACK_GRANT_STALE"
 
 
+def test_audio_playback_grant_rejects_exact_object_version_swap(client, auth_headers):
+    with SessionLocal() as session:
+        storage_object = session.get(StorageObject, "sto_rec_A_1001_20250526_122300")
+        assert storage_object is not None
+        storage_object.payload = {
+            **storage_object.payload,
+            "object_version_id": "immutable-playback-version-v1",
+        }
+        session.commit()
+
+    grant = client.post(
+        "/api/v1/audio-sessions/S20250526-000128/playback-grants",
+        headers={**auth_headers, "Idempotency-Key": "grant-exact-version-binding"},
+    )
+    assert grant.status_code == 201
+
+    with SessionLocal() as session:
+        storage_object = session.get(StorageObject, "sto_rec_A_1001_20250526_122300")
+        assert storage_object is not None
+        storage_object.payload = {
+            **storage_object.payload,
+            "object_version_id": "immutable-playback-version-v2",
+        }
+        session.commit()
+
+    stale = client.get(
+        grant.json()["data"]["playback_url"],
+        headers={"Range": "bytes=0-15"},
+    )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "AUDIO_PLAYBACK_GRANT_STALE"
+
+
 def test_audio_recording_object_registration_is_scoped_idempotent_and_traceable(
     client, auth_headers
 ):
@@ -1285,7 +1500,11 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
     assert intelligence_data["run_type"] == "audio_intelligence"
     assert intelligence_data["status"] == "pending"
     assert intelligence_data["audio_session_id"] == "S20250526-000128"
-    assert intelligence_data["job_name"] == "audio_intelligence_pipeline"
+    assert "job_name" not in intelligence_data
+    with SessionLocal() as session:
+        persisted_intelligence_run = session.get(RunRecord, intelligence_data["run_id"])
+        assert persisted_intelligence_run is not None
+        assert persisted_intelligence_run.payload["job_name"] == "audio_intelligence_pipeline"
     assert {item["capability"] for item in intelligence_data["output_assets"]} == {
         "vad",
         "asr",

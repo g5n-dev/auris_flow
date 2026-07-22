@@ -17,6 +17,24 @@ from app.models import JsonResource, LabelTaxonomy, LabelVersion, LabelVersionIt
 from app.repositories.run_records import RunRecordRepository
 from app.services.audit_service import record_audit
 from app.services.outbox_service import enqueue_event
+from app.services.public_run_projection_service import public_run_projection
+
+LABEL_LIFECYCLE_BACKFILL_PUBLIC_FIELDS = frozenset(
+    {
+        "run_id",
+        "status",
+        "batch_number",
+        "batch_size",
+        "next_cursor",
+        "scanned_count",
+        "updated_count",
+        "migration_required_count",
+        "migration_required",
+        "ready_for_contract",
+        "trace_id",
+        "replayed",
+    }
+)
 
 _ARTIFACT_STATUSES = frozenset(
     {
@@ -592,7 +610,11 @@ def _materialize_taxonomies(
 def _terminal_replay(run: RunRecord) -> dict[str, Any] | None:
     if run.status not in {"success", "blocked", "failed"}:
         return None
-    return {**run.payload, "status": run.status, "replayed": True}
+    return public_run_projection(
+        {**run.payload, "status": run.status, "replayed": True},
+        allowed_fields=LABEL_LIFECYCLE_BACKFILL_PUBLIC_FIELDS,
+        field_name="label_lifecycle_backfill",
+    )
 
 
 def _deduplicate_migration_issues(

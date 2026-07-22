@@ -280,9 +280,11 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "projects": "work_items",
         "prompt_version": "work_items",
         "prompt_asset": "prompt_version_candidates",
+        "prompt_candidate": "prompt_version_candidates",
         "prompt_review_adjudication": "prompt_version_candidates",
         "prompt_review_submission": "prompt_version_candidates",
-        "prompt_version_candidate": "work_items",
+        "prompt_version_candidate": "prompt_version_candidates",
+        "prompt_version_candidates": "prompt_version_candidates",
         "prompt_regression": "eval_datasets",
         "provider_test": "settings",
         "quality_appeal": "work_items",
@@ -356,6 +358,7 @@ TRACE_REFERENCE_KEY_COLLECTIONS: Mapping[str, str] = MappingProxyType(
         "voiceprint_id": "voiceprint_enrollments",
         "voiceprint_sample_id": "voiceprint_samples",
         "voiceprint_embedding_ref": "voiceprint_samples",
+        "prompt_candidate_id": "prompt_version_candidates",
     }
 )
 

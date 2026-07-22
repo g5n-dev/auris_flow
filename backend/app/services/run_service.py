@@ -44,8 +44,8 @@ from app.services.agentic_execution_service import (
 )
 from app.services.audio_intelligence_service import (
     materialize_audio_intelligence_completion,
+    resolve_audio_intelligence_result,
     sanitize_audio_intelligence_result,
-    validate_audio_intelligence_result,
 )
 from app.services.audit_service import record_audit
 from app.services.data_asset_materialization_service import materialize_asset_completion
@@ -66,12 +66,31 @@ from app.services.prompt_candidate_service import (
     materialize_optimization_prompt_candidates,
     materialize_prompt_candidate,
 )
+from app.services.public_run_projection_service import (
+    PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS as _PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS,
+)
+from app.services.public_run_projection_service import (
+    PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS as _PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS,
+)
+from app.services.public_run_projection_service import (
+    project_public_run_value,
+    public_run_payload,
+    sanitize_public_run_string,
+)
 from app.services.resource_service import upsert_resource
 from app.services.run_completion_storage_service import (
+    hydrate_staged_audio_result_ref,
     register_hotword_completion_storage_objects,
+    reject_staged_audio_completion_storage_object,
+    stage_audio_completion_storage_object,
 )
 
 logger = get_logger("run")
+
+# Compatibility exports for release-policy and contract checks. The policy
+# itself lives in the dependency-light projection module above.
+PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS = _PUBLIC_RUN_FORBIDDEN_FIELD_FINGERPRINTS
+PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS = _PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS
 
 RUN_INITIAL_STATUSES = {"queued", "pending", "running", "blocked"}
 RUN_STATUS_TRANSITIONS: dict[str, set[str]] = {
@@ -149,6 +168,16 @@ RUN_CREATE_ROLE_POLICY: dict[str, tuple[str, ...]] = {
     "task_run": ("project_admin", "asset_manager", "model_engineer"),
     "task_version_publish": ("project_admin", "model_engineer"),
 }
+RUN_RETRY_ENTRY_ROLES = tuple(
+    sorted(
+        {
+            role
+            for allowed_roles in RUN_CREATE_ROLE_POLICY.values()
+            for role in allowed_roles
+            if role != "system"
+        }
+    )
+)
 
 RUN_EVENT_TYPES: dict[str, str] = {
     "audio_ingest": "audio_ingest.requested",
@@ -380,27 +409,62 @@ def transition_run(record: RunRecord, target_status: str, *, reason: str) -> Non
     record.payload = {**record.payload, "status": target_status, "status_history": history}
 
 
+def public_run_response(
+    response: dict[str, Any],
+    ctx: RequestContext,
+) -> dict[str, Any]:
+    """Re-project legacy stored responses before they cross the public boundary."""
+
+    projected = project_public_run_value(response, field_name="response")
+    if not isinstance(projected, dict):
+        return {}
+    data = projected.get("data")
+    if isinstance(data, dict) and isinstance(data.get("run_id"), str):
+        projected["data"] = {
+            **data,
+            "tenant_id": ctx.tenant_id,
+            "project_id": ctx.project_id,
+        }
+    return projected
+
+
 def run_payload(record: RunRecord) -> dict[str, Any]:
     def iso_or_none(value: datetime | None) -> str | None:
         return value.isoformat() if value is not None else None
 
+    public_payload = public_run_payload(record.payload)
     return {
         "run_id": record.run_id,
         "id": record.run_id,
         "run_type": record.run_type,
-        "run_key": record.run_key,
-        "partition_key": record.partition_key,
+        "run_key": (
+            sanitize_public_run_string(record.run_key, field_name="run_key")
+            if record.run_key is not None
+            else None
+        ),
+        "partition_key": (
+            sanitize_public_run_string(record.partition_key, field_name="partition_key")
+            if record.partition_key is not None
+            else None
+        ),
         "submitted_at": iso_or_none(record.submitted_at),
         "started_at": iso_or_none(record.started_at),
         "finished_at": iso_or_none(record.finished_at),
-        "engine_status": record.engine_status,
-        "engine_status_observed_at": iso_or_none(record.engine_status_observed_at),
         "cancel_requested_at": iso_or_none(record.cancel_requested_at),
-        "cancel_reason": record.cancel_reason,
-        "terminal_reason": record.terminal_reason,
-        "affected_objects": record.payload.get("affected_objects", []),
-        "next_actions": record.payload.get("next_actions", []),
-        **record.payload,
+        "cancel_reason": (
+            sanitize_public_run_string(record.cancel_reason, field_name="cancel_reason")
+            if record.cancel_reason is not None
+            else None
+        ),
+        "terminal_reason": (
+            sanitize_public_run_string(record.terminal_reason, field_name="terminal_reason")
+            if record.terminal_reason is not None
+            else None
+        ),
+        **public_payload,
+        "affected_objects": public_payload.get("affected_objects", []),
+        "next_actions": public_payload.get("next_actions", []),
+        "status_history": public_payload.get("status_history", []),
         # Adapter and business projections can add their own lineage fields,
         # but the public run trace is always the persisted RunRecord trace.
         "trace_id": record.trace_id,
@@ -409,8 +473,10 @@ def run_payload(record: RunRecord) -> dict[str, Any]:
         "status": record.status,
         "status_version": record.status_version,
         "deadline_at": iso_or_none(record.deadline_at),
-        "next_status_sync_at": iso_or_none(record.next_status_sync_at),
-        "monitor_generation": int(record.monitor_generation or 0),
+        # Scope always comes from strong columns and cannot be shadowed by a
+        # legacy payload copied from another tenant or project.
+        "tenant_id": record.tenant_id,
+        "project_id": record.project_id,
     }
 
 
@@ -476,7 +542,7 @@ def _validate_completion_source_binding(
     if not dispatch_adapter:
         raise ApiError(
             "RUN_DISPATCH_ADAPTER_MISSING",
-            "运行分发回执缺少 adapter",
+            "运行分发回执缺少可信执行来源",
             409,
             details=[{"run_id": record.run_id}],
         )
@@ -485,50 +551,32 @@ def _validate_completion_source_binding(
     if strict_external_receipt and not payload_adapter:
         raise ApiError(
             "RUN_COMPLETION_ADAPTER_REQUIRED",
-            "外部完成回执必须声明 adapter",
+            "外部完成回执必须声明执行来源",
             400,
-            details=[{"run_id": record.run_id, "expected_adapter": dispatch_adapter}],
+            details=[{"run_id": record.run_id}],
         )
     declared_adapter = payload_adapter or payload.get("source")
     payload_source = payload.get("source")
     if payload_source and payload_adapter and str(payload_source) != str(payload_adapter):
         raise ApiError(
             "RUN_COMPLETION_PAYLOAD_SOURCE_MISMATCH",
-            "完成回执的 source 与 adapter 不一致",
+            "完成回执声明的执行来源不一致",
             409,
-            details=[
-                {
-                    "run_id": record.run_id,
-                    "adapter": payload_adapter,
-                    "source": payload_source,
-                }
-            ],
+            details=[{"run_id": record.run_id}],
         )
     if authenticated_source and str(declared_adapter or "") != authenticated_source:
         raise ApiError(
             "RUN_COMPLETION_AUTH_SOURCE_MISMATCH",
-            "签名认证来源与完成回执 adapter 不一致",
+            "签名认证来源与完成回执声明不一致",
             403,
-            details=[
-                {
-                    "run_id": record.run_id,
-                    "authenticated_source": authenticated_source,
-                    "payload_adapter": declared_adapter,
-                }
-            ],
+            details=[{"run_id": record.run_id}],
         )
     if declared_adapter and str(declared_adapter) != dispatch_adapter:
         raise ApiError(
             "RUN_COMPLETION_ADAPTER_MISMATCH",
-            "完成回执来源与运行分发 adapter 不一致",
+            "完成回执来源与运行绑定不一致",
             409,
-            details=[
-                {
-                    "run_id": record.run_id,
-                    "expected_adapter": dispatch_adapter,
-                    "actual_adapter": declared_adapter,
-                }
-            ],
+            details=[{"run_id": record.run_id}],
         )
     return dispatch_adapter
 
@@ -570,17 +618,17 @@ def _validate_completion_receipt(
     if strict_external_receipt and not expected_external_id:
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_UNAVAILABLE",
-            "运行分发回执缺少可校验的外部 ID",
+            "运行缺少可校验的远端运行引用",
             409,
-            details=[{"run_id": record.run_id, "adapter": adapter}],
+            details=[{"run_id": record.run_id}],
         )
     actual_external_id = payload.get("external_id")
     if strict_external_receipt and not actual_external_id:
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_REQUIRED",
-            "外部完成回执必须携带 external_id",
+            "外部完成回执必须携带远端运行引用",
             400,
-            details=[{"run_id": record.run_id, "adapter": adapter}],
+            details=[{"run_id": record.run_id}],
         )
     if (
         actual_external_id
@@ -589,16 +637,9 @@ def _validate_completion_receipt(
     ):
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_MISMATCH",
-            "完成回执外部 ID 与分发回执不一致",
+            "完成回执远端运行引用与运行绑定不一致",
             409,
-            details=[
-                {
-                    "run_id": record.run_id,
-                    "adapter": adapter,
-                    "expected_external_id": expected_external_id,
-                    "actual_external_id": actual_external_id,
-                }
-            ],
+            details=[{"run_id": record.run_id}],
         )
     if not actual_external_id and expected_external_id and not strict_external_receipt:
         payload["external_id"] = expected_external_id
@@ -614,7 +655,10 @@ def _stageable_early_dagster_completion(
 ) -> bool:
     if not strict_external_receipt or authenticated_source != "dagster":
         return False
-    if record.run_type != "task_run" or record.status not in {"pending", "running"}:
+    if record.run_type not in {"task_run", "audio_intelligence"} or record.status not in {
+        "pending",
+        "running",
+    }:
         return False
     if isinstance(record.payload.get("dispatch"), dict):
         return False
@@ -623,13 +667,13 @@ def _stageable_early_dagster_completion(
     if declared_adapter != "dagster" or declared_source != "dagster":
         raise ApiError(
             "RUN_COMPLETION_AUTH_SOURCE_MISMATCH",
-            "早到完成回执必须由已验签 Dagster 来源提交",
+            "早到完成回执必须由已验签执行来源提交",
             403,
         )
     if not payload.get("external_id"):
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_REQUIRED",
-            "早到 Dagster 完成回执必须携带 external_id",
+            "早到完成回执必须携带远端运行引用",
             400,
         )
     return True
@@ -675,30 +719,23 @@ def _stageable_cancelling_dagster_completion(
     if not expected_external_id:
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_UNAVAILABLE",
-            "运行分发回执缺少可校验的 Dagster 外部 ID",
+            "运行缺少可校验的远端运行引用",
             409,
-            details=[{"run_id": record.run_id, "adapter": adapter}],
+            details=[{"run_id": record.run_id}],
         )
     if not actual_external_id:
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_REQUIRED",
-            "外部完成回执必须携带 external_id",
+            "外部完成回执必须携带远端运行引用",
             400,
-            details=[{"run_id": record.run_id, "adapter": adapter}],
+            details=[{"run_id": record.run_id}],
         )
     if not hmac.compare_digest(actual_external_id, expected_external_id):
         raise ApiError(
             "RUN_COMPLETION_EXTERNAL_ID_MISMATCH",
-            "取消竞争中的完成回执与可信 Dagster binding 不一致",
+            "取消竞争中的完成回执与可信运行绑定不一致",
             409,
-            details=[
-                {
-                    "run_id": record.run_id,
-                    "adapter": adapter,
-                    "expected_external_id": expected_external_id,
-                    "actual_external_id": actual_external_id,
-                }
-            ],
+            details=[{"run_id": record.run_id}],
         )
     return True
 
@@ -985,6 +1022,13 @@ def _replay_claimed_completion_receipt(
                 }
             ],
         )
+    if receipt.processing_state == "rejected":
+        raise ApiError(
+            "RUN_COMPLETION_RECEIPT_REJECTED",
+            "完成回执已被可信运行绑定拒绝，不能重放或重新绑定",
+            409,
+            details=[{"run_id": run_id, "completion_receipt_id": completion_receipt_id}],
+        )
     if receipt.processing_state != "completed" or receipt.response_json is None:
         raise ApiError(
             "RUN_COMPLETION_RECEIPT_IN_PROGRESS",
@@ -993,7 +1037,7 @@ def _replay_claimed_completion_receipt(
             details=[{"run_id": run_id, "completion_receipt_id": completion_receipt_id}],
             retryable=True,
         )
-    response = _json_copy(receipt.response_json)
+    response = public_run_response(_json_copy(receipt.response_json), ctx)
     save_idempotency_result(
         session,
         ctx,
@@ -1102,6 +1146,13 @@ def apply_staged_dagster_completion(
     actual_external_id = str(payload.get("external_id") or receipt.external_id or "")
 
     def reject(code: str, message: str) -> bool:
+        reject_staged_audio_completion_storage_object(
+            session,
+            record,
+            payload.get("result_ref"),
+            completion_receipt_id=receipt.completion_receipt_id,
+            rejection_code=code,
+        )
         receipt.processing_state = "rejected"
         receipt.completion_status = "rejected"
         receipt.status_code = 409
@@ -1117,8 +1168,8 @@ def apply_staged_dagster_completion(
         record_audit(
             session,
             ctx,
-            action="task_run.completion_rejected",
-            object_type="task_run",
+            action=f"{record.run_type}.completion_rejected",
+            object_type=record.run_type,
             object_id=record.run_id,
             result="failed",
             after={
@@ -1144,17 +1195,30 @@ def apply_staged_dagster_completion(
             f"运行状态 {record.status} 不能应用早到完成回执",
         )
 
+    audio_domain_result: dict[str, Any] | None = None
     try:
+        status = str(payload.get("status") or "success")
+        target_status = "failed" if status == "failed" else "success"
+        if target_status == "success" and record.run_type == "audio_intelligence":
+            payload["result_ref"] = hydrate_staged_audio_result_ref(
+                session,
+                record,
+                payload.get("result_ref"),
+                completion_receipt_id=receipt.completion_receipt_id,
+            )
         adapter, external_id = _validate_completion_receipt(
             record,
             payload,
             strict_external_receipt=True,
             authenticated_source="dagster",
         )
-        status = str(payload.get("status") or "success")
-        target_status = "failed" if status == "failed" else "success"
         if target_status == "success":
             _validate_experiment_bundle_execution(record, payload)
+        if target_status == "success" and record.run_type == "audio_intelligence":
+            audio_domain_result = resolve_audio_intelligence_result(
+                record,
+                payload.get("result_ref"),
+            )
     except ApiError as exc:
         return reject(exc.code, exc.message)
 
@@ -1171,9 +1235,16 @@ def apply_staged_dagster_completion(
             ctx,
             record,
             payload.get("result_ref"),
+            staged_completion_receipt_id=receipt.completion_receipt_id,
         )
         if target_status == "success"
         else []
+    )
+    raw_result_ref = payload.get("result_ref") or {}
+    persisted_result_ref = (
+        sanitize_audio_intelligence_result(raw_result_ref)
+        if record.run_type == "audio_intelligence" and isinstance(raw_result_ref, dict)
+        else raw_result_ref
     )
     completion_receipt: dict[str, Any] = {
         "completion_receipt_id": receipt.completion_receipt_id,
@@ -1182,7 +1253,7 @@ def apply_staged_dagster_completion(
         "external_id": external_id,
         "source": "dagster",
         "status": target_status,
-        "result_ref": payload.get("result_ref") or {},
+        "result_ref": persisted_result_ref,
         "metrics": payload.get("metrics") or {},
         "note": payload.get("note"),
         "error_code": payload.get("error_code"),
@@ -1204,7 +1275,7 @@ def apply_staged_dagster_completion(
         "registered_storage_objects": registered_storage_objects,
     }
     experiment_completion: dict[str, Any] | None = None
-    if target_status == "success":
+    if target_status == "success" and record.run_type == "task_run":
         from app.services.experiment_service import materialize_task_experiment_completion
 
         experiment_completion = materialize_task_experiment_completion(
@@ -1225,7 +1296,7 @@ def apply_staged_dagster_completion(
             else "staged_completion_receipt"
         ),
         "completion_receipt": completion_receipt,
-        "result_ref": payload.get("result_ref") or {},
+        "result_ref": persisted_result_ref,
         "metrics": payload.get("metrics") or {},
         "registered_storage_objects": registered_storage_objects,
         "experiment_completion": experiment_completion,
@@ -1247,15 +1318,29 @@ def apply_staged_dagster_completion(
             "error_code": record.terminal_reason,
             "retryable": bool(payload.get("retryable", True)),
         }
+    if target_status == "success" and record.run_type == "audio_intelligence":
+        assert audio_domain_result is not None
+        materialized_outputs = materialize_audio_intelligence_completion(
+            session,
+            ctx,
+            record,
+            completion_receipt,
+            validated_result_ref=audio_domain_result,
+        )
+        record.payload = {
+            **record.payload,
+            "completion_receipt": completion_receipt,
+            "materialized_outputs": materialized_outputs,
+        }
     record_agent_completion(session, record, completion_receipt)
     record_audit(
         session,
         ctx,
-        action="task_run.completion_received",
-        object_type="task_run",
+        action=f"{record.run_type}.completion_received",
+        object_type=record.run_type,
         object_id=record.run_id,
         result=target_status,
-        after=record.payload,
+        after=public_run_payload(record.payload),
         trace_id=record.trace_id,
     )
     response = envelope(run_payload(record), ctx)
@@ -1266,14 +1351,15 @@ def apply_staged_dagster_completion(
         completion_status=target_status,
         response=response,
     )
-    from app.services.task_run_control_service import emit_task_run_terminal_event
+    if record.run_type == "task_run":
+        from app.services.task_run_control_service import emit_task_run_terminal_event
 
-    emit_task_run_terminal_event(
-        session,
-        ctx,
-        record,
-        reason=completion_reason,
-    )
+        emit_task_run_terminal_event(
+            session,
+            ctx,
+            record,
+            reason=completion_reason,
+        )
     return True
 
 
@@ -1460,8 +1546,9 @@ async def complete_run_from_receipt(
     _claim_completion_nonce(session, ctx, completion_auth)
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
-        raise_replayed_api_error(replay)
-        return replay
+        public_replay = public_run_response(replay, ctx)
+        raise_replayed_api_error(public_replay)
+        return public_replay
 
     if record.run_type == "task_run" and record.status in {"success", "failed", "cancelled"}:
         error = ApiError(
@@ -1553,6 +1640,18 @@ async def complete_run_from_receipt(
         )
 
     if stage_early_receipt or stage_cancellation_receipt:
+        if (
+            stage_early_receipt
+            and record.run_type == "audio_intelligence"
+            and str(payload.get("status") or "success") == "success"
+        ):
+            stage_audio_completion_storage_object(
+                session,
+                ctx,
+                record,
+                payload.get("result_ref"),
+                completion_receipt_id=receipt_id,
+            )
         public_receipt_state = (
             "pending_cancellation_resolution" if stage_cancellation_receipt else "pending_binding"
         )
@@ -1659,8 +1758,9 @@ async def complete_run_from_receipt(
     target_status = "failed" if status == "failed" else "success"
     if target_status == "success":
         _validate_experiment_bundle_execution(record, payload)
+    audio_domain_result: dict[str, Any] | None = None
     if target_status == "success" and record.run_type == "audio_intelligence":
-        validate_audio_intelligence_result(record, payload.get("result_ref"))
+        audio_domain_result = resolve_audio_intelligence_result(record, payload.get("result_ref"))
     label_eval_result: dict[str, Any] | None = None
     if target_status == "success" and record.run_type == "eval_run":
         from app.services.label_eval_result_service import materialize_label_eval_completion
@@ -1705,6 +1805,12 @@ async def complete_run_from_receipt(
         )
         if release_command_result.get("status") == "blocked":
             target_status = "blocked"
+    raw_completion_result_ref = payload.get("result_ref") or {}
+    persisted_completion_result_ref = raw_completion_result_ref
+    if record.run_type == "audio_intelligence" and isinstance(raw_completion_result_ref, dict):
+        persisted_completion_result_ref = sanitize_audio_intelligence_result(
+            raw_completion_result_ref
+        )
     transition_run(record, target_status, reason=f"{adapter}_completion_received")
     completion_receipt: dict[str, Any] = {
         "completion_receipt_id": receipt_id,
@@ -1713,7 +1819,7 @@ async def complete_run_from_receipt(
         "external_id": external_id,
         "source": authenticated_source or payload.get("source") or adapter,
         "status": target_status,
-        "result_ref": payload.get("result_ref") or {},
+        "result_ref": persisted_completion_result_ref,
         "metrics": payload.get("metrics") or {},
         "note": payload.get("note"),
         "error_code": payload.get("error_code"),
@@ -1755,7 +1861,7 @@ async def complete_run_from_receipt(
         "business_completion_required": False,
         "completion_mode": "completion_receipt",
         "completion_receipt": completion_receipt,
-        "result_ref": payload.get("result_ref") or record.payload.get("result_ref") or {},
+        "result_ref": persisted_completion_result_ref or record.payload.get("result_ref") or {},
         "metrics": payload.get("metrics") or record.payload.get("metrics") or {},
         "registered_storage_objects": registered_storage_objects,
         "label_eval_result": label_eval_result,
@@ -1802,19 +1908,16 @@ async def complete_run_from_receipt(
             "retryable": bool(payload.get("retryable", True)),
         }
     if target_status == "success" and record.run_type == "audio_intelligence":
+        assert audio_domain_result is not None
         materialized_outputs = materialize_audio_intelligence_completion(
-            session, ctx, record, completion_receipt
+            session,
+            ctx,
+            record,
+            completion_receipt,
+            validated_result_ref=audio_domain_result,
         )
-        sanitized_result_ref = sanitize_audio_intelligence_result(
-            dict(completion_receipt["result_ref"])
-        )
-        completion_receipt = {
-            **completion_receipt,
-            "result_ref": sanitized_result_ref,
-        }
         record.payload = {
             **record.payload,
-            "result_ref": sanitized_result_ref,
             "completion_receipt": completion_receipt,
             "materialized_outputs": materialized_outputs,
         }
@@ -2158,7 +2261,7 @@ async def create_run(
     operation = idempotency_operation or f"create:{run_type}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
-        return replay
+        return public_run_response(replay, ctx)
     if prepare_payload is not None:
         payload = prepare_payload(payload)
 
@@ -2300,11 +2403,23 @@ async def retry_run(
     run_id: str,
     payload: dict[str, Any],
 ) -> dict[str, Any]:
+    # Reject actors that cannot retry any run type before reading scoped run
+    # existence or state. The concrete run type still passes its narrower
+    # create policy after lookup.
+    require_any_role(ctx, RUN_RETRY_ENTRY_ROLES, action="runs.retry")
+    actor_roles = set(ctx.roles)
+    allowed_run_types = tuple(
+        run_type
+        for run_type in RUN_EVENT_TYPES
+        if "system" in actor_roles
+        or actor_roles.intersection(RUN_CREATE_ROLE_POLICY.get(run_type, ("project_admin",)))
+    )
     record = session.scalar(
         select(RunRecord).where(
             RunRecord.run_id == run_id,
             RunRecord.tenant_id == ctx.tenant_id,
             RunRecord.project_id == ctx.project_id,
+            RunRecord.run_type.in_(allowed_run_types),
         )
     )
     if not record:
@@ -2348,7 +2463,7 @@ async def retry_run(
     body_hash = await request_hash(request)
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
-        return replay
+        return public_run_response(replay, ctx)
     retry_payload = retry_payload_from_record(record, ctx, payload)
     retry_reason = str(retry_payload.get("retry_reason") or "manual retry")
     prepare_record = _insight_report_retry_hook(

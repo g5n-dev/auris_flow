@@ -20,6 +20,7 @@ from app.schemas.label_closed_loop import (
     LabelExtractionRunCreateRequest,
     LabelObservationCreateRequest,
 )
+from app.schemas.public_runs import LabelExtractionRunPublic, PublicRunEnvelope
 from app.services.closed_loop_review_service import (
     adjudicate_closed_loop_review,
     submit_closed_loop_review,
@@ -89,7 +90,12 @@ def _commit_idempotent(
     return response
 
 
-@router.post("/label-extraction-runs", status_code=202)
+@router.post(
+    "/label-extraction-runs",
+    status_code=202,
+    response_model=PublicRunEnvelope[LabelExtractionRunPublic],
+    response_model_exclude_unset=True,
+)
 async def post_label_extraction_runs(
     request: Request, session: SessionDep, ctx: ContextDep
 ) -> dict[str, Any]:
@@ -112,7 +118,7 @@ async def post_label_extraction_runs(
             ],
         }
     )
-    return await create_run(
+    response = await create_run(
         session,
         ctx,
         request,
@@ -124,9 +130,17 @@ async def post_label_extraction_runs(
             session, ctx, body, record
         ),
     )
+    return {
+        **response,
+        "data": get_label_extraction_run(session, ctx, body.extraction_run_id),
+    }
 
 
-@router.get("/label-extraction-runs/{extraction_run_id}")
+@router.get(
+    "/label-extraction-runs/{extraction_run_id}",
+    response_model=PublicRunEnvelope[LabelExtractionRunPublic],
+    response_model_exclude_unset=True,
+)
 def get_label_extraction_run_by_id(
     extraction_run_id: str, session: SessionDep, ctx: ContextDep
 ) -> dict[str, Any]:

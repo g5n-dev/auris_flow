@@ -4,7 +4,7 @@ import hashlib
 import logging
 import struct
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from io import BytesIO
 from typing import Any
@@ -20,6 +20,7 @@ from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.audio_playback import create_audio_playback_grant
 from app.core.config import get_settings
 from app.core.errors import ApiError
+from app.core.http_headers import content_disposition_header
 from app.core.http_transport import open_url_no_redirect as urlopen
 from app.core.logging import get_logger, log_event
 from app.core.rbac import require_any_role
@@ -182,6 +183,28 @@ def _real_object_storage_enabled() -> bool:
         503,
         retryable=False,
     )
+
+
+def _require_server_audio_inference_policy(
+    *,
+    provider: str | None,
+    model: str | None,
+) -> None:
+    if settings.auris_dagster_adapter.strip().lower() != "real":
+        return
+    configured_provider = settings.auris_audio_inference_provider.strip()
+    allowed_models = {
+        value.strip()
+        for value in settings.auris_audio_inference_allowed_models.split(",")
+        if value.strip()
+    }
+    if provider != configured_provider or model not in allowed_models:
+        raise ApiError(
+            "AUDIO_INFERENCE_POLICY_VIOLATION",
+            "音频推理 Provider 或模型不在服务端批准策略内",
+            422,
+            retryable=False,
+        )
 
 
 def _numeric(value: object, default: float = 0.0) -> float:
@@ -355,7 +378,13 @@ def _runtime_audio_items(
     )
 
 
-def _recording_for_session(session: SessionDep, ctx: ContextDep, audio_session_id: str) -> dict:
+def _recording_for_session(
+    session: SessionDep,
+    ctx: ContextDep,
+    audio_session_id: str,
+    *,
+    include_internal_storage_version: bool = False,
+) -> dict:
     session_resource = get_resource(session, ctx, "audio_sessions", audio_session_id)
     recording_id = session_resource.data.get("recording_id")
     strong_recording = session.scalar(
@@ -380,7 +409,10 @@ def _recording_for_session(session: SessionDep, ctx: ContextDep, audio_session_i
     storage_object = _storage_object_for_recording(session, ctx, str(recording_id or ""))
     if storage_object:
         recording = {**recording, "storage_object_id": storage_object.storage_object_id}
-        recording["storage_object"] = _storage_object_data(storage_object)
+        recording["storage_object"] = _storage_object_data(
+            storage_object,
+            include_internal_version=include_internal_storage_version,
+        )
     return recording
 
 
@@ -402,8 +434,12 @@ def _storage_object_for_recording(
     )
 
 
-def _storage_object_data(storage_object: StorageObject) -> dict[str, Any]:
-    return {
+def _storage_object_data(
+    storage_object: StorageObject,
+    *,
+    include_internal_version: bool = False,
+) -> dict[str, Any]:
+    data = {
         "storage_object_id": storage_object.storage_object_id,
         "provider": storage_object.provider,
         "bucket": storage_object.bucket,
@@ -417,6 +453,11 @@ def _storage_object_data(storage_object: StorageObject) -> dict[str, Any]:
         "source_id": storage_object.source_id,
         "trace_id": storage_object.trace_id,
     }
+    if include_internal_version and isinstance(storage_object.payload, dict):
+        object_version_id = storage_object.payload.get("object_version_id")
+        if isinstance(object_version_id, str):
+            data["object_version_id"] = object_version_id
+    return data
 
 
 def _require_immutable_storage_object_registration(
@@ -433,6 +474,7 @@ def _require_immutable_storage_object_registration(
     size_bytes: int,
     content_sha256: str,
     etag: str | None,
+    object_version_id: str | None,
 ) -> None:
     if existing is None:
         return
@@ -460,6 +502,11 @@ def _require_immutable_storage_object_registration(
         if (stored_value := getattr(existing, field)) is not None
         and stored_value != requested_value
     ]
+    stored_version_id = (
+        existing.payload.get("object_version_id") if isinstance(existing.payload, dict) else None
+    )
+    if stored_version_id is not None and stored_version_id != object_version_id:
+        changed_fields.append("object_version_id")
     if changed_fields:
         raise ApiError(
             "STORAGE_OBJECT_IDENTITY_CONFLICT",
@@ -535,6 +582,67 @@ def _strong_etag_opaque(value: object) -> str | None:
     return raw
 
 
+def _exact_object_version_id(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or value.casefold() == "null"
+        or len(value) > 1024
+        or any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    ):
+        raise ApiError(
+            "AUDIO_OBJECT_VERSION_ID_UNAVAILABLE",
+            "录音对象缺少已登记的精确版本 ID，无法安全播放",
+            409,
+            retryable=False,
+        )
+    return value
+
+
+def _normalized_audio_content_type(value: object, *, upstream: bool = False) -> str:
+    if not isinstance(value, str) or len(value) > 128:
+        normalized = ""
+    else:
+        normalized = value.partition(";")[0].strip().casefold()
+    if normalized not in {"audio/wav", "audio/x-wav"}:
+        raise ApiError(
+            (
+                "AUDIO_OBJECT_CONTENT_TYPE_MISMATCH"
+                if upstream
+                else "AUDIO_OBJECT_CONTENT_TYPE_UNSUPPORTED"
+            ),
+            (
+                "对象存储返回的音频类型与登记元数据不一致"
+                if upstream
+                else "录音对象的媒体类型不在允许列表中"
+            ),
+            502 if upstream else 409,
+            retryable=False,
+        )
+    return "audio/wav"
+
+
+def _require_exact_response_version(result: dict[str, Any], registered_version_id: str) -> None:
+    response_version_id = result.get("version_id")
+    if not isinstance(response_version_id, str) or not response_version_id:
+        _close_object_stream(result)
+        raise ApiError(
+            "AUDIO_OBJECT_VERSION_ID_MISSING",
+            "对象存储响应缺少精确版本 ID，无法确认录音版本",
+            502,
+            retryable=True,
+        )
+    if response_version_id != registered_version_id:
+        _close_object_stream(result)
+        raise ApiError(
+            "AUDIO_OBJECT_VERSION_CHANGED",
+            "录音对象版本已变化，请重新登记并获取播放授权",
+            412,
+            retryable=False,
+        )
+
+
 def _etag_header(value: str) -> str:
     return f'"{value}"'
 
@@ -546,6 +654,7 @@ def _open_object_with_if_match(
     *,
     byte_range: str | None,
     registered_etag: str,
+    registered_version_id: str,
 ) -> dict[str, Any]:
     if_match = _etag_header(registered_etag)
     signed_request = getattr(client, "_signed_request", None)
@@ -557,6 +666,7 @@ def _open_object_with_if_match(
             "GET",
             f"/{bucket}/{object_key}",
             extra_headers=extra_headers,
+            query={"versionId": registered_version_id},
         )
         response = urlopen(request, timeout=5)
         response_etag = response.headers.get("ETag")
@@ -567,6 +677,12 @@ def _open_object_with_if_match(
             and response_etag.endswith('"')
         ):
             response_etag = response_etag[1:-1]
+        version_header = {
+            "minio": "x-amz-version-id",
+            "s3": "x-amz-version-id",
+            "oss": "x-oss-version-id",
+            "obs": "x-obs-version-id",
+        }.get(str(getattr(client, "provider", "")))
         return {
             "status": response.status,
             "headers": dict(response.headers.items()),
@@ -578,6 +694,7 @@ def _open_object_with_if_match(
             "content_length": response.headers.get("Content-Length"),
             "content_range": response.headers.get("Content-Range"),
             "content_type": response.headers.get("Content-Type"),
+            "version_id": response.headers.get(version_header) if version_header else None,
             "stream": response,
         }
 
@@ -588,12 +705,14 @@ def _open_object_with_if_match(
             object_key,
             byte_range=byte_range,
             if_match=if_match,
+            version_id=registered_version_id,
         )
     return client.get_object(
         bucket,
         object_key,
         byte_range=byte_range,
         if_match=if_match,
+        version_id=registered_version_id,
     )
 
 
@@ -603,6 +722,7 @@ def _head_object_with_if_match(
     object_key: str,
     *,
     registered_etag: str,
+    registered_version_id: str,
 ) -> dict[str, Any]:
     head_object = getattr(client, "head_object", None)
     if not callable(head_object):
@@ -616,6 +736,7 @@ def _head_object_with_if_match(
         bucket,
         object_key,
         if_match=_etag_header(registered_etag),
+        version_id=registered_version_id,
     )
 
 
@@ -626,6 +747,7 @@ def _read_versioned_wav_probe(
     *,
     content_length: int,
     registered_etag: str,
+    registered_version_id: str,
 ) -> bytes:
     probe_length = min(content_length, MAX_WAV_PROBE_BYTES)
     try:
@@ -635,6 +757,7 @@ def _read_versioned_wav_probe(
             object_key,
             byte_range=f"bytes=0-{probe_length - 1}",
             registered_etag=registered_etag,
+            registered_version_id=registered_version_id,
         )
     except HTTPError as exc:
         if exc.code in {412, 416}:
@@ -661,6 +784,7 @@ def _read_versioned_wav_probe(
                 502,
                 retryable=True,
             )
+        _require_exact_response_version(result, registered_version_id)
         response_etag = _strong_etag_opaque(result.get("etag"))
         if response_etag is None or response_etag != registered_etag:
             raise ApiError(
@@ -694,6 +818,7 @@ def _read_versioned_object_sha256(
     content_length: int,
     content_type: str,
     registered_etag: str,
+    registered_version_id: str,
 ) -> str:
     require_streamed_checksum_size(content_length)
     try:
@@ -703,6 +828,7 @@ def _read_versioned_object_sha256(
             object_key,
             byte_range=None,
             registered_etag=registered_etag,
+            registered_version_id=registered_version_id,
         )
     except HTTPError as exc:
         if exc.code == 412:
@@ -742,6 +868,7 @@ def _read_versioned_object_sha256(
                 502,
                 retryable=True,
             )
+        _require_exact_response_version(result, registered_version_id)
         response_etag = _strong_etag_opaque(result.get("etag"))
         if response_etag is None or response_etag != registered_etag:
             raise ApiError(
@@ -847,11 +974,17 @@ def _audio_response_plan(
     extra_headers: dict[str, str] | None = None,
 ) -> tuple[int, int, int, dict[str, str]]:
     parsed = _parse_byte_range(range_header, total)
+    normalized_content_type = _normalized_audio_content_type(content_type)
     common_headers = {
         "Accept-Ranges": "bytes",
-        "Content-Type": content_type,
-        "Content-Disposition": f'inline; filename="{file_name}"',
+        "Content-Type": normalized_content_type,
+        "Content-Disposition": content_disposition_header(
+            "inline",
+            file_name,
+            fallback="recording.wav",
+        ),
         "X-Audio-Source": source,
+        "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-cache",
         "Vary": "Range, Authorization, X-Tenant-Id, X-Project-Id",
         **(extra_headers or {}),
@@ -938,22 +1071,21 @@ def _object_storage_audio_response(
         or recording.get("storage_bucket")
         or settings.object_storage_bucket
     )
-    content_type = str(storage.get("content_type") or recording.get("content_type") or "audio/wav")
+    content_type = _normalized_audio_content_type(
+        storage.get("content_type") or recording.get("content_type") or "audio/wav"
+    )
     file_name = str(recording.get("file_name") or f"{recording.get('recording_id')}.wav")
+    content_disposition = content_disposition_header(
+        "inline",
+        file_name,
+        fallback="recording.wav",
+    )
     total = 0
     result: dict[str, Any] | None = None
     try:
         provider = str(
             storage.get("provider") or recording.get("provider") or settings.object_storage_provider
         ).lower()
-        client = object_storage_client_for_provider(provider)
-        if not client.allows_bucket(bucket):
-            raise ApiError(
-                "AUDIO_STORAGE_BUCKET_NOT_ALLOWED",
-                "录音对象所在 bucket 不在当前 Provider 允许列表中",
-                403,
-                retryable=False,
-            )
         registered_etag = _strong_etag_opaque(storage.get("etag"))
         if registered_etag is None:
             raise ApiError(
@@ -962,22 +1094,39 @@ def _object_storage_audio_response(
                 409,
                 retryable=False,
             )
+        registered_version_id = _exact_object_version_id(storage.get("object_version_id"))
+        client = object_storage_client_for_provider(provider)
+        if not client.allows_bucket(bucket):
+            raise ApiError(
+                "AUDIO_STORAGE_BUCKET_NOT_ALLOWED",
+                "录音对象所在 bucket 不在当前 Provider 允许列表中",
+                403,
+                retryable=False,
+            )
         registered_total = storage.get("content_length")
         if isinstance(registered_total, int) and registered_total > 0:
             total = registered_total
         else:
-            head = (
-                _head_object_with_if_match(
-                    client,
-                    bucket,
-                    object_key,
-                    registered_etag=registered_etag,
-                )
-                if head_only
-                else client.head_object(bucket, object_key)
+            head = _head_object_with_if_match(
+                client,
+                bucket,
+                object_key,
+                registered_etag=registered_etag,
+                registered_version_id=registered_version_id,
             )
-            if head_only:
-                result = head
+            _require_exact_response_version(head, registered_version_id)
+            remote_head_type = _normalized_audio_content_type(
+                head.get("content_type"),
+                upstream=True,
+            )
+            if remote_head_type != content_type:
+                raise ApiError(
+                    "AUDIO_OBJECT_CONTENT_TYPE_MISMATCH",
+                    "对象存储返回的音频类型与登记元数据不一致",
+                    502,
+                    retryable=False,
+                )
+            result = head if head_only else None
             total = int(head.get("content_length") or 0)
         parsed = _parse_byte_range(range_header, total)
         if parsed is None:
@@ -987,6 +1136,8 @@ def _object_storage_audio_response(
                     "Accept-Ranges": "bytes",
                     "Content-Range": f"bytes */{total}",
                     "Content-Type": content_type,
+                    "Content-Disposition": content_disposition,
+                    "X-Content-Type-Options": "nosniff",
                     **_storage_response_headers(recording),
                 },
             )
@@ -997,6 +1148,7 @@ def _object_storage_audio_response(
                 bucket,
                 object_key,
                 registered_etag=registered_etag,
+                registered_version_id=registered_version_id,
             )
         else:
             result = _open_object_with_if_match(
@@ -1005,6 +1157,7 @@ def _object_storage_audio_response(
                 object_key,
                 byte_range=range_header if partial else None,
                 registered_etag=registered_etag,
+                registered_version_id=registered_version_id,
             )
         upstream_status = int(result.get("status") or 0)
         if upstream_status == 412:
@@ -1042,6 +1195,8 @@ def _object_storage_audio_response(
                     "Accept-Ranges": "bytes",
                     "Content-Range": content_range,
                     "Content-Type": content_type,
+                    "Content-Disposition": content_disposition,
+                    "X-Content-Type-Options": "nosniff",
                     **_storage_response_headers(recording),
                 },
             )
@@ -1090,6 +1245,7 @@ def _object_storage_audio_response(
             502,
             retryable=True,
         )
+    _require_exact_response_version(result, registered_version_id)
     upstream_etag = _strong_etag_opaque(result.get("etag"))
     if upstream_etag is None:
         _close_object_stream(result)
@@ -1107,12 +1263,29 @@ def _object_storage_audio_response(
             412,
             retryable=False,
         )
+    try:
+        upstream_content_type = _normalized_audio_content_type(
+            result.get("content_type"),
+            upstream=True,
+        )
+    except ApiError:
+        _close_object_stream(result)
+        raise
+    if upstream_content_type != content_type:
+        _close_object_stream(result)
+        raise ApiError(
+            "AUDIO_OBJECT_CONTENT_TYPE_MISMATCH",
+            "对象存储返回的音频类型与登记元数据不一致",
+            502,
+            retryable=False,
+        )
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Type": str(result.get("content_type") or content_type),
+        "Content-Type": content_type,
         "Content-Length": str(expected_length),
-        "Content-Disposition": f'inline; filename="{file_name}"',
+        "Content-Disposition": content_disposition,
         "X-Audio-Source": "object-storage",
+        "X-Content-Type-Options": "nosniff",
         "Cache-Control": "private, no-cache",
         "Vary": "Range, Authorization, X-Tenant-Id, X-Project-Id",
         **_storage_response_headers(recording),
@@ -1314,9 +1487,28 @@ async def post_audio_sessions_by_id_playback_grants(
         AUDIO_PLAYBACK_READ_ROLES,
         action="audio_recordings.create_playback_grant",
     )
-    recording = _recording_for_session(session, ctx, id)
+    recording = _recording_for_session(
+        session,
+        ctx,
+        id,
+        include_internal_storage_version=True,
+    )
     raw_storage = recording.get("storage_object")
     storage = raw_storage if isinstance(raw_storage, dict) else {}
+    object_version_id = storage.get("object_version_id")
+    if _real_object_storage_enabled():
+        if (
+            not storage.get("storage_object_id")
+            or not storage.get("provider")
+            or not storage.get("etag")
+        ):
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_ID_UNAVAILABLE",
+                "录音对象尚未完成精确版本登记，无法签发播放授权",
+                409,
+                retryable=False,
+            )
+        object_version_id = _exact_object_version_id(object_version_id)
     body_hash = await request_hash(request)
     operation = f"audio_recordings.create_playback_grant:{id}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
@@ -1331,6 +1523,9 @@ async def post_audio_sessions_by_id_playback_grants(
         auth_session_id=ctx.auth_session_id,
         storage_object_id=str(storage.get("storage_object_id") or "") or None,
         storage_provider=str(storage.get("provider") or "") or None,
+        object_version_id=(
+            object_version_id if isinstance(object_version_id, str) and object_version_id else None
+        ),
         etag=str(storage.get("etag") or "") or None,
     )
     response_data = {
@@ -1388,12 +1583,15 @@ def _stream_audio_with_playback_grant(
         session,
         ctx,
         playback_grant.audio_session_id,
+        include_internal_storage_version=True,
     )
     raw_storage = recording.get("storage_object")
     storage = raw_storage if isinstance(raw_storage, dict) else {}
     if playback_grant.storage_object_id and (
         storage.get("storage_object_id") != playback_grant.storage_object_id
         or storage.get("provider") != playback_grant.storage_provider
+        or str(storage.get("object_version_id") or "")
+        != str(playback_grant.object_version_id or "")
         or str(storage.get("etag") or "") != str(playback_grant.etag or "")
     ):
         raise ApiError(
@@ -1403,7 +1601,20 @@ def _stream_audio_with_playback_grant(
             retryable=True,
         )
     range_header = _effective_range_header(request, recording)
-    if _real_object_storage_enabled():
+    real_object_storage = _real_object_storage_enabled()
+    if real_object_storage:
+        if (
+            not playback_grant.storage_object_id
+            or not playback_grant.storage_provider
+            or not playback_grant.etag
+            or not playback_grant.object_version_id
+        ):
+            raise ApiError(
+                "AUDIO_PLAYBACK_GRANT_STALE",
+                "录音播放授权未绑定精确对象版本，请重新获取播放授权",
+                409,
+                retryable=True,
+            )
         response = _object_storage_audio_response(
             recording,
             range_header=range_header,
@@ -1495,6 +1706,7 @@ async def put_audio_sessions_by_id_recording_object(
 
     storage_verification: dict[str, Any] = {"mode": "declared", "verified": False}
     verified_etag = body.etag.strip('"') if body.etag else None
+    object_version_id: str | None = None
     object_status = "registered"
     if _real_object_storage_enabled():
         try:
@@ -1552,12 +1764,26 @@ async def put_audio_sessions_by_id_recording_object(
                 409,
                 retryable=False,
             )
+        raw_version_id = remote.get("version_id")
+        if (
+            not isinstance(raw_version_id, str)
+            or not raw_version_id.strip()
+            or raw_version_id.strip().casefold() == "null"
+        ):
+            raise ApiError(
+                "AUDIO_OBJECT_VERSION_ID_UNAVAILABLE",
+                "对象存储未返回精确版本 ID，无法安全登记录音版本",
+                409,
+                retryable=False,
+            )
+        object_version_id = _exact_object_version_id(raw_version_id.strip())
         wav_probe = _read_versioned_wav_probe(
             provider_client,
             body.bucket,
             body.object_key,
             content_length=remote_size,
             registered_etag=remote_etag,
+            registered_version_id=object_version_id,
         )
         try:
             verification = verify_remote_audio_object(
@@ -1581,6 +1807,7 @@ async def put_audio_sessions_by_id_recording_object(
                     content_length=remote_size,
                     content_type=body.content_type,
                     registered_etag=remote_etag,
+                    registered_version_id=object_version_id,
                 )
                 checksum_method = "versioned_full_stream"
             verification = verify_remote_audio_object(
@@ -1595,6 +1822,7 @@ async def put_audio_sessions_by_id_recording_object(
         storage_verification = {
             **verification,
             "etag": remote_etag,
+            "object_version_id": object_version_id,
         }
         verified_etag = remote_etag
         object_status = "verified"
@@ -1614,6 +1842,7 @@ async def put_audio_sessions_by_id_recording_object(
         size_bytes=body.content_length,
         content_sha256=body.checksum_sha256,
         etag=verified_etag,
+        object_version_id=object_version_id,
     )
     object_key_sha256 = hashlib.sha256(body.object_key.encode("utf-8")).hexdigest()
     locator = session.scalar(
@@ -1636,12 +1865,20 @@ async def put_audio_sessions_by_id_recording_object(
     before = _storage_object_data(existing) if existing else None
     object_payload = {
         **storage_data,
+        **({"object_version_id": object_version_id} if object_version_id is not None else {}),
         "source_type": "audio_recording",
         "source_id": recording_id,
         "status": object_status,
         "trace_id": ctx.trace_id,
         "verification": storage_verification,
     }
+    public_storage_verification = {
+        key: value for key, value in storage_verification.items() if key != "object_version_id"
+    }
+    public_object_payload = {
+        key: value for key, value in object_payload.items() if key != "object_version_id"
+    }
+    public_object_payload["verification"] = public_storage_verification
     if existing:
         target = existing
         target.provider = body.provider
@@ -1696,7 +1933,7 @@ async def put_audio_sessions_by_id_recording_object(
         **(strong_recording.payload if strong_recording else {}),
         "recording_id": recording_id,
         "storage_object_id": body.storage_object_id,
-        "storage_object": object_payload,
+        "storage_object": public_object_payload,
         "trace_id": ctx.trace_id,
     }
     if strong_recording:
@@ -1727,7 +1964,7 @@ async def put_audio_sessions_by_id_recording_object(
         "audio_session_id": id,
         "recording_id": recording_id,
         "status": object_status,
-        "storage_object": object_payload,
+        "storage_object": public_object_payload,
         "affected_objects": [
             {"type": "audio_session", "id": id},
             {"type": "audio_recording", "id": recording_id},
@@ -2107,6 +2344,8 @@ async def post_audio_sessions_by_id_intelligence_runs(
         hotword_pack_version_id=body.hotword_pack_version_id,
         provider=body.provider,
         provider_explicit="provider" in raw_body,
+        model_version=body.model_version,
+        model_version_explicit="model_version" in raw_body,
         language=body.language,
     )
     effective_hotword_version_id = (
@@ -2128,6 +2367,9 @@ async def post_audio_sessions_by_id_intelligence_runs(
     effective_language = (
         str(task_binding["language"]) if task_binding is not None else body.language
     )
+    effective_model_version = (
+        str(task_binding["model_version"]) if task_binding is not None else body.model_version
+    )
     hotword_provider = validate_hotword_execution(
         session,
         ctx,
@@ -2137,14 +2379,52 @@ async def post_audio_sessions_by_id_intelligence_runs(
         language=effective_language,
     )
     body_data["language"] = effective_language
+    body_data["model_version"] = effective_model_version
     if effective_hotword_version_id:
         body_data["hotword_pack_version_id"] = effective_hotword_version_id
     if task_binding is not None:
         body_data["task_version_id"] = task_binding["task_version_id"]
         body_data["task_version_snapshot"] = task_binding["task_version_snapshot"]
-    if hotword_provider is not None:
-        body_data["provider"] = hotword_provider
+    final_provider = hotword_provider or effective_provider
+    body_data["provider"] = final_provider
+    _require_server_audio_inference_policy(
+        provider=final_provider,
+        model=effective_model_version,
+    )
     recording_id = body.recording_id or session_data.get("recording_id")
+    storage_object = _storage_object_for_recording(session, ctx, str(recording_id or ""))
+    input_object: dict[str, Any] | None = None
+    if storage_object is not None:
+        storage_payload = storage_object.payload if isinstance(storage_object.payload, dict) else {}
+        object_version_id = storage_payload.get("object_version_id")
+        content_sha256 = str(storage_object.content_sha256 or "").strip().lower()
+        if (
+            storage_object.status in {"verified", "active"}
+            and isinstance(object_version_id, str)
+            and object_version_id.strip()
+            and object_version_id.strip().casefold() != "null"
+            and len(content_sha256) == 64
+            and all(character in "0123456789abcdef" for character in content_sha256)
+            and isinstance(storage_object.size_bytes, int)
+            and 44 <= storage_object.size_bytes <= 5 * 1024**3
+        ):
+            input_object = {
+                "storage_object_id": storage_object.storage_object_id,
+                "storage_provider": storage_object.provider,
+                "bucket": storage_object.bucket,
+                "object_key": storage_object.object_key,
+                "version_id": object_version_id.strip(),
+                "content_sha256": content_sha256,
+                "content_length": storage_object.size_bytes,
+                "content_type": storage_object.content_type,
+            }
+    if settings.auris_dagster_adapter.strip().lower() == "real" and input_object is None:
+        raise ApiError(
+            "AUDIO_EXECUTION_INPUT_VERSION_REQUIRED",
+            "真实音频执行要求已验证且绑定精确版本 ID 的录音对象",
+            409,
+            retryable=False,
+        )
     capabilities = list(dict.fromkeys(body.capabilities))
     output_assets = audio_intelligence_output_assets(capabilities)
     non_production = body.execution_mode in {"shadow", "diagnostic"}
@@ -2161,6 +2441,11 @@ async def post_audio_sessions_by_id_intelligence_runs(
         "recording_id": recording_id,
         "capabilities": capabilities,
         "output_assets": output_assets,
+        "execution_contract": "auris-flow-audio-intelligence-v1",
+        "execution_deadline_at": (
+            datetime.now(UTC) + timedelta(seconds=settings.task_run_default_deadline_seconds)
+        ).isoformat(),
+        **({"input_object": input_object} if input_object is not None else {}),
         "job_name": "audio_intelligence_pipeline",
         "root_trace_id": root_trace_id,
         "external_outputs_enabled": (
@@ -2182,9 +2467,8 @@ async def post_audio_sessions_by_id_intelligence_runs(
             if non_production
             else "configured"
         ),
-        "run_key": body_data.get("run_key")
-        or (
-            f"audio-intelligence:{id}:{body.model_version}:"
+        "run_key": (
+            f"audio-intelligence:{id}:{effective_model_version}:"
             f"{body_data.get('task_version_id') or body.execution_mode}"
         ),
         "partition_key": body_data.get("partition_key")

@@ -3,7 +3,14 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 from app.core.database import SessionLocal
-from app.models import AuditLog, HotwordPack, HotwordPackVersion, OutboxEvent, RunRecord
+from app.models import (
+    AuditLog,
+    HotwordPack,
+    HotwordPackVersion,
+    IdempotencyRecord,
+    OutboxEvent,
+    RunRecord,
+)
 
 SOURCE_VERSION_ID = "hwpv-auto-sales-v1-8"
 TARGET_VERSION_ID = "hwpv-auto-sales-v1-7-rollback-contract"
@@ -128,6 +135,101 @@ def test_hotword_rollback_request_is_model_engineer_only_idempotent_and_audited(
             .one()
         )
         assert audit.trace_id == "trace_hotword_pack_auto_sales"
+
+
+def test_hotword_rollback_reprojects_legacy_idempotency_response(
+    client,
+    auth_headers,
+) -> None:
+    _seed_historical_published_target()
+    with SessionLocal() as session:
+        source = session.get(HotwordPackVersion, SOURCE_VERSION_ID)
+        assert source is not None
+        source_resource_version = source.resource_version
+
+    body = {
+        "target_version_id": TARGET_VERSION_ID,
+        "expected_resource_version": source_resource_version,
+        "reason": "验证历史幂等响应重新投影",
+    }
+    headers = _headers(
+        auth_headers,
+        key="rollback-legacy-run-response",
+        token="model-token",
+    )
+    requested = client.post(
+        f"/api/v1/hotword-pack-versions/{SOURCE_VERSION_ID}/rollback",
+        json=body,
+        headers=headers,
+    )
+    assert requested.status_code == 202, requested.text
+
+    with SessionLocal.begin() as session:
+        stored = (
+            session.query(IdempotencyRecord)
+            .filter(
+                IdempotencyRecord.operation
+                == f"hotword_pack_versions.rollback:{SOURCE_VERSION_ID}",
+                IdempotencyRecord.idempotency_key == "rollback-legacy-run-response",
+            )
+            .one()
+        )
+        legacy_response = dict(stored.response_json)
+        legacy_data = dict(legacy_response["data"])
+        legacy_data.update(
+            {
+                "tenant_id": "legacy_wrong_tenant",
+                "project_id": "legacy_wrong_project",
+                "dagster_run_id": "legacy-dagster-id-canary",
+                "external_run_id": "legacy-external-id-canary",
+                "legacy_transport": {
+                    "result_ref": {"artifact_id": "artifact-domain-safe"},
+                    "adapter": "dagster_graphql",
+                    "nested": [
+                        {
+                            "engine_status": "STARTED",
+                            "signature": "legacy-signature-canary",
+                            "secret_ref": "legacy-secret-canary",
+                            "graphql": "legacy-graphql-canary",
+                        }
+                    ],
+                },
+            }
+        )
+        legacy_response["data"] = legacy_data
+        stored.response_json = legacy_response
+
+    replay = client.post(
+        f"/api/v1/hotword-pack-versions/{SOURCE_VERSION_ID}/rollback",
+        json=body,
+        headers=headers,
+    )
+    assert replay.status_code == 202, replay.text
+    data = replay.json()["data"]
+    assert data["tenant_id"] == "aurora_auto"
+    assert data["project_id"] == "sales_qa"
+    assert data["legacy_transport"] == {
+        "result_ref": {"artifact_id": "artifact-domain-safe"},
+        "nested": [{}],
+    }
+    assert "dagster_run_id" not in data
+    assert "external_run_id" not in data
+
+    with SessionLocal() as session:
+        stored = (
+            session.query(IdempotencyRecord)
+            .filter(
+                IdempotencyRecord.operation
+                == f"hotword_pack_versions.rollback:{SOURCE_VERSION_ID}",
+                IdempotencyRecord.idempotency_key == "rollback-legacy-run-response",
+            )
+            .one()
+        )
+        assert stored.response_json["data"]["dagster_run_id"] == ("legacy-dagster-id-canary")
+        assert (
+            stored.response_json["data"]["legacy_transport"]["nested"][0]["signature"]
+            == "legacy-signature-canary"
+        )
 
 
 def test_hotword_rollback_rejects_wrong_version_and_non_historical_target(

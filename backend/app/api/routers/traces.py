@@ -31,45 +31,49 @@ from app.models import (
     TraceRef,
     VoiceprintEnrollment,
 )
+from app.services.public_run_projection_service import (
+    project_public_navigation_path,
+    sanitize_public_run_string,
+)
 from app.services.read_policy_service import (
     can_read_human_review_task,
     can_read_resource_collection,
     readable_resource_collections,
     require_trace_read,
-    trace_payload_field_names,
     trace_reference_ids,
     trace_reference_is_visible,
 )
 
 router = APIRouter(tags=["traces"])
 
-NON_ADMIN_TRACE_SCALAR_FIELDS = frozenset(
+PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
     {
         "action",
-        "adapter",
         "agent_run_id",
         "aggregate_id",
         "aggregate_type",
         "annotation_id",
+        "asset_key",
         "attempt_count",
         "attempt_id",
         "attempt_number",
         "audio_session_id",
         "available_at",
+        "base_prompt_version",
         "candidate_id",
+        "change_set_id",
         "collection",
         "completed_at",
         "correlation_id",
         "decision_id",
         "decision_type",
-        "delivery_mode",
-        "delivery_state",
         "edge_id",
         "effect_id",
         "enrollment_id",
         "error_code",
         "event_id",
         "event_type",
+        "evidence_pack_id",
         "gate_id",
         "hit_rate",
         "id",
@@ -80,16 +84,15 @@ NON_ADMIN_TRACE_SCALAR_FIELDS = frozenset(
         "knowledge_source_id",
         "kind",
         "label_version_id",
-        "lease_generation",
         "lineage_source",
         "materialization_id",
         "object_id",
-        "operation",
         "parent_trace_id",
         "partition_key",
         "processed_at",
-        "reconcile_attempt_count",
         "ref_role",
+        "ref_id",
+        "ref_type",
         "request_id",
         "retry_after_seconds",
         "retryable",
@@ -107,45 +110,50 @@ NON_ADMIN_TRACE_SCALAR_FIELDS = frozenset(
         "started_at",
         "status",
         "target_asset_key",
-        "tool",
         "tool_call_id",
         "trace_ref_id",
-        "vector_collection",
         "voiceprint_id",
     }
 )
-NON_ADMIN_TRACE_FIELD_LISTS = frozenset(
-    {
-        "adapter_dispatch_fields",
-        "dispatch_fields",
-        "input_ref_fields",
-        "result_ref_fields",
-        "write_policy_fields",
-    }
-)
+PUBLIC_TRACE_ACTION_FIELDS = frozenset({"available_at", "key", "label", "route"})
 
 
-def _allows_raw_trace_payloads(ctx: ContextDep) -> bool:
-    return bool({"project_admin", "system"}.intersection(ctx.roles))
+def _public_trace_scalar(field: str, value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    return sanitize_public_run_string(value, field_name=field)
 
 
-def _non_admin_trace_span(span: dict[str, Any]) -> dict[str, Any]:
-    """Project a span to reviewed scalars and JSON field names only."""
+def _public_trace_span(span: dict[str, Any]) -> dict[str, Any]:
+    """Project every public trace span to stable domain fields only."""
     projected: dict[str, Any] = {
-        field: value
+        field: _public_trace_scalar(field, value)
         for field, value in span.items()
-        if field in NON_ADMIN_TRACE_SCALAR_FIELDS
+        if field in PUBLIC_TRACE_SCALAR_FIELDS
         and (value is None or isinstance(value, str | int | float | bool))
     }
-    for field in NON_ADMIN_TRACE_FIELD_LISTS:
-        value = span.get(field)
-        if isinstance(value, list) and all(isinstance(item, str) for item in value):
-            projected[field] = value
+    actions = span.get("next_actions")
+    if isinstance(actions, list):
+        projected_actions = []
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            projected_action: dict[str, Any] = {}
+            for field, value in action.items():
+                if field not in PUBLIC_TRACE_ACTION_FIELDS or not (
+                    value is None or isinstance(value, str | int | float | bool)
+                ):
+                    continue
+                if field == "route" and isinstance(value, str):
+                    route = project_public_navigation_path(value, field_name=field)
+                    if route is not None:
+                        projected_action[field] = route
+                    continue
+                projected_action[field] = _public_trace_scalar(field, value)
+            projected_actions.append(projected_action)
+        if projected_actions:
+            projected["next_actions"] = projected_actions
     return projected
-
-
-def _nested_payload_fields(values: list[dict[str, Any]]) -> list[str]:
-    return sorted({field for value in values for field in trace_payload_field_names(value)})
 
 
 def _decision_task_id(decision: HumanReviewDecision) -> str | None:
@@ -192,16 +200,11 @@ def outbox_span(event: OutboxEvent) -> dict:
         "aggregate_id": event.aggregate_id,
         "status": event.status,
         "attempt_count": event.attempt_count,
-        "reconcile_attempt_count": event.reconcile_attempt_count,
-        "delivery_state": event.delivery_state,
         "retryable": retryable,
         "retry_after_seconds": retry_after_seconds,
         "available_at": event.available_at.isoformat() if event.available_at else None,
-        "last_error": event.last_error,
         "error_code": error_code,
         "processed_at": event.processed_at.isoformat() if event.processed_at else None,
-        "adapter_dispatch": adapter_dispatch,
-        "adapter_dispatch_fields": trace_payload_field_names(adapter_dispatch),
         "next_actions": next_actions,
     }
 
@@ -214,16 +217,7 @@ def outbox_attempt_span(attempt: OutboxDeliveryAttempt) -> dict:
         "event_id": attempt.event_id,
         "status": attempt.status,
         "attempt_number": attempt.attempt_number,
-        "lease_generation": attempt.lease_generation,
-        "claimed_by": attempt.claimed_by,
-        "delivery_mode": attempt.delivery_mode,
-        "dispatch_idempotency_key": attempt.dispatch_idempotency_key,
-        "request_sha256": attempt.request_sha256,
-        "adapter": attempt.adapter,
-        "operation": attempt.operation,
-        "remote_id": attempt.remote_id,
         "error_code": attempt.error_code,
-        "error_message": attempt.error_message,
         "started_at": attempt.started_at.isoformat() if attempt.started_at else None,
         "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
     }
@@ -312,14 +306,18 @@ def get_traces_by_trace_id(
         if can_read_voiceprints
         else []
     )
-    prompt_candidates = list(
-        session.scalars(
-            select(PromptVersionCandidate).where(
-                PromptVersionCandidate.trace_id == trace_id,
-                PromptVersionCandidate.tenant_id == ctx.tenant_id,
-                PromptVersionCandidate.project_id == ctx.project_id,
+    prompt_candidates = (
+        list(
+            session.scalars(
+                select(PromptVersionCandidate).where(
+                    PromptVersionCandidate.trace_id == trace_id,
+                    PromptVersionCandidate.tenant_id == ctx.tenant_id,
+                    PromptVersionCandidate.project_id == ctx.project_id,
+                )
             )
         )
+        if can_read_resource_collection(ctx, "prompt_version_candidates")
+        else []
     )
     label_versions = list(
         session.scalars(
@@ -650,6 +648,8 @@ def get_traces_by_trace_id(
     response = envelope(
         {
             "trace_id": trace_id,
+            "tenant_id": ctx.tenant_id,
+            "project_id": ctx.project_id,
             "spans": [
                 *[
                     {
@@ -680,7 +680,6 @@ def get_traces_by_trace_id(
                         "asset_key": materialization.payload.get("asset_key"),
                         "partition_key": materialization.payload.get("partition_key"),
                         "run_id": materialization.payload.get("run_id"),
-                        "storage_refs": materialization.payload.get("storage_refs", []),
                     }
                     for materialization in materializations
                 ],
@@ -835,14 +834,8 @@ def get_traces_by_trace_id(
                         "status": agent.status,
                         "source_run_id": agent.payload.get("source_run_id"),
                         "source_run_type": agent.payload.get("source_run_type"),
-                        "input_refs": visible_refs,
-                        "input_ref_fields": _nested_payload_fields(visible_refs),
-                        "write_policy": agent.payload.get("write_policy", {}),
-                        "write_policy_fields": trace_payload_field_names(
-                            agent.payload.get("write_policy")
-                        ),
                     }
-                    for agent, visible_refs in visible_agent_runs
+                    for agent, _visible_refs in visible_agent_runs
                 ],
                 *[
                     {
@@ -852,10 +845,6 @@ def get_traces_by_trace_id(
                         "status": tool.status,
                         "agent_run_id": tool.payload.get("agent_run_id"),
                         "source_run_id": tool.payload.get("source_run_id"),
-                        "tool": tool.payload.get("tool"),
-                        "purpose": tool.payload.get("purpose"),
-                        "dispatch": tool.payload.get("dispatch"),
-                        "dispatch_fields": trace_payload_field_names(tool.payload.get("dispatch")),
                     }
                     for tool in tool_calls
                 ],
@@ -868,11 +857,6 @@ def get_traces_by_trace_id(
                         "agent_run_id": decision.payload.get("agent_run_id"),
                         "source_run_id": decision.payload.get("source_run_id"),
                         "decision_type": decision.payload.get("decision_type"),
-                        "result": decision.payload.get("result"),
-                        "result_ref": decision.payload.get("result_ref", {}),
-                        "result_ref_fields": trace_payload_field_names(
-                            decision.payload.get("result_ref")
-                        ),
                     }
                     for decision in agent_decisions
                 ],
@@ -911,8 +895,5 @@ def get_traces_by_trace_id(
         },
         ctx,
     )
-    if not _allows_raw_trace_payloads(ctx):
-        response["data"]["spans"] = [
-            _non_admin_trace_span(span) for span in response["data"]["spans"]
-        ]
+    response["data"]["spans"] = [_public_trace_span(span) for span in response["data"]["spans"]]
     return response

@@ -1346,7 +1346,10 @@ def _finalize_success(
                 for action in next_actions
             ],
         }
-        if event.event_type == "task_run.requested" and run.run_type == "task_run":
+        if event.event_type in {
+            "task_run.requested",
+            "audio_intelligence.requested",
+        } and run.run_type in {"task_run", "audio_intelligence"}:
             from app.services.run_service import apply_staged_dagster_completion
 
             apply_staged_dagster_completion(

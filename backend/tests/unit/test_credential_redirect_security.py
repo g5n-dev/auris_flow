@@ -134,6 +134,7 @@ def test_audio_signed_get_is_not_forwarded_across_redirect(status_code: int) -> 
                 "tenants/tenant/projects/project/audio.wav",
                 byte_range=None,
                 registered_etag="registered-etag",
+                registered_version_id="immutable-version-v1",
             )
 
         assert target_requests == []

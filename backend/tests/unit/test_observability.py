@@ -18,6 +18,15 @@ from opentelemetry.sdk.trace.export import (
     SpanExportResult,
 )
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+from opentelemetry.trace import (
+    NonRecordingSpan,
+    SpanContext,
+    SpanKind,
+    StatusCode,
+    TraceFlags,
+    TraceState,
+    set_span_in_context,
+)
 from prometheus_client import CollectorRegistry
 from pydantic import ValidationError
 from sqlalchemy import create_engine, text
@@ -28,10 +37,13 @@ from app.core.database import SessionLocal
 from app.core.logging import LOGGER_NAME, get_logger, log_event
 from app.core.metrics import AurisMetrics, is_metrics_client_allowed
 from app.core.observability import (
+    ObservabilityRuntime,
     SafeSanitizingSpanExporter,
     _instrument_outbound_clients,
+    _public_boundary_sampler,
     annotate_current_span,
     configure_observability,
+    configure_worker_observability,
     current_trace_carrier,
     current_trace_context,
     extract_remote_trace_context,
@@ -60,6 +72,22 @@ def test_observability_configuration_rejects_unsafe_endpoints_and_open_metrics_c
             metrics_enabled=True,
             metrics_trusted_cidrs="0.0.0.0/0",
         )
+    with pytest.raises(ValidationError, match="PROMETHEUS_READINESS_URL"):
+        Settings(
+            _env_file=None,
+            app_env="test",
+            otel_enabled=True,
+            otel_exporter_otlp_endpoint="http://otel-collector:4318/v1/traces",
+            prometheus_readiness_url="https://user:pass@prometheus.example/ready?token=x",
+        )
+    with pytest.raises(ValidationError, match="OBSERVABILITY_HEALTH_URL"):
+        Settings(
+            _env_file=None,
+            app_env="test",
+            otel_enabled=True,
+            otel_exporter_otlp_endpoint="http://otel-collector:4318/v1/traces",
+            observability_health_url="https://user:pass@health.example/ready?token=x",
+        )
 
 
 def test_disabled_observability_does_not_construct_an_exporter() -> None:
@@ -78,6 +106,68 @@ def test_disabled_observability_does_not_construct_an_exporter() -> None:
 
     assert runtime.enabled is False
     assert created is False
+
+
+def _otel_settings(*, app_env: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        app_env=app_env,
+        app_name="auris-flow-test",
+        otel_enabled=True,
+        otel_exporter_otlp_endpoint="http://otel-collector:4318/v1/traces",
+        otel_exporter_otlp_headers="",
+        otel_service_name="auris-flow-test",
+        otel_trace_sample_ratio=0.1,
+        otel_export_timeout_seconds=3.0,
+    )
+
+
+def test_observability_initialization_failure_is_fail_closed_in_production(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.observability._INSTRUMENTED", False)
+
+    def exporter_factory(*_args: object, **_kwargs: object) -> SpanExporter:
+        raise RuntimeError("collector token=must-not-leak")
+
+    with pytest.raises(RuntimeError, match="^OTEL_CONFIGURATION_FAILED$"):
+        configure_observability(
+            FastAPI(),
+            _otel_settings(app_env="prod"),
+            exporter_factory=exporter_factory,
+        )
+
+
+def test_observability_initialization_failure_remains_contained_outside_production(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.observability._INSTRUMENTED", False)
+
+    def exporter_factory(*_args: object, **_kwargs: object) -> SpanExporter:
+        raise RuntimeError("collector token=must-not-leak")
+
+    runtime = configure_observability(
+        FastAPI(),
+        _otel_settings(app_env="test"),
+        exporter_factory=exporter_factory,
+    )
+
+    assert runtime.enabled is False
+    assert runtime.error_code == "OTEL_CONFIGURATION_FAILED"
+
+
+def test_worker_observability_initialization_failure_is_fail_closed_in_production(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("app.core.observability._INSTRUMENTED", False)
+
+    def exporter_factory(*_args: object, **_kwargs: object) -> SpanExporter:
+        raise RuntimeError("collector token=must-not-leak")
+
+    with pytest.raises(RuntimeError, match="^OTEL_CONFIGURATION_FAILED$"):
+        configure_worker_observability(
+            _otel_settings(app_env="release"),
+            exporter_factory=exporter_factory,
+        )
 
 
 def test_all_outbound_http_transports_are_instrumented(monkeypatch) -> None:
@@ -302,6 +392,13 @@ def test_span_export_redaction_drops_sql_query_auth_cookie_and_secret_values() -
             "http.request.header.cookie": "session=canary",
             "api_secret": "canary-secret",
             "http.request.method": "POST",
+            "http.route": "/api/v1/data-assets/{data_asset_id}",
+            "http.target": "/api/v1/data-assets/customer-13800138000?token=canary",
+            "url.path": "/private/customer-13800138000.wav",
+            "client.address": "203.0.113.99",
+            "client.port": 49152,
+            "enduser.id": "user-sensitive-001",
+            "user_agent.original": "AurisClient token=canary-user-agent",
         }
     )
 
@@ -309,8 +406,113 @@ def test_span_export_redaction_drops_sql_query_auth_cookie_and_secret_values() -
     assert "SELECT" not in serialized
     assert "canary" not in serialized
     assert "user:pass" not in serialized
-    assert attributes["url.full"] == "https://example.test/callback"
+    assert attributes["url.full"] == "https://example.test"
     assert attributes["http.request.method"] == "POST"
+    assert attributes["http.route"] == "/api/v1/data-assets/{data_asset_id}"
+
+
+def test_final_exporter_removes_exception_description_and_raw_request_identity() -> None:
+    delegate = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(SafeSanitizingSpanExporter(delegate)))
+    tracer = provider.get_tracer("egress-redaction-test")
+
+    with pytest.raises(RuntimeError, match="must-not-leave"):
+        with tracer.start_as_current_span(
+            "http.request",
+            attributes={
+                "http.route": "/api/v1/data-assets/{data_asset_id}",
+                "http.target": "/api/v1/data-assets/private-asset?token=must-not-leave",
+                "client.address": "203.0.113.77",
+                "user_agent.original": "AurisClient token=must-not-leave",
+            },
+        ):
+            raise RuntimeError("must-not-leave token=secret SQL=SELECT path=/objects/private.wav")
+
+    span = delegate.get_finished_spans()[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.status.description is None
+    assert span.attributes == {
+        "http.route": "/api/v1/data-assets/{data_asset_id}",
+    }
+    serialized = repr(span)
+    assert "must-not-leave" not in serialized
+    assert "203.0.113.77" not in serialized
+    provider.shutdown()
+
+
+def test_public_boundary_sampler_does_not_trust_remote_sampled_bit() -> None:
+    sampler = _public_boundary_sampler(0.01, decision_key=b"k" * 32)
+    decisions = []
+    for flags in (TraceFlags.DEFAULT, TraceFlags.SAMPLED):
+        remote_parent = SpanContext(
+            trace_id=int("12" * 16, 16),
+            span_id=int("34" * 8, 16),
+            is_remote=True,
+            trace_flags=TraceFlags(flags),
+            trace_state=TraceState(),
+        )
+        decisions.append(
+            sampler.should_sample(
+                set_span_in_context(NonRecordingSpan(remote_parent)),
+                1,
+                "public.request",
+                SpanKind.SERVER,
+            ).decision
+        )
+
+    assert decisions[0] == decisions[1]
+    assert decisions[0].is_sampled() is False
+    marker_decision = sampler.should_sample(
+        None,
+        int("78" * 16, 16),
+        "auris_flow.observability.pipeline.readiness",
+        SpanKind.INTERNAL,
+        {"auris.readiness.probe": True},
+    ).decision
+    assert marker_decision.is_sampled() is True
+
+
+def test_public_boundary_sampling_uses_a_secret_key_not_caller_chosen_low_bits() -> None:
+    trace_id = 1
+    remote_parent = SpanContext(
+        trace_id=trace_id,
+        span_id=int("34" * 8, 16),
+        is_remote=True,
+        trace_flags=TraceFlags(TraceFlags.SAMPLED),
+        trace_state=TraceState(),
+    )
+    parent_context = set_span_in_context(NonRecordingSpan(remote_parent))
+
+    decision_a = (
+        _public_boundary_sampler(
+            0.5,
+            decision_key=b"a" * 32,
+        )
+        .should_sample(
+            parent_context,
+            trace_id,
+            "public.request",
+            SpanKind.SERVER,
+        )
+        .decision
+    )
+    decision_b = (
+        _public_boundary_sampler(
+            0.5,
+            decision_key=b"b" * 32,
+        )
+        .should_sample(
+            parent_context,
+            trace_id,
+            "public.request",
+            SpanKind.SERVER,
+        )
+        .decision
+    )
+
+    assert decision_a.is_sampled() is False
+    assert decision_b.is_sampled() is True
 
 
 def test_exporter_failure_is_contained() -> None:
@@ -332,6 +534,136 @@ def test_exporter_failure_is_contained() -> None:
     provider.shutdown()
 
 
+@pytest.mark.parametrize(
+    ("export_result", "expects_trace_id"),
+    [
+        (SpanExportResult.SUCCESS, True),
+        (SpanExportResult.FAILURE, False),
+    ],
+)
+def test_runtime_readiness_trace_requires_this_trace_to_export_successfully(
+    export_result: SpanExportResult,
+    expects_trace_id: bool,
+) -> None:
+    export_calls = 0
+
+    class ResultExporter(SpanExporter):
+        def export(self, _spans: object) -> SpanExportResult:
+            nonlocal export_calls
+            export_calls += 1
+            return export_result
+
+        def shutdown(self) -> None:
+            return None
+
+    safe_exporter = SafeSanitizingSpanExporter(ResultExporter())
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(safe_exporter))
+    runtime = ObservabilityRuntime(
+        enabled=True,
+        provider=provider,
+        exporter=safe_exporter,
+    )
+
+    trace_id = runtime.export_readiness_trace(timeout_millis=100)
+    cached_trace_id = runtime.export_readiness_trace(timeout_millis=100)
+
+    assert (trace_id is not None) is expects_trace_id
+    assert cached_trace_id == trace_id
+    assert export_calls == 1
+    if trace_id is not None:
+        assert len(trace_id) == 32
+        assert int(trace_id, 16) > 0
+    provider.shutdown()
+
+
+def test_runtime_readiness_requires_the_exact_bff_marker_in_tempo(monkeypatch) -> None:
+    now = [100.0]
+    marker = ["a" * 32]
+    visible: set[str] = set()
+    runtime = ObservabilityRuntime(enabled=True)
+    monkeypatch.setattr("app.core.observability.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(
+        runtime,
+        "export_readiness_trace",
+        lambda *, timeout_millis: marker[0],
+    )
+
+    def lookup(trace_id: str) -> bool:
+        return trace_id in visible
+
+    assert (
+        runtime.readiness_pipeline_is_live(
+            timeout_millis=100,
+            trace_visible=lookup,
+        )
+        is False
+    )
+
+    now[0] += 1.1
+    visible.add(marker[0])
+    assert runtime.readiness_pipeline_is_live(
+        timeout_millis=100,
+        trace_visible=lookup,
+    )
+
+    now[0] += 10.1
+    marker[0] = "b" * 32
+    assert runtime.readiness_pipeline_is_live(
+        timeout_millis=100,
+        trace_visible=lookup,
+    ), "one proven marker may cover only the bounded propagation interval"
+
+    now[0] += 10.1
+    assert (
+        runtime.readiness_pipeline_is_live(
+            timeout_millis=100,
+            trace_visible=lookup,
+        )
+        is False
+    )
+
+
+def test_runtime_readiness_probe_is_singleflight_and_lock_contention_fails_closed(
+    monkeypatch,
+) -> None:
+    runtime = ObservabilityRuntime(enabled=True)
+    lookup_started = Event()
+    allow_lookup_to_finish = Event()
+    lookup_calls = 0
+    monkeypatch.setattr(
+        runtime,
+        "export_readiness_trace",
+        lambda *, timeout_millis: "c" * 32,
+    )
+
+    def blocked_lookup(_trace_id: str) -> bool:
+        nonlocal lookup_calls
+        lookup_calls += 1
+        lookup_started.set()
+        assert allow_lookup_to_finish.wait(timeout=1.0)
+        return False
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        leader = executor.submit(
+            runtime.readiness_pipeline_is_live,
+            timeout_millis=100,
+            trace_visible=blocked_lookup,
+        )
+        assert lookup_started.wait(timeout=1.0)
+        assert (
+            runtime.readiness_pipeline_is_live(
+                timeout_millis=100,
+                trace_visible=blocked_lookup,
+            )
+            is False
+        )
+        allow_lookup_to_finish.set()
+        assert leader.result(timeout=1.0) is False
+
+    assert lookup_calls == 1
+
+
 def test_metrics_client_policy_uses_socket_peer_and_explicit_cidrs() -> None:
     assert is_metrics_client_allowed("127.0.0.1", "") is True
     assert is_metrics_client_allowed("172.20.0.4", "") is True
@@ -351,19 +683,25 @@ def test_metrics_use_bounded_labels_and_refresh_outbox_and_pool_state() -> None:
             text(
                 "CREATE TABLE outbox_events ("
                 "event_id INTEGER PRIMARY KEY, status VARCHAR(32), attempt_count INTEGER, "
-                "reconcile_attempt_count INTEGER, event_type VARCHAR(128), created_at DATETIME)"
+                "reconcile_attempt_count INTEGER, event_type VARCHAR(128), created_at DATETIME, "
+                "processed_at DATETIME)"
             )
         )
         connection.execute(
             text(
                 "INSERT INTO outbox_events VALUES "
-                "(1, 'pending', 0, 0, 'task_run.requested', :oldest), "
-                "(2, 'pending', 2, 0, 'task_run.requested', :recent), "
-                "(3, 'dead_letter', 5, 1, 'task_run.requested', :recent)"
+                "(1, 'pending', 0, 0, 'task_run.requested', :oldest, NULL), "
+                "(2, 'pending', 2, 0, 'task_run.requested', :recent, NULL), "
+                "(3, 'dead_letter', 5, 1, 'task_run.requested', :recent, :now), "
+                "(4, 'processed', 1, 0, 'task_run.requested', :delivery_fast, :now), "
+                "(5, 'processed', 1, 0, 'task_run.requested', :delivery_slow, :now)"
             ),
             {
                 "oldest": (now - timedelta(seconds=90)).replace(tzinfo=None),
                 "recent": (now - timedelta(seconds=10)).replace(tzinfo=None),
+                "delivery_fast": (now - timedelta(seconds=30)).replace(tzinfo=None),
+                "delivery_slow": (now - timedelta(seconds=90)).replace(tzinfo=None),
+                "now": now.replace(tzinfo=None),
             },
         )
         connection.execute(
@@ -431,8 +769,13 @@ def test_metrics_use_bounded_labels_and_refresh_outbox_and_pool_state() -> None:
     assert 'route="/api/v1/data-assets/{data_asset_id}"' in payload
     assert "auris_outbox_pending 2.0" in payload
     assert "auris_outbox_dead_letter 1.0" in payload
+    assert "auris_outbox_dead_letter_recent 1.0" in payload
     assert "auris_outbox_retry_pending 1.0" in payload
     assert "auris_outbox_oldest_pending_age_seconds 90.0" in payload
+    assert "auris_outbox_delivery_duration_window_seconds_count 2.0" in payload
+    assert "auris_outbox_delivery_duration_window_seconds_sum 120.0" in payload
+    assert 'auris_outbox_delivery_duration_window_seconds_bucket{le="60"} 1.0' in payload
+    assert 'auris_outbox_delivery_duration_window_seconds_bucket{le="120"} 2.0' in payload
     assert 'auris_callback_outcomes_total{outcome="retry"} 1.0' in payload
     assert 'auris_worker_processing_total{outcome="success"} 1.0' in payload
     assert 'auris_rate_limit_decisions_total{outcome="allowed"} 1.0' in payload
@@ -453,38 +796,28 @@ def test_metrics_use_bounded_labels_and_refresh_outbox_and_pool_state() -> None:
     assert "auris_task_run_status_sync_overdue 1.0" in payload
 
 
-def test_callback_metrics_are_derived_from_the_attempt_ledger() -> None:
-    registry = CollectorRegistry()
-    operational_metrics = AurisMetrics(registry=registry)
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    factory = sessionmaker(bind=engine)
-    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+def _outcome_total(
+    registry: CollectorRegistry,
+    metric_name: str,
+    outcome: str,
+) -> float:
+    return float(registry.get_sample_value(metric_name, {"outcome": outcome}) or 0.0)
+
+
+def _create_operational_metrics_ledgers(engine) -> None:
     with engine.begin() as connection:
         connection.execute(
             text(
                 "CREATE TABLE outbox_events ("
                 "event_id INTEGER PRIMARY KEY, status VARCHAR(32), attempt_count INTEGER, "
-                "reconcile_attempt_count INTEGER, event_type VARCHAR(128), created_at DATETIME)"
+                "reconcile_attempt_count INTEGER, event_type VARCHAR(128), created_at DATETIME, "
+                "processed_at DATETIME)"
             )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO outbox_events VALUES "
-                "(1, 'processed', 2, 0, 'external_callback.requested', :created), "
-                "(2, 'processed', 1, 0, 'task_run.requested', :created)"
-            ),
-            {"created": now.replace(tzinfo=None)},
         )
         connection.execute(
             text(
                 "CREATE TABLE outbox_delivery_attempts ("
                 "attempt_id INTEGER PRIMARY KEY, event_id INTEGER, status VARCHAR(64))"
-            )
-        )
-        connection.execute(
-            text(
-                "INSERT INTO outbox_delivery_attempts VALUES "
-                "(1, 1, 'retry_scheduled'), (2, 1, 'succeeded'), (3, 2, 'succeeded')"
             )
         )
         connection.execute(
@@ -496,17 +829,197 @@ def test_callback_metrics_are_derived_from_the_attempt_ledger() -> None:
             )
         )
 
+
+def test_attempt_ledger_first_refresh_sets_baseline_then_counts_only_new_outcome() -> None:
+    clock = [100.0]
+    registry = CollectorRegistry()
+    operational_metrics = AurisMetrics(
+        registry=registry,
+        monotonic_clock=lambda: clock[0],
+    )
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    factory = sessionmaker(bind=engine)
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+    _create_operational_metrics_ledgers(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO outbox_events VALUES "
+                "(1, 'processed', 2, 0, 'external_callback.requested', :created, :created), "
+                "(2, 'processed', 1, 0, 'task_run.requested', :created, :created)"
+            ),
+            {"created": now.replace(tzinfo=None)},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO outbox_delivery_attempts VALUES "
+                "(1, 1, 'retry_scheduled'), (2, 1, 'succeeded'), (3, 2, 'succeeded')"
+            )
+        )
+
     operational_metrics.refresh_operational_metrics(
         session_factory=factory,
         engine=engine,
         now=now,
     )
-    payload = operational_metrics.render().decode("utf-8")
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "retry") == 0
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "retry") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 0
 
-    assert 'auris_callback_outcomes_total{outcome="retry"} 1.0' in payload
-    assert 'auris_callback_outcomes_total{outcome="success"} 1.0' in payload
-    assert 'auris_worker_processing_total{outcome="retry"} 1.0' in payload
-    assert 'auris_worker_processing_total{outcome="success"} 2.0' in payload
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO outbox_delivery_attempts "
+                "(attempt_id, event_id, status) VALUES (4, 1, 'dead_letter')"
+            )
+        )
+
+    clock[0] = 109.999
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "dead_letter") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "dead_letter") == 0
+
+    clock[0] = 110.0
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "dead_letter") == 1
+    assert _outcome_total(registry, "auris_worker_processing_total", "dead_letter") == 1
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "retry") == 0
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "retry") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 0
+
+
+def test_recent_dead_letter_gauge_survives_process_restart_before_first_scrape() -> None:
+    registry = CollectorRegistry()
+    operational_metrics = AurisMetrics(registry=registry)
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    factory = sessionmaker(bind=engine)
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+    _create_operational_metrics_ledgers(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO outbox_events VALUES "
+                "(1, 'dead_letter', 5, 1, 'external_callback.requested', :created, :processed)"
+            ),
+            {
+                "created": (now - timedelta(minutes=30)).replace(tzinfo=None),
+                "processed": (now - timedelta(minutes=1)).replace(tzinfo=None),
+            },
+        )
+        connection.execute(
+            text("INSERT INTO outbox_delivery_attempts VALUES (1, 1, 'dead_letter')")
+        )
+
+    # This is a new metrics process: its reconstructed counters intentionally
+    # baseline at zero, while the authority-backed recent gauge must still see
+    # the dead letter which preceded the first scrape.
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+
+    assert _outcome_total(registry, "auris_worker_processing_total", "dead_letter") == 0
+    assert registry.get_sample_value("auris_outbox_dead_letter_recent") == 1
+
+
+def test_attempt_ledger_retention_rebaselines_then_counts_new_growth() -> None:
+    clock = [200.0]
+    registry = CollectorRegistry()
+    operational_metrics = AurisMetrics(
+        registry=registry,
+        monotonic_clock=lambda: clock[0],
+    )
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    factory = sessionmaker(bind=engine)
+    now = datetime(2026, 7, 18, 12, 0, tzinfo=UTC)
+    _create_operational_metrics_ledgers(engine)
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO outbox_events VALUES "
+                "(1, 'processed', 3, 0, 'external_callback.requested', :created, :created)"
+            ),
+            {"created": now.replace(tzinfo=None)},
+        )
+        connection.execute(
+            text(
+                "INSERT INTO outbox_delivery_attempts VALUES "
+                "(1, 1, 'succeeded'), (2, 1, 'succeeded'), (3, 1, 'succeeded')"
+            )
+        )
+
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 0
+
+    with engine.begin() as connection:
+        connection.execute(text("DELETE FROM outbox_delivery_attempts WHERE attempt_id IN (2, 3)"))
+    clock[0] = 210.0
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 0
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 0
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO outbox_delivery_attempts VALUES "
+                "(4, 1, 'succeeded'), (5, 1, 'succeeded')"
+            )
+        )
+    clock[0] = 220.0
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 2
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 2
+
+    clock[0] = 230.0
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 2
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 2
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO outbox_delivery_attempts "
+                "(attempt_id, event_id, status) VALUES (6, 1, 'succeeded')"
+            )
+        )
+    clock[0] = 240.0
+    operational_metrics.refresh_operational_metrics(
+        session_factory=factory,
+        engine=engine,
+        now=now,
+    )
+
+    assert _outcome_total(registry, "auris_callback_outcomes_total", "success") == 3
+    assert _outcome_total(registry, "auris_worker_processing_total", "success") == 3
 
 
 def test_metrics_collection_reports_failure_when_outcome_ledger_cannot_be_read() -> None:

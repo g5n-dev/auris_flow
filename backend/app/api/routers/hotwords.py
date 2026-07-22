@@ -54,6 +54,7 @@ from app.services.idempotency_service import (
     save_idempotency_result,
 )
 from app.services.label_closed_loop_service import create_label_badcase
+from app.services.run_service import public_run_response
 
 router = APIRouter(tags=["hotwords"])
 
@@ -525,7 +526,7 @@ async def post_hotword_rollback(
     operation = f"hotword_pack_versions.rollback:{version_id}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
-        return replay
+        return public_run_response(replay, ctx)
     return _finish_write(
         session,
         ctx,

@@ -1,13 +1,21 @@
 from __future__ import annotations
 
 import re
+from collections.abc import AsyncIterator
+from io import BytesIO
 from typing import Any
+from urllib.error import HTTPError, URLError
 
 from fastapi import APIRouter, Request
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select
+from starlette.concurrency import run_in_threadpool
+from starlette.types import Receive, Scope, Send
 
 from app.api.deps import ContextDep, PaginationDep, SessionDep, SignedCompletionContextDep
+from app.core.config import get_settings
 from app.core.errors import ApiError
+from app.core.http_headers import content_disposition_header
 from app.core.project_membership import (
     conflicting_project_member_identities,
     duplicate_project_member_user_ids,
@@ -26,6 +34,8 @@ from app.schemas import (
     TaskRunRetryRequest,
     parse_payload,
 )
+from app.schemas.public_runs import ExportJob, PublicRunEnvelope
+from app.services.adapters import object_storage_client_for_provider
 from app.services.audit_service import record_audit
 from app.services.idempotency_service import (
     replay_or_conflict,
@@ -34,6 +44,7 @@ from app.services.idempotency_service import (
 )
 from app.services.knowledge_recall_service import recall_knowledge_index
 from app.services.outbox_service import enqueue_event
+from app.services.public_run_projection_service import public_run_projection
 from app.services.release_gate_service import (
     decide_release_gate,
     prepare_settings_publish,
@@ -48,12 +59,69 @@ from app.services.resource_service import (
     status_counts,
     upsert_idempotent_json_resource,
 )
-from app.services.run_service import complete_run_from_receipt, create_run, get_run, retry_run
+from app.services.run_service import (
+    complete_run_from_receipt,
+    create_run,
+    get_run,
+    retry_run,
+)
 from app.services.scene_profile_service import bind_active_scene_profile_lock
 
 router = APIRouter(tags=["generic"])
 
 SCENE_LOCK_EXEMPT_EXPORT_MODULES = frozenset({"tenants", "projects", "settings"})
+EXPORT_PUBLIC_FIELDS = frozenset(
+    {
+        "id",
+        "run_id",
+        "export_job_id",
+        "run_type",
+        "status",
+        "format",
+        "target",
+        "object_id",
+        "scene_profile_id",
+        "scene_profile_version_id",
+        "scene_profile_snapshot_sha256",
+        "scope",
+        "download_ref",
+        "trace_id",
+        "next_actions",
+    }
+)
+EXPORT_FORMAT_EXTENSIONS = {
+    "csv": "csv",
+    "json": "json",
+    "jsonl": "jsonl",
+    "parquet": "parquet",
+}
+EXPORT_MEDIA_TYPE_PATTERN = re.compile(
+    r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+/[!#$%&'*+.^_`|~0-9A-Za-z-]+"
+    r"(?: *; *[!-~][ -~]*)?$"
+)
+
+
+class _ExportObjectStreamTruncatedError(RuntimeError):
+    """Raised after headers are sent when object storage ends a stream early."""
+
+
+class _ExportStreamingResponse(StreamingResponse):
+    def __init__(
+        self,
+        content: AsyncIterator[bytes],
+        *,
+        upstream_stream: Any,
+        status_code: int,
+        headers: dict[str, str],
+    ) -> None:
+        super().__init__(content, status_code=status_code, headers=headers)
+        self.upstream_stream = upstream_stream
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            await run_in_threadpool(self.upstream_stream.close)
 
 
 def prepare_export_payload(session: SessionDep, ctx: ContextDep, payload: object) -> dict[str, Any]:
@@ -203,47 +271,475 @@ def knowledge_qdrant_collection(
     return KNOWLEDGE_QDRANT_COLLECTION
 
 
+def _strong_export_etag(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if normalized.startswith("W/"):
+        return None
+    if normalized.startswith('"') or normalized.endswith('"'):
+        if len(normalized) < 2 or not (normalized.startswith('"') and normalized.endswith('"')):
+            return None
+        normalized = normalized[1:-1]
+    if (
+        not normalized
+        or '"' in normalized
+        or any(ord(character) < 0x21 for character in normalized)
+    ):
+        return None
+    return normalized
+
+
+def _safe_export_content_type(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip()
+    if len(normalized) > 255 or EXPORT_MEDIA_TYPE_PATTERN.fullmatch(normalized) is None:
+        return None
+    return normalized
+
+
+def _export_locator(record: RunRecord) -> dict[str, Any] | None:
+    if record.status != "success":
+        return None
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    dispatch = payload.get("dispatch")
+    if not isinstance(dispatch, dict) or dispatch.get("adapter") != "object_storage":
+        return None
+    details = dispatch.get("details")
+    if not isinstance(details, dict):
+        return None
+    provider = details.get("provider")
+    bucket = details.get("bucket")
+    object_key = details.get("object_key")
+    etag = _strong_export_etag(details.get("etag"))
+    content_length = details.get("content_length")
+    content_type = _safe_export_content_type(
+        details.get("content_type") or payload.get("content_type")
+    )
+    if (
+        not isinstance(provider, str)
+        or not provider.strip()
+        or not isinstance(bucket, str)
+        or not bucket.strip()
+        or not isinstance(object_key, str)
+        or not isinstance(content_length, int)
+        or isinstance(content_length, bool)
+        or content_length <= 0
+        or etag is None
+        or content_type is None
+    ):
+        return None
+    expected_prefix = f"tenants/{record.tenant_id}/projects/{record.project_id}/"
+    key_parts = object_key.split("/")
+    if (
+        not object_key.startswith(expected_prefix)
+        or object_key.startswith("/")
+        or "\\" in object_key
+        or any(part in {"", ".", ".."} for part in key_parts)
+    ):
+        return None
+    settings = get_settings()
+    configured_provider = settings.object_storage_provider.strip().lower()
+    allowed_buckets = {
+        settings.object_storage_bucket.strip(),
+        *(
+            item.strip()
+            for item in settings.object_storage_allowed_buckets.split(",")
+            if item.strip()
+        ),
+    }
+    if provider.strip().lower() != configured_provider or bucket not in allowed_buckets:
+        return None
+    return {
+        "provider": provider.strip().lower(),
+        "bucket": bucket,
+        "object_key": object_key,
+        "etag": etag,
+        "content_length": content_length,
+        "content_type": content_type,
+    }
+
+
 def export_job_payload(record: RunRecord) -> dict[str, Any]:
-    payload = record.payload or {}
-    dispatch = payload.get("dispatch") if isinstance(payload.get("dispatch"), dict) else None
-    details = dispatch.get("details", {}) if isinstance(dispatch, dict) else {}
-    storage_object_id = details.get("storage_object_id")
-    object_uri = details.get("object_uri")
-    content_type = details.get("content_type") or payload.get("content_type", "application/json")
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    dispatch = payload.get("dispatch")
+    has_reservation = isinstance(dispatch, dict) and dispatch.get("adapter") == "object_storage"
+    locator = _export_locator(record)
     download_ref = None
-    if dispatch and dispatch.get("adapter") == "object_storage":
+    if has_reservation:
         download_ref = {
-            "kind": "object_storage_reference",
-            "status": "ready" if record.status == "success" and object_uri else "reserved",
-            "storage_object_id": storage_object_id,
-            "object_uri": object_uri,
-            "content_type": content_type,
+            "kind": "bff_download",
+            "status": (
+                "ready"
+                if locator is not None
+                else "unavailable"
+                if record.status == "success"
+                else "reserved"
+            ),
+            "href": (f"/api/v1/exports/{record.run_id}/download" if locator is not None else None),
+            "content_type": (
+                locator["content_type"]
+                if locator is not None
+                else payload.get("content_type", "application/json")
+            ),
             "expires_at": payload.get("expires_at"),
         }
 
-    return {
+    raw_scope = payload.get("scope")
+    scope_source = raw_scope if isinstance(raw_scope, dict) else payload
+    raw_filter = scope_source.get("filter")
+    public_filter = (
+        {
+            str(key): value
+            for key, value in raw_filter.items()
+            if isinstance(key, str)
+            and (
+                isinstance(value, str | int | float | bool)
+                or (
+                    isinstance(value, list)
+                    and all(isinstance(item, str | int | float | bool) for item in value)
+                )
+            )
+        }
+        if isinstance(raw_filter, dict)
+        else None
+    )
+    scope = {
+        field: scope_source.get(field) if isinstance(scope_source.get(field), str) else None
+        for field in ("target", "object_id", "module_key", "active_tab")
+    }
+    scope["filter"] = public_filter
+    raw_next_actions = payload.get("next_actions")
+    next_actions = (
+        [
+            {
+                field: action[field]
+                for field in ("key", "label", "code", "type", "href", "route", "available_at")
+                if isinstance(action.get(field), str)
+            }
+            for action in raw_next_actions
+            if isinstance(action, dict)
+            and isinstance(action.get("key"), str)
+            and isinstance(action.get("label"), str)
+        ]
+        if isinstance(raw_next_actions, list)
+        else []
+    )
+    projection = {
         "id": record.run_id,
         "run_id": record.run_id,
         "export_job_id": record.run_id,
         "run_type": record.run_type,
         "status": record.status,
-        "format": payload.get("format", "jsonl"),
-        "target": payload.get("target"),
-        "object_id": payload.get("object_id"),
-        "scope": payload.get("scope")
-        or {
-            "target": payload.get("target"),
-            "object_id": payload.get("object_id"),
-            "module_key": payload.get("module_key"),
-            "active_tab": payload.get("active_tab"),
-            "filter": payload.get("filter"),
-        },
-        "storage_object_id": storage_object_id,
+        "format": payload.get("format") if isinstance(payload.get("format"), str) else "jsonl",
+        "target": payload.get("target") if isinstance(payload.get("target"), str) else None,
+        "object_id": (
+            payload.get("object_id") if isinstance(payload.get("object_id"), str) else None
+        ),
+        "scope": scope,
         "download_ref": download_ref,
         "trace_id": record.trace_id,
-        "dispatch": dispatch,
-        "next_actions": payload.get("next_actions", []),
+        "next_actions": next_actions,
     }
+    for scene_field in (
+        "scene_profile_id",
+        "scene_profile_version_id",
+        "scene_profile_snapshot_sha256",
+    ):
+        if isinstance(payload.get(scene_field), str):
+            projection[scene_field] = payload[scene_field]
+    return public_run_projection(
+        projection,
+        allowed_fields=EXPORT_PUBLIC_FIELDS,
+        field_name="export_job",
+    )
+
+
+def _scoped_export_record(session: SessionDep, ctx: ContextDep, run_id: str) -> RunRecord:
+    # Exports can contain a snapshot of otherwise sensitive project resources.
+    # Creation is project-admin-only, so reads and byte streaming must preserve
+    # that authority boundary instead of treating possession of a run ID as a
+    # download capability.
+    require_any_role(ctx, ("project_admin",), "exports.read")
+    record = session.get(RunRecord, run_id)
+    if (
+        record is None
+        or record.run_type != "export"
+        or record.tenant_id != ctx.tenant_id
+        or record.project_id != ctx.project_id
+    ):
+        raise ApiError("NOT_FOUND", f"导出任务不存在：{run_id}", 404)
+    return record
+
+
+def _parse_export_range(value: str | None, total: int) -> tuple[int, int, bool] | None:
+    if total <= 0:
+        return None
+    if not value:
+        return 0, total - 1, False
+    if not value.startswith("bytes=") or "," in value:
+        return None
+    start_raw, separator, end_raw = value.removeprefix("bytes=").partition("-")
+    if separator != "-":
+        return None
+    try:
+        if start_raw == "":
+            suffix = int(end_raw)
+            if suffix <= 0:
+                return None
+            start = max(total - suffix, 0)
+            end = total - 1
+        else:
+            start = int(start_raw)
+            end = int(end_raw) if end_raw else total - 1
+    except ValueError:
+        return None
+    if start < 0 or end < start or start >= total:
+        return None
+    return start, min(end, total - 1), True
+
+
+def _export_etag_header(value: str) -> str:
+    return f'"{value}"'
+
+
+def _close_export_result(result: dict[str, Any] | None) -> None:
+    if not isinstance(result, dict):
+        return
+    stream = result.get("stream")
+    if stream is not None and hasattr(stream, "close"):
+        stream.close()
+
+
+def _export_response_headers(
+    record: RunRecord,
+    locator: dict[str, Any],
+    *,
+    content_length: int,
+) -> dict[str, str]:
+    extension = EXPORT_FORMAT_EXTENSIONS.get(str(record.payload.get("format") or "").lower())
+    filename_component = re.sub(r"[^A-Za-z0-9._-]+", "-", record.run_id)
+    filename_component = filename_component.strip(".-")[:96].rstrip(".-") or "artifact"
+    filename = f"export-{filename_component}.{extension or 'bin'}"
+    return {
+        "Accept-Ranges": "bytes",
+        "Content-Type": str(locator["content_type"]),
+        "Content-Length": str(content_length),
+        "Content-Disposition": content_disposition_header(
+            "attachment",
+            filename,
+            fallback="export-artifact.bin",
+        ),
+        "ETag": _export_etag_header(str(locator["etag"])),
+        "Cache-Control": "private, no-store",
+        "Vary": "Range, Authorization, X-Tenant-Id, X-Project-Id",
+        "X-Content-Type-Options": "nosniff",
+    }
+
+
+def _stream_export_download(
+    record: RunRecord,
+    request: Request,
+    *,
+    head_only: bool,
+) -> Response:
+    locator = _export_locator(record)
+    if locator is None:
+        raise ApiError(
+            "EXPORT_DOWNLOAD_NOT_READY",
+            "导出对象尚未形成可验证的 BFF 下载引用",
+            409,
+            retryable=record.status != "success",
+        )
+    total = int(locator["content_length"])
+    range_header = request.headers.get("range")
+    parsed = _parse_export_range(range_header, total)
+    if parsed is None:
+        return Response(
+            status_code=416,
+            headers={
+                "Accept-Ranges": "bytes",
+                "Content-Range": f"bytes */{total}",
+                "Cache-Control": "private, no-store",
+                "Vary": "Range, Authorization, X-Tenant-Id, X-Project-Id",
+            },
+        )
+    start, end, partial = parsed
+    expected_length = end - start + 1 if partial else total
+    headers = _export_response_headers(
+        record,
+        locator,
+        content_length=expected_length,
+    )
+    if partial:
+        headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+
+    result: dict[str, Any] | None = None
+    try:
+        client = object_storage_client_for_provider(str(locator["provider"]))
+        if not client.allows_bucket(str(locator["bucket"])):
+            raise ApiError(
+                "EXPORT_DOWNLOAD_NOT_READY",
+                "导出对象不在服务端允许的存储范围内",
+                409,
+                retryable=False,
+            )
+        if head_only:
+            result = client.head_object(
+                str(locator["bucket"]),
+                str(locator["object_key"]),
+                if_match=_export_etag_header(str(locator["etag"])),
+            )
+        else:
+            open_object = getattr(client, "open_object", None)
+            if not callable(open_object):
+                raise ApiError(
+                    "EXPORT_DOWNLOAD_UNSUPPORTED",
+                    "对象存储 Provider 不支持安全流式下载",
+                    502,
+                    retryable=True,
+                )
+            result = open_object(
+                str(locator["bucket"]),
+                str(locator["object_key"]),
+                byte_range=range_header if partial else None,
+                if_match=_export_etag_header(str(locator["etag"])),
+            )
+    except HTTPError as exc:
+        if exc.fp is not None:
+            exc.close()
+        if exc.code == 404:
+            raise ApiError("EXPORT_OBJECT_NOT_FOUND", "导出对象不存在", 404) from exc
+        if exc.code == 412:
+            raise ApiError(
+                "EXPORT_OBJECT_VERSION_CHANGED",
+                "导出对象版本已变化，必须重新生成导出任务",
+                412,
+                retryable=False,
+            ) from exc
+        if exc.code == 416:
+            return Response(
+                status_code=416,
+                headers={
+                    "Accept-Ranges": "bytes",
+                    "Content-Range": f"bytes */{total}",
+                    "Cache-Control": "private, no-store",
+                },
+            )
+        raise ApiError(
+            "EXPORT_OBJECT_FETCH_FAILED",
+            "读取导出对象失败",
+            502,
+            retryable=True,
+        ) from exc
+    except ApiError:
+        raise
+    except (OSError, URLError, TimeoutError, ValueError, TypeError) as exc:
+        raise ApiError(
+            "EXPORT_OBJECT_FETCH_FAILED",
+            "读取导出对象失败",
+            502,
+            retryable=True,
+        ) from exc
+
+    if not isinstance(result, dict):
+        raise ApiError("EXPORT_OBJECT_INVALID", "导出对象响应无效", 502, retryable=True)
+    try:
+        upstream_status = int(result.get("status") or 0)
+    except (TypeError, ValueError) as exc:
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_INVALID",
+            "对象存储返回了无效的状态元数据",
+            502,
+            retryable=True,
+        ) from exc
+    expected_status = 206 if partial and not head_only else 200
+    if head_only and partial:
+        # A conditional HEAD validates the complete immutable object. The BFF
+        # still returns Range-parity headers/status to its caller.
+        expected_status = 200
+    if upstream_status != expected_status:
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_RANGE_INVALID",
+            "对象存储返回了不符合下载语义的状态",
+            502,
+            retryable=True,
+        )
+    upstream_etag = _strong_export_etag(result.get("etag"))
+    if upstream_etag != locator["etag"]:
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_VERSION_CHANGED",
+            "导出对象版本已变化，必须重新生成导出任务",
+            412,
+            retryable=False,
+        )
+    if result.get("content_type") != locator["content_type"]:
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_CONTENT_TYPE_MISMATCH",
+            "对象存储返回的导出对象类型不一致",
+            502,
+            retryable=True,
+        )
+    upstream_length = result.get("content_length")
+    expected_upstream_length = total if head_only else expected_length
+    if str(upstream_length or "") != str(expected_upstream_length):
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_SIZE_MISMATCH",
+            "对象存储返回的导出对象长度不一致",
+            502,
+            retryable=True,
+        )
+    if not head_only and partial and result.get("content_range") != headers["Content-Range"]:
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_RANGE_INVALID",
+            "对象存储返回的导出对象区间不一致",
+            502,
+            retryable=True,
+        )
+    if not head_only and not partial and result.get("content_range") not in (None, ""):
+        _close_export_result(result)
+        raise ApiError(
+            "EXPORT_OBJECT_RANGE_INVALID",
+            "对象存储为完整下载返回了意外的区间元数据",
+            502,
+            retryable=True,
+        )
+    if head_only:
+        _close_export_result(result)
+        return Response(status_code=206 if partial else 200, headers=headers)
+
+    stream = result.get("stream")
+    if stream is None:
+        body = result.get("body")
+        if isinstance(body, bytes):
+            stream = BytesIO(body)
+            result["stream"] = stream
+    if stream is None or not hasattr(stream, "read") or not hasattr(stream, "close"):
+        _close_export_result(result)
+        raise ApiError("EXPORT_OBJECT_INVALID", "导出对象响应无效", 502, retryable=True)
+
+    async def iter_export() -> AsyncIterator[bytes]:
+        remaining = expected_length
+        while remaining > 0:
+            chunk = await run_in_threadpool(stream.read, min(64 * 1024, remaining))
+            if not chunk or len(chunk) > remaining:
+                raise _ExportObjectStreamTruncatedError("对象存储导出流长度与已验证元数据不一致")
+            remaining -= len(chunk)
+            yield chunk
+
+    return _ExportStreamingResponse(
+        iter_export(),
+        upstream_stream=stream,
+        status_code=206 if partial else 200,
+        headers=headers,
+    )
 
 
 def knowledge_qdrant_payload(
@@ -1102,11 +1598,16 @@ async def patch_work_items_by_id(id: str, request: Request, session: SessionDep,
     return await patch_idempotent_json_resource(session, ctx, request, "work_items", id)
 
 
-@router.post("/exports", status_code=202)
+@router.post(
+    "/exports",
+    status_code=202,
+    response_model=PublicRunEnvelope[ExportJob],
+    response_model_exclude_unset=True,
+)
 async def post_exports(request: Request, session: SessionDep, ctx: ContextDep):
     require_any_role(ctx, ("project_admin",), "exports.create")
     body = prepare_export_payload(session, ctx, await request.json())
-    return await create_run(
+    response = await create_run(
         session,
         ctx,
         request,
@@ -1115,22 +1616,56 @@ async def post_exports(request: Request, session: SessionDep, ctx: ContextDep):
         payload=body,
         status="pending",
     )
+    data = response.get("data")
+    run_id = data.get("run_id") if isinstance(data, dict) else None
+    if not isinstance(run_id, str):
+        raise ApiError("EXPORT_RESPONSE_INVALID", "导出任务缺少运行标识", 500)
+    return {**response, "data": export_job_payload(_scoped_export_record(session, ctx, run_id))}
 
 
-@router.get("/exports/{id}")
+@router.get(
+    "/exports/{id}",
+    response_model=PublicRunEnvelope[ExportJob],
+    response_model_exclude_unset=True,
+)
 def get_exports_by_id(id: str, session: SessionDep, ctx: ContextDep):
-    record = session.get(RunRecord, id)
-    if (
-        not record
-        or record.run_type != "export"
-        or record.tenant_id != ctx.tenant_id
-        or record.project_id != ctx.project_id
-    ):
-        raise ApiError("NOT_FOUND", f"导出任务不存在：{id}", 404)
+    record = _scoped_export_record(session, ctx, id)
     return envelope(export_job_payload(record), ctx)
 
 
-@router.post("/exports/{id}/completion-receipts")
+@router.get("/exports/{id}/download")
+def get_exports_by_id_download(
+    id: str,
+    request: Request,
+    session: SessionDep,
+    ctx: ContextDep,
+):
+    return _stream_export_download(
+        _scoped_export_record(session, ctx, id),
+        request,
+        head_only=False,
+    )
+
+
+@router.head("/exports/{id}/download")
+def head_exports_by_id_download(
+    id: str,
+    request: Request,
+    session: SessionDep,
+    ctx: ContextDep,
+):
+    return _stream_export_download(
+        _scoped_export_record(session, ctx, id),
+        request,
+        head_only=True,
+    )
+
+
+@router.post(
+    "/exports/{id}/completion-receipts",
+    response_model=PublicRunEnvelope[ExportJob],
+    response_model_exclude_unset=True,
+)
 async def post_exports_by_id_completion_receipts(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
 ):

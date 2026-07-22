@@ -224,6 +224,9 @@ def test_real_dagster_launch_failure_never_exposes_graphql_stack() -> None:
             "tenant_id": "aurora_auto",
             "project_id": "sales_qa",
             "trace_id": "trace-stack-guard",
+            "event_type": "task_run.requested",
+            "dispatch_idempotency_key": "outbox:task-run-stack-guard",
+            "outbox_fencing_token": "701:1",
         }
     )
 
@@ -252,6 +255,9 @@ def test_real_dagster_network_failure_never_exposes_url_or_exception() -> None:
             "tenant_id": "aurora_auto",
             "project_id": "sales_qa",
             "trace_id": "trace-network-guard",
+            "event_type": "task_run.requested",
+            "dispatch_idempotency_key": "outbox:task-run-network-guard",
+            "outbox_fencing_token": "702:1",
         }
     )
 

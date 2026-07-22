@@ -114,9 +114,15 @@ def test_task_run_uses_server_generated_id_and_control_columns(client, auth_head
     assert data["deadline_at"] is not None
     deadline_at = datetime.fromisoformat(data["deadline_at"])
     assert 60 <= (deadline_at - datetime.now(UTC)).total_seconds() <= 7 * 24 * 60 * 60
-    assert data["next_status_sync_at"] is None
-    assert data["monitor_generation"] == 0
-    assert data["engine_status"] is None
+    for internal_field in (
+        "next_status_sync_at",
+        "monitor_generation",
+        "engine_status",
+        "engine_status_observed_at",
+    ):
+        assert internal_field not in data
+    assert data["tenant_id"] == "aurora_auto"
+    assert data["project_id"] == "sales_qa"
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
         assert run is not None
@@ -247,6 +253,81 @@ def test_task_run_cancellation_requires_execution_role(client, auth_headers) -> 
         source = session.get(RunRecord, run_id)
         assert source is not None
         assert source.status == "submitted"
+
+
+def test_run_retry_entry_role_does_not_disclose_existence_or_status(
+    client,
+    auth_headers,
+) -> None:
+    with SessionLocal() as session:
+        for run_id, status in (
+            ("task_run_retry_hidden_failed", "failed"),
+            ("task_run_retry_hidden_pending", "pending"),
+        ):
+            session.add(
+                RunRecord(
+                    run_id=run_id,
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    run_type="task_run",
+                    status=status,
+                    trace_id=f"trace_{run_id}",
+                    payload={
+                        "run_id": run_id,
+                        "status": status,
+                        "trace_id": f"trace_{run_id}",
+                        "affected_objects": [],
+                        "next_actions": [],
+                    },
+                )
+            )
+        session.commit()
+
+    denials = []
+    for run_id in (
+        "task_run_retry_hidden_failed",
+        "task_run_retry_hidden_pending",
+        "task_run_retry_hidden_missing",
+    ):
+        response = client.post(
+            f"/api/v1/task-runs/{run_id}/retries",
+            json={"reason": "must not reveal state"},
+            headers={
+                **auth_headers,
+                "Authorization": "Bearer annotator-b-token",
+                "Idempotency-Key": f"retry-hidden-{run_id}",
+            },
+        )
+        assert response.status_code == 403, response.text
+        body = response.json()
+        assert body["error"]["code"] == "FORBIDDEN"
+        denials.append(
+            (
+                body["error"]["code"],
+                body["error"]["message"],
+                body["error"].get("details"),
+            )
+        )
+
+    assert denials[0] == denials[1] == denials[2]
+
+    for run_id in (
+        "task_run_retry_hidden_failed",
+        "task_run_retry_hidden_pending",
+        "task_run_retry_hidden_missing",
+    ):
+        response = client.post(
+            f"/api/v1/task-runs/{run_id}/retries",
+            json={"reason": "must hide unauthorized run type"},
+            headers={
+                **auth_headers,
+                "Authorization": "Bearer annotator-token",
+                "Idempotency-Key": f"retry-review-hidden-{run_id}",
+            },
+        )
+        assert response.status_code == 404, response.text
+        assert response.json()["error"]["code"] == "NOT_FOUND"
+        assert "状态" not in response.json()["error"]["message"]
 
 
 def test_dagster_success_status_sync_never_fabricates_business_success(

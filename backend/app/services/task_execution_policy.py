@@ -18,6 +18,7 @@ HOTWORD_RUN_OVERRIDE_KEYS = {
     "hotword_pack_version_id",
     "provider",
     "provider_ref",
+    "model_version",
     "language",
 }
 HOTWORD_PUBLISH_LINEAGE_FIELDS = frozenset(
@@ -25,6 +26,7 @@ HOTWORD_PUBLISH_LINEAGE_FIELDS = frozenset(
         "task_version_id",
         "hotword_pack_version_id",
         "provider",
+        "model_version",
         "language",
         "execution_mode",
         "source",
@@ -124,12 +126,25 @@ def _audio_binding(data: dict[str, Any]) -> dict[str, Any]:
             409,
             details=[{"legacy_refs": sorted(legacy_refs)}],
         )
+    model_versions = {
+        str(value).strip()
+        for value in (data.get("model_version"), audio_data.get("model_version"))
+        if isinstance(value, str) and value.strip()
+    }
+    if len(model_versions) > 1:
+        raise ApiError(
+            "TASK_MODEL_VERSION_CONFLICT",
+            "TaskVersion 内存在多个不一致的模型版本绑定",
+            409,
+            details=[{"model_versions": sorted(model_versions)}],
+        )
     return {
         "hotword_pack_version_id": version_id,
         "provider": data.get("provider")
         or audio_data.get("provider")
         or audio_data.get("provider_ref")
         or "auris-audio-stack",
+        "model_version": next(iter(model_versions), None),
         "language": data.get("language") or audio_data.get("language") or "zh-CN",
         "execution_mode": data.get("execution_mode")
         or audio_data.get("execution_mode")
@@ -183,7 +198,13 @@ def prepare_task_version_write(
         if isinstance(current_audio, dict) and isinstance(payload_audio, dict):
             attempted_changes.extend(
                 f"audio_intelligence.{field}"
-                for field in ("hotword_pack_version_id", "provider", "language", "execution_mode")
+                for field in (
+                    "hotword_pack_version_id",
+                    "provider",
+                    "model_version",
+                    "language",
+                    "execution_mode",
+                )
                 if field in payload_audio and payload_audio.get(field) != current_audio.get(field)
             )
         if attempted_changes:
@@ -319,6 +340,7 @@ def validate_task_version_publish_binding(
             "root_trace_id": version.root_trace_id,
             "hotword_pack_version_id": version.version_id,
             "provider": version.compiled_provider,
+            "model_version": (version.payload or {}).get("task_model_version"),
             "language": binding["language"],
             "execution_mode": "production",
         }
@@ -333,7 +355,13 @@ def validate_task_version_publish_binding(
                     if field == "task_version_id"
                     else binding.get(field)
                     if field
-                    in {"hotword_pack_version_id", "provider", "language", "execution_mode"}
+                    in {
+                        "hotword_pack_version_id",
+                        "provider",
+                        "model_version",
+                        "language",
+                        "execution_mode",
+                    }
                     else data.get(field)
                 ),
             }
@@ -343,7 +371,14 @@ def validate_task_version_publish_binding(
                 task_version_id
                 if field == "task_version_id"
                 else binding.get(field)
-                if field in {"hotword_pack_version_id", "provider", "language", "execution_mode"}
+                if field
+                in {
+                    "hotword_pack_version_id",
+                    "provider",
+                    "model_version",
+                    "language",
+                    "execution_mode",
+                }
                 else data.get(field)
             )
             != expected

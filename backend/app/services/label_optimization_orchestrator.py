@@ -29,6 +29,7 @@ from app.models import (
 )
 from app.services.audit_service import record_audit
 from app.services.outbox_service import enqueue_event
+from app.services.public_run_projection_service import public_run_projection
 
 TRIGGER_SCAN_COLLECTION = "label_optimization_trigger_scans"
 METRIC_BASELINE_COLLECTION = "label_optimization_metric_baselines"
@@ -48,6 +49,35 @@ TERMINAL_RUN_STATUSES = frozenset(
 )
 OVERRIDE_FEEDBACK_TYPES = frozenset(
     {"human-modified", "human_modified", "modified", "modified-accepted"}
+)
+LABEL_OPTIMIZATION_PUBLIC_FIELDS = frozenset(
+    {
+        "run_id",
+        "scan_id",
+        "status",
+        "stage",
+        "label_version_id",
+        "prompt_version_id",
+        "model_version",
+        "aggregation_policy_version_id",
+        "eval_dataset_version_id",
+        "locked_versions",
+        "trigger_kind",
+        "trigger_reasons",
+        "trigger_hash",
+        "triggered_at",
+        "metrics",
+        "metrics_source",
+        "metric_provenance",
+        "budget",
+        "blocked_reasons",
+        "next_action",
+        "next_actions",
+        "affected_objects",
+        "trace_id",
+        "created_at",
+        "updated_at",
+    }
 )
 
 
@@ -428,7 +458,7 @@ def _next_action(*, triggered: bool, blocked_reasons: list[str]) -> dict[str, st
 
 def _serialize_run(record: RunRecord) -> dict[str, Any]:
     payload = dict(record.payload or {})
-    return {
+    projection = {
         **payload,
         "run_id": record.run_id,
         "status": record.status,
@@ -437,6 +467,12 @@ def _serialize_run(record: RunRecord) -> dict[str, Any]:
         "created_at": _iso(record.created_at),
         "updated_at": _iso(record.updated_at),
     }
+    return public_run_projection(
+        projection,
+        allowed_fields=LABEL_OPTIMIZATION_PUBLIC_FIELDS,
+        forbidden_fields={"provider"},
+        field_name="label_optimization_run",
+    )
 
 
 def execute_trigger_scan(

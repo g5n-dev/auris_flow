@@ -3,12 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import math
 import os
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from http.client import HTTPException
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import Request as UrlRequest
 
 from fastapi import FastAPI, Request
@@ -70,6 +74,7 @@ query AurisReadinessWorkspace {
         daemonType
         required
         healthy
+        lastHeartbeatTime
       }
     }
   }
@@ -86,7 +91,10 @@ query AurisReadinessWorkspace {
 }
 """.strip()
 DAGSTER_READINESS_MAX_BYTES = 1_048_576
+DAGSTER_HEARTBEAT_MAX_AGE_SECONDS = 90.0
+DAGSTER_HEARTBEAT_FUTURE_SKEW_SECONDS = 5.0
 OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS = 0.25
+READINESS_MARKER_MAX_BYTES = 2 * 1024 * 1024
 
 
 @asynccontextmanager
@@ -383,6 +391,7 @@ def probe_dagster_workspace(url: str | None) -> str:
         return "not_ready"
     daemon_types: set[str] = set()
     required_daemons = 0
+    heartbeat_now = time.time()
     for daemon_status in daemon_statuses:
         if not isinstance(daemon_status, dict):
             return "not_ready"
@@ -401,6 +410,15 @@ def probe_dagster_workspace(url: str | None) -> str:
         if required:
             required_daemons += 1
             if healthy is not True:
+                return "not_ready"
+            last_heartbeat = daemon_status.get("lastHeartbeatTime")
+            if (
+                isinstance(last_heartbeat, bool)
+                or not isinstance(last_heartbeat, (int, float))
+                or not math.isfinite(float(last_heartbeat))
+                or float(last_heartbeat) < heartbeat_now - DAGSTER_HEARTBEAT_MAX_AGE_SECONDS
+                or float(last_heartbeat) > heartbeat_now + DAGSTER_HEARTBEAT_FUTURE_SKEW_SECONDS
+            ):
                 return "not_ready"
     if required_daemons == 0:
         return "not_ready"
@@ -452,13 +470,13 @@ def readyz() -> JSONResponse:
         if strict_mode:
             checks = {"auth"}
             if is_production_environment(settings.app_env):
-                checks.add("dagster")
+                checks.update({"dagster", "observability"})
             if configured and configured != "auto":
                 checks.update(item.strip() for item in configured.split(",") if item.strip())
                 return checks
             automatic = {"auth", "database", "redis", "object_storage", "qdrant"}
             if is_production_environment(settings.app_env):
-                automatic.add("dagster")
+                automatic.update({"dagster", "observability"})
             return automatic
         if configured and configured != "auto":
             return {item.strip() for item in configured.split(",") if item.strip()}
@@ -488,16 +506,72 @@ def readyz() -> JSONResponse:
         except Exception:
             return "not_ready"
 
-    def probe_http(url: str | None, path: str = "", headers: dict[str, str] | None = None) -> str:
+    def probe_http(
+        url: str | None,
+        path: str = "",
+        headers: dict[str, str] | None = None,
+        *,
+        required_token: bytes | None = None,
+        timeout_seconds: float = 0.25,
+    ) -> str:
         if not url:
             return "not_configured"
         target = f"{url.rstrip('/')}{path}"
         try:
             request = UrlRequest(target, method="GET", headers=headers or {})
-            with urlopen(request, timeout=0.25) as response:
-                return "ok" if 200 <= response.status < 300 else "not_ready"
-        except (OSError, URLError, ValueError):
+            with urlopen(request, timeout=timeout_seconds) as response:
+                if not 200 <= response.status < 300:
+                    return "not_ready"
+                if required_token is not None:
+                    body = response.read(READINESS_MARKER_MAX_BYTES + 1)
+                    if len(body) > READINESS_MARKER_MAX_BYTES or required_token not in body:
+                        return "not_ready"
+                return "ok"
+        except (HTTPException, OSError, URLError, ValueError):
             return "not_ready"
+
+    def probe_observability() -> str:
+        runtime = getattr(app.state, "observability", None)
+        if (
+            not bool(getattr(runtime, "enabled", False))
+            or getattr(runtime, "error_code", None) is not None
+        ):
+            return "not_ready"
+        if probe_http(settings.observability_health_url) != "ok":
+            return "not_ready"
+
+        timeout_millis = min(
+            max(int(float(settings.otel_export_timeout_seconds) * 1000), 100),
+            1000,
+        )
+        pipeline_probe = getattr(runtime, "readiness_pipeline_is_live", None)
+        if not callable(pipeline_probe):
+            return "not_ready"
+
+        def marker_is_visible(trace_id: str) -> bool:
+            if not re.fullmatch(r"[0-9a-f]{32}", trace_id):
+                return False
+            parts = urlsplit(settings.observability_health_url)
+            parent_path = parts.path.rsplit("/", 1)[0].rstrip("/")
+            marker_url = urlunsplit(
+                (
+                    parts.scheme,
+                    parts.netloc,
+                    f"{parent_path}/traces/{trace_id}",
+                    "",
+                    "",
+                )
+            )
+            return probe_http(marker_url, timeout_seconds=0.75) == "ok"
+
+        return (
+            "ok"
+            if pipeline_probe(
+                timeout_millis=timeout_millis,
+                trace_visible=marker_is_visible,
+            )
+            else "not_ready"
+        )
 
     def probe_object_storage() -> str:
         try:
@@ -514,6 +588,7 @@ def readyz() -> JSONResponse:
     checks = {
         "auth": probe_auth(),
         "database": "unknown",
+        "observability": probe_observability(),
         "redis": probe_redis(settings.redis_url),
         "object_storage": probe_object_storage(),
         "qdrant": probe_http(

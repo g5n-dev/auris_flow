@@ -345,6 +345,11 @@ paths:
     get:
       tags: [traces]
       summary: 按 trace_id 查询跨模块调用链和审计摘要
+      description: >
+        返回当前 tenant/project 范围内的公开领域追踪投影，仅包含业务对象引用、领域状态、
+        重试摘要和可执行下一步；不返回适配器、调度、远端运行 ID、请求哈希、storage/tool
+        payload 或其他执行内部证据。原始证据仅保存在 scoped DB、Outbox 与 Audit 记录中，
+        并由离线 verifier 校验；本 API 不提供原始证据或内部排障入口。
       operationId: getTracesByTraceId
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -987,6 +992,10 @@ paths:
     post:
       tags: [task-runs]
       summary: 创建任务运行
+      description: >
+        创建执行引擎中立的领域运行。响应只包含 tenant/project、领域状态、状态历史、
+        trace、结果引用与可执行下一步；底层调度、引擎绑定、远端运行 ID、适配器和签名证据
+        仅保存在 scoped MySQL、Outbox、完成回执与审计记录中。
       operationId: postTaskRuns
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -1011,6 +1020,9 @@ paths:
     get:
       tags: [task-runs]
       summary: 任务运行列表
+      description: >
+        返回执行引擎中立的领域运行页。运行项位于 `data.items`，分页统计与游标位于
+        `meta.total`、`meta.limit` 和 `meta.next_cursor`。
       operationId: getTaskRuns
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -1034,6 +1046,9 @@ paths:
     get:
       tags: [task-runs]
       summary: 任务运行详情
+      description: >
+        返回执行引擎中立的任务运行投影；所有嵌套自由 JSON 同样递归移除底层调度、
+        引擎/适配器标识、远端运行 ID、签名和 secret 字段。
       operationId: getTaskRunsById
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -1042,7 +1057,11 @@ paths:
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
-          $ref: "#/components/responses/GenericObject"
+          description: 任务运行领域详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunDetailResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1403,7 +1422,8 @@ paths:
       summary: 获取通用异步运行详情
       description: >
         按当前租户和项目读取任意 run type 的统一运行投影，包括指标聚合、洞察报告、导出和任务运行。
-        非 `task_run` 运行必须使用此路径，不应回退到 `/task-runs/{id}`。
+        非 `task_run` 运行必须使用此路径，不应回退到 `/task-runs/{id}`。该投影执行引擎中立，
+        只暴露领域状态、状态历史、trace、结果引用和下一步，不回传底层调度与认证证据。
       operationId: getRunsById
       parameters:
         - $ref: "#/components/parameters/XTenantId"
@@ -1428,7 +1448,6 @@ paths:
                       status: submitted
                       metric_keys: [reception_conversion_quality, quote_consistency]
                       business_completion_required: true
-                      dispatch_state: submitted
                       affected_objects:
                         - type: metric_definition
                           id: reception_conversion_quality
@@ -3557,7 +3576,11 @@ paths:
         - $ref: "#/components/parameters/Status"
       responses:
         "200":
-          $ref: "#/components/responses/GenericList"
+          description: 已闭合的 Prompt 候选业务投影；递归移除运行和存储内部证据。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicPromptVersionCandidateListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -3573,7 +3596,11 @@ paths:
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
-          $ref: "#/components/responses/GenericObject"
+          description: 已闭合的 Prompt 候选业务投影；递归移除运行和存储内部证据。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicPromptVersionCandidateResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6353,7 +6380,11 @@ paths:
         $ref: "#/components/requestBodies/GenericRequest"
       responses:
         "202":
-          $ref: "#/components/responses/AcceptedRun"
+          description: 已闭合的导出任务领域投影；对象存储定位器只保留在服务端。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJobResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6369,7 +6400,68 @@ paths:
         - $ref: "#/components/parameters/Id"
       responses:
         "200":
-          $ref: "#/components/responses/GenericObject"
+          description: 已闭合的导出任务领域投影；不包含任何对象存储定位器。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJobResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /exports/{id}/download:
+    get:
+      tags: [exports]
+      summary: 下载已完成的导出对象
+      description: >
+        受鉴权且按 tenant/project 作用域读取的 BFF 下载路由。BFF 使用服务端保存的强 ETag
+        和对象版本定位器访问对象存储，支持单区间 Range；响应不会暴露上游对象定位器。
+      operationId: getExportsByIdDownload
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/AudioRange"
+      responses:
+        "200":
+          description: 完整导出对象
+          headers:
+            Accept-Ranges: {schema: {type: string, enum: [bytes]}}
+            Content-Length: {schema: {type: integer}}
+            ETag: {schema: {type: string}}
+          content:
+            application/octet-stream:
+              schema: {type: string, format: binary}
+        "206":
+          $ref: "#/components/responses/AudioPartialContent"
+        "416":
+          $ref: "#/components/responses/AudioRangeNotSatisfiable"
+        default:
+          $ref: "#/components/responses/Error"
+    head:
+      tags: [exports]
+      summary: 读取已完成导出对象元数据
+      description: >
+        与 GET 相同的鉴权、tenant/project 作用域、强 ETag 和 Range 语义；仅返回响应头，
+        不返回正文，也不会暴露上游对象定位器。
+      operationId: headExportsByIdDownload
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/AudioRange"
+      responses:
+        "200":
+          description: 完整导出对象元数据
+          headers:
+            Accept-Ranges: {schema: {type: string, enum: [bytes]}}
+            Content-Length: {schema: {type: integer}}
+            ETag: {schema: {type: string}}
+        "206":
+          $ref: "#/components/responses/AudioPartialContent"
+        "416":
+          $ref: "#/components/responses/AudioRangeNotSatisfiable"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6391,7 +6483,11 @@ paths:
         $ref: "#/components/requestBodies/RunCompletionReceipt"
       responses:
         "200":
-          $ref: "#/components/responses/GenericObject"
+          description: 已闭合的导出任务领域投影；不包含任何对象存储定位器。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ExportJobResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -8347,6 +8443,94 @@ components:
     RunAction:
       type: object
       additionalProperties: true
+      x-auris-recursively-omitted-fields: &public-run-recursive-omissions
+        - access_key
+        - access_token
+        - adapter
+        - adapter_dispatch
+        - adapter_mode
+        - authenticated_source
+        - auth
+        - authorization
+        - api_key
+        - bearer_token
+        - claim_token
+        - cookie
+        - cookies
+        - credential
+        - details
+        - dagster_run_draft
+        - dagster_run_id
+        - dispatch
+        - dispatch_idempotency_key
+        - dispatch_request
+        - dispatch_request_sha256
+        - dispatch_state
+        - engine_status
+        - engine_status_observed_at
+        - execution_contract
+        - execution_deadline_at
+        - execution_envelope
+        - endpoint
+        - external_id
+        - external_run_id
+        - graphql
+        - graphql_url
+        - headers
+        - hmac
+        - id_token
+        - input_object
+        - job_name
+        - monitor_generation
+        - next_status_sync_at
+        - observed_engine_status
+        - nonce
+        - password
+        - pipeline_name
+        - private_key
+        - protocol_receipt
+        - refresh_token
+        - remote_id
+        - remote_run_id
+        - repository_location_name
+        - repository_name
+        - request_headers
+        - response_typename
+        - run_config
+        - secret_ref
+        - signature
+        - signature_body_hash
+        - signature_key_id
+        - signature_mode
+        - signature_nonce
+        - signature_request_hash
+        - signed_at
+        - signed_url
+        - signing_key
+        - bucket
+        - download_url
+        - object_key
+        - object_uri
+        - storage_object_id
+        - token
+      x-auris-recursively-omitted-key-parts: &public-run-recursive-omission-key-parts
+        - adapter
+        - credential
+        - dagster
+        - details
+        - dispatch
+        - endpoint
+        - engine
+        - graphql
+        - headers
+        - hmac
+        - internal
+        - password
+        - protocol
+        - remote
+        - secret
+        - signature
+        - token
       required: [id, run_id, run_type, status, trace_id, affected_objects, next_actions]
       properties:
         id:
@@ -8354,6 +8538,10 @@ components:
         run_id:
           type: string
         run_type:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
           type: string
         status:
           $ref: "#/components/schemas/RunStatus"
@@ -8373,22 +8561,6 @@ components:
           format: date-time
           nullable: true
         deadline_at:
-          type: string
-          format: date-time
-          nullable: true
-        next_status_sync_at:
-          type: string
-          format: date-time
-          nullable: true
-          description: 服务端下一次执行引擎状态核对时间；调用方不可写。
-        monitor_generation:
-          type: integer
-          minimum: 0
-          description: 服务端自动状态核对单调代次；调用方不可写。
-        engine_status:
-          type: string
-          nullable: true
-        engine_status_observed_at:
           type: string
           format: date-time
           nullable: true
@@ -8419,6 +8591,20 @@ components:
             oneOf:
               - type: string
               - $ref: "#/components/schemas/InsightNextAction"
+        status_history:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [from, to, reason]
+            properties:
+              from:
+                type: string
+              to:
+                type: string
+              reason:
+                type: string
+                description: 执行引擎中立的领域状态迁移原因。
     RunActionResponse:
       type: object
       additionalProperties: false
@@ -8428,6 +8614,193 @@ components:
           $ref: "#/components/schemas/RunAction"
         meta:
           $ref: "#/components/schemas/ApiMeta"
+    PublicRunResponseMeta:
+      type: object
+      additionalProperties: false
+      required: [trace_id, request_id]
+      properties:
+        trace_id: {type: string}
+        request_id: {type: string}
+    PublicRunCollectionMeta:
+      type: object
+      additionalProperties: false
+      required: [trace_id, request_id, total, limit, next_cursor]
+      properties:
+        trace_id: {type: string}
+        request_id: {type: string}
+        total: {type: integer, minimum: 0}
+        limit: {type: integer, minimum: 1}
+        next_cursor: {type: string, nullable: true}
+    PublicRunNextAction:
+      type: object
+      additionalProperties: false
+      required: [key, label]
+      properties:
+        key: {type: string}
+        code: {type: string}
+        type: {type: string}
+        label: {type: string}
+        href: {type: string, nullable: true}
+        route: {type: string, nullable: true}
+        available_at: {type: string, format: date-time, nullable: true}
+    ExportDownloadRef:
+      type: object
+      additionalProperties: false
+      required: [kind, status, href, content_type, expires_at]
+      properties:
+        kind: {type: string, enum: [bff_download]}
+        status: {type: string, enum: [reserved, ready, unavailable]}
+        href:
+          type: string
+          nullable: true
+          description: 仅 ready 时提供同源、受鉴权的 BFF 下载路由。
+        content_type: {type: string}
+        expires_at: {type: string, format: date-time, nullable: true}
+    ExportScope:
+      type: object
+      additionalProperties: false
+      properties:
+        target: {type: string, nullable: true}
+        object_id: {type: string, nullable: true}
+        module_key: {type: string, nullable: true}
+        active_tab: {type: string, nullable: true}
+        filter:
+          type: object
+          nullable: true
+          description: 仅包含经过递归公共投影后的业务筛选条件。
+          additionalProperties:
+            oneOf:
+              - type: string
+              - type: number
+              - type: integer
+              - type: boolean
+              - type: array
+                items:
+                  oneOf:
+                    - type: string
+                    - type: number
+                    - type: integer
+                    - type: boolean
+    ExportJob:
+      type: object
+      additionalProperties: false
+      required: [id, run_id, export_job_id, run_type, status, format, trace_id, next_actions]
+      properties:
+        id: {type: string}
+        run_id: {type: string}
+        export_job_id: {type: string}
+        run_type: {type: string, enum: [export]}
+        status: {$ref: "#/components/schemas/RunStatus"}
+        format: {type: string}
+        target: {type: string, nullable: true}
+        object_id: {type: string, nullable: true}
+        scene_profile_id: {type: string, nullable: true}
+        scene_profile_version_id: {type: string, nullable: true}
+        scene_profile_snapshot_sha256:
+          allOf:
+            - $ref: "#/components/schemas/Sha256"
+          nullable: true
+        scope: {$ref: "#/components/schemas/ExportScope"}
+        download_ref:
+          allOf:
+            - $ref: "#/components/schemas/ExportDownloadRef"
+          nullable: true
+        trace_id: {type: string}
+        next_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicRunNextAction"
+    ExportJobResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: {$ref: "#/components/schemas/ExportJob"}
+        meta: {$ref: "#/components/schemas/PublicRunResponseMeta"}
+    PublicProjectionValue:
+      nullable: true
+      oneOf:
+        - type: string
+        - type: number
+        - type: integer
+        - type: boolean
+        - type: array
+          items: {$ref: "#/components/schemas/PublicProjectionValue"}
+        - type: object
+          additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}
+    PublicPromptVersionCandidate:
+      type: object
+      additionalProperties: false
+      required: [id, candidate_id, status, trace_id]
+      properties:
+        id: {type: string}
+        candidate_id: {type: string}
+        prompt_version_id: {type: string, nullable: true}
+        prompt_asset_id: {type: string, nullable: true}
+        parent_version_id: {type: string, nullable: true}
+        label_version_id: {type: string, nullable: true}
+        model_version: {type: string, nullable: true}
+        schema_version: {type: string, nullable: true}
+        status: {type: string}
+        template: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        output_schema: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        generation_params: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        structured_diff: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        source_badcase_refs: {type: array, items: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        content_sha256: {type: string, nullable: true}
+        source_run_id: {type: string, nullable: true}
+        source_run_type: {type: string, nullable: true}
+        agent_run_id: {type: string, nullable: true}
+        eval_run_id: {type: string, nullable: true}
+        feedback_task_id: {type: string, nullable: true}
+        base_prompt_version: {type: string, nullable: true}
+        target: {type: string, nullable: true}
+        badcase_refs: {type: array, items: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        result_ref: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        metrics: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        change_set_id: {type: string, nullable: true}
+        review_task_id: {type: string, nullable: true}
+        review_gate: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        write_policy: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        affected_objects: {type: array, items: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        summary: {type: string, nullable: true}
+        review_status: {type: string, nullable: true}
+        review_submission_ids: {type: array, items: {type: string}, nullable: true}
+        received_reviews: {type: integer, minimum: 0, nullable: true}
+        review_decision_id: {type: string, nullable: true}
+        review_resolution_source: {type: string, nullable: true}
+        adjudication_id: {type: string, nullable: true}
+        requested_field_diff: {type: object, additionalProperties: {$ref: "#/components/schemas/PublicProjectionValue"}, nullable: true}
+        reviewed_at: {type: string, format: date-time, nullable: true}
+        source_trace_id: {type: string, nullable: true}
+        action_trace_id: {type: string, nullable: true}
+        revision_of_candidate_id: {type: string, nullable: true}
+        source_review_decision_id: {type: string, nullable: true}
+        child_prompt_version_id: {type: string, nullable: true}
+        child_review_task_id: {type: string, nullable: true}
+        trace_id: {type: string}
+    PublicPromptVersionCandidateResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: {$ref: "#/components/schemas/PublicPromptVersionCandidate"}
+        meta: {$ref: "#/components/schemas/PublicRunResponseMeta"}
+    PublicPromptVersionCandidateListData:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: {$ref: "#/components/schemas/PublicPromptVersionCandidate"}
+    PublicPromptVersionCandidateListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data: {$ref: "#/components/schemas/PublicPromptVersionCandidateListData"}
+        meta: {$ref: "#/components/schemas/PublicRunCollectionMeta"}
     ObjectRef:
       type: object
       required: [object_type, object_id]
@@ -8464,30 +8837,27 @@ components:
           type: string
     RunSummary:
       type: object
+      additionalProperties: true
+      x-auris-recursively-omitted-fields: *public-run-recursive-omissions
+      x-auris-recursively-omitted-key-parts: *public-run-recursive-omission-key-parts
       properties:
         run_id:
           type: string
         run_type:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
           type: string
         status:
           $ref: "#/components/schemas/RunStatus"
         status_version:
           type: integer
           minimum: 1
-        engine_status:
-          type: string
-          nullable: true
         deadline_at:
           type: string
           format: date-time
           nullable: true
-        next_status_sync_at:
-          type: string
-          format: date-time
-          nullable: true
-        monitor_generation:
-          type: integer
-          minimum: 0
         finished_at:
           type: string
           format: date-time
@@ -8497,9 +8867,46 @@ components:
         created_at:
           type: string
           format: date-time
+    RunCompletionSummary:
+      type: object
+      additionalProperties: false
+      description: >
+        已确认业务结果的领域摘要。底层适配器、远端运行 ID、签名、认证材料、回执哈希和
+        执行来源仅作为 DB/Outbox/Audit 证据保存，不属于公开运行契约。
+      required: [completion_receipt_id, status]
+      properties:
+        completion_receipt_id:
+          type: string
+          description: 领域完成确认引用，不是执行引擎远端运行 ID。
+        status:
+          $ref: "#/components/schemas/RunStatus"
+        result_ref:
+          type: object
+          additionalProperties: true
+          description: 领域结果引用；其嵌套字段继续应用公开运行递归省略策略。
+        metrics:
+          type: object
+          additionalProperties: true
+          description: 领域完成指标；其嵌套字段继续应用公开运行递归省略策略。
+        note:
+          type: string
+          nullable: true
+        error_code:
+          type: string
+          nullable: true
+          description: 稳定、执行引擎中立的领域错误码。
+        retryable:
+          type: boolean
+          nullable: true
+        received_at:
+          type: string
+          format: date-time
+          nullable: true
     RunDetail:
       type: object
       additionalProperties: true
+      x-auris-recursively-omitted-fields: *public-run-recursive-omissions
+      x-auris-recursively-omitted-key-parts: *public-run-recursive-omission-key-parts
       required: [id, run_id, run_type, status, trace_id, affected_objects, next_actions]
       properties:
         id:
@@ -8507,6 +8914,10 @@ components:
         run_id:
           type: string
         run_type:
+          type: string
+        tenant_id:
+          type: string
+        project_id:
           type: string
         status:
           $ref: "#/components/schemas/RunStatus"
@@ -8529,22 +8940,6 @@ components:
           type: string
           format: date-time
           nullable: true
-        next_status_sync_at:
-          type: string
-          format: date-time
-          nullable: true
-          description: 服务端下一次执行引擎状态核对时间；调用方不可写。
-        monitor_generation:
-          type: integer
-          minimum: 0
-          description: 服务端自动状态核对单调代次；调用方不可写。
-        engine_status:
-          type: string
-          nullable: true
-        engine_status_observed_at:
-          type: string
-          format: date-time
-          nullable: true
         cancel_requested_at:
           type: string
           format: date-time
@@ -8563,8 +8958,6 @@ components:
           nullable: true
         business_completion_required:
           type: boolean
-        dispatch_state:
-          type: string
         affected_objects:
           type: array
           items:
@@ -8580,11 +8973,24 @@ components:
           type: object
           additionalProperties: true
         completion_receipt:
-          type: object
-          additionalProperties: true
+          $ref: "#/components/schemas/RunCompletionSummary"
         insight_completion:
           type: object
           additionalProperties: true
+        status_history:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [from, to, reason]
+            properties:
+              from:
+                type: string
+              to:
+                type: string
+              reason:
+                type: string
+                description: 执行引擎中立的领域状态迁移原因。
         trace_id:
           type: string
     RunDetailResponse:
@@ -8725,26 +9131,94 @@ components:
           type: string
     TraceSpan:
       type: object
-      required: [span_id, name, status, started_at]
+      additionalProperties: false
+      description: >
+        跨模块调用链中的领域投影节点。只允许下列标量引用与 `next_actions`；不得附带
+        storage/tool payload、调度请求、适配器响应、远端 ID 或请求哈希等自由 JSON。
+      required: [kind, id]
       properties:
-        span_id:
+        kind: {type: string}
+        id: {type: string}
+        action: {type: string, nullable: true}
+        agent_run_id: {type: string, nullable: true}
+        aggregate_id: {type: string, nullable: true}
+        aggregate_type: {type: string, nullable: true}
+        annotation_id: {type: string, nullable: true}
+        asset_key: {type: string, nullable: true}
+        attempt_count: {type: integer, minimum: 0, nullable: true}
+        attempt_id: {type: string, nullable: true}
+        attempt_number: {type: integer, minimum: 1, nullable: true}
+        audio_session_id: {type: string, nullable: true}
+        available_at: {type: string, format: date-time, nullable: true}
+        base_prompt_version: {type: string, nullable: true}
+        candidate_id: {type: string, nullable: true}
+        change_set_id: {type: string, nullable: true}
+        collection: {type: string, nullable: true}
+        completed_at: {type: string, format: date-time, nullable: true}
+        correlation_id: {type: string, nullable: true}
+        decision_id: {type: string, nullable: true}
+        decision_type: {type: string, nullable: true}
+        edge_id: {type: string, nullable: true}
+        effect_id: {type: string, nullable: true}
+        enrollment_id: {type: string, nullable: true}
+        error_code:
           type: string
-        parent_span_id:
-          type: string
-        name:
-          type: string
+          nullable: true
+          description: 稳定、执行引擎中立的领域错误码。
+        event_id: {type: string, nullable: true}
+        event_type: {type: string, nullable: true}
+        evidence_pack_id: {type: string, nullable: true}
+        gate_id: {type: string, nullable: true}
+        hit_rate: {type: number, nullable: true}
+        index_id: {type: string, nullable: true}
+        knowledge_effect_id: {type: string, nullable: true}
+        knowledge_gate_id: {type: string, nullable: true}
+        knowledge_index_id: {type: string, nullable: true}
+        knowledge_source_id: {type: string, nullable: true}
+        label_version_id: {type: string, nullable: true}
+        lineage_source: {type: string, nullable: true}
+        materialization_id: {type: string, nullable: true}
+        object_id: {type: string, nullable: true}
+        parent_trace_id: {type: string, nullable: true}
+        partition_key: {type: string, nullable: true}
+        processed_at: {type: string, format: date-time, nullable: true}
+        ref_id: {type: string, nullable: true}
+        ref_role: {type: string, nullable: true}
+        ref_type: {type: string, nullable: true}
+        request_id: {type: string, nullable: true}
+        retry_after_seconds: {type: integer, minimum: 0, nullable: true}
+        retryable: {type: boolean, nullable: true}
+        review_task_id: {type: string, nullable: true}
+        root_trace_id: {type: string, nullable: true}
+        run_id: {type: string, nullable: true}
+        run_type: {type: string, nullable: true}
+        score: {type: number, nullable: true}
+        source_asset_key: {type: string, nullable: true}
+        source_field: {type: string, nullable: true}
+        source_id: {type: string, nullable: true}
+        source_run_id: {type: string, nullable: true}
+        source_run_type: {type: string, nullable: true}
+        source_type: {type: string, nullable: true}
+        started_at: {type: string, format: date-time, nullable: true}
         status:
-          $ref: "#/components/schemas/RunStatus"
-        started_at:
           type: string
-          format: date-time
-        ended_at:
-          type: string
-          format: date-time
-        object_refs:
+          nullable: true
+          description: 对应领域对象的状态；不同 kind 可使用各自稳定状态集。
+        target_asset_key: {type: string, nullable: true}
+        tool_call_id: {type: string, nullable: true}
+        trace_ref_id: {type: string, nullable: true}
+        voiceprint_id: {type: string, nullable: true}
+        next_actions:
           type: array
           items:
-            $ref: "#/components/schemas/ObjectRef"
+            type: object
+            additionalProperties: false
+            required: [key, label]
+            properties:
+              key: {type: string}
+              label: {type: string}
+              route: {type: string, nullable: true}
+              available_at: {type: string, format: date-time, nullable: true}
     TraceProjection:
       type: object
       required: [trace_id, tenant_id, project_id, spans]
@@ -9184,15 +9658,24 @@ components:
       type: object
       additionalProperties: false
       maxProperties: 0
-    RunListResponse:
+    RunListData:
       type: object
+      additionalProperties: false
+      required: [items]
       properties:
-        data:
+        items:
           type: array
           items:
             $ref: "#/components/schemas/RunSummary"
+    RunListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/RunListData"
         meta:
-          $ref: "#/components/schemas/ApiMeta"
+          $ref: "#/components/schemas/InsightResponseMeta"
     AudioSessionListResponse:
       type: object
       properties:
@@ -12106,6 +12589,17 @@ components:
           default: model
         provider: {type: string, minLength: 1, maxLength: 64, default: internal}
         adapter: {type: string, minLength: 1, maxLength: 64, default: model-adapter}
+    PublicExtractionSourceBinding:
+      type: object
+      additionalProperties: false
+      required: [source_family]
+      description: 执行来源的领域血缘；不包含内部 provider/adapter 或网络定位器。
+      properties:
+        source_family: {type: string, minLength: 1, maxLength: 128}
+        source_type:
+          type: string
+          enum: [verified-business-document, deterministic-rule, model, llm, inferred]
+        correlation_group_id: {type: string}
     CreateLabelExtractionRunRequest:
       type: object
       additionalProperties: false
@@ -12585,11 +13079,14 @@ components:
 
     LabelExtractionRun:
       type: object
-      required: [extraction_run_id, label_version_id, prompt_version_id, model_version, schema_version, aggregation_policy_version_id, source_bindings, status, trace_id]
+      additionalProperties: false
+      required: [extraction_run_id, tenant_id, project_id, label_version_id, prompt_version_id, model_version, schema_version, aggregation_policy_version_id, source_bindings, status, trace_id]
       properties:
         id: {type: string}
         run_id: {type: string}
         extraction_run_id: {type: string}
+        tenant_id: {type: string}
+        project_id: {type: string}
         label_version_id: {type: string}
         prompt_version_id: {type: string}
         model_version: {type: string}
@@ -12598,11 +13095,7 @@ components:
         source_bindings:
           type: array
           items:
-            allOf:
-              - $ref: "#/components/schemas/ExtractionSourceBinding"
-              - type: object
-                properties:
-                  correlation_group_id: {type: string}
+            $ref: "#/components/schemas/PublicExtractionSourceBinding"
         manifest_sha256:
           allOf:
             - $ref: "#/components/schemas/Sha256"
@@ -12615,30 +13108,28 @@ components:
           type: array
           items: {type: string}
         status: {type: string, enum: [queued, pending, running, submitted, materializing, materialized, failed, blocked]}
-        stage:
-          $ref: "#/components/schemas/LabelClosedLoopStage"
         subject_scope: {type: string}
         subject_refs:
           type: array
-          items: {type: object, additionalProperties: true}
+          items:
+            $ref: "#/components/schemas/ExtractionSubjectReference"
         input_sha256:
           $ref: "#/components/schemas/Sha256"
         observation_count: {type: integer, minimum: 0}
-        locked_versions:
-          type: object
-          additionalProperties: {type: string}
-        dispatch:
+        release_head_lock:
           type: object
           nullable: true
-          additionalProperties: true
-        blocked_reasons:
-          type: array
-          items:
-            $ref: "#/components/schemas/BlockedReason"
+          additionalProperties: false
+          required: [environment, generation, active_deployment_id, active_bundle_sha256]
+          properties:
+            environment: {type: string}
+            generation: {type: integer, minimum: 1}
+            active_deployment_id: {type: string}
+            active_bundle_sha256: {$ref: "#/components/schemas/Sha256"}
         next_actions:
           type: array
           items:
-            $ref: "#/components/schemas/NextAction"
+            $ref: "#/components/schemas/PublicRunNextAction"
         trace_id: {type: string}
         created_at: {type: string, format: date-time}
     LabelObservation:
@@ -13145,12 +13636,13 @@ components:
 
     LabelExtractionRunResponse:
       type: object
+      additionalProperties: false
       required: [data, meta]
       properties:
         data:
           $ref: "#/components/schemas/LabelExtractionRun"
         meta:
-          $ref: "#/components/schemas/ApiMeta"
+          $ref: "#/components/schemas/PublicRunResponseMeta"
     LabelObservationResponse:
       type: object
       required: [data, meta]

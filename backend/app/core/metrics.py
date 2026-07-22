@@ -57,6 +57,23 @@ _TASK_RUN_DURATION_BUCKETS_SECONDS = (
     86400,
 )
 _TASK_RUN_DURATION_WINDOW = timedelta(hours=24)
+_OUTBOX_DELIVERY_DURATION_BUCKETS_SECONDS = (
+    1,
+    5,
+    15,
+    30,
+    60,
+    120,
+    300,
+    600,
+    1800,
+    3600,
+    7200,
+    14400,
+    86400,
+)
+_OUTBOX_DELIVERY_DURATION_WINDOW = timedelta(hours=24)
+_RECENT_DEAD_LETTER_WINDOW = timedelta(minutes=5)
 _OPERATIONAL_SNAPSHOT_TTL_SECONDS = 10.0
 _FAILED_OPERATIONAL_SNAPSHOT_TTL_SECONDS = 5.0
 _OPERATIONAL_SNAPSHOT_WAIT_SECONDS = 1.0
@@ -202,6 +219,12 @@ class AurisMetrics:
             "Current dead-letter outbox event count.",
             registry=self.registry,
         )
+        self.outbox_dead_letter_recent = Gauge(
+            "auris_outbox_dead_letter_recent",
+            "Dead-letter Outbox events whose authoritative processing timestamp is within "
+            "the trailing five minutes.",
+            registry=self.registry,
+        )
         self.outbox_retry_pending = Gauge(
             "auris_outbox_retry_pending",
             "Current pending outbox events which have consumed a dispatch or reconcile attempt.",
@@ -210,6 +233,25 @@ class AurisMetrics:
         self.outbox_oldest_pending_age = Gauge(
             "auris_outbox_oldest_pending_age_seconds",
             "Age in seconds of the oldest pending outbox event.",
+            registry=self.registry,
+        )
+        self.outbox_delivery_duration_window_bucket = Gauge(
+            "auris_outbox_delivery_duration_window_seconds_bucket",
+            "Cumulative delivery-duration buckets for successfully processed Outbox events "
+            "in the trailing 24 hours.",
+            ("le",),
+            registry=self.registry,
+        )
+        self.outbox_delivery_duration_window_count = Gauge(
+            "auris_outbox_delivery_duration_window_seconds_count",
+            "Successfully processed Outbox events with a valid creation-to-processing "
+            "duration in the trailing 24 hours.",
+            registry=self.registry,
+        )
+        self.outbox_delivery_duration_window_sum = Gauge(
+            "auris_outbox_delivery_duration_window_seconds_sum",
+            "Summed creation-to-processing duration for successfully processed Outbox "
+            "events in the trailing 24 hours.",
             registry=self.registry,
         )
         self.callback_outcomes = Counter(
@@ -325,6 +367,7 @@ class AurisMetrics:
             "dagster",
             "database",
             "object_storage",
+            "observability",
             "qdrant",
             "redis",
         }
@@ -420,6 +463,21 @@ class AurisMetrics:
                     )
                     or 0
                 )
+                query_observed_at = (
+                    observed_at.replace(tzinfo=None)
+                    if engine.dialect.name in {"mysql", "sqlite"}
+                    else observed_at
+                )
+                recent_dead_letter = int(
+                    session.scalar(
+                        text(
+                            "SELECT COUNT(*) FROM outbox_events "
+                            "WHERE status = 'dead_letter' AND processed_at >= :cutoff"
+                        ),
+                        {"cutoff": query_observed_at - _RECENT_DEAD_LETTER_WINDOW},
+                    )
+                    or 0
+                )
                 retry_pending = int(
                     session.scalar(
                         text(
@@ -437,9 +495,15 @@ class AurisMetrics:
                 )
             self.outbox_pending.set(pending)
             self.outbox_dead_letter.set(dead_letter)
+            self.outbox_dead_letter_recent.set(recent_dead_letter)
             self.outbox_retry_pending.set(retry_pending)
             age_seconds = max(0.0, (observed_at - oldest).total_seconds()) if oldest else 0.0
             self.outbox_oldest_pending_age.set(age_seconds)
+            outbox_delivery_metrics_collected = self._refresh_outbox_delivery_metrics(
+                session_factory,
+                engine=engine,
+                observed_at=observed_at,
+            )
             outcome_metrics_collected = self._refresh_outcome_counters(session_factory)
             task_run_metrics_collected = self._refresh_task_run_metrics(
                 session_factory,
@@ -447,7 +511,11 @@ class AurisMetrics:
                 observed_at=observed_at,
             )
             self._refresh_pool(engine)
-            succeeded = outcome_metrics_collected and task_run_metrics_collected
+            succeeded = (
+                outbox_delivery_metrics_collected
+                and outcome_metrics_collected
+                and task_run_metrics_collected
+            )
             self.collection_success.set(1 if succeeded else 0)
             return succeeded
         except Exception:  # noqa: BLE001 - a scrape failure must never affect the service.
@@ -464,6 +532,69 @@ class AurisMetrics:
             method = getattr(pool, method_name, None)
             if callable(method):
                 metric.set(max(0, int(method())))
+
+    def _refresh_outbox_delivery_metrics(
+        self,
+        session_factory: Callable[[], Session],
+        *,
+        engine: Engine,
+        observed_at: datetime,
+    ) -> bool:
+        query_observed_at = (
+            observed_at.replace(tzinfo=None)
+            if engine.dialect.name in {"mysql", "sqlite"}
+            else observed_at
+        )
+        try:
+            with session_factory() as session:
+                row = self._outbox_delivery_duration_row(
+                    session,
+                    dialect_name=engine.dialect.name,
+                    cutoff=query_observed_at - _OUTBOX_DELIVERY_DURATION_WINDOW,
+                )
+        except Exception:  # noqa: BLE001 - a partial metric view must fail closed.
+            return False
+
+        count = int(row[0])
+        duration_sum = max(0.0, float(row[1]))
+        self.outbox_delivery_duration_window_count.set(count)
+        self.outbox_delivery_duration_window_sum.set(duration_sum)
+        for index, upper_bound in enumerate(_OUTBOX_DELIVERY_DURATION_BUCKETS_SECONDS):
+            self.outbox_delivery_duration_window_bucket.labels(str(upper_bound)).set(
+                int(row[index + 2])
+            )
+        self.outbox_delivery_duration_window_bucket.labels("+Inf").set(count)
+        return True
+
+    @staticmethod
+    def _outbox_delivery_duration_row(
+        session: Session,
+        *,
+        dialect_name: str,
+        cutoff: datetime,
+    ) -> Any:
+        if dialect_name == "mysql":
+            duration_expression = "TIMESTAMPDIFF(MICROSECOND, created_at, processed_at) / 1000000.0"
+        elif dialect_name == "sqlite":
+            duration_expression = (
+                "ROUND((julianday(processed_at) - julianday(created_at)) * 86400.0, 3)"
+            )
+        else:
+            raise RuntimeError(f"unsupported operational metrics dialect: {dialect_name}")
+        buckets = ", ".join(
+            f"SUM(CASE WHEN duration_seconds <= {upper_bound} THEN 1 ELSE 0 END) AS bucket_{index}"
+            for index, upper_bound in enumerate(_OUTBOX_DELIVERY_DURATION_BUCKETS_SECONDS)
+        )
+        query = text(
+            "SELECT COUNT(*), COALESCE(SUM(duration_seconds), 0), "
+            f"{buckets} FROM ("
+            f"SELECT {duration_expression} AS duration_seconds "
+            "FROM outbox_events WHERE status = 'processed' "
+            "AND created_at IS NOT NULL AND processed_at IS NOT NULL "
+            "AND processed_at >= :cutoff"
+            ") AS outbox_delivery_durations WHERE duration_seconds >= 0"
+        )
+        return session.execute(query, {"cutoff": cutoff}).one()
 
     def _refresh_outcome_counters(self, session_factory: Callable[[], Session]) -> bool:
         try:
@@ -664,7 +795,10 @@ class AurisMetrics:
         current: dict[str, int],
     ) -> None:
         for outcome, count in current.items():
-            prior = previous.get(outcome, 0)
+            prior = previous.get(outcome)
+            if prior is None:
+                previous[outcome] = count
+                continue
             if count > prior:
                 counter.labels(outcome).inc(count - prior)
             previous[outcome] = count

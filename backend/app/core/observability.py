@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import hmac
 import re
+import secrets
+import time
+from collections import deque
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from threading import Lock
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit, urlunsplit
 
@@ -23,13 +28,31 @@ from opentelemetry.sdk.trace.export import (
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.sdk.trace.sampling import ParentBased, TraceIdRatioBased
-from opentelemetry.trace import Link, Span, SpanKind, Status, StatusCode
+from opentelemetry.sdk.trace.sampling import (
+    Decision,
+    ParentBased,
+    Sampler,
+    SamplingResult,
+    TraceIdRatioBased,
+)
+from opentelemetry.trace import (
+    Link,
+    NonRecordingSpan,
+    Span,
+    SpanContext,
+    SpanKind,
+    Status,
+    StatusCode,
+    TraceFlags,
+    TraceState,
+    set_span_in_context,
+)
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.util.types import AttributeValue
 from sqlalchemy.engine import Engine
 
 from app.core.redaction import redact_structured_value
+from app.core.secrets import is_production_environment
 
 _SENSITIVE_ATTRIBUTE_PARTS = (
     "authorization",
@@ -46,9 +69,30 @@ _SENSITIVE_ATTRIBUTE_PARTS = (
     "url.query",
 )
 _URL_ATTRIBUTE_KEYS = frozenset({"http.url", "url.full", "url.original"})
+_RAW_REQUEST_ATTRIBUTE_KEYS = frozenset(
+    {
+        "client.address",
+        "client.port",
+        "enduser.id",
+        "http.client_ip",
+        "http.target",
+        "http.user_agent",
+        "net.peer.ip",
+        "net.peer.port",
+        "network.peer.address",
+        "network.peer.port",
+        "url.path",
+        "user.id",
+        "user_agent.original",
+    }
+)
 _SAFE_HEADER_NAME = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
 _INSTRUMENTED = False
 _ACTIVE_PROVIDER: TracerProvider | None = None
+_ACTIVE_EXPORTER: SafeSanitizingSpanExporter | None = None
+_READINESS_MARKER_TTL_SECONDS = 10.0
+_READINESS_PROPAGATION_GRACE_SECONDS = 10.0
+_READINESS_LAST_SUCCESS_TTL_SECONDS = 20.0
 
 
 class ObservabilitySettings(Protocol):
@@ -85,7 +129,7 @@ def _safe_url(value: object) -> str:
         if not parsed.scheme or not host:
             return "[REDACTED]"
         port = f":{parsed.port}" if parsed.port is not None else ""
-        return urlunsplit((parsed.scheme, f"{host}{port}", parsed.path, "", ""))
+        return urlunsplit((parsed.scheme, f"{host}{port}", "", "", ""))
     except (TypeError, ValueError):
         return "[REDACTED]"
 
@@ -98,6 +142,8 @@ def sanitize_span_attributes(
     sanitized: dict[str, AttributeValue] = {}
     for key, value in attributes.items():
         normalized = key.casefold().replace("-", "_")
+        if key.casefold() in _RAW_REQUEST_ATTRIBUTE_KEYS:
+            continue
         if key in _URL_ATTRIBUTE_KEYS:
             sanitized[key] = _safe_url(value)
             continue
@@ -142,7 +188,11 @@ def _sanitize_span(span: ReadableSpan) -> ReadableSpan:
         events=tuple(_sanitize_event(event) for event in span.events),
         links=tuple(_sanitize_link(link) for link in span.links),
         kind=span.kind,
-        status=span.status,
+        # SDK auto-instrumentation may copy exception messages into
+        # ``Status.description``. Preserve only the bounded status code at the final
+        # egress boundary so tokens, SQL values and object paths cannot bypass event
+        # and attribute redaction.
+        status=Status(span.status.status_code),
         start_time=span.start_time,
         end_time=span.end_time,
         instrumentation_scope=span.instrumentation_scope,
@@ -154,12 +204,27 @@ class SafeSanitizingSpanExporter(SpanExporter):
 
     def __init__(self, delegate: SpanExporter) -> None:
         self._delegate = delegate
+        self._successful_trace_ids: deque[int] = deque(maxlen=128)
+        self._trace_lock = Lock()
 
     def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
         try:
-            return self._delegate.export(tuple(_sanitize_span(span) for span in spans))
+            sanitized_spans = tuple(_sanitize_span(span) for span in spans)
+            result = self._delegate.export(sanitized_spans)
+            if result == SpanExportResult.SUCCESS:
+                with self._trace_lock:
+                    self._successful_trace_ids.extend(
+                        span.context.trace_id
+                        for span in sanitized_spans
+                        if span.context is not None and span.context.is_valid
+                    )
+            return result
         except Exception:  # noqa: BLE001 - telemetry cannot make domain traffic fail.
             return SpanExportResult.FAILURE
+
+    def exported_trace_successfully(self, trace_id: int) -> bool:
+        with self._trace_lock:
+            return trace_id in self._successful_trace_ids
 
     def shutdown(self) -> None:
         try:
@@ -178,7 +243,129 @@ class SafeSanitizingSpanExporter(SpanExporter):
 class ObservabilityRuntime:
     enabled: bool
     provider: TracerProvider | None = None
+    exporter: SafeSanitizingSpanExporter | None = None
     error_code: str | None = None
+    _readiness_probe_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _readiness_trace_id: str | None = field(default=None, init=False, repr=False)
+    _readiness_probe_expires_at: float = field(default=0.0, init=False, repr=False)
+    _pipeline_probe_lock: Lock = field(default_factory=Lock, init=False, repr=False)
+    _pipeline_pending_trace_id: str | None = field(default=None, init=False, repr=False)
+    _pipeline_pending_since: float = field(default=0.0, init=False, repr=False)
+    _pipeline_last_success_at: float = field(default=0.0, init=False, repr=False)
+    _pipeline_cached_ready: bool = field(default=False, init=False, repr=False)
+    _pipeline_next_probe_at: float = field(default=0.0, init=False, repr=False)
+
+    def export_readiness_trace(self, *, timeout_millis: int) -> str | None:
+        """Export one forced-sampled marker and prove this exact trace was accepted."""
+
+        if not self.enabled or self.provider is None or self.exporter is None:
+            return None
+        now = time.monotonic()
+        if now < self._readiness_probe_expires_at:
+            return self._readiness_trace_id
+        if not self._readiness_probe_lock.acquire(blocking=False):
+            if now < self._readiness_probe_expires_at + 5.0:
+                return self._readiness_trace_id
+            return None
+        try:
+            now = time.monotonic()
+            if now < self._readiness_probe_expires_at:
+                return self._readiness_trace_id
+            trace_id = self._export_readiness_trace_uncached(timeout_millis=timeout_millis)
+            self._readiness_trace_id = trace_id
+            self._readiness_probe_expires_at = now + (
+                _READINESS_MARKER_TTL_SECONDS if trace_id else 1.0
+            )
+            return trace_id
+        finally:
+            self._readiness_probe_lock.release()
+
+    def _export_readiness_trace_uncached(self, *, timeout_millis: int) -> str | None:
+        assert self.provider is not None
+        assert self.exporter is not None
+        trace_id = secrets.randbits(128) or 1
+        span_id = secrets.randbits(64) or 1
+        parent = SpanContext(
+            trace_id=trace_id,
+            span_id=span_id,
+            is_remote=True,
+            trace_flags=TraceFlags(TraceFlags.SAMPLED),
+            trace_state=TraceState(),
+        )
+        parent_context = set_span_in_context(NonRecordingSpan(parent))
+        try:
+            tracer = self.provider.get_tracer("auris-flow.readiness")
+            with tracer.start_as_current_span(
+                "auris_flow.observability.pipeline.readiness",
+                context=parent_context,
+                attributes={"auris.readiness.probe": True},
+                record_exception=False,
+                set_status_on_exception=False,
+            ):
+                pass
+            if not self.provider.force_flush(timeout_millis=timeout_millis):
+                return None
+        except Exception:  # noqa: BLE001 - readiness reports only a stable state.
+            return None
+        if not self.exporter.exported_trace_successfully(trace_id):
+            return None
+        return trace.format_trace_id(trace_id)
+
+    def readiness_pipeline_is_live(
+        self,
+        *,
+        timeout_millis: int,
+        trace_visible: Callable[[str], bool],
+    ) -> bool:
+        """Prove that one exact BFF marker reached Tempo without probe fan-out.
+
+        A successful observation is cached briefly. When the exporter rotates its
+        marker, the previous success may cover only the bounded propagation window;
+        a marker that remains invisible for more than ten seconds fails closed.
+        Concurrent readiness requests never create parallel Collector/Tempo probes.
+        """
+
+        now = time.monotonic()
+        if now < self._pipeline_next_probe_at:
+            return self._pipeline_cached_ready
+        if not self._pipeline_probe_lock.acquire(blocking=False):
+            return False
+        try:
+            now = time.monotonic()
+            if now < self._pipeline_next_probe_at:
+                return self._pipeline_cached_ready
+            trace_id = self.export_readiness_trace(timeout_millis=timeout_millis)
+            if trace_id is None:
+                self._pipeline_cached_ready = False
+                self._pipeline_next_probe_at = now + 1.0
+                return False
+            if trace_id != self._pipeline_pending_trace_id:
+                self._pipeline_pending_trace_id = trace_id
+                self._pipeline_pending_since = now
+            try:
+                visible = bool(trace_visible(trace_id))
+            except Exception:  # noqa: BLE001 - readiness emits only a stable result.
+                visible = False
+            observed_at = time.monotonic()
+            if visible:
+                self._pipeline_last_success_at = observed_at
+                self._pipeline_cached_ready = True
+                self._pipeline_next_probe_at = observed_at + 5.0
+                return True
+
+            pending_age = max(0.0, observed_at - self._pipeline_pending_since)
+            previous_success_is_fresh = (
+                self._pipeline_last_success_at > 0
+                and observed_at - self._pipeline_last_success_at
+                <= _READINESS_LAST_SUCCESS_TTL_SECONDS
+            )
+            self._pipeline_cached_ready = (
+                pending_age <= _READINESS_PROPAGATION_GRACE_SECONDS and previous_success_is_fresh
+            )
+            self._pipeline_next_probe_at = observed_at + 1.0
+            return self._pipeline_cached_ready
+        finally:
+            self._pipeline_probe_lock.release()
 
     def shutdown(self) -> None:
         if self.provider is None:
@@ -201,6 +388,95 @@ def _parse_otlp_headers(raw: str) -> dict[str, str]:
     return headers
 
 
+class _PublicBoundarySampler(Sampler):
+    """Keep public trace correlation while refusing caller-controlled sampling."""
+
+    def __init__(self, sample_ratio: float, *, decision_key: bytes) -> None:
+        ratio_sampler = TraceIdRatioBased(sample_ratio)
+        remote_sampler = _KeyedTraceIdRatioSampler(
+            sample_ratio,
+            decision_key=decision_key,
+        )
+        self._delegate = ParentBased(
+            ratio_sampler,
+            remote_parent_sampled=remote_sampler,
+            remote_parent_not_sampled=remote_sampler,
+        )
+
+    def should_sample(
+        self,
+        parent_context: Context | None,
+        trace_id: int,
+        name: str,
+        kind: SpanKind | None = None,
+        attributes: Mapping[str, AttributeValue] | None = None,
+        links: Sequence[Link] | None = None,
+        trace_state: TraceState | None = None,
+    ) -> SamplingResult:
+        if (
+            name == "auris_flow.observability.pipeline.readiness"
+            and attributes is not None
+            and attributes.get("auris.readiness.probe") is True
+        ):
+            return SamplingResult(Decision.RECORD_AND_SAMPLE, trace_state=trace_state)
+        return self._delegate.should_sample(
+            parent_context,
+            trace_id,
+            name,
+            kind,
+            attributes,
+            links,
+            trace_state,
+        )
+
+    def get_description(self) -> str:
+        return "AurisPublicBoundarySampler"
+
+
+class _KeyedTraceIdRatioSampler(Sampler):
+    """Make remote sampling unpredictable when the caller chooses the trace ID."""
+
+    def __init__(self, sample_ratio: float, *, decision_key: bytes) -> None:
+        if not 0.0 <= sample_ratio <= 1.0 or len(decision_key) < 32:
+            raise ValueError("invalid keyed sampler configuration")
+        self._threshold = int(sample_ratio * (1 << 64))
+        self._decision_key = decision_key
+
+    def should_sample(
+        self,
+        parent_context: Context | None,
+        trace_id: int,
+        name: str,
+        kind: SpanKind | None = None,
+        attributes: Mapping[str, AttributeValue] | None = None,
+        links: Sequence[Link] | None = None,
+        trace_state: TraceState | None = None,
+    ) -> SamplingResult:
+        del parent_context, name, kind, attributes, links
+        digest = hmac.digest(
+            self._decision_key,
+            trace_id.to_bytes(16, byteorder="big", signed=False),
+            "sha256",
+        )
+        decision_value = int.from_bytes(digest[:8], byteorder="big", signed=False)
+        decision = Decision.RECORD_AND_SAMPLE if decision_value < self._threshold else Decision.DROP
+        return SamplingResult(decision, trace_state=trace_state)
+
+    def get_description(self) -> str:
+        return "AurisKeyedTraceIdRatioSampler"
+
+
+def _public_boundary_sampler(
+    sample_ratio: float,
+    *,
+    decision_key: bytes | None = None,
+) -> Sampler:
+    return _PublicBoundarySampler(
+        sample_ratio,
+        decision_key=(decision_key if decision_key is not None else secrets.token_bytes(32)),
+    )
+
+
 def configure_observability(
     app: FastAPI,
     settings: ObservabilitySettings | Any,
@@ -210,13 +486,15 @@ def configure_observability(
 ) -> ObservabilityRuntime:
     """Configure tracing without creating exporter threads or clients when disabled."""
 
-    global _ACTIVE_PROVIDER, _INSTRUMENTED
+    global _ACTIVE_EXPORTER, _ACTIVE_PROVIDER, _INSTRUMENTED
     if not bool(getattr(settings, "otel_enabled", False)):
         return ObservabilityRuntime(enabled=False)
     if _INSTRUMENTED:
         existing = getattr(app.state, "observability", None)
-        if isinstance(existing, ObservabilityRuntime):
+        if isinstance(existing, ObservabilityRuntime) and existing.enabled:
             return existing
+        if is_production_environment(str(getattr(settings, "app_env", ""))):
+            raise RuntimeError("OTEL_CONFIGURATION_FAILED")
         return ObservabilityRuntime(enabled=False, error_code="OTEL_ALREADY_INSTRUMENTED")
     try:
         endpoint = str(settings.otel_exporter_otlp_endpoint).strip()
@@ -233,9 +511,10 @@ def configure_observability(
                     "deployment.environment.name": str(settings.app_env),
                 }
             ),
-            sampler=ParentBased(TraceIdRatioBased(float(settings.otel_trace_sample_ratio))),
+            sampler=_public_boundary_sampler(float(settings.otel_trace_sample_ratio)),
         )
-        provider.add_span_processor(BatchSpanProcessor(SafeSanitizingSpanExporter(delegate)))
+        safe_exporter = SafeSanitizingSpanExporter(delegate)
+        provider.add_span_processor(BatchSpanProcessor(safe_exporter))
 
         FastAPIInstrumentor.instrument_app(
             app,
@@ -254,10 +533,17 @@ def configure_observability(
         _instrument_outbound_clients(provider)
         _INSTRUMENTED = True
         _ACTIVE_PROVIDER = provider
-        runtime = ObservabilityRuntime(enabled=True, provider=provider)
+        _ACTIVE_EXPORTER = safe_exporter
+        runtime = ObservabilityRuntime(
+            enabled=True,
+            provider=provider,
+            exporter=safe_exporter,
+        )
         app.state.observability = runtime
         return runtime
-    except Exception:  # noqa: BLE001 - observability cannot prevent API startup.
+    except Exception:  # noqa: BLE001 - emit only a stable, non-secret failure code.
+        if is_production_environment(str(getattr(settings, "app_env", ""))):
+            raise RuntimeError("OTEL_CONFIGURATION_FAILED") from None
         return ObservabilityRuntime(enabled=False, error_code="OTEL_CONFIGURATION_FAILED")
 
 
@@ -269,10 +555,18 @@ def configure_worker_observability(
 ) -> ObservabilityRuntime:
     """Configure the same safe exporter and client instrumentation in a worker process."""
 
-    global _ACTIVE_PROVIDER, _INSTRUMENTED
+    global _ACTIVE_EXPORTER, _ACTIVE_PROVIDER, _INSTRUMENTED
     if not bool(getattr(settings, "otel_enabled", False)):
         return ObservabilityRuntime(enabled=False)
     if _INSTRUMENTED:
+        if _ACTIVE_PROVIDER is not None:
+            return ObservabilityRuntime(
+                enabled=True,
+                provider=_ACTIVE_PROVIDER,
+                exporter=_ACTIVE_EXPORTER,
+            )
+        if is_production_environment(str(getattr(settings, "app_env", ""))):
+            raise RuntimeError("OTEL_CONFIGURATION_FAILED")
         return ObservabilityRuntime(enabled=False, error_code="OTEL_ALREADY_INSTRUMENTED")
     try:
         delegate = exporter_factory(
@@ -290,7 +584,8 @@ def configure_worker_observability(
             ),
             sampler=ParentBased(TraceIdRatioBased(float(settings.otel_trace_sample_ratio))),
         )
-        provider.add_span_processor(BatchSpanProcessor(SafeSanitizingSpanExporter(delegate)))
+        safe_exporter = SafeSanitizingSpanExporter(delegate)
+        provider.add_span_processor(BatchSpanProcessor(safe_exporter))
         if engine is not None:
             SQLAlchemyInstrumentor().instrument(
                 engine=engine,
@@ -300,8 +595,15 @@ def configure_worker_observability(
         _instrument_outbound_clients(provider)
         _INSTRUMENTED = True
         _ACTIVE_PROVIDER = provider
-        return ObservabilityRuntime(enabled=True, provider=provider)
-    except Exception:  # noqa: BLE001 - telemetry cannot prevent worker startup.
+        _ACTIVE_EXPORTER = safe_exporter
+        return ObservabilityRuntime(
+            enabled=True,
+            provider=provider,
+            exporter=safe_exporter,
+        )
+    except Exception:  # noqa: BLE001 - emit only a stable, non-secret failure code.
+        if is_production_environment(str(getattr(settings, "app_env", ""))):
+            raise RuntimeError("OTEL_CONFIGURATION_FAILED") from None
         return ObservabilityRuntime(enabled=False, error_code="OTEL_CONFIGURATION_FAILED")
 
 

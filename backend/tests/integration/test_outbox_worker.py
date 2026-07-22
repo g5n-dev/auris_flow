@@ -280,7 +280,7 @@ def test_outbox_worker_marks_task_run_submitted_after_dagster_dispatch(client, a
         if span.get("kind") == "outbox" and span.get("event_type") == "task_run.requested"
     ]
     assert outbox_spans
-    assert outbox_spans[0]["adapter_dispatch"]["details"]["external_run_id"].startswith("dg_run_")
+    assert "adapter_dispatch" not in outbox_spans[0]
     assert outbox_spans[0]["attempt_count"] == 1
     attempt_spans = [
         span
@@ -290,8 +290,9 @@ def test_outbox_worker_marks_task_run_submitted_after_dagster_dispatch(client, a
     ]
     assert len(attempt_spans) == 1
     assert attempt_spans[0]["status"] == "succeeded"
-    assert attempt_spans[0]["delivery_mode"] == "dispatch"
-    assert attempt_spans[0]["remote_id"].startswith("dg_run_")
+    assert "delivery_mode" not in attempt_spans[0]
+    assert "remote_id" not in attempt_spans[0]
+    assert "dispatch_idempotency_key" not in attempt_spans[0]
 
 
 def test_outbox_worker_can_process_specific_aggregate_without_draining_others(client, auth_headers):
@@ -389,7 +390,7 @@ def test_outbox_worker_submits_conversation_boundary_sync_run(client, auth_heade
     assert any(
         span.get("kind") == "outbox"
         and span.get("event_type") == "conversation_boundary.sync_requested"
-        and span.get("adapter_dispatch", {}).get("adapter") == "dagster"
+        and "adapter_dispatch" not in span
         for span in spans
     )
 
@@ -650,12 +651,8 @@ def test_outbox_worker_records_qdrant_receipt_for_knowledge_build(client, auth_h
         if span.get("kind") == "outbox"
         and span.get("event_type") == "knowledge_index.build_requested"
     )
-    assert outbox_span["adapter_dispatch"]["adapter"] == "qdrant"
-    assert outbox_span["adapter_dispatch"]["details"]["point_ids"][0].startswith("qdrant_point_")
-    assert (
-        outbox_span["adapter_dispatch"]["details"]["qdrant_payload"]["asset_key"]
-        == "auris/knowledge/ks_sales_policy"
-    )
+    assert outbox_span["status"] == "processed"
+    assert "adapter_dispatch" not in outbox_span
 
 
 def test_outbox_worker_records_qdrant_receipt_for_knowledge_source_sync(client, auth_headers):
@@ -697,10 +694,8 @@ def test_outbox_worker_records_qdrant_receipt_for_knowledge_source_sync(client, 
         if span.get("kind") == "outbox"
         and span.get("event_type") == "knowledge_source.sync_requested"
     )
-    assert (
-        outbox_span["adapter_dispatch"]["details"]["qdrant_payload"]["source_type"]
-        == "sop_faq_product_docs"
-    )
+    assert outbox_span["status"] == "processed"
+    assert "adapter_dispatch" not in outbox_span
 
 
 def test_knowledge_recall_returns_business_hit_after_qdrant_build(client, auth_headers):
@@ -1290,14 +1285,17 @@ def test_outbox_worker_indexes_approved_voiceprint_enrollment(client, auth_heade
     trace = client.get(f"/api/v1/traces/{trace_id}", headers=auth_headers)
     assert trace.status_code == 200
     spans = trace.json()["data"]["spans"]
-    assert any(
-        span.get("kind") == "voiceprint_enrollment"
-        and span.get("status") == "enrolled"
-        and span.get("voiceprint_id") == "VP-WORKER-QDRANT"
+    voiceprint_span = next(
+        span
         for span in spans
+        if span.get("kind") == "voiceprint_enrollment" and span.get("status") == "enrolled"
     )
+    assert voiceprint_span.get("voiceprint_id")
+    assert "qdrant" not in json.dumps(voiceprint_span, ensure_ascii=False).lower()
     assert any(
-        span.get("kind") == "outbox" and span.get("adapter_dispatch", {}).get("adapter") == "qdrant"
+        span.get("kind") == "outbox"
+        and span.get("event_type") == "voiceprint_enrollments.upserted"
+        and "adapter_dispatch" not in span
         for span in spans
     )
 
@@ -1320,7 +1318,7 @@ def test_outbox_worker_records_object_storage_receipt_for_export(client, auth_he
     assert pending_data["export_job_id"] == run_id
     assert pending_data["status"] == "pending"
     assert pending_data["download_ref"] is None
-    assert pending_data["storage_object_id"] is None
+    assert "storage_object_id" not in pending_data
 
     assert process_once() == 1
     with SessionLocal() as session:
@@ -1347,11 +1345,11 @@ def test_outbox_worker_records_object_storage_receipt_for_export(client, auth_he
     assert export_data["format"] == "jsonl"
     assert export_data["target"] == "evidence_pack"
     assert export_data["object_id"] == "AF-128"
-    assert export_data["storage_object_id"].startswith("obj_")
-    assert export_data["download_ref"]["kind"] == "object_storage_reference"
+    assert "storage_object_id" not in export_data
+    assert export_data["download_ref"]["kind"] == "bff_download"
     assert export_data["download_ref"]["status"] == "reserved"
-    assert export_data["download_ref"]["storage_object_id"] == export_data["storage_object_id"]
-    assert export_data["download_ref"]["object_uri"].startswith("mock://object-storage/obj_")
+    assert export_data["download_ref"]["href"] is None
+    assert "object_uri" not in export_data["download_ref"]
 
 
 def test_outbox_worker_records_callback_receipt_for_external_callback(client, auth_headers):
@@ -1442,11 +1440,12 @@ def test_task_run_completion_receipt_moves_submitted_run_to_success(client, auth
     assert completion.json()["data"]["status"] == "success"
     assert completion.json()["data"]["business_status"] == "completed"
     assert completion.json()["data"]["business_completion_required"] is False
-    assert completion.json()["data"]["completion_receipt"]["external_id"] == external_run_id
+    assert "external_id" not in completion.json()["data"]["completion_receipt"]
 
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
         assert run.status == "success"
+        assert run.payload["completion_receipt"]["external_id"] == external_run_id
         assert run.payload["status_history"] == [
             {"from": "pending", "to": "running", "reason": "outbox_dispatch_started"},
             {"from": "running", "to": "submitted", "reason": "outbox_dispatch_submitted"},
@@ -1504,10 +1503,16 @@ def test_signed_external_completion_receipt_moves_submitted_run_to_success(clien
     assert replay.status_code == 200
     data = completion.json()["data"]
     assert data["status"] == "success"
-    assert data["completion_receipt"]["external_id"] == external_run_id
-    assert data["completion_receipt"]["auth"]["auth_mode"] == "signed_external_completion"
-    assert data["completion_receipt"]["auth"]["authenticated_source"] == "dagster"
-    assert data["completion_receipt"]["auth"]["signature_key_id"] == TEST_COMPLETION_KEY_ID
+    assert "external_id" not in data["completion_receipt"]
+    assert "auth" not in data["completion_receipt"]
+    with SessionLocal() as session:
+        persisted = session.get(RunRecord, run_id)
+        assert persisted is not None
+        persisted_receipt = persisted.payload["completion_receipt"]
+        assert persisted_receipt["external_id"] == external_run_id
+        assert persisted_receipt["auth"]["auth_mode"] == "signed_external_completion"
+        assert persisted_receipt["auth"]["authenticated_source"] == "dagster"
+        assert persisted_receipt["auth"]["signature_key_id"] == TEST_COMPLETION_KEY_ID
 
 
 def test_signed_external_completion_receipt_rejects_missing_signature(client, auth_headers):
@@ -1680,6 +1685,12 @@ def test_completion_receipt_rejects_wrong_external_id(client, auth_headers):
     )
     assert completion.status_code == 409
     assert completion.json()["error"]["code"] == "RUN_COMPLETION_EXTERNAL_ID_MISMATCH"
+    public_error = json.dumps(completion.json(), ensure_ascii=False).lower()
+    assert "wrong_dagster_run_id" not in public_error
+    assert "dagster" not in public_error
+    assert "expected_external_id" not in public_error
+    assert "actual_external_id" not in public_error
+    assert "adapter" not in completion.json()["error"].get("details", [{}])[0]
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
         assert run.status == "submitted"
@@ -1704,7 +1715,13 @@ def test_export_completion_receipt_makes_download_ready(client, auth_headers):
     assert reserved.status_code == 200
     assert reserved.json()["data"]["status"] == "submitted"
     assert reserved.json()["data"]["download_ref"]["status"] == "reserved"
-    storage_object_id = reserved.json()["data"]["storage_object_id"]
+    assert reserved.json()["data"]["download_ref"]["href"] is None
+    with SessionLocal() as session:
+        internal_run = session.get(RunRecord, run_id)
+        assert internal_run is not None
+        internal_details = internal_run.payload["dispatch"]["details"]
+        storage_object_id = internal_details["storage_object_id"]
+        internal_object_uri = internal_details["object_uri"]
 
     completion = client.post(
         f"/api/v1/exports/{run_id}/completion-receipts",
@@ -1713,14 +1730,17 @@ def test_export_completion_receipt_makes_download_ready(client, auth_headers):
             "status": "success",
             "completion_receipt_id": "export_ready_AF_129",
             "external_id": storage_object_id,
-            "result_ref": {"download_url": reserved.json()["data"]["download_ref"]["object_uri"]},
+            "result_ref": {"download_url": internal_object_uri},
         },
         headers={**auth_headers, "Idempotency-Key": "worker-completion-export-ready"},
     )
     assert completion.status_code == 200
     assert completion.json()["data"]["status"] == "success"
-    assert completion.json()["data"]["download_ref"]["status"] == "ready"
-    assert completion.json()["data"]["download_ref"]["storage_object_id"] == storage_object_id
+    # The deterministic local adapter is protocol-only and has no immutable
+    # upstream locator that the BFF can stream. Never manufacture a ready link.
+    assert completion.json()["data"]["download_ref"]["status"] == "unavailable"
+    assert completion.json()["data"]["download_ref"]["href"] is None
+    assert "storage_object_id" not in completion.json()["data"]
 
 
 def test_asset_backfill_completion_materializes_asset_lineage(client, auth_headers):
@@ -1792,13 +1812,13 @@ def test_asset_backfill_completion_materializes_asset_lineage(client, auth_heade
     assert completion.json()["data"]["status"] == "success"
     assert completion.json()["data"]["registered_storage_objects"] == [
         {
-            "storage_object_id": storage_object_id,
             "source_type": "asset_backfill",
             "source_id": run_id,
             "status": "verified",
             "trace_id": run_trace_id,
         }
     ]
+    assert storage_object_id not in json.dumps(completion.json(), ensure_ascii=False)
     assert completion.json()["data"]["materialized_assets"][0]["asset_key"] == asset_key
     assert (
         completion.json()["data"]["materialized_assets"][0]["materialization_id"]
@@ -1888,7 +1908,13 @@ def test_asset_backfill_completion_materializes_asset_lineage(client, auth_heade
 
     trace = client.get(f"/api/v1/traces/{run_trace_id}", headers=auth_headers)
     assert trace.status_code == 200
-    assert {
+    materialization_span = next(
+        span
+        for span in trace.json()["data"]["spans"]
+        if span.get("kind") == "materialization"
+        and span.get("materialization_id") == materialization_id
+    )
+    assert materialization_span == {
         "kind": "materialization",
         "id": materialization_id,
         "materialization_id": materialization_id,
@@ -1896,22 +1922,7 @@ def test_asset_backfill_completion_materializes_asset_lineage(client, auth_heade
         "asset_key": asset_key,
         "partition_key": partition_key,
         "run_id": run_id,
-        "storage_refs": [
-            {
-                "kind": "storage_object",
-                "storage_object_id": storage_object_id,
-                "provider": "minio",
-                "bucket": "auris-flow-local",
-                "object_key": storage_object_key,
-                "content_type": "application/x-ndjson",
-                "size_bytes": 128,
-                "content_sha256": storage_content_sha256,
-                "etag": "event-tags-backfill-etag",
-                "status": "verified",
-                "run_id": run_id,
-            }
-        ],
-    } in trace.json()["data"]["spans"]
+    }
     assert any(
         span.get("kind") == "asset_lineage_edge"
         and span.get("materialization_id") == materialization_id
@@ -2192,9 +2203,12 @@ def test_external_callback_completion_ack_is_persisted(client, auth_headers):
     )
     assert completion.status_code == 200
     assert completion.json()["data"]["status"] == "success"
-    assert completion.json()["data"]["completion_receipt"]["external_id"] == callback_receipt_id
+    assert "external_id" not in completion.json()["data"]["completion_receipt"]
 
     with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        assert run.payload["completion_receipt"]["external_id"] == callback_receipt_id
         receipt = session.get(ExternalCallbackReceipt, callback_receipt_id)
         assert receipt.payload["completion_ack"]["run_id"] == run_id
         assert (
@@ -2548,8 +2562,8 @@ def test_outbox_worker_retries_structured_adapter_failure(client, auth_headers):
     )
     assert outbox_span["status"] == "pending"
     assert outbox_span["retryable"] is True
-    assert outbox_span["error_code"] == "DAGSTER_TIMEOUT"
-    assert outbox_span["adapter_dispatch"]["retryable"] is True
+    assert outbox_span["error_code"] == "EXECUTION_TIMEOUT"
+    assert "adapter_dispatch" not in outbox_span
 
 
 def test_outbox_worker_dead_letters_terminal_adapter_failure(client, auth_headers):

@@ -118,9 +118,15 @@ def test_settings_publish_distinct_admin_succeeds_and_replay_is_actor_bound(
     )
     assert approved.status_code == 200, approved.text
     assert approved.json()["data"]["release_gate"]["decision"]["actor_id"] == ("u_admin_001")
-    assert approved.json()["data"]["release_gate"]["decision"]["reason"] == decision_reason
+    public_reason = approved.json()["data"]["release_gate"]["decision"]["reason"]
+    assert public_reason != decision_reason
+    assert "13800138000" not in public_reason
+    assert public_reason.endswith("[TRUNCATED]")
 
     with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        assert run.payload["release_gate"]["decision"]["reason"] == decision_reason
         audit = (
             session.query(AuditLog)
             .filter(

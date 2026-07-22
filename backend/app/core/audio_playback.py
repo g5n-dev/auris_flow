@@ -21,6 +21,7 @@ class AudioPlaybackGrant:
     audio_session_id: str
     storage_object_id: str | None
     storage_provider: str | None
+    object_version_id: str | None
     etag: str | None
     expires_at: int
     nonce: str
@@ -48,6 +49,17 @@ def _playback_secret(settings: Settings) -> str:
     return secret
 
 
+def _valid_optional_binding(value: object, *, maximum: int) -> bool:
+    return value is None or (
+        isinstance(value, str)
+        and bool(value)
+        and value == value.strip()
+        and len(value) <= maximum
+        and value.casefold() != "null"
+        and not any(ord(character) < 0x20 or ord(character) == 0x7F for character in value)
+    )
+
+
 def create_audio_playback_grant(
     settings: Settings,
     *,
@@ -58,9 +70,16 @@ def create_audio_playback_grant(
     auth_session_id: str | None = None,
     storage_object_id: str | None = None,
     storage_provider: str | None = None,
+    object_version_id: str | None = None,
     etag: str | None = None,
     now: int | None = None,
 ) -> tuple[str, AudioPlaybackGrant]:
+    if not _valid_optional_binding(object_version_id, maximum=1024):
+        raise ApiError(
+            "AUDIO_OBJECT_VERSION_ID_UNAVAILABLE",
+            "录音对象版本标识无效，无法签发播放授权",
+            409,
+        )
     issued_at = int(time.time()) if now is None else now
     ttl_seconds = max(30, min(settings.audio_playback_grant_ttl_seconds, 900))
     expires_at = issued_at + ttl_seconds
@@ -73,6 +92,7 @@ def create_audio_playback_grant(
         "audio_session_id": audio_session_id,
         "storage_object_id": storage_object_id,
         "storage_provider": storage_provider,
+        "object_version_id": object_version_id,
         "etag": etag,
         "exp": expires_at,
         "nonce": nonce,
@@ -93,6 +113,7 @@ def create_audio_playback_grant(
         audio_session_id=audio_session_id,
         storage_object_id=storage_object_id,
         storage_provider=storage_provider,
+        object_version_id=object_version_id,
         etag=etag,
         expires_at=expires_at,
         nonce=nonce,
@@ -129,6 +150,7 @@ def verify_audio_playback_grant(
     audio_session_id = raw_payload.get("audio_session_id")
     storage_object_id = raw_payload.get("storage_object_id")
     storage_provider = raw_payload.get("storage_provider")
+    object_version_id = raw_payload.get("object_version_id")
     etag = raw_payload.get("etag")
     nonce = raw_payload.get("nonce")
     expires_at = raw_payload.get("exp")
@@ -145,6 +167,7 @@ def verify_audio_playback_grant(
         or not audio_session_id
         or (storage_object_id is not None and not isinstance(storage_object_id, str))
         or (storage_provider is not None and not isinstance(storage_provider, str))
+        or not _valid_optional_binding(object_version_id, maximum=1024)
         or (etag is not None and not isinstance(etag, str))
         or not isinstance(nonce, str)
         or not nonce
@@ -159,6 +182,7 @@ def verify_audio_playback_grant(
         audio_session_id=audio_session_id,
         storage_object_id=storage_object_id,
         storage_provider=storage_provider,
+        object_version_id=object_version_id,
         etag=etag,
         expires_at=expires_at,
         nonce=nonce,

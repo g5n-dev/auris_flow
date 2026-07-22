@@ -514,7 +514,16 @@ def _hotword_task_type_binding(
             task_data.get("task_type_id") if isinstance(task_data, dict) else ""
         ).strip()
         if task_type_id:
-            inherited_bindings.append({**reference, "task_type_id": task_type_id})
+            model_version = str(
+                task_data.get("model_version") if isinstance(task_data, dict) else ""
+            ).strip()
+            inherited_bindings.append(
+                {
+                    **reference,
+                    "task_type_id": task_type_id,
+                    **({"model_version": model_version} if model_version else {}),
+                }
+            )
 
     inherited_task_types = sorted({binding["task_type_id"] for binding in inherited_bindings})
     if len(inherited_task_types) > 1:
@@ -573,10 +582,21 @@ def _hotword_task_type_binding(
                 }
             ],
         )
+    inherited_model_versions = sorted(
+        {binding["model_version"] for binding in inherited_bindings if binding.get("model_version")}
+    )
+    if len(inherited_model_versions) > 1:
+        raise ApiError(
+            "HOTWORD_TASK_MODEL_BINDING_AMBIGUOUS",
+            "热词包基线关联了多个模型版本，必须先修复版本血缘",
+            409,
+            details=inherited_bindings,
+        )
     return task_type_id, {
         "source": binding_source,
         "source_task_versions": inherited_bindings,
         "scene_profile_version_id": scene_binding["scene_profile_version_id"],
+        "model_version": inherited_model_versions[0] if inherited_model_versions else None,
     }
 
 
@@ -1326,12 +1346,34 @@ def _evaluated_term_bindings(
 def _verify_eval_run(
     session: Session, ctx: RequestContext, version: HotwordPackVersion, eval_run_id: str
 ) -> dict[str, Any]:
-    try:
-        eval_run = get_run(session, ctx, eval_run_id)
-    except ApiError as exc:
-        if exc.status_code == 404:
-            raise ApiError("HOTWORD_EVAL_RUN_NOT_FOUND", "热词评测运行不存在", 404) from exc
-        raise
+    # Release authorization must use the owned durable payload, not the public
+    # Run projection. The public projection intentionally removes internal
+    # artifact hashes and frozen baseline bindings before returning data to a
+    # caller; reusing it here would make every valid approval fail closed and
+    # would couple authorization semantics to response-shaping policy.
+    record = session.scalar(
+        select(RunRecord).where(
+            RunRecord.run_id == eval_run_id,
+            RunRecord.tenant_id == ctx.tenant_id,
+            RunRecord.project_id == ctx.project_id,
+            RunRecord.run_type == "hotword_eval",
+        )
+    )
+    if record is None:
+        raise ApiError("HOTWORD_EVAL_RUN_NOT_FOUND", "热词评测运行不存在", 404)
+    if not isinstance(record.payload, dict):
+        raise ApiError(
+            "HOTWORD_EVAL_GATE_NOT_PASSED",
+            "发布要求成功、锁定且通过门禁的同版本 EvalRun",
+            409,
+        )
+    eval_run = {
+        **record.payload,
+        "run_id": record.run_id,
+        "run_type": record.run_type,
+        "status": record.status,
+        "trace_id": record.trace_id,
+    }
     payload = eval_run
     gate = payload.get("gate")
     pack = _get_pack(session, ctx, version.pack_id)
@@ -2523,6 +2565,7 @@ def materialize_hotword_publish_completion(
     task_type_id, task_type_binding = _hotword_task_type_binding(
         session, ctx, version, pack, scene_binding
     )
+    task_model_version = str(task_type_binding.get("model_version") or "").strip() or None
     prior_current_version_id = record.payload.get("prior_current_version_id")
     if pack.current_version_id not in {prior_current_version_id, version_id}:
         raise ApiError(
@@ -2549,11 +2592,13 @@ def materialize_hotword_publish_completion(
         "scene_profile_snapshot_sha256": scene_binding["manifest_sha256"],
         "execution_mode": "production",
         "provider": version.compiled_provider,
+        **({"model_version": task_model_version} if task_model_version else {}),
         "hotword_pack_version_id": version_id,
         "language": pack.language,
         "audio_intelligence": {
             "execution_mode": "production",
             "provider": version.compiled_provider,
+            **({"model_version": task_model_version} if task_model_version else {}),
             "hotword_pack_version_id": version_id,
             "language": pack.language,
         },
@@ -2616,6 +2661,7 @@ def materialize_hotword_publish_completion(
         "task_version_id": task_version_id,
         "task_type_id": task_type_id,
         "task_type_binding": task_type_binding,
+        "task_model_version": task_model_version,
         "production_active": False,
         "production_task_version_id": None,
     }
@@ -2635,6 +2681,7 @@ def materialize_hotword_publish_completion(
         "task_version_id": task_version_id,
         "task_type_id": task_type_id,
         "task_type_binding": task_type_binding,
+        "model_version": task_model_version,
         "content_sha256": version.content_sha256,
         "compiled_provider": version.compiled_provider,
         "provider_artifact_ref": version.provider_artifact_ref,
@@ -2691,6 +2738,7 @@ def activate_hotword_version_for_task_release(
         "source_publish_run_id": version_payload.get("publish_run_id"),
         "hotword_pack_version_id": version.version_id,
         "provider": version.compiled_provider,
+        "model_version": version_payload.get("task_model_version"),
         "language": pack.language,
         "execution_mode": "production",
     }
@@ -2699,6 +2747,7 @@ def activate_hotword_version_for_task_release(
         "source_publish_run_id": task_data.get("source_publish_run_id"),
         "hotword_pack_version_id": task_data.get("hotword_pack_version_id"),
         "provider": task_data.get("provider"),
+        "model_version": task_data.get("model_version"),
         "language": task_data.get("language"),
         "execution_mode": task_data.get("execution_mode"),
     }

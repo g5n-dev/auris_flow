@@ -11,6 +11,7 @@ from urllib.request import Request
 
 import pytest
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from starlette.requests import ClientDisconnect
 from starlette.types import Message as ASGIMessage
 from starlette.types import Scope
@@ -19,7 +20,7 @@ from app.api.routers import audio_sessions as audio_sessions_router
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.errors import ApiError
-from app.models import StorageObject
+from app.models import OutboxEvent, RunRecord, StorageObject
 from app.services import adapters as storage_adapters
 
 PROVIDER_CASES = (
@@ -36,7 +37,11 @@ def _mark_storage_object_verified(storage_object_id: str) -> None:
         storage_object = session.get(StorageObject, storage_object_id)
         assert storage_object is not None
         storage_object.status = "verified"
-        storage_object.payload = {**storage_object.payload, "status": "verified"}
+        storage_object.payload = {
+            **storage_object.payload,
+            "status": "verified",
+            "object_version_id": f"version-{storage_object_id}",
+        }
 
 
 def test_production_audio_storage_never_falls_back_to_synthetic_audio(
@@ -340,6 +345,92 @@ def test_real_client_builds_provider_url_signs_range_and_preserves_206(
     assert result["body"] == body
 
 
+@pytest.mark.parametrize("provider", ["minio", "s3"])
+def test_real_client_reads_exact_s3_version_with_signed_canonical_query_and_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+) -> None:
+    captured: list[Request] = []
+    body = b'{"schema_version":"manifest"}'
+
+    class VersionResponse:
+        status = 200
+
+        def __init__(self) -> None:
+            self.headers = Message()
+            self.headers["Content-Type"] = "application/json"
+            self.headers["Content-Length"] = str(len(body))
+            self.headers["x-amz-version-id"] = "version +/=?7"
+            self._remaining = body
+
+        def __enter__(self) -> VersionResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, size: int = -1) -> bytes:
+            if size < 0:
+                chunk, self._remaining = self._remaining, b""
+                return chunk
+            chunk, self._remaining = self._remaining[:size], self._remaining[size:]
+            return chunk
+
+    def fake_urlopen(request: Request, timeout: float) -> VersionResponse:
+        assert timeout == 5
+        captured.append(request)
+        return VersionResponse()
+
+    monkeypatch.setattr(storage_adapters, "urlopen", fake_urlopen)
+    monkeypatch.setenv("AURIS_FIXED_AWS_SIGV4_TIME", "20260710T010203Z")
+    client = storage_adapters.RealObjectStorageClient(
+        provider=provider,
+        endpoint="http://minio:9000" if provider == "minio" else "https://s3.example.test",
+        bucket="audio-bucket",
+        access_key="unit-access",
+        secret_key="unit-secret",
+        region="test-region-1",
+        addressing_style="path",
+        signature_mode="s3v4",
+        allowed_buckets="audio-bucket",
+    )
+
+    result = client.get_object_version(
+        "audio-bucket",
+        "tenants/tenant-a/projects/project-a/runs/run-a/manifest.json",
+        version_id="version +/=?7",
+        max_response_bytes=1024,
+    )
+
+    assert result["body"] == body
+    assert result["version_id"] == "version +/=?7"
+    assert captured[0].full_url.endswith("?versionId=version%20%2B%2F%3D%3F7")
+    assert "SignedHeaders=" in str(captured[0].get_header("Authorization"))
+
+
+@pytest.mark.parametrize("provider", ["obs", "oss"])
+def test_exact_version_manifest_read_fails_closed_for_unsupported_provider(provider: str) -> None:
+    client = storage_adapters.RealObjectStorageClient(
+        provider=provider,
+        endpoint=f"https://{provider}.example.test",
+        bucket="audio-bucket",
+        access_key="unit-access",
+        secret_key="unit-secret",
+        region="test-region-1",
+        addressing_style="virtual",
+        signature_mode="obs" if provider == "obs" else "ossv4",
+        allowed_buckets="audio-bucket",
+    )
+
+    with pytest.raises(ValueError, match="exact version"):
+        client.get_object_version(
+            "audio-bucket",
+            "manifest.json",
+            version_id="version-1",
+            max_response_bytes=1024,
+        )
+
+
 @pytest.mark.parametrize("provider,endpoint,addressing_style,signature_mode", PROVIDER_CASES)
 def test_real_client_open_object_defers_audio_body_read(
     monkeypatch: pytest.MonkeyPatch,
@@ -392,6 +483,14 @@ def test_real_client_head_object_signs_if_match_without_getting_object_body(
             self.headers["Content-Length"] = "100"
             self.headers["Content-Type"] = "audio/wav"
             self.headers["ETag"] = '"head-etag"'
+            self.headers[
+                {
+                    "minio": "x-amz-version-id",
+                    "s3": "x-amz-version-id",
+                    "oss": "x-oss-version-id",
+                    "obs": "x-obs-version-id",
+                }[provider]
+            ] = "immutable-version-7"
 
         def __enter__(self) -> HeadObjectResponse:
             return self
@@ -430,6 +529,7 @@ def test_real_client_head_object_signs_if_match_without_getting_object_body(
     assert captured[0].get_header("Range") is None
     assert result["status"] == 200
     assert result["body"] == b""
+    assert result["version_id"] == "immutable-version-7"
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -437,7 +537,7 @@ def test_bff_audio_head_uses_provider_metadata_without_getting_object_body(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
 ) -> None:
-    calls: list[tuple[str, str, str | None]] = []
+    calls: list[tuple[str, str, str | None, str | None]] = []
 
     class HeadOnlyProviderClient:
         def allows_bucket(self, bucket: str) -> bool:
@@ -449,11 +549,13 @@ def test_bff_audio_head_uses_provider_metadata_without_getting_object_body(
             object_key: str,
             *,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
-            calls.append((bucket, object_key, if_match))
+            calls.append((bucket, object_key, if_match, version_id))
             return {
                 "status": 200,
                 "etag": "head-etag",
+                "version_id": version_id,
                 "content_length": "100",
                 "content_type": "audio/wav",
                 "body": b"",
@@ -487,6 +589,7 @@ def test_bff_audio_head_uses_provider_metadata_without_getting_object_body(
             "audio-bucket",
             "tenants/tenant-a/projects/project-a/audio/recording.wav",
             '"head-etag"',
+            f"{provider}-immutable-version-v1",
         )
     ]
 
@@ -530,14 +633,17 @@ def test_bff_closes_upstream_object_stream_when_consumer_stops(
             *,
             byte_range: str | None = None,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
             assert bucket == "audio-bucket"
             assert object_key == "tenants/tenant-a/recording.wav"
             assert byte_range == "bytes=0-99999"
             assert if_match == '"stream-etag"'
+            assert version_id == "stream-version-v1"
             return {
                 "status": 206,
                 "etag": "stream-etag",
+                "version_id": version_id,
                 "content_length": "100000",
                 "content_range": "bytes 0-99999/100000",
                 "content_type": "audio/wav",
@@ -560,6 +666,7 @@ def test_bff_closes_upstream_object_stream_when_consumer_stops(
             "content_type": "audio/wav",
             "content_length": 100_000,
             "etag": "stream-etag",
+            "object_version_id": "stream-version-v1",
             "status": "verified",
         },
     }
@@ -627,14 +734,17 @@ def test_bff_fails_closed_when_upstream_audio_stream_ends_early(
             *,
             byte_range: str | None = None,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
             assert bucket == "audio-bucket"
             assert object_key == "tenants/tenant-a/truncated.wav"
             assert byte_range == "bytes=0-12"
             assert if_match == '"truncated-etag"'
+            assert version_id == "truncated-version-v1"
             return {
                 "status": 206,
                 "etag": "truncated-etag",
+                "version_id": version_id,
                 "content_length": "13",
                 "content_range": "bytes 0-12/13",
                 "content_type": "audio/wav",
@@ -657,6 +767,7 @@ def test_bff_fails_closed_when_upstream_audio_stream_ends_early(
             "content_type": "audio/wav",
             "content_length": 13,
             "etag": "truncated-etag",
+            "object_version_id": "truncated-version-v1",
             "status": "verified",
         },
     }
@@ -717,11 +828,13 @@ def test_audio_range_preserves_provider_416_content_range(
             *,
             byte_range: str | None = None,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
             assert bucket == "audio-bucket"
             assert object_key == "tenants/tenant-a/recording.wav"
             assert byte_range == "bytes=90-99"
             assert if_match == '"registered-etag"'
+            assert version_id == f"{provider}-provider-416-version-v1"
             headers = Message()
             headers["Content-Range"] = "bytes */80"
             raise HTTPError(
@@ -748,6 +861,7 @@ def test_audio_range_preserves_provider_416_content_range(
             "content_type": "audio/wav",
             "content_length": 100,
             "etag": "registered-etag",
+            "object_version_id": f"{provider}-provider-416-version-v1",
             "status": "verified",
         },
     }
@@ -942,8 +1056,8 @@ def test_oss_v4_signer_matches_official_algorithm_with_literal_test_secret() -> 
 class _ProviderRangeClient:
     def __init__(self, provider: str) -> None:
         self.provider = provider
-        self.calls: list[tuple[str, str, str | None, str | None]] = []
-        self.head_calls: list[tuple[str, str, str | None]] = []
+        self.calls: list[tuple[str, str, str | None, str | None, str | None]] = []
+        self.head_calls: list[tuple[str, str, str | None, str | None]] = []
 
     def allows_bucket(self, bucket: str) -> bool:
         return bucket == f"{self.provider}-audio"
@@ -954,11 +1068,13 @@ class _ProviderRangeClient:
         object_key: str,
         *,
         if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
-        self.head_calls.append((bucket, object_key, if_match))
+        self.head_calls.append((bucket, object_key, if_match, version_id))
         return {
             "status": 200,
             "etag": f"{self.provider}-range-etag",
+            "version_id": version_id,
             "content_length": "100",
             "content_type": "audio/wav",
             "body": b"",
@@ -971,8 +1087,9 @@ class _ProviderRangeClient:
         *,
         byte_range: str | None = None,
         if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
-        self.calls.append((bucket, object_key, byte_range, if_match))
+        self.calls.append((bucket, object_key, byte_range, if_match, version_id))
         body = b"partial-audio"
         return {
             "status": 206,
@@ -986,6 +1103,7 @@ class _ProviderRangeClient:
             "content_range": "bytes 87-99/100",
             "content_type": "audio/wav",
             "etag": f"{self.provider}-range-etag",
+            "version_id": version_id,
             "body": body,
         }
 
@@ -993,6 +1111,7 @@ class _ProviderRangeClient:
 class _VersionedRegistrationClient:
     def __init__(self) -> None:
         self.etag = "provider-etag-v1"
+        self.version_id: str | None = "immutable-provider-version-v1"
         data = b"\x00\x00" * 28
         self.body = b"".join(
             [
@@ -1009,7 +1128,7 @@ class _VersionedRegistrationClient:
         self.checksum_sha256 = hashlib.sha256(self.body).hexdigest()
         self.expose_checksum = True
         self.full_get_etag: str | None = None
-        self.open_calls: list[tuple[str | None, str | None]] = []
+        self.open_calls: list[tuple[str | None, str | None, str | None]] = []
 
     def allows_bucket(self, bucket: str) -> bool:
         return bucket == "minio-audio"
@@ -1019,6 +1138,7 @@ class _VersionedRegistrationClient:
             "content_length": "100",
             "content_type": "audio/wav",
             "etag": self.etag,
+            "version_id": self.version_id,
         }
         if self.expose_checksum:
             result["checksum_sha256"] = self.checksum_sha256
@@ -1031,9 +1151,11 @@ class _VersionedRegistrationClient:
         *,
         byte_range: str | None = None,
         if_match: str | None = None,
+        version_id: str | None = None,
     ) -> dict[str, Any]:
         assert if_match == '"provider-etag-v1"'
-        self.open_calls.append((byte_range, if_match))
+        assert version_id == self.version_id
+        self.open_calls.append((byte_range, if_match, version_id))
         if byte_range is None:
             body = self.body
             status = 200
@@ -1049,6 +1171,7 @@ class _VersionedRegistrationClient:
         return {
             "status": status,
             "etag": response_etag,
+            "version_id": version_id,
             "content_length": str(len(body)),
             "content_range": content_range,
             "content_type": "audio/wav",
@@ -1089,6 +1212,8 @@ def test_registration_persists_provider_etag_and_rejects_replaced_same_size_obje
     )
     assert registration.status_code == 200, registration.text
     assert registration.json()["data"]["storage_object"]["etag"] == "provider-etag-v1"
+    assert "object_version_id" not in registration.json()["data"]["storage_object"]
+    assert "immutable-provider-version-v1" not in repr(registration.json())
     assert registration.json()["data"]["storage_object"]["status"] == "verified"
 
     grant = client.post(
@@ -1104,6 +1229,113 @@ def test_registration_persists_provider_etag_and_rejects_replaced_same_size_obje
     )
     assert stale.status_code == 412, stale.text
     assert stale.json()["error"]["code"] == "AUDIO_OBJECT_VERSION_CHANGED"
+
+
+@pytest.mark.parametrize("version_id", [None, "", "null", "NULL"])
+def test_real_registration_fails_closed_when_provider_has_no_version_id(
+    client: Any,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    version_id: str | None,
+) -> None:
+    provider_client = _VersionedRegistrationClient()
+    provider_client.version_id = version_id
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: provider_client,
+    )
+    monkeypatch.setattr(audio_sessions_router.settings, "auris_object_storage_adapter", "real")
+
+    response = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_missing_provider_version",
+            "provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": (
+                "tenants/aurora_auto/projects/sales_qa/audio/raw/missing-provider-version.wav"
+            ),
+            "content_type": "audio/wav",
+            "content_length": len(provider_client.body),
+            "checksum_sha256": provider_client.checksum_sha256,
+        },
+        headers={**auth_headers, "Idempotency-Key": "unit-test-missing-provider-version"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "AUDIO_OBJECT_VERSION_ID_UNAVAILABLE"
+
+
+def test_audio_intelligence_run_freezes_registered_exact_object_version_for_outbox(
+    client: Any,
+    auth_headers: dict[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider_client = _VersionedRegistrationClient()
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: provider_client,
+    )
+    monkeypatch.setattr(audio_sessions_router.settings, "auris_object_storage_adapter", "real")
+    registration = client.put(
+        "/api/v1/audio-sessions/S20250526-000128/recording-object",
+        json={
+            "storage_object_id": "sto_audio_execution_envelope",
+            "provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": (
+                "tenants/aurora_auto/projects/sales_qa/audio/raw/execution-envelope.wav"
+            ),
+            "content_type": "audio/wav",
+            "content_length": len(provider_client.body),
+            "checksum_sha256": provider_client.checksum_sha256,
+        },
+        headers={**auth_headers, "Idempotency-Key": "register-audio-execution-envelope"},
+    )
+    assert registration.status_code == 200, registration.text
+    monkeypatch.setattr(audio_sessions_router.settings, "auris_dagster_adapter", "real")
+
+    response = client.post(
+        "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
+        json={
+            "recording_id": "rec_A_1001_20250526_122300",
+            "capabilities": ["vad", "asr"],
+            "provider": "audio_intelligence_default",
+            "model_version": "audio-v2.3.1",
+        },
+        headers={**auth_headers, "Idempotency-Key": "create-audio-execution-envelope"},
+    )
+
+    assert response.status_code == 202, response.text
+    run_id = response.json()["data"]["run_id"]
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "audio_intelligence.requested",
+            )
+        )
+        assert run is not None
+        assert event is not None
+        assert run.payload["execution_contract"] == "auris-flow-audio-intelligence-v1"
+        assert run.payload["input_object"] == {
+            "storage_object_id": "sto_audio_execution_envelope",
+            "storage_provider": "minio",
+            "bucket": "minio-audio",
+            "object_key": (
+                "tenants/aurora_auto/projects/sales_qa/audio/raw/execution-envelope.wav"
+            ),
+            "version_id": "immutable-provider-version-v1",
+            "content_sha256": provider_client.checksum_sha256,
+            "content_length": len(provider_client.body),
+            "content_type": "audio/wav",
+        }
+        assert event.payload["input_object"] == run.payload["input_object"]
+        assert event.payload["dispatch_idempotency_key"]
+        assert event.payload["trace_id"] == run.trace_id
 
 
 def test_real_registration_streams_version_bound_sha256_when_head_checksum_is_missing(
@@ -1140,8 +1372,8 @@ def test_real_registration_streams_version_bound_sha256_when_head_checksum_is_mi
     assert verification["checksum_sha256"] == provider_client.checksum_sha256
     assert verification["checksum_method"] == "versioned_full_stream"
     assert provider_client.open_calls == [
-        ("bytes=0-63", '"provider-etag-v1"'),
-        (None, '"provider-etag-v1"'),
+        ("bytes=0-63", '"provider-etag-v1"', "immutable-provider-version-v1"),
+        (None, '"provider-etag-v1"', "immutable-provider-version-v1"),
     ]
 
 
@@ -1321,7 +1553,13 @@ def test_audio_range_route_uses_registered_provider_and_preserves_upstream_parti
     assert response.headers["X-Storage-Provider"] == provider
     assert response.content == b"partial-audio"
     assert provider_client.calls == [
-        (f"{provider}-audio", object_key, "bytes=-13", f'"{provider}-range-etag"')
+        (
+            f"{provider}-audio",
+            object_key,
+            "bytes=-13",
+            f'"{provider}-range-etag"',
+            f"version-sto_provider_range_{provider}",
+        )
     ]
     assert provider_client.head_calls == []
 
@@ -1336,10 +1574,21 @@ def test_audio_range_route_uses_registered_provider_and_preserves_upstream_parti
     assert head.headers["Content-Length"] == "13"
     assert head.headers["ETag"] == f'"{provider}-range-etag"'
     assert provider_client.calls == [
-        (f"{provider}-audio", object_key, "bytes=-13", f'"{provider}-range-etag"')
+        (
+            f"{provider}-audio",
+            object_key,
+            "bytes=-13",
+            f'"{provider}-range-etag"',
+            f"version-sto_provider_range_{provider}",
+        )
     ]
     assert provider_client.head_calls == [
-        (f"{provider}-audio", object_key, f'"{provider}-range-etag"')
+        (
+            f"{provider}-audio",
+            object_key,
+            f'"{provider}-range-etag"',
+            f"version-sto_provider_range_{provider}",
+        )
     ]
 
     invalid = client.get(
@@ -1350,7 +1599,13 @@ def test_audio_range_route_uses_registered_provider_and_preserves_upstream_parti
     assert invalid.headers["Accept-Ranges"] == "bytes"
     assert invalid.headers["Content-Range"] == "bytes */100"
     assert provider_client.calls == [
-        (f"{provider}-audio", object_key, "bytes=-13", f'"{provider}-range-etag"')
+        (
+            f"{provider}-audio",
+            object_key,
+            "bytes=-13",
+            f'"{provider}-range-etag"',
+            f"version-sto_provider_range_{provider}",
+        )
     ]
 
 
@@ -1366,9 +1621,155 @@ def _registered_range_recording(provider: str, etag: str) -> dict[str, object]:
             "content_type": "audio/wav",
             "content_length": 100,
             "etag": etag,
+            "object_version_id": f"{provider}-immutable-version-v1",
             "status": "verified",
         },
     }
+
+
+def test_audio_response_headers_sanitize_untrusted_filename_for_get_head_and_416() -> None:
+    malicious = '../customer-call"\r\nX-Injected: yes\\recording.wav'
+
+    responses = (
+        audio_sessions_router._audio_response(
+            b"0123456789",
+            range_header="bytes=0-2",
+            content_type="audio/wav",
+            file_name=malicious,
+            source="unit-test",
+        ),
+        audio_sessions_router._audio_head_response(
+            10,
+            range_header="bytes=0-2",
+            content_type="audio/wav",
+            file_name=malicious,
+            source="unit-test",
+        ),
+        audio_sessions_router._audio_head_response(
+            10,
+            range_header="bytes=99-100",
+            content_type="audio/wav",
+            file_name=malicious,
+            source="unit-test",
+        ),
+    )
+
+    assert [response.status_code for response in responses] == [206, 206, 416]
+    for response in responses:
+        disposition = response.headers["Content-Disposition"]
+        assert disposition == ('inline; filename="customer-call-X-Injected-yes-recording.wav"')
+        assert not any(character in disposition for character in ("\r", "\n", "/", "\\"))
+
+
+def test_object_storage_audio_fails_closed_without_exact_object_version() -> None:
+    recording = _registered_range_recording("minio", "etag-v1")
+    storage = recording["storage_object"]
+    assert isinstance(storage, dict)
+    storage.pop("object_version_id")
+
+    with pytest.raises(ApiError) as exc_info:
+        audio_sessions_router._object_storage_audio_response(
+            recording,
+            range_header="bytes=0-9",
+        )
+
+    assert exc_info.value.code == "AUDIO_OBJECT_VERSION_ID_UNAVAILABLE"
+    assert exc_info.value.status_code == 409
+
+
+@pytest.mark.parametrize(
+    "upstream_content_type",
+    ("text/html", "audio/wav\r\nX-Injected: yes", "audio/mpeg"),
+)
+def test_object_storage_audio_rejects_unapproved_or_mismatched_upstream_content_type(
+    monkeypatch: pytest.MonkeyPatch,
+    upstream_content_type: str,
+) -> None:
+    class ContentTypeSwapProvider:
+        def allows_bucket(self, bucket: str) -> bool:
+            return bucket == "audio-bucket"
+
+        def open_object(
+            self,
+            _bucket: str,
+            _object_key: str,
+            *,
+            byte_range: str | None = None,
+            if_match: str | None = None,
+            version_id: str | None = None,
+        ) -> dict[str, object]:
+            assert byte_range == "bytes=0-9"
+            assert if_match == '"etag-v1"'
+            assert version_id == "minio-immutable-version-v1"
+            return {
+                "status": 206,
+                "etag": "etag-v1",
+                "version_id": version_id,
+                "content_length": "10",
+                "content_range": "bytes 0-9/100",
+                "content_type": upstream_content_type,
+                "body": b"0123456789",
+            }
+
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: ContentTypeSwapProvider(),
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        audio_sessions_router._object_storage_audio_response(
+            _registered_range_recording("minio", "etag-v1"),
+            range_header="bytes=0-9",
+        )
+
+    assert exc_info.value.code == "AUDIO_OBJECT_CONTENT_TYPE_MISMATCH"
+    assert exc_info.value.status_code == 502
+
+
+def test_object_storage_audio_rejects_version_swap_even_when_etag_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class VersionSwapProvider:
+        def allows_bucket(self, bucket: str) -> bool:
+            return bucket == "audio-bucket"
+
+        def open_object(
+            self,
+            _bucket: str,
+            _object_key: str,
+            *,
+            byte_range: str | None = None,
+            if_match: str | None = None,
+            version_id: str | None = None,
+        ) -> dict[str, object]:
+            assert byte_range == "bytes=0-9"
+            assert if_match == '"etag-v1"'
+            assert version_id == "minio-immutable-version-v1"
+            return {
+                "status": 206,
+                "etag": "etag-v1",
+                "version_id": "minio-immutable-version-v2",
+                "content_length": "10",
+                "content_range": "bytes 0-9/100",
+                "content_type": "audio/wav",
+                "body": b"0123456789",
+            }
+
+    monkeypatch.setattr(
+        audio_sessions_router,
+        "object_storage_client_for_provider",
+        lambda _provider: VersionSwapProvider(),
+    )
+
+    with pytest.raises(ApiError) as exc_info:
+        audio_sessions_router._object_storage_audio_response(
+            _registered_range_recording("minio", "etag-v1"),
+            range_header="bytes=0-9",
+        )
+
+    assert exc_info.value.code == "AUDIO_OBJECT_VERSION_CHANGED"
+    assert exc_info.value.status_code == 412
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -1376,7 +1777,7 @@ def test_audio_range_sends_if_match_and_accepts_exact_quoted_multipart_etag(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
 ) -> None:
-    calls: list[tuple[str | None, str | None]] = []
+    calls: list[tuple[str | None, str | None, str | None]] = []
 
     class ExactEtagProvider:
         def allows_bucket(self, bucket: str) -> bool:
@@ -1389,11 +1790,13 @@ def test_audio_range_sends_if_match_and_accepts_exact_quoted_multipart_etag(
             *,
             byte_range: str | None = None,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
-            calls.append((byte_range, if_match))
+            calls.append((byte_range, if_match, version_id))
             return {
                 "status": 206,
                 "etag": '"AbC123-9"',
+                "version_id": version_id,
                 "content_length": "13",
                 "content_range": "bytes 87-99/100",
                 "content_type": "audio/wav",
@@ -1412,7 +1815,7 @@ def test_audio_range_sends_if_match_and_accepts_exact_quoted_multipart_etag(
 
     assert response.status_code == 206
     assert response.headers["ETag"] == '"AbC123-9"'
-    assert calls == [("bytes=87-99", '"AbC123-9"')]
+    assert calls == [("bytes=87-99", '"AbC123-9"', f"{provider}-immutable-version-v1")]
 
 
 @pytest.mark.parametrize("provider", PROVIDERS)
@@ -1440,12 +1843,15 @@ def test_audio_range_fails_closed_when_upstream_etag_is_missing_or_case_changed(
             *,
             byte_range: str | None = None,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
             assert byte_range == "bytes=87-99"
             assert if_match == '"AbC123-9"'
+            assert version_id == f"{provider}-immutable-version-v1"
             return {
                 "status": 206,
                 "etag": upstream_etag,
+                "version_id": version_id,
                 "content_length": "13",
                 "content_range": "bytes 87-99/100",
                 "content_type": "audio/wav",
@@ -1483,9 +1889,11 @@ def test_audio_range_maps_provider_if_match_412_to_version_changed(
             *,
             byte_range: str | None = None,
             if_match: str | None = None,
+            version_id: str | None = None,
         ) -> dict[str, object]:
             assert byte_range == "bytes=87-99"
             assert if_match == '"AbC123-9"'
+            assert version_id == f"{provider}-immutable-version-v1"
             raise HTTPError(
                 url=f"https://{provider}.example.test/{object_key}",
                 code=412,
@@ -1543,9 +1951,11 @@ def test_real_provider_request_carries_signed_if_match_condition(
         "tenants/tenant-a/recording.wav",
         byte_range="bytes=87-99",
         registered_etag="range-etag",
+        registered_version_id="immutable-version-v1",
     )
 
     assert captured[0].get_header("Range") == "bytes=87-99"
     assert captured[0].get_header("If-match") == '"range-etag"'
+    assert captured[0].full_url.endswith("?versionId=immutable-version-v1")
     assert result["etag"] == "range-etag"
     result["stream"].close()

@@ -70,7 +70,39 @@ from app.services.label_fact_temporal_service import (
 )
 from app.services.label_lifecycle_compat_service import label_version_item_definition_sha256
 from app.services.outbox_service import enqueue_event
+from app.services.public_run_projection_service import public_run_projection
 from app.services.resource_service import upsert_resource
+
+LABEL_EXTRACTION_PUBLIC_FIELDS = frozenset(
+    {
+        "id",
+        "run_id",
+        "extraction_run_id",
+        "tenant_id",
+        "project_id",
+        "label_version_id",
+        "prompt_version_id",
+        "model_version",
+        "schema_version",
+        "status",
+        "subject_scope",
+        "subject_refs",
+        "input_sha256",
+        "observation_count",
+        "aggregation_policy_version_id",
+        "source_bindings",
+        "manifest_sha256",
+        "release_head_lock",
+        "aggregation_run_id",
+        "aggregate_ids",
+        "trace_id",
+        "created_at",
+        "next_actions",
+    }
+)
+LABEL_EXTRACTION_PUBLIC_SOURCE_BINDING_FIELDS = frozenset(
+    {"source_family", "source_type", "correlation_group_id"}
+)
 
 
 def _canonical_json(value: object) -> str:
@@ -1197,7 +1229,21 @@ def extraction_run_data(
     status = run_record.status if run_record is not None else record.status
     if status == "success" and record.status == "materialized":
         status = "materialized"
-    return {
+    raw_source_bindings = record.payload.get("source_bindings", [])
+    public_source_bindings = (
+        [
+            {
+                field: binding[field]
+                for field in LABEL_EXTRACTION_PUBLIC_SOURCE_BINDING_FIELDS
+                if field in binding
+            }
+            for binding in raw_source_bindings
+            if isinstance(binding, dict) and isinstance(binding.get("source_family"), str)
+        ]
+        if isinstance(raw_source_bindings, list)
+        else []
+    )
+    projection = {
         "extraction_run_id": record.extraction_run_id,
         "tenant_id": record.tenant_id,
         "project_id": record.project_id,
@@ -1211,16 +1257,20 @@ def extraction_run_data(
         "input_sha256": record.input_sha256,
         "observation_count": record.observation_count,
         "aggregation_policy_version_id": record.payload.get("aggregation_policy_version_id"),
-        "source_bindings": record.payload.get("source_bindings", []),
+        "source_bindings": public_source_bindings,
         "manifest_sha256": record.payload.get("manifest_sha256"),
         "release_head_lock": record.payload.get("release_head_lock"),
         "aggregation_run_id": record.payload.get("aggregation_run_id"),
         "aggregate_ids": record.payload.get("aggregate_ids", []),
         "trace_id": record.trace_id,
         "created_at": _iso(record.created_at),
-        "dispatch": run_record.payload.get("dispatch") if run_record else None,
         "next_actions": (run_record.payload.get("next_actions", []) if run_record else []),
     }
+    return public_run_projection(
+        projection,
+        allowed_fields=LABEL_EXTRACTION_PUBLIC_FIELDS,
+        field_name="label_extraction_run",
+    )
 
 
 def _revalidate_extraction_manifest(

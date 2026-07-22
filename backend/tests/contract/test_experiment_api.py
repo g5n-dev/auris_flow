@@ -866,7 +866,11 @@ def test_experiment_task_run_materializes_exposure_and_outcomes(client, auth_hea
         stored_run = session.get(RunRecord, run["run_id"])
         assert stored_run is not None
         assert readback_data["trace_id"] == stored_run.trace_id
-        assert readback_data["completion_receipt"]["run_trace_id"] == stored_run.trace_id
+        assert (
+            readback_data["completion_receipt"]["completion_receipt_id"]
+            == payload["completion_receipt_id"]
+        )
+        assert "run_trace_id" not in readback_data["completion_receipt"]
 
     detail = client.get(f"/api/v1/experiments/{experiment['experiment_id']}", headers=auth_headers)
     assert detail.status_code == 200, detail.text

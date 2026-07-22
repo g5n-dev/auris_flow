@@ -28,7 +28,10 @@ from app.models import (
     User,
 )
 from app.services import audio_intelligence_service
-from app.services.hotword_service import materialize_hotword_analysis_completion
+from app.services.hotword_service import (
+    _verify_eval_run,
+    materialize_hotword_analysis_completion,
+)
 from app.workers.outbox_worker import process_aggregate_events
 
 
@@ -488,7 +491,10 @@ def test_hotword_completion_registers_only_run_scoped_storage_descriptors(
     )
     assert completed.status_code == 200, completed.text
     registered = completed.json()["data"]["registered_storage_objects"]
-    assert {item["storage_object_id"] for item in registered} == {manifest_id, artifact_id}
+    # Completion responses expose only domain registration status. Immutable
+    # storage identifiers and locators remain in the scoped internal ledger.
+    assert all("storage_object_id" not in item for item in registered)
+    assert len(registered) == 2
     assert all(item["source_type"] == "hotword_build" for item in registered)
     assert all(item["source_id"] == build_run_id for item in registered)
     assert all(item["status"] == "verified" for item in registered)
@@ -674,6 +680,81 @@ def test_canvas_task_bound_to_seeded_hotword_version_releases_after_gate(
     assert task_version.status_code == 200, task_version.text
     assert task_version.json()["data"]["status"] == "published"
     assert task_version.json()["data"]["hotword_pack_version_id"] == "hwpv-auto-sales-v1-8"
+
+
+def test_hotword_eval_authorization_hides_foreign_or_wrong_type_runs_and_rejects_bad_payload():
+    ctx = RequestContext(
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        user_id="u_admin_001",
+        roles=("project_admin",),
+        request_id="hotword-eval-authorization",
+        trace_id="trace-hotword-eval-authorization",
+    )
+    with SessionLocal() as session:
+        version = session.get(HotwordPackVersion, "hwpv-auto-sales-v1-8")
+        assert version is not None
+        session.add_all(
+            [
+                RunRecord(
+                    run_id="hweval-foreign-tenant",
+                    tenant_id="foreign-tenant",
+                    project_id=ctx.project_id,
+                    run_type="hotword_eval",
+                    status="success",
+                    trace_id="foreign-tenant-canary",
+                    payload={"canary": "foreign-tenant-canary"},
+                ),
+                RunRecord(
+                    run_id="hweval-foreign-project",
+                    tenant_id=ctx.tenant_id,
+                    project_id="foreign-project",
+                    run_type="hotword_eval",
+                    status="success",
+                    trace_id="foreign-project-canary",
+                    payload={"canary": "foreign-project-canary"},
+                ),
+                RunRecord(
+                    run_id="hweval-wrong-type",
+                    tenant_id=ctx.tenant_id,
+                    project_id=ctx.project_id,
+                    run_type="export",
+                    status="success",
+                    trace_id="wrong-type-canary",
+                    payload={
+                        "run_type": "hotword_eval",
+                        "status": "success",
+                        "canary": "wrong-type-canary",
+                    },
+                ),
+                RunRecord(
+                    run_id="hweval-invalid-payload",
+                    tenant_id=ctx.tenant_id,
+                    project_id=ctx.project_id,
+                    run_type="hotword_eval",
+                    status="success",
+                    trace_id="invalid-payload-canary",
+                    payload=[],
+                ),
+            ]
+        )
+        session.flush()
+
+        for run_id, canary in (
+            ("hweval-foreign-tenant", "foreign-tenant-canary"),
+            ("hweval-foreign-project", "foreign-project-canary"),
+            ("hweval-wrong-type", "wrong-type-canary"),
+        ):
+            with pytest.raises(ApiError) as hidden:
+                _verify_eval_run(session, ctx, version, run_id)
+            assert hidden.value.status_code == 404
+            assert hidden.value.code == "HOTWORD_EVAL_RUN_NOT_FOUND"
+            assert canary not in hidden.value.message
+
+        with pytest.raises(ApiError) as invalid_payload:
+            _verify_eval_run(session, ctx, version, "hweval-invalid-payload")
+        assert invalid_payload.value.status_code == 409
+        assert invalid_payload.value.code == "HOTWORD_EVAL_GATE_NOT_PASSED"
 
 
 @pytest.mark.parametrize(
@@ -1157,6 +1238,7 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
     assert task_detail.json()["data"]["status"] == "published"
     assert task_detail.json()["data"]["task_type_id"] == "task_sales_quality"
     assert task_detail.json()["data"]["task_type_binding"]["source"] == ("baseline_task_version")
+    assert task_detail.json()["data"]["model_version"] == "asr_v2.3.1"
     assert task_detail.json()["data"]["scene_profile_id"] == "scene_auto_sales_quality"
     assert task_detail.json()["data"]["scene_profile_version_id"] == "scenev_auto_sales_quality_v1"
     assert len(task_detail.json()["data"]["scene_profile_snapshot_sha256"]) == 64
@@ -1278,7 +1360,7 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
     assert backfill_completed.status_code == 200, backfill_completed.text
     registered_backfill_objects = backfill_completed.json()["data"]["registered_storage_objects"]
     assert len(registered_backfill_objects) == 1
-    assert registered_backfill_objects[0]["storage_object_id"] == backfill_storage_object_id
+    assert "storage_object_id" not in registered_backfill_objects[0]
     assert registered_backfill_objects[0]["source_id"] == backfill_run_id
     assert registered_backfill_objects[0]["status"] == "verified"
     backfill_materialization_id = backfill_completed.json()["data"]["materialized_assets"][0][
@@ -1852,6 +1934,26 @@ def test_hotword_build_adapter_failure_retries_dead_letters_and_recovers(
         assert stored_version is not None and stored_version.status == "ready_for_eval"
 
 
+def test_audio_production_task_rejects_explicit_model_override(client, auth_headers):
+    response = client.post(
+        "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
+        json={
+            "recording_id": "A-1001_20250526_122300",
+            "capabilities": ["asr"],
+            "task_version_id": "task_version_v3_2_1",
+            "model_version": "audio-v2.3.1",
+            "execution_mode": "production",
+            "language": "zh-CN",
+            "provider": "auris-audio-stack",
+            "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
+        },
+        headers=_headers(auth_headers, key="audio-task-model-override"),
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "AUDIO_TASK_MODEL_BINDING_MISMATCH"
+
+
 def test_audio_completion_receipt_persists_only_hotword_diagnostic_summary(client, auth_headers):
     requested = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
@@ -1864,6 +1966,7 @@ def test_audio_completion_receipt_persists_only_hotword_diagnostic_summary(clien
             "provider": "auris-audio-stack",
             "hotword_pack_version_id": "hwpv-auto-sales-v1-8",
             "return_word_timestamps": True,
+            "run_key": "caller-selected-other-model",
         },
         headers=_headers(auth_headers, key="audio-hotword-summary-request"),
     )
@@ -1923,6 +2026,17 @@ def test_audio_completion_receipt_persists_only_hotword_diagnostic_summary(clien
         }
         run = session.get(RunRecord, run_id)
         assert run is not None
+        requested_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "audio_intelligence.requested",
+            )
+        )
+        assert requested_event is not None
+        assert run.payload["model_version"] == "asr_v2.3.1"
+        assert requested_event.payload["model_version"] == "asr_v2.3.1"
+        assert ":asr_v2.3.1:" in run.run_key
+        assert run.run_key != "caller-selected-other-model"
         assert run.payload["result_ref"]["hotword_diagnostics"] == stored
 
 
@@ -2231,7 +2345,8 @@ def test_hotword_analysis_completion_registers_run_bound_evidence_descriptors(
     )
     assert completed.status_code == 200, completed.text
     registered = completed.json()["data"]["registered_storage_objects"]
-    assert {item["storage_object_id"] for item in registered} == {word_id, diagnostics_id}
+    assert all("storage_object_id" not in item for item in registered)
+    assert len(registered) == 2
     with SessionLocal() as session:
         for storage_object_id, role in (
             (word_id, "word_timestamps"),

@@ -255,11 +255,16 @@ X-Trace-Id: tr_01J...
 X-Request-Id: req_01J...
 ```
 
-内部排障入口：
+公开领域追踪入口：
 
 | API | 用途 | 最低字段 |
 | --- | --- | --- |
-| `GET /api/v1/traces/{trace_id}` | 查询一次请求、运行、模型调用、外部回写或资产生成链路 | `trace_id`、`request_id`、`spans[]`、`related_runs[]`、`related_assets[]`、`errors[]` |
+| `GET /api/v1/traces/{trace_id}` | 查询一次请求、运行、模型调用、外部回写或资产生成链路的领域投影 | `trace_id`、`spans[]`；span 仅含领域运行/状态、错误码、重试状态和对象关联 |
+
+该公开 Trace 投影对项目管理员、系统角色和普通获准角色执行同一字段收口，不因角色提升而返回
+adapter、operation、remote ID、dispatch 幂等键、request hash、adapter dispatch 或任意 dispatch
+自由 JSON。完整原始证据只允许保存在租户/项目 scoped DB、Outbox、Audit 与完成回执中，并由离线
+verifier 读取；不得新增可公开访问的 raw/internal HTTP endpoint。
 
 审计日志最低字段：
 
@@ -492,14 +497,14 @@ PATCH /api/v1/{resources}/{id}
 | `PATCH /api/v1/task-versions/{id}` | 修改草稿节点、连线、调度、门禁 | `changed_fields`、`node_bindings`、`run_config`、`validation_summary`、`trace_id` |
 | `POST /api/v1/task-runs` | 手动运行、定时运行、事件触发或回填运行 | `task_run_id`、`task_version_id`、`trigger`、`run_key`、`status`、`partition_key`、`trace_id` |
 | `GET /api/v1/task-runs` | 运行记录列表 | `id`、`task_version_id`、`status`、`trigger`、`started_at`、`finished_at`、`retry_count` |
-| `GET /api/v1/task-runs/{id}` | 运行详情 | `id`、`status`、`progress`、`error`、`asset_outputs[]`、`trace_id`、`dagster_binding_ref` |
+| `GET /api/v1/task-runs/{id}` | 执行引擎中立的运行详情 | `id`、`tenant_id`、`project_id`、`status`、`status_history[]`、`progress`、`error`、`asset_outputs[]`、`result_ref`、`next_actions[]`、`trace_id` |
 | `POST /api/v1/task-runs/{id}/retries` | 失败或死信运行的人工重试，创建新的运行记录 | `retry_run_id`、`retry_of_run_id`、`retry_of_event_id`、`retry_of_trace_id`、`status`、`trace_id` |
-| `POST /api/v1/task-runs/{id}/cancellations` | 创建独立取消控制运行；未分发任务本地取消，已绑定 Dagster 任务执行 SAFE_TERMINATE | `run_id`、`run_type=task_run_cancellation`、`source_run_id`、`control_action=cancel`、`status`、`trace_id` |
-| `POST /api/v1/task-runs/{id}/status-syncs` | 创建独立状态同步控制运行；读取可信 Dagster binding 并收敛状态 | `run_id`、`run_type=task_run_status_sync`、`source_run_id`、`control_action=status_sync`、`status`、`trace_id` |
+| `POST /api/v1/task-runs/{id}/cancellations` | 创建独立取消控制运行；未分发任务本地取消，已提交任务使用底层执行引擎的安全终止语义 | `run_id`、`run_type=task_run_cancellation`、`source_run_id`、`control_action=cancel`、`status`、`trace_id` |
+| `POST /api/v1/task-runs/{id}/status-syncs` | 创建独立状态同步控制运行；从内部可信 binding 收敛领域状态 | `run_id`、`run_type=task_run_status_sync`、`source_run_id`、`control_action=status_sync`、`status`、`trace_id` |
 
 TaskRun 的 `deadline_at`、`next_status_sync_at` 与 `monitor_generation` 全部由服务端生成，
 `POST /task-runs` 对同名或其他控制面字段执行 `additionalProperties=false` 拒绝。生产 Worker 周期扫描
-权威 `run_records`：超时且仍 pending 的原始 Outbox 在同一事务内撤销；已有可信 Dagster binding 的
+权威 `run_records`：超时且仍 pending 的原始 Outbox 在同一事务内撤销；已有可信执行引擎 binding 的
 运行进入 `cancelling` 并只生成一个 deadline cancel control；未超时的
 `submitted/running/completion_pending` 按间隔生成单调代次的 status-sync control。多 Worker 使用行锁、
 确定性 ID 与 Outbox fencing 去重；观察到引擎 `SUCCESS` 只能进入 `completion_pending`，仍须匹配且验签
@@ -508,13 +513,22 @@ TaskRun 的 `deadline_at`、`next_status_sync_at` 与 `monitor_generation` 全�
 
 `POST /api/v1/task-runs` 只接受业务输入。`run_id/task_run_id`、`job_name`、`pipeline_name`、
 `repository_name`、`repository_location_name`、`dagster_run_draft` 和 `run_config` 均为服务端控制面字段，
-调用方注入时返回 422；运行 ID、Dagster job 与 run config 由服务端从已发布 TaskVersion 和固定部署配置生成。
+调用方注入时返回 422；运行 ID、底层 workflow 与 run config 由服务端从已发布 TaskVersion 和固定部署配置生成。
+
+所有由 `RunRecord` 派生的公开响应采用同一执行引擎中立投影。任意层级的 `dispatch`、adapter 名、
+引擎/协议实现名、`job_name`、`external_run_id/dagster_run_id`、`endpoint/bucket/object_key/object_uri`、
+`storage_object_id`、内部错误 `details`、签名、认证凭据与 secret 字段都会递归省略；状态历史中的内部
+原因会映射为稳定领域原因。`run_records.payload`、scoped Outbox、完成回执和
+Audit 仍保留完整底层证据，供 Worker、故障恢复和 release gate 验证；不得为读取这些证据新增公网
+internal endpoint。
 
 任务运行最低字段：
 
 ```json
 {
   "id": "task_run_128",
+  "tenant_id": "aurora_auto",
+  "project_id": "sales_qa",
   "task_version_id": "tv_19_rc2",
   "status": "running",
   "status_version": 2,
@@ -524,21 +538,24 @@ TaskRun 的 `deadline_at`、`next_status_sync_at` 与 `monitor_generation` 全�
   "submitted_at": "2026-07-06T02:00:01Z",
   "started_at": "2026-07-06T02:00:00Z",
   "deadline_at": "2026-07-06T04:00:00Z",
-  "next_status_sync_at": "2026-07-06T02:01:01Z",
-  "monitor_generation": 0,
-  "engine_status": "STARTED",
-  "engine_status_observed_at": "2026-07-06T02:00:02Z",
+  "status_history": [
+    {"from": "pending", "to": "running", "reason": "execution_started"}
+  ],
   "asset_outputs": [
     {
       "asset_key": "auris/label/event_tags",
       "materialization_id": "mat_128"
     }
   ],
+  "result_ref": {},
+  "next_actions": [
+    {"key": "view_trace", "label": "查看 Trace", "route": "traces/tr_01J..."}
+  ],
   "trace_id": "tr_01J..."
 }
 ```
 
-Dagster `SUCCESS` 只证明执行引擎结束，状态同步最多把业务运行推进到 `completion_pending`；
+底层执行成功只证明执行引擎结束，状态同步最多把业务运行推进到 `completion_pending`；
 只有 external ID 与可信 launch binding 完全一致的签名完成回执才能写入 `success`。签名回执若早于
 launch 最终提交到达，会先以 `pending_binding` 持久化；绑定不一致时回执标记 `rejected` 并写审计，
 不得修改业务终态。取消与完成并发时依赖 scoped row lock 和单向状态机只提交一个终态事件。
@@ -630,7 +647,7 @@ MySQL 是标签事实唯一权威源。`LabelObservation` 是不可变来源观�
 | API | 用途 | 请求锁定 / 响应最低字段 |
 | --- | --- | --- |
 | `POST /api/v1/label-extraction-runs` | 创建真实模型抽取运行 | 请求必须锁定 `label_version_id`、`prompt_version_id`、`model_version`、`schema_version`、`aggregation_policy_version_id`、输入哈希、规范 subject refs 和唯一 `source_bindings[]`；L2 每个 subject 必须有可验证 `evidence_ref`。`202` 仅返回 queued 运行事实 |
-| `GET /api/v1/label-extraction-runs/{extraction_run_id}` | 轮询抽取、Observation 与自动聚合物化 | `status`、`observation_count`、`source_bindings`、强 Manifest hash、`aggregation_run_id/aggregate_ids`、`dispatch`、`next_actions[]`、根 `trace_id`；完成回执前不得显示成功 |
+| `GET /api/v1/label-extraction-runs/{extraction_run_id}` | 轮询抽取、Observation 与自动聚合物化 | `status`、`observation_count`、`source_bindings`、强 Manifest hash、`aggregation_run_id/aggregate_ids`、`next_actions[]`、根 `trace_id`；不得返回 RunRecord 的 dispatch 或远端执行定位器，完成回执前不得显示成功 |
 | `POST /api/v1/label-observations` | 受信模型/worker 写入不可变观察 | 来源族/type 必须与抽取 Manifest 一致；服务端恢复 provider/adapter/correlation group，验证 subject evidence 或 scoped storage SHA，并按 published 校准器计算置信度。客户端不得伪造强校准或 `human-confirmed` Observation |
 | `GET /api/v1/label-observations`、`GET /api/v1/label-observations/{observation_id}` | 按锁定标签版本、subject 读取观察 | 原始标签、canonical `label_id`、value/type、`source_lineage`、`evidence_verification`、校准版本、哈希、`status=materialized`、根 `trace_id` |
 | `POST /api/v1/label-calibration-versions` | 从锁定 Gold 创建 append-only 校准版本 | 锁定 label/version、来源族、方法、GoldSetVersion、参数和指标；published 要求同 LabelVersion 的稳定 Gold，isotonic/Platt/全局保守最少分别 200/100/50 条，系统身份不得发布 |
@@ -673,7 +690,7 @@ MySQL 是标签事实唯一权威源。`LabelObservation` 是不可变来源观�
 | `GET /api/v1/label-optimization-schedules`、`GET /api/v1/label-optimization-schedules/{schedule_id}` | 查询计划、due 时钟与当前单活 session | 返回 `next_threshold_scan_at/next_daily_at/next_weekly_at`、`active_run_id`、baseline snapshot、预算、资源版本和 Trace |
 | `GET /api/v1/label-optimization-schedules/{schedule_id}/metric-snapshots` | 查询权威触发指标快照 | append-only 24h metrics、规范 `reason_code` 聚类、非法 JSON/自由文本 reason 拒绝记录、确定性 hash 与来源 |
 | `GET /api/v1/label-optimization-schedules/{schedule_id}/rounds` | 查询候选→锁定 EvalRun→预算决策轮次 | generation/eval run、候选 IDs、收益/关键回退/成本、stop reason、`awaiting-review`；最多三轮且不自动发布 |
-| `GET /api/v1/prompt-version-candidates`、`GET /api/v1/prompt-version-candidates/{id}` | 旧前端兼容投影 | 仅作为 PromptVersion 候选投影；不得替代 `prompt-assets/prompt-versions` 权威版本 |
+| `GET /api/v1/prompt-version-candidates`、`GET /api/v1/prompt-version-candidates/{id}` | 闭合的旧前端兼容投影 | 保留候选正文、diff、评测、双盲审核进度与 trace；递归移除 Run/存储定位器、内部错误 details 和执行协议字段；不得替代 `prompt-assets/prompt-versions` 权威版本 |
 
 预算上限为 3 轮、每轮 2–5 个候选、最长 2 小时；同一租户/项目/标签版本单活，canonical trigger hash 去重并执行 24 小时冷却。独立 scheduler worker 或 Dagster schedule 调用相同 `run_once`，使用数据库条件更新作为 scope mutex；过密 blocked 探测不推进 15 分钟时钟。每次 reconcile 都从该 session 最早 Round 的 `started_at` 计算墙钟；达到 2 小时即把仍处于 queued/submitted/running 的 generation 与 EvalRun 全部置 `blocked(time_budget_exceeded)`，关闭 `active_run_id` 并发出 hard-stop 审计/事件，不能让卡住的外部运行绕过预算。候选物化后自动创建完整锁定 EvalRun，评测完成后进入下一轮、`blocked` 或 `awaiting-review`。自动化范围锁定 L1→L2，Prompt、Taxonomy、聚合策略及正式发布仍需自然人批准。
 
@@ -807,6 +824,8 @@ Prompt 审核的 `modified` 不是原地批准：两份密封修改一致或独�
 | `POST /api/v1/data-assets/{asset_key}/backfills` | 创建受控回填 | `backfill_id`、`approval_status`、`impact_scope`、`run_request`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`trace_id` |
 | `POST /api/v1/data-assets/{asset_key}/checks/retry` | 重跑失败质量校验 | `retry_id`、`status`、`failed_partitions[]`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`trace_id` |
 | `POST /api/v1/exports` | 创建导出任务 | `export_job_id`、`format`、`scope`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`download_ref`、`trace_id` |
+| `GET /api/v1/exports/{id}` | 获取闭合导出任务投影 | `export_job_id`、`format`、`scope`、`status`、`download_ref.status/href/content_type`、`trace_id`；不得返回 storage object ID、URI、bucket、object key 或 dispatch |
+| `GET/HEAD /api/v1/exports/{id}/download` | 通过同源 BFF 下载已完成导出 | 当前会话鉴权 + tenant/project 作用域；服务端以强 ETag 锁定上游对象，支持单区间 Range/206/416，且不暴露上游对象定位器 |
 
 连接器创建、资产回填、资产质量重跑以及项目业务数据导出都必须在服务端解析当前 tenant/project 的 active production SceneProfile，并把权威 `scene_profile_id + scene_profile_version_id + scene_profile_snapshot_sha256` 写入资源或 Run/Outbox。调用方可省略锁字段，由 BFF 原子捕获当前绑定；但只要显式提供任一字段，就必须与当前已发布快照逐字段完全一致，否则 fail closed。没有 active 绑定返回 `SCENE_PROFILE_BINDING_REQUIRED`；资产不存在或跨项目时应先返回同构 404，不能借 Scene 错误泄漏资产存在性。仅 `target=module_view`、`module_key` 为 `tenants/projects/settings` 且 `object_id` 以同一模块前缀开头的治理视图导出不要求业务 Scene 锁。
 

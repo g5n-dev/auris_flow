@@ -30,6 +30,8 @@ def test_production_hotword_requires_published_task_version() -> None:
                 hotword_pack_version_id="hwpv-auto-sales-v1-8",
                 provider="auris-audio-stack",
                 provider_explicit=True,
+                model_version="asr_v2.3.1",
+                model_version_explicit=True,
                 language="zh-CN",
             )
     assert exc_info.value.code == "AUDIO_PRODUCTION_TASK_VERSION_REQUIRED"
@@ -45,12 +47,15 @@ def test_production_hotword_recovers_immutable_task_binding() -> None:
             hotword_pack_version_id="hwpv-auto-sales-v1-8",
             provider=None,
             provider_explicit=False,
+            model_version=None,
+            model_version_explicit=False,
             language="zh-CN",
         )
     assert binding is not None
     assert binding["task_version_id"] == "task_version_v3_2_1"
     assert binding["hotword_pack_version_id"] == "hwpv-auto-sales-v1-8"
     assert binding["provider"] == "auris-audio-stack"
+    assert binding["model_version"] == "asr_v2.3.1"
     assert binding["task_version_snapshot"]["status"] == "published"
     assert binding["root_trace_id"] == "trace_hotword_pack_auto_sales"
 
@@ -94,6 +99,8 @@ def test_production_hotword_rejects_per_run_binding_override(
                 hotword_pack_version_id=hotword_version_id,
                 provider=provider,
                 provider_explicit=provider is not None,
+                model_version=None,
+                model_version_explicit=False,
                 language=language,
             )
     assert exc_info.value.code == expected_code
@@ -109,6 +116,27 @@ def test_shadow_candidate_can_run_without_task_version() -> None:
             hotword_pack_version_id="hwpv-auto-sales-v1-8",
             provider="auris-audio-stack",
             provider_explicit=True,
+            model_version="candidate-model",
+            model_version_explicit=True,
             language="zh-CN",
         )
     assert binding is None
+
+
+def test_production_task_rejects_explicit_model_override() -> None:
+    with SessionLocal() as session:
+        with pytest.raises(ApiError) as exc_info:
+            resolve_audio_hotword_task_binding(
+                session,
+                _context(),
+                execution_mode="production",
+                task_version_id="task_version_v3_2_1",
+                hotword_pack_version_id="hwpv-auto-sales-v1-8",
+                provider=None,
+                provider_explicit=False,
+                model_version="audio-v2.3.1",
+                model_version_explicit=True,
+                language="zh-CN",
+            )
+
+    assert exc_info.value.code == "AUDIO_TASK_MODEL_BINDING_MISMATCH"

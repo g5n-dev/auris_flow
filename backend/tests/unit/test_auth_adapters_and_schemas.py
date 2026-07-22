@@ -336,6 +336,10 @@ def test_audio_playback_grant_is_scoped_signed_and_expires():
         project_id="sales_qa",
         user_id="u_admin_001",
         audio_session_id="S20250526-000128",
+        storage_object_id="sto-audio-v1",
+        storage_provider="minio",
+        object_version_id="immutable-version-v1",
+        etag="audio-etag-v1",
         now=1000,
     )
 
@@ -343,6 +347,7 @@ def test_audio_playback_grant_is_scoped_signed_and_expires():
     assert verified == created
     assert verified.tenant_id == "aurora_auto"
     assert verified.audio_session_id == "S20250526-000128"
+    assert verified.object_version_id == "immutable-version-v1"
 
     with pytest.raises(ApiError) as expired:
         verify_audio_playback_grant(settings, token, now=created.expires_at)
@@ -1083,7 +1088,11 @@ def test_real_object_storage_adapter_creates_bucket_and_verifies_object_without_
             body: bytes | None = None,
             content_type: str = "application/json",
             extra_headers: dict[str, str] | None = None,
+            timeout_seconds: float = 5.0,
+            query: dict[str, str] | None = None,
+            max_response_bytes: int | None = None,
         ) -> dict:
+            del timeout_seconds, query, max_response_bytes
             self.calls.append((method, path, body, content_type))
             if method == "HEAD" and path == "/auris-test":
                 raise HTTPError(path, 404, "missing", {}, None)
@@ -1149,7 +1158,11 @@ def test_real_object_storage_get_object_forwards_http_range_without_network():
             body: bytes | None = None,
             content_type: str = "application/json",
             extra_headers: dict[str, str] | None = None,
+            timeout_seconds: float = 5.0,
+            query: dict[str, str] | None = None,
+            max_response_bytes: int | None = None,
         ) -> dict:
+            del timeout_seconds, query, max_response_bytes
             self.extra_headers = extra_headers
             return {
                 "status": 206,

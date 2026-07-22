@@ -18,13 +18,15 @@ def resolve_audio_hotword_task_binding(
     hotword_pack_version_id: str | None,
     provider: str | None,
     provider_explicit: bool,
+    model_version: str | None,
+    model_version_explicit: bool,
     language: str,
 ) -> dict[str, Any] | None:
     """Resolve the immutable TaskVersion binding for a production hotword run.
 
     Shadow and diagnostic runs may evaluate a candidate hotword version directly.
     Production runs must be launched through a published TaskVersion, so the
-    client cannot swap the hotword pack, provider, or language per request.
+    client cannot swap the hotword pack, provider, model, or language per request.
     """
 
     normalized_task_version_id = str(task_version_id or "").strip()
@@ -78,6 +80,32 @@ def resolve_audio_hotword_task_binding(
                 }
             ],
         )
+    task_version_snapshot = binding.get("task_version_snapshot")
+    if not isinstance(task_version_snapshot, dict):
+        raise ApiError(
+            "AUDIO_TASK_MODEL_BINDING_REQUIRED",
+            "生产 TaskVersion 缺少不可变模型快照",
+            409,
+        )
+    canonical_model_version = str(task_version_snapshot.get("model_version") or "").strip()
+    if not canonical_model_version:
+        raise ApiError(
+            "AUDIO_TASK_MODEL_BINDING_REQUIRED",
+            "生产 TaskVersion 必须冻结模型版本",
+            409,
+        )
+    if model_version_explicit and str(model_version or "").strip() != canonical_model_version:
+        raise ApiError(
+            "AUDIO_TASK_MODEL_BINDING_MISMATCH",
+            "请求模型版本与 TaskVersion 冻结绑定不一致",
+            409,
+            details=[
+                {
+                    "requested_model_version": model_version,
+                    "task_model_version": canonical_model_version,
+                }
+            ],
+        )
     canonical_language = str(binding.get("language") or "")
     if language != canonical_language:
         raise ApiError(
@@ -95,9 +123,10 @@ def resolve_audio_hotword_task_binding(
         "task_version_id": normalized_task_version_id,
         "hotword_pack_version_id": canonical_hotword_version_id,
         "provider": canonical_provider,
+        "model_version": canonical_model_version,
         "language": canonical_language,
         "root_trace_id": binding["root_trace_id"],
-        "task_version_snapshot": binding["task_version_snapshot"],
+        "task_version_snapshot": task_version_snapshot,
         "external_outputs_enabled": binding["external_outputs_enabled"],
         "writeback_mode": binding["writeback_mode"],
         "callback_mode": binding["callback_mode"],

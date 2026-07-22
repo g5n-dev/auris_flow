@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 import pytest
@@ -34,6 +35,7 @@ def _workspace_payload(*, pipelines: object = None) -> dict[str, Any]:
                             "daemonType": "QUEUED_RUN_COORDINATOR",
                             "required": True,
                             "healthy": True,
+                            "lastHeartbeatTime": time.time(),
                         }
                     ]
                 }
@@ -80,6 +82,7 @@ def test_dagster_readiness_requires_exact_workspace_and_uses_post(
     }
     assert "repositoriesOrError" in observed["body"]["query"]  # type: ignore[index]
     assert "daemonHealth" in observed["body"]["query"]  # type: ignore[index]
+    assert "lastHeartbeatTime" in observed["body"]["query"]  # type: ignore[index]
 
 
 @pytest.mark.parametrize(
@@ -143,6 +146,32 @@ def test_dagster_readiness_handles_null_pipeline_inventory(
 ) -> None:
     payload = _workspace_payload()
     payload["data"]["repositoriesOrError"]["nodes"][0]["pipelines"] = None
+    monkeypatch.setattr("app.main.urlopen", lambda _request, timeout: _Response(payload))
+
+    assert probe_dagster_workspace("http://dagster:3000/graphql") == "not_ready"
+
+
+@pytest.mark.parametrize(
+    "heartbeat",
+    [
+        None,
+        "not-a-number",
+        True,
+        float("nan"),
+        time.time() - 3600.0,
+        time.time() + 3600.0,
+    ],
+)
+def test_dagster_readiness_rejects_missing_invalid_stale_or_future_heartbeat(
+    monkeypatch: pytest.MonkeyPatch,
+    heartbeat: object,
+) -> None:
+    payload = _workspace_payload()
+    daemon = payload["data"]["instance"]["daemonHealth"]["allDaemonStatuses"][0]
+    if heartbeat is None:
+        daemon.pop("lastHeartbeatTime")
+    else:
+        daemon["lastHeartbeatTime"] = heartbeat
     monkeypatch.setattr("app.main.urlopen", lambda _request, timeout: _Response(payload))
 
     assert probe_dagster_workspace("http://dagster:3000/graphql") == "not_ready"

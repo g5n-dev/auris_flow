@@ -59,6 +59,7 @@ def secure_production_values(**overrides: Any) -> dict[str, Any]:
         "external_callback_active_key_id": CALLBACK_ACTIVE_KEY_ID,
         "external_callback_legacy_hmac_enabled": False,
         "dependency_check_mode": "strict",
+        "web_concurrency": 1,
         "otel_enabled": True,
         "otel_exporter_otlp_endpoint": "https://telemetry.example.com/v1/traces",
         "metrics_enabled": True,
@@ -76,6 +77,40 @@ def test_secure_production_configuration_is_accepted() -> None:
     assert configured.metrics_enabled is True
     assert configured.dependency_check_mode == "strict"
     assert configured.task_run_monitor_enabled is True
+    assert configured.web_concurrency == 1
+
+
+@pytest.mark.parametrize("app_env", ["production", "release"])
+@pytest.mark.parametrize(
+    ("field_name", "value", "error"),
+    [
+        ("web_concurrency", 0, "WEB_CONCURRENCY"),
+        ("web_concurrency", 2, "WEB_CONCURRENCY"),
+    ],
+)
+def test_production_and_release_require_a_single_bff_process(
+    app_env: str,
+    field_name: str,
+    value: int,
+    error: str,
+) -> None:
+    with pytest.raises(ValidationError, match=error):
+        Settings(
+            _env_file=None,
+            **secure_production_values(
+                app_env=app_env,
+                **{field_name: value},
+            ),
+        )
+
+
+def test_local_environment_may_explicitly_use_multiple_bff_processes() -> None:
+    configured = Settings(
+        _env_file=None,
+        web_concurrency=2,
+    )
+
+    assert configured.web_concurrency == 2
 
 
 @pytest.mark.parametrize(
@@ -131,6 +166,15 @@ def test_production_embedding_configuration_fails_closed(
 def test_production_requires_observability_gates(field_name: str) -> None:
     with pytest.raises(ValidationError, match=field_name.upper()):
         Settings(_env_file=None, **secure_production_values(**{field_name: False}))
+
+
+@pytest.mark.parametrize("sample_ratio", [0.0, 0.009])
+def test_production_requires_nonzero_minimum_trace_sampling(sample_ratio: float) -> None:
+    with pytest.raises(ValidationError, match="OTEL_TRACE_SAMPLE_RATIO"):
+        Settings(
+            _env_file=None,
+            **secure_production_values(otel_trace_sample_ratio=sample_ratio),
+        )
 
 
 @pytest.mark.parametrize(

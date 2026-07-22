@@ -22,7 +22,7 @@ from app.services.idempotency_service import (
     save_idempotency_result,
 )
 from app.services.outbox_service import enqueue_event
-from app.services.run_service import run_payload, transition_run
+from app.services.run_service import public_run_response, run_payload, transition_run
 
 TASK_RUN_CONTROL_ROLES = ("project_admin", "asset_manager", "model_engineer")
 TERMINAL_RUN_STATUSES = {"success", "failed", "cancelled"}
@@ -191,8 +191,9 @@ async def create_task_run_control(
     operation = f"task_run:{run_id}:{action}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
-        raise_replayed_api_error(replay)
-        return replay
+        public_replay = public_run_response(replay, ctx)
+        raise_replayed_api_error(public_replay)
+        return public_replay
 
     source = _source_task_run(session, ctx, run_id)
     if source.status in TERMINAL_RUN_STATUSES:

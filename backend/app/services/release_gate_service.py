@@ -30,7 +30,7 @@ from app.services.idempotency_service import (
     save_idempotency_result,
 )
 from app.services.resource_service import get_resource, upsert_resource
-from app.services.run_service import run_payload, transition_run
+from app.services.run_service import public_run_response, run_payload, transition_run
 
 CONTROL_PLANE_RELEASE_RUN_TYPES = frozenset({"task_version_publish", "settings_publish"})
 RELEASE_RUN_TYPES = CONTROL_PLANE_RELEASE_RUN_TYPES | {"hotword_rollback"}
@@ -965,7 +965,7 @@ async def decide_release_gate(
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     _assert_decision_idempotency_actor(session, ctx, operation=operation)
     if replay is not None:
-        return replay
+        return public_run_response(replay, ctx)
     record = session.scalar(
         select(RunRecord)
         .where(

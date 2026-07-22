@@ -34,7 +34,7 @@ SENSITIVE_SQL_MODELS = frozenset(
 )
 SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
     {
-        ("api/routers/generic.py", "get_exports_by_id", "get", "RunRecord"): 1,
+        ("api/routers/generic.py", "_scoped_export_record", "get", "RunRecord"): 1,
         ("api/routers/labels.py", "post_label_optimization_runs", "select", "RunRecord"): 1,
         ("api/routers/traces.py", "get_traces_by_trace_id", "select", "AgentDecision"): 1,
         ("api/routers/traces.py", "get_traces_by_trace_id", "select", "AgentRun"): 1,
@@ -126,6 +126,12 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "get_human_review_task_for_update",
             "select",
             "HumanReviewTask",
+        ): 1,
+        (
+            "services/hotword_service.py",
+            "_verify_eval_run",
+            "select",
+            "RunRecord",
         ): 1,
         (
             "services/hotword_service.py",
@@ -544,6 +550,7 @@ def test_direct_sensitive_sql_api_inventory_and_trace_guards_are_explicit() -> N
     )
     called_names = {_call_name(call) for call in ast.walk(function) if isinstance(call, ast.Call)}
     required_guards = {
+        "_public_trace_span",
         "require_trace_read",
         "can_read_resource_collection",
         "can_read_human_review_task",
@@ -553,6 +560,43 @@ def test_direct_sensitive_sql_api_inventory_and_trace_guards_are_explicit() -> N
     assert required_guards <= called_names, (
         f"Trace 聚合路由缺少显式读取保护：{sorted(required_guards - called_names)}"
     )
+
+    generic_path = APP_ROOT / "api" / "routers" / "generic.py"
+    generic_tree = ast.parse(
+        generic_path.read_text(encoding="utf-8"),
+        filename=str(generic_path),
+    )
+
+    def generic_function(function_name: str) -> ast.FunctionDef | ast.AsyncFunctionDef:
+        return next(
+            node
+            for node in ast.walk(generic_tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name == function_name
+        )
+
+    scoped_export_source = ast.unparse(generic_function("_scoped_export_record"))
+    for required_scope_check in (
+        "record.run_type != 'export'",
+        "record.tenant_id != ctx.tenant_id",
+        "record.project_id != ctx.project_id",
+    ):
+        assert required_scope_check in scoped_export_source
+
+    for endpoint_name in (
+        "post_exports",
+        "get_exports_by_id",
+        "get_exports_by_id_download",
+        "head_exports_by_id_download",
+    ):
+        endpoint_calls = {
+            _call_name(call)
+            for call in ast.walk(generic_function(endpoint_name))
+            if isinstance(call, ast.Call)
+        }
+        assert "_scoped_export_record" in endpoint_calls, (
+            f"导出端点 {endpoint_name} 未通过统一 tenant/project/run_type 读取边界"
+        )
 
 
 def test_task_run_control_sensitive_sql_scope_guards_are_explicit() -> None:

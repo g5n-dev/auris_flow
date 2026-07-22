@@ -668,7 +668,28 @@ def test_trace_independently_blocks_every_free_json_sensitive_reference_variant(
 
     privileged = client.get(f"/api/v1/traces/{trace_id}", headers=auth_headers)
     assert privileged.status_code == 200, privileged.text
-    assert all(secret in privileged.text for secret in secret_values)
+    assert all(
+        secret not in privileged.text
+        for secret in {
+            "VP-AGENT-WRITE-SECRET",
+            "VP-TOOL-SECRET",
+            "VP-OUTBOX-SECRET",
+            "RAW-AGENT-SECRET",
+            "RAW-TOOL-SECRET",
+            "RAW-DECISION-SECRET",
+            "RAW-OUTBOX-SECRET",
+        }
+    )
+    assert all(
+        object_id in privileged.text
+        for object_id in {
+            sensitive_run_id,
+            review_decision_id,
+            "VP-TRACE-REF-SECRET",
+            "VP-AUDIT-SECRET",
+            "VP-COLLISION-SECRET",
+        }
+    )
     assert "trace_ref_uppercase_prefix_collision" in privileged.text
 
     model_trace = client.get(

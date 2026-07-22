@@ -39,12 +39,19 @@ class Settings(BaseSettings):
     app_env: str = "local"
     app_name: str = "auris-flow-bff"
     log_level: str = "INFO"
+    web_concurrency: int = 1
     otel_enabled: bool = False
     otel_exporter_otlp_endpoint: str = ""
     otel_exporter_otlp_headers: str = ""
     otel_service_name: str = "auris-flow-bff"
     otel_trace_sample_ratio: float = 0.1
     otel_export_timeout_seconds: float = 5.0
+    otel_collector_health_url: str = "http://otel-collector:13133/"
+    tempo_readiness_url: str = "http://tempo:3200/ready"
+    prometheus_readiness_url: str = "http://prometheus:9090/-/ready"
+    alertmanager_readiness_url: str = "http://alertmanager:9093/-/ready"
+    node_exporter_metrics_url: str = "http://node-exporter:9100/metrics"
+    observability_health_url: str = "http://observability-health:8080/ready"
     metrics_enabled: bool = False
     metrics_trusted_cidrs: str = ""
     api_prefix: str = "/api/v1"
@@ -75,6 +82,8 @@ class Settings(BaseSettings):
     embedding_http_timeout_seconds: float = 10.0
     dagster_graphql_url: str = "http://127.0.0.1:3000/graphql"
     auris_dagster_adapter: AdapterMode = "local"
+    auris_audio_inference_provider: str = "audio_intelligence_default"
+    auris_audio_inference_allowed_models: str = "audio-v2.3.1"
     auris_external_callback_adapter: AdapterMode = "local"
     external_callback_url: str = "http://127.0.0.1:8089/callbacks/platform"
     external_callback_secret: str = "auris-dev-callback-secret"
@@ -246,6 +255,27 @@ class Settings(BaseSettings):
                 )
             if not self.otel_service_name.strip():
                 raise ValueError("OTEL_SERVICE_NAME must not be empty when OTEL is enabled")
+            for setting_name in (
+                "otel_collector_health_url",
+                "tempo_readiness_url",
+                "prometheus_readiness_url",
+                "alertmanager_readiness_url",
+                "node_exporter_metrics_url",
+                "observability_health_url",
+            ):
+                readiness_endpoint = urlparse(str(getattr(self, setting_name)).strip())
+                if (
+                    readiness_endpoint.scheme not in {"http", "https"}
+                    or not readiness_endpoint.hostname
+                    or readiness_endpoint.username
+                    or readiness_endpoint.password
+                    or readiness_endpoint.query
+                    or readiness_endpoint.fragment
+                ):
+                    raise ValueError(
+                        f"{setting_name.upper()} must be an HTTP(S) URL without credentials, "
+                        "query, or fragment"
+                    )
         for item in _csv_items(self.metrics_trusted_cidrs):
             try:
                 network = ipaddress.ip_network(item, strict=False)
@@ -256,12 +286,17 @@ class Settings(BaseSettings):
 
         production = is_production_environment(self.app_env)
         _validate_embedding_settings(self, production=production)
+        _validate_audio_inference_policy_settings(self)
 
         if not production:
             return self
 
+        if self.web_concurrency != 1:
+            raise ValueError("WEB_CONCURRENCY must be 1 in prod/release")
         if not self.otel_enabled:
             raise ValueError("OTEL_ENABLED must be true in prod/release")
+        if self.otel_trace_sample_ratio < 0.01:
+            raise ValueError("OTEL_TRACE_SAMPLE_RATIO must be at least 0.01 in prod/release")
         if not self.metrics_enabled:
             raise ValueError("METRICS_ENABLED must be true in prod/release")
         if not self.task_run_monitor_enabled:
@@ -580,6 +615,24 @@ def _validate_embedding_settings(settings: Settings, *, production: bool) -> Non
         raise ValueError("EMBEDDING_MODEL is required and must not exceed 256 characters")
     if production:
         _require_strong_secret("EMBEDDING_API_KEY", settings.embedding_api_key)
+
+
+_AUDIO_POLICY_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+
+
+def _validate_audio_inference_policy_settings(settings: Settings) -> None:
+    provider = settings.auris_audio_inference_provider.strip()
+    models = _csv_items(settings.auris_audio_inference_allowed_models)
+    if _AUDIO_POLICY_IDENTIFIER.fullmatch(provider) is None:
+        raise ValueError("AURIS_AUDIO_INFERENCE_PROVIDER is invalid")
+    if (
+        not models
+        or len(models) > 32
+        or len(set(models)) != len(models)
+        or "*" in models
+        or any(_AUDIO_POLICY_IDENTIFIER.fullmatch(model) is None for model in models)
+    ):
+        raise ValueError("AURIS_AUDIO_INFERENCE_ALLOWED_MODELS is invalid")
 
 
 @lru_cache

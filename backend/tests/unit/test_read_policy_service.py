@@ -74,6 +74,29 @@ def test_oidc_identity_trace_object_uses_an_admin_only_sensitive_policy() -> Non
         )
 
 
+def test_prompt_candidate_trace_objects_reuse_sensitive_collection_policy() -> None:
+    for object_type in (
+        "prompt_candidate",
+        "prompt_version_candidate",
+        "prompt_version_candidates",
+    ):
+        assert trace_reference_collection(object_type) == "prompt_version_candidates"
+        assert not trace_reference_is_visible(
+            {"type": object_type, "id": "candidate-hidden"},
+            _context("asset_manager"),
+        )
+        for role in ("project_admin", "model_engineer", "review_arbitrator", "system"):
+            assert trace_reference_is_visible(
+                {"type": object_type, "id": "candidate-visible"},
+                _context(role),
+            )
+
+    assert not trace_reference_is_visible(
+        {"prompt_candidate_id": "candidate-hidden-by-key"},
+        _context("asset_manager"),
+    )
+
+
 def test_voiceprint_sensitive_reads_require_explicit_privileged_role() -> None:
     for role in ("annotator", "model_engineer", "asset_manager"):
         with pytest.raises(ApiError) as exc_info:
