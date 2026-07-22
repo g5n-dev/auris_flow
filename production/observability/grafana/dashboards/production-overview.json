@@ -102,6 +102,15 @@
       "targets": [{"expr": "auris_task_run_deadline_overdue", "legendFormat": "deadline overdue", "refId": "A"}, {"expr": "auris_task_run_status_sync_overdue", "legendFormat": "status sync overdue", "refId": "B"}],
       "title": "TaskRun monitor overdue",
       "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "prometheus"},
+      "fieldConfig": {"defaults": {"unit": "s"}, "overrides": []},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 32},
+      "id": 12,
+      "targets": [{"expr": "histogram_quantile(0.95, sum by (le) (auris_outbox_delivery_duration_window_seconds_bucket))", "legendFormat": "P95", "refId": "A"}],
+      "title": "Outbox P95 delivery duration (24h)",
+      "type": "timeseries"
     }
   ],
   "refresh": "30s",
@@ -112,5 +121,5 @@
   "timezone": "browser",
   "title": "Auris Flow Production Overview",
   "uid": "auris-flow-production",
-  "version": 2
+  "version": 3
 }

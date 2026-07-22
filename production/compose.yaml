@@ -1,5 +1,17 @@
 name: ${COMPOSE_PROJECT_NAME:-auris-flow}
 
+x-auris-backup-manifest-trust:
+  algorithm: ed25519
+  private_key_file: ${AURIS_SECRETS_DIR:-./secrets}/backup_manifest_signing_private_key.pem
+  public_key_file: ${AURIS_SECRETS_DIR:-./secrets}/backup_manifest_signing_public_key.pem
+  exposure: host-backup-tools-only
+
+x-auris-restore-attestation-trust:
+  algorithm: ed25519
+  private_key_file: ${AURIS_SECRETS_DIR:-./secrets}/restore_attestation_signing_private_key.pem
+  public_key_file: ${AURIS_SECRETS_DIR:-./secrets}/restore_attestation_signing_public_key.pem
+  exposure: host-restore-tools-only
+
 x-service-security: &service-security
   restart: unless-stopped
   init: true
@@ -14,7 +26,7 @@ x-app-environment: &app-environment
   AUTH_PROVIDER: oidc
   ALLOW_DEV_AUTH: "false"
   DEPENDENCY_CHECK_MODE: strict
-  REQUIRED_DEPENDENCY_CHECKS: auth,database,redis,object_storage,qdrant,dagster
+  REQUIRED_DEPENDENCY_CHECKS: auth,database,redis,object_storage,qdrant,dagster,observability
   DATABASE_URL_FILE: /run/secrets/runtime_database_url
   REDIS_URL_FILE: /run/secrets/redis_url
   OBJECT_STORAGE_ENDPOINT: http://minio:9000
@@ -39,6 +51,8 @@ x-app-environment: &app-environment
   DAGSTER_REPOSITORY_NAME: __repository__
   DAGSTER_DEFAULT_JOB_NAME: auris_flow_generic_job
   AURIS_DAGSTER_ADAPTER: real
+  AURIS_AUDIO_INFERENCE_PROVIDER: ${AURIS_AUDIO_INFERENCE_PROVIDER:?set AURIS_AUDIO_INFERENCE_PROVIDER}
+  AURIS_AUDIO_INFERENCE_ALLOWED_MODELS: ${AURIS_AUDIO_INFERENCE_ALLOWED_MODELS:?set AURIS_AUDIO_INFERENCE_ALLOWED_MODELS}
   AURIS_EXTERNAL_CALLBACK_ADAPTER: real
   EXTERNAL_CALLBACK_URL: ${AURIS_EXTERNAL_CALLBACK_URL:?set AURIS_EXTERNAL_CALLBACK_URL}
   EXTERNAL_CALLBACK_ALLOWED_HOSTS: ${AURIS_EXTERNAL_CALLBACK_HOST:?set AURIS_EXTERNAL_CALLBACK_HOST}
@@ -66,6 +80,12 @@ x-app-environment: &app-environment
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
   OTEL_SERVICE_NAME: auris-flow-bff
   OTEL_TRACE_SAMPLE_RATIO: ${AURIS_OTEL_TRACE_SAMPLE_RATIO:-0.1}
+  OTEL_COLLECTOR_HEALTH_URL: http://otel-collector:13133/
+  TEMPO_READINESS_URL: http://tempo:3200/ready
+  PROMETHEUS_READINESS_URL: http://prometheus:9090/-/ready
+  ALERTMANAGER_READINESS_URL: http://alertmanager:9093/-/ready
+  NODE_EXPORTER_METRICS_URL: http://node-exporter:9100/metrics
+  OBSERVABILITY_HEALTH_URL: http://observability-health:8080/ready
   METRICS_ENABLED: "true"
   METRICS_TRUSTED_CIDRS: ${AURIS_METRICS_TRUSTED_CIDRS:-}
   TASK_RUN_MONITOR_ENABLED: "true"
@@ -165,6 +185,27 @@ services:
       retries: 20
       start_period: 10s
 
+  minio-volume-init:
+    image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
+    user: "0:0"
+    restart: "no"
+    init: true
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN]
+    security_opt:
+      - no-new-privileges:true
+    network_mode: "none"
+    entrypoint: [/bin/sh, -eu, -c]
+    command:
+      - |
+        if [ "$$(stat -c '%u:%g' /data)" != "1000:1000" ]; then
+          chown 1000:1000 /data
+        fi
+        test "$$(stat -c '%u:%g' /data)" = "1000:1000"
+    volumes:
+      - minio_data:/data
+
   minio:
     <<: *service-security
     image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
@@ -188,18 +229,30 @@ services:
       timeout: 5s
       retries: 20
       start_period: 20s
+    depends_on:
+      minio-volume-init:
+        condition: service_completed_successfully
 
   minio-bootstrap:
     <<: *service-security
     image: ${MINIO_MC_IMAGE:-minio/mc:RELEASE.2025-04-16T18-13-26Z}
     restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
     entrypoint: [/bin/sh, /opt/auris/minio-bootstrap.sh]
+    environment:
+      OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/object_storage_access_key
+      OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key
     secrets:
       - object_storage_access_key
       - object_storage_secret_key
     configs:
       - source: minio_bootstrap
         target: /opt/auris/minio-bootstrap.sh
+        mode: 0555
+      - source: minio_client
+        target: /opt/auris/minio-client.sh
         mode: 0555
     depends_on:
       minio:
@@ -224,6 +277,28 @@ services:
       timeout: 5s
       retries: 20
       start_period: 20s
+
+  qdrant-backup-tool:
+    <<: *service-security
+    profiles: [backup-tools]
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    restart: "no"
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    command: [python, -c, "raise SystemExit('invoke through the governed backup scripts')"]
+    environment:
+      AURIS_BACKUP_QDRANT_URL: http://qdrant:6333
+      AURIS_BACKUP_QDRANT_API_KEY_FILE: /run/secrets/qdrant_api_key
+    secrets:
+      - qdrant_api_key
+    depends_on:
+      qdrant:
+        condition: service_healthy
 
   migrate:
     <<: *service-security
@@ -337,9 +412,28 @@ services:
       AURIS_BFF_INTERNAL_URL: http://bff:8000
       AURIS_COMPLETION_RECEIPT_KEYRING_FILE: /run/secrets/completion_receipt_key_bindings
       AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: ${AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID:-dagster-v1}
+      AURIS_AUDIO_OBJECT_STORAGE_PROVIDER: minio
+      AURIS_AUDIO_OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      AURIS_AUDIO_OBJECT_STORAGE_REGION: us-east-1
+      AURIS_AUDIO_OBJECT_STORAGE_ALLOWED_BUCKETS: auris-flow
+      AURIS_AUDIO_OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/object_storage_access_key
+      AURIS_AUDIO_OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key
+      AURIS_AUDIO_INFERENCE_PROVIDER: ${AURIS_AUDIO_INFERENCE_PROVIDER:?set AURIS_AUDIO_INFERENCE_PROVIDER}
+      AURIS_AUDIO_INFERENCE_ALLOWED_MODELS: ${AURIS_AUDIO_INFERENCE_ALLOWED_MODELS:?set AURIS_AUDIO_INFERENCE_ALLOWED_MODELS}
+      AURIS_AUDIO_INFERENCE_ENDPOINT: ${AURIS_AUDIO_INFERENCE_ENDPOINT:?set AURIS_AUDIO_INFERENCE_ENDPOINT}
+      AURIS_AUDIO_INFERENCE_API_TOKEN_FILE: /run/secrets/audio_inference_api_token
+      AURIS_AUDIO_INFERENCE_TIMEOUT_SECONDS: "30"
+      AURIS_AUDIO_INFERENCE_MAX_RESPONSE_BYTES: "1048576"
+      AURIS_AUDIO_RESULT_BUCKET: auris-flow
     secrets:
       - dagster_database_url
       - completion_receipt_key_bindings
+      - object_storage_access_key
+      - object_storage_secret_key
+      - audio_inference_api_token
+    networks:
+      - internal
+      - app-egress
     volumes:
       - dagster_compute:/var/lib/auris-flow-dagster
     healthcheck:
@@ -353,6 +447,8 @@ services:
         condition: service_completed_successfully
       otel-collector:
         condition: service_started
+      observability-health:
+        condition: service_healthy
 
   dagster-webserver:
     <<: *service-security
@@ -416,12 +512,13 @@ services:
       - 0.0.0.0
       - --port
       - "8000"
+      - --no-access-log
       - --proxy-headers
       - --forwarded-allow-ips
       - ${AURIS_EDGE_INTERNAL_IP:-172.31.48.10}
     environment:
       <<: *app-environment
-      WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-2}
+      WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-1}
     secrets: *app-secrets
     networks:
       - internal
@@ -449,6 +546,8 @@ services:
         condition: service_completed_successfully
       otel-collector:
         condition: service_started
+      observability-health:
+        condition: service_healthy
 
   worker:
     <<: *service-security
@@ -481,6 +580,8 @@ services:
         condition: service_healthy
       otel-collector:
         condition: service_started
+      observability-health:
+        condition: service_healthy
 
   otel-collector:
     <<: *service-security
@@ -494,15 +595,9 @@ services:
       - source: otel_collector_config
         target: /etc/otelcol-contrib/config.yaml
         mode: 0444
-    healthcheck:
-      test: [CMD, /otelcol-contrib, --version]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 15s
     depends_on:
       tempo:
-        condition: service_healthy
+        condition: service_started
 
   tempo:
     <<: *service-security
@@ -518,8 +613,41 @@ services:
         mode: 0444
     volumes:
       - tempo_data:/var/tempo
+  alertmanager:
+    <<: *service-security
+    image: ${ALERTMANAGER_IMAGE:-prom/alertmanager:v0.28.1}
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    entrypoint: [/bin/sh, /etc/alertmanager/alertmanager-entrypoint.sh]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yaml
+      - --storage.path=/alertmanager
+      - --data.retention=120h
+      - --cluster.listen-address=
+      - --web.listen-address=0.0.0.0:9093
+      - --enable-feature=utf8-strict-mode
+    configs:
+      - source: alertmanager_config
+        target: /etc/alertmanager/alertmanager.yaml
+        mode: 0444
+      - source: alertmanager_entrypoint
+        target: /etc/alertmanager/alertmanager-entrypoint.sh
+        mode: 0555
+    secrets:
+      - source: alertmanager_webhook_url
+        target: alertmanager_webhook_url
+        uid: "65534"
+        gid: "65534"
+        mode: 0400
+    volumes:
+      - alertmanager_data:/alertmanager
+    networks:
+      - internal
+      - app-egress
     healthcheck:
-      test: [CMD, /tempo, -version]
+      test: [CMD, /bin/wget, -q, -O, /dev/null, http://127.0.0.1:9093/-/ready]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -547,14 +675,16 @@ services:
     volumes:
       - prometheus_data:/prometheus
     healthcheck:
-      test: [CMD, /bin/prometheus, --version]
+      test: [CMD, /bin/wget, -q, -O, /dev/null, http://127.0.0.1:9090/-/ready]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 15s
     depends_on:
-      otel-collector:
+      alertmanager:
         condition: service_healthy
+      otel-collector:
+        condition: service_started
       node-exporter:
         condition: service_healthy
 
@@ -601,6 +731,8 @@ services:
       prometheus:
         condition: service_healthy
       tempo:
+        condition: service_started
+      observability-health:
         condition: service_healthy
 
   node-exporter:
@@ -629,6 +761,36 @@ services:
       timeout: 5s
       retries: 5
       start_period: 10s
+
+  observability-health:
+    <<: *service-security
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    build:
+      context: ..
+      dockerfile: production/backend/Dockerfile
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    command: [python, /app/scripts/check_observability_health.py, --serve]
+    expose:
+      - "8080"
+    healthcheck:
+      test: [CMD, python, /app/scripts/check_observability_health.py, --check-server]
+      interval: 15s
+      timeout: 15s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      alertmanager:
+        condition: service_started
+      node-exporter:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+      prometheus:
+        condition: service_started
+      tempo:
+        condition: service_started
 
   edge:
     restart: unless-stopped
@@ -684,6 +846,8 @@ configs:
     file: ./minio/entrypoint.sh
   minio_bootstrap:
     file: ./minio/bootstrap.sh
+  minio_client:
+    file: ./minio/client.sh
   qdrant_entrypoint:
     file: ./qdrant/entrypoint.sh
   keycloak_entrypoint:
@@ -698,6 +862,10 @@ configs:
     file: ./observability/prometheus.yaml
   prometheus_alerts:
     file: ./observability/alerts.yaml
+  alertmanager_config:
+    file: ./observability/alertmanager.yaml
+  alertmanager_entrypoint:
+    file: ./observability/alertmanager-entrypoint.sh
   grafana_datasources:
     file: ./observability/grafana/provisioning/datasources/auris-flow.yaml
   grafana_dashboard_provider:
@@ -740,6 +908,16 @@ secrets:
     file: ${AURIS_SECRETS_DIR:-./secrets}/qdrant_api_key
   embedding_api_key:
     file: ${AURIS_SECRETS_DIR:-./secrets}/embedding_api_key
+  audio_inference_api_token:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/audio_inference_api_token
+  backup_manifest_signing_private_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/backup_manifest_signing_private_key.pem
+  backup_manifest_signing_public_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/backup_manifest_signing_public_key.pem
+  restore_attestation_signing_private_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/restore_attestation_signing_private_key.pem
+  restore_attestation_signing_public_key:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/restore_attestation_signing_public_key.pem
   audio_playback_grant_secret:
     file: ${AURIS_SECRETS_DIR:-./secrets}/audio_playback_grant_secret
   completion_receipt_key_bindings:
@@ -756,6 +934,8 @@ secrets:
     file: ${AURIS_SECRETS_DIR:-./secrets}/grafana_admin_user
   grafana_admin_password:
     file: ${AURIS_SECRETS_DIR:-./secrets}/grafana_admin_password
+  alertmanager_webhook_url:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/alertmanager_webhook_url
 
 volumes:
   mysql_data:
@@ -767,6 +947,7 @@ volumes:
   dagster_compute:
   tempo_data:
   prometheus_data:
+  alertmanager_data:
   grafana_data:
 
 networks:

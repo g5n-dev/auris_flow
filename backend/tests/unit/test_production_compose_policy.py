@@ -67,7 +67,7 @@ def test_rendered_production_compose_satisfies_candidate_policy() -> None:
     assert "identity-bootstrap" in document["services"]
 
 
-def test_rendered_networks_confine_egress_to_application_services() -> None:
+def test_rendered_networks_confine_egress_to_authorized_services() -> None:
     policy = _load_policy()
     document = policy._render_compose()
     services = document["services"]
@@ -77,6 +77,8 @@ def test_rendered_networks_confine_egress_to_application_services() -> None:
     assert document["networks"]["app-egress"].get("internal", False) is False
     assert set(services["bff"]["networks"]) == {"internal", "app-egress"}
     assert set(services["worker"]["networks"]) == {"internal", "app-egress"}
+    assert set(services["alertmanager"]["networks"]) == {"internal", "app-egress"}
+    assert set(services["dagster-code"]["networks"]) == {"internal", "app-egress"}
     assert not services["bff"].get("ports")
     assert not services["worker"].get("ports")
     assert set(services["mysql"]["cap_add"]) == {
@@ -92,13 +94,70 @@ def test_rendered_networks_confine_egress_to_application_services() -> None:
         assert service.get("privileged") is not True
         assert "host-gateway" not in str(service.get("extra_hosts") or {})
 
-        if name in {"bff", "worker"}:
+        if name in {"bff", "worker", "alertmanager", "dagster-code"}:
+            continue
+        if name == "minio-volume-init":
+            assert service.get("network_mode") == "none"
+            assert networks == set()
             continue
         if name == "edge":
             assert networks == {"internal", "edge"}
         else:
             assert networks == {"internal"}, name
         assert "app-egress" not in networks
+
+
+def test_qdrant_backup_tool_has_a_single_secret_and_no_application_egress() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    tool = document["services"]["qdrant-backup-tool"]
+
+    assert tool["profiles"] == ["backup-tools"]
+    assert tool["restart"] == "no"
+    assert tool["read_only"] is True
+    assert tool["cap_drop"] == ["ALL"]
+    assert set(tool["networks"]) == {"internal"}
+    assert tool["environment"] == {
+        "AURIS_BACKUP_QDRANT_API_KEY_FILE": "/run/secrets/qdrant_api_key",
+        "AURIS_BACKUP_QDRANT_URL": "http://qdrant:6333",
+    }
+    assert {
+        secret["source"] if isinstance(secret, dict) else secret for secret in tool["secrets"]
+    } == {"qdrant_api_key"}
+
+    leaked = policy._render_compose()
+    leaked["services"]["qdrant-backup-tool"]["secrets"].append(
+        {"source": "runtime_database_url", "target": "runtime_database_url"}
+    )
+    assert "qdrant-backup-tool: only the Qdrant API key may be mounted" in policy.validate_compose(
+        leaked
+    )
+
+
+def test_alertmanager_notification_boundary_is_policy_enforced() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    services = document["services"]
+    assert "alertmanager" in services
+
+    missing_secret = policy._render_compose()
+    missing_secret["services"]["alertmanager"]["secrets"] = []
+    unsafe_command = policy._render_compose()
+    unsafe_command["services"]["alertmanager"]["command"].append(
+        "--webhook-url=https://should-never-be-in-a-command.invalid"
+    )
+    prometheus_detached = policy._render_compose()
+    prometheus_detached["services"]["prometheus"]["depends_on"].pop("alertmanager")
+
+    assert "alertmanager: webhook URL must use the dedicated Docker secret" in (
+        policy.validate_compose(missing_secret)
+    )
+    assert "alertmanager: command must not contain notification URLs" in (
+        policy.validate_compose(unsafe_command)
+    )
+    assert "prometheus: Alertmanager dependency must be healthy" in (
+        policy.validate_compose(prometheus_detached)
+    )
 
 
 @pytest.mark.parametrize(
@@ -201,6 +260,74 @@ def test_bff_proxy_headers_trust_only_the_static_edge_address() -> None:
     assert ipaddress.ip_address(edge_ip) in next(
         subnet for subnet in subnets if ipaddress.ip_address(edge_ip) in subnet
     )
+
+
+def test_bff_disables_uvicorn_access_logs_and_defaults_to_one_process() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    bff = document["services"]["bff"]
+    command = [str(item) for item in bff["command"]]
+    env_example = (ROOT / "production" / ".env.example").read_text(encoding="utf-8")
+
+    assert command.count("--no-access-log") == 1
+    assert bff["environment"]["WEB_CONCURRENCY"] == "1"
+    assert re.search(r"^AURIS_BFF_WORKERS=1$", env_example, re.MULTILINE)
+
+
+def test_compose_policy_rejects_uvicorn_access_logs() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    document["services"]["bff"]["command"].remove("--no-access-log")
+
+    errors = policy.validate_compose(document)
+
+    assert "bff: Uvicorn access logging must be disabled" in errors
+
+
+@pytest.mark.parametrize(
+    "worker_override",
+    [
+        ["--workers", "2"],
+        ["--workers=2"],
+        ["-w", "2"],
+    ],
+)
+def test_compose_policy_rejects_uvicorn_cli_worker_overrides(
+    worker_override: list[str],
+) -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    document["services"]["bff"]["command"].extend(worker_override)
+
+    errors = policy.validate_compose(document)
+
+    assert "bff: Uvicorn CLI worker override is forbidden" in errors
+
+
+@pytest.mark.parametrize("value", ["0", "2"])
+def test_compose_policy_rejects_non_singleton_bff_process_configuration(
+    value: str,
+) -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    document["services"]["bff"]["environment"]["WEB_CONCURRENCY"] = value
+
+    errors = policy.validate_compose(document)
+
+    assert "bff: WEB_CONCURRENCY must be 1 in prod/release" in errors
+
+
+def test_compose_policy_rejects_non_singleton_auris_bff_workers_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = _load_policy()
+    monkeypatch.setenv("AURIS_BFF_WORKERS", "2")
+
+    document = policy._render_compose()
+    errors = policy.validate_compose(document)
+
+    assert document["services"]["bff"]["environment"]["WEB_CONCURRENCY"] == "2"
+    assert "bff: WEB_CONCURRENCY must be 1 in prod/release" in errors
 
 
 def test_compose_policy_rejects_wildcard_or_non_edge_forwarded_proxy_trust() -> None:
@@ -346,6 +473,41 @@ def test_confidential_oidc_override_adds_only_a_bff_secret_file() -> None:
     assert bff_secret_sources == worker_secret_sources | {"oidc_client_secret"}
 
 
+def test_backup_manifest_trust_keys_are_declared_but_never_mounted_into_services() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    trust_secrets = {
+        "backup_manifest_signing_private_key",
+        "backup_manifest_signing_public_key",
+    }
+
+    assert document["x-auris-backup-manifest-trust"] == {
+        "algorithm": "ed25519",
+        "exposure": "host-backup-tools-only",
+        "private_key_file": "./secrets/backup_manifest_signing_private_key.pem",
+        "public_key_file": "./secrets/backup_manifest_signing_public_key.pem",
+    }
+    compose_source = (ROOT / "production" / "compose.yaml").read_text(encoding="utf-8")
+    assert trust_secrets <= {name for name in trust_secrets if f"  {name}:\n" in compose_source}
+    for service in document["services"].values():
+        mounted = {
+            str(item.get("source") or "") if isinstance(item, dict) else str(item)
+            for item in service.get("secrets", [])
+        }
+        assert not trust_secrets & mounted
+
+    del document["x-auris-backup-manifest-trust"]["public_key_file"]
+    errors = policy.validate_compose(document)
+    assert any("backup manifest trust keys" in error for error in errors)
+
+    suffix_spoof = policy._render_compose()
+    suffix_spoof["x-auris-backup-manifest-trust"]["private_key_file"] = (
+        "./secrets/evilbackup_manifest_signing_private_key.pem"
+    )
+    errors = policy.validate_compose(suffix_spoof)
+    assert any("backup manifest trust keys" in error for error in errors)
+
+
 def test_policy_rejects_latest_secret_environment_and_public_database() -> None:
     policy = _load_policy()
     document = policy._render_compose()
@@ -354,6 +516,9 @@ def test_policy_rejects_latest_secret_environment_and_public_database() -> None:
     document["services"]["bff"]["environment"]["QDRANT_API_KEY"] = "visible-value"
     document["services"]["worker"]["environment"]["AURIS_EMBEDDING_PROVIDER"] = "deterministic_test"
     document["services"]["worker"]["environment"]["OTEL_ENABLED"] = "false"
+    document["services"]["dagster-code"]["environment"]["AURIS_AUDIO_INFERENCE_ENDPOINT"] = (
+        "http://inference.example.com/v1/audio-intelligence"
+    )
     document["services"]["grafana"]["ports"][0]["host_ip"] = "0.0.0.0"
 
     errors = policy.validate_compose(document)
@@ -363,6 +528,7 @@ def test_policy_rejects_latest_secret_environment_and_public_database() -> None:
     assert any("QDRANT_API_KEY must use a file reference" in error for error in errors)
     assert any("AURIS_EMBEDDING_PROVIDER must be http" in error for error in errors)
     assert any("OTEL_ENABLED must be true" in error for error in errors)
+    assert any("audio inference endpoint must use HTTPS" in error for error in errors)
     assert any("operator port must bind to loopback" in error for error in errors)
 
 
@@ -396,8 +562,34 @@ def test_edge_exposes_readiness_but_never_metrics() -> None:
 
     assert "location = /readyz" in nginx
     assert "proxy_pass http://bff:8000/readyz" in nginx
+    assert "limit_req zone=auris_readiness" in nginx
+    assert "proxy_cache auris_readyz" in nginx
+    assert "proxy_cache_lock on" in nginx
+    assert "proxy_cache_lock_timeout 6s" in nginx
+    assert "proxy_cache_lock_age 6s" in nginx
     metrics_location = nginx.split("location = /metrics", 1)[1].split("}", 1)[0]
     assert "return 404" in metrics_location
+
+
+def test_edge_policy_rejects_readiness_stampede_and_trace_boundary_regressions() -> None:
+    policy = _load_policy()
+    nginx = (ROOT / "production" / "edge" / "nginx.conf").read_text(encoding="utf-8")
+    unsafe = re.sub(
+        r"proxy_cache_lock_timeout\s+\d+s;",
+        "proxy_cache_lock_timeout 1s;",
+        nginx,
+    )
+    unsafe = re.sub(r"^\s*proxy_cache_lock_age\s+\d+s;\n", "", unsafe, flags=re.MULTILINE)
+    unsafe = unsafe.replace(
+        "proxy_set_header traceparent $http_traceparent;",
+        'proxy_set_header traceparent "";',
+    )
+
+    errors = policy.validate_edge_nginx(unsafe)
+
+    assert any("cache lock timeout" in error for error in errors)
+    assert any("cache lock age" in error for error in errors)
+    assert any("business traceparent" in error for error in errors)
 
 
 def test_edge_overwrites_forwarded_for_and_never_logs_audio_grant_queries() -> None:
@@ -421,6 +613,64 @@ def test_edge_overwrites_forwarded_for_and_never_logs_audio_grant_queries() -> N
     assert "proxy_pass http://bff:8000" in audio_location
     assert "X-Forwarded-For $remote_addr" in audio_location
     assert "$request_uri" not in audio_location
+
+
+def test_edge_uses_server_scoped_query_safe_json_access_logs() -> None:
+    nginx = (ROOT / "production" / "edge" / "nginx.conf").read_text(encoding="utf-8")
+    log_format = re.search(
+        r"log_format\s+auris_safe_json\s+escape=json\s+'(?P<body>\{[^\n]+\})'\s*;",
+        nginx,
+    )
+
+    assert log_format is not None
+    body = log_format.group("body")
+    variables = set(re.findall(r"\$[A-Za-z0-9_]+", body))
+    assert variables == {
+        "$body_bytes_sent",
+        "$request_id",
+        "$request_method",
+        "$request_time",
+        "$status",
+        "$time_iso8601",
+        "$uri",
+    }
+    rendered_json = re.sub(r"\$[A-Za-z0-9_]+", "value", body)
+    assert json.loads(rendered_json)["path"] == "value"
+    assert nginx.count("access_log /dev/stdout auris_safe_json;") == 2
+
+
+def test_nginx_policy_rejects_query_bearing_log_fields_and_inherited_defaults() -> None:
+    policy = _load_policy()
+    nginx = (ROOT / "production" / "edge" / "nginx.conf").read_text(encoding="utf-8")
+    query_bearing = nginx.replace('"path":"$uri"', '"path":"$request_uri"', 1)
+    identifying = nginx.replace(
+        '"method":"$request_method"',
+        '"remote_addr":"$remote_addr","method":"$request_method"',
+        1,
+    )
+    unsafe_location_override = nginx.replace(
+        "    location /api/ {\n",
+        "    location /api/ {\n        access_log /dev/stdout combined;\n",
+        1,
+    )
+    inherited_default = nginx.replace(
+        "    access_log /dev/stdout auris_safe_json;\n",
+        "",
+        1,
+    )
+
+    assert "edge nginx: access log format contains query-bearing variables" in (
+        policy.validate_edge_nginx(query_bearing)
+    )
+    assert "edge nginx: access log format must use only the approved safe variables" in (
+        policy.validate_edge_nginx(identifying)
+    )
+    assert "edge nginx: access_log directives must use auris_safe_json or off" in (
+        policy.validate_edge_nginx(unsafe_location_override)
+    )
+    assert "edge nginx: every server must override access_log with auris_safe_json" in (
+        policy.validate_edge_nginx(inherited_default)
+    )
 
 
 def test_nginx_policy_rejects_forwarded_chain_append_and_playback_access_logging() -> None:

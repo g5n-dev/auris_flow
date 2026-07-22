@@ -13,13 +13,27 @@ if [[ ! "${TENANT_ID}" =~ ^[A-Za-z0-9._-]+$ || ! "${PROJECT_ID}" =~ ^[A-Za-z0-9.
 fi
 
 umask 077
+if [[ -L "${SECRETS_DIR}" ]]; then
+  echo "refusing symlink secrets directory: ${SECRETS_DIR}" >&2
+  exit 2
+fi
 mkdir -p "${SECRETS_DIR}"
+if [[ ! -d "${SECRETS_DIR}" || -L "${SECRETS_DIR}" ]]; then
+  echo "secrets path must be a real directory: ${SECRETS_DIR}" >&2
+  exit 2
+fi
+SECRETS_DIR="$(cd -P "${SECRETS_DIR}" && pwd)"
 chmod 700 "${SECRETS_DIR}"
 if [[ -L "${RUNTIME_METRICS_DIR}" ]]; then
   echo "refusing symlink runtime metrics directory: ${RUNTIME_METRICS_DIR}" >&2
   exit 2
 fi
 mkdir -p "${RUNTIME_METRICS_DIR}"
+if [[ ! -d "${RUNTIME_METRICS_DIR}" || -L "${RUNTIME_METRICS_DIR}" ]]; then
+  echo "runtime metrics path must be a real directory: ${RUNTIME_METRICS_DIR}" >&2
+  exit 2
+fi
+RUNTIME_METRICS_DIR="$(cd -P "${RUNTIME_METRICS_DIR}" && pwd)"
 chmod 755 "${RUNTIME_METRICS_DIR}"
 
 random_hex() {
@@ -48,6 +62,68 @@ write_once() {
   secret_value "${name}" "${value}" >/dev/null
 }
 
+ensure_ed25519_signing_keys() {
+  local key_prefix="$1" key_label="$2" temporary_label="$3"
+  local private_key="${SECRETS_DIR}/${key_prefix}_signing_private_key.pem"
+  local public_key="${SECRETS_DIR}/${key_prefix}_signing_public_key.pem"
+  local private_exists=false public_exists=false
+  [[ -e "${private_key}" || -L "${private_key}" ]] && private_exists=true
+  [[ -e "${public_key}" || -L "${public_key}" ]] && public_exists=true
+  if [[ "${private_exists}" != "${public_exists}" ]]; then
+    echo "${key_label} key pair must be provided together" >&2
+    exit 2
+  fi
+  if [[ "${private_exists}" == true ]]; then
+    for key_path in "${private_key}" "${public_key}"; do
+      if [[ ! -f "${key_path}" || -L "${key_path}" ]]; then
+        echo "refusing unsafe ${key_label} key: ${key_path}" >&2
+        exit 2
+      fi
+    done
+    echo "preserving existing ${key_label} key pair" >&2
+  else
+    local private_tmp public_tmp
+    private_tmp="$(mktemp "${SECRETS_DIR}/.${temporary_label}-private.XXXXXX")"
+    public_tmp="$(mktemp "${SECRETS_DIR}/.${temporary_label}-public.XXXXXX")"
+    if ! openssl genpkey -algorithm ED25519 -out "${private_tmp}" >/dev/null 2>&1 || \
+      ! openssl pkey -in "${private_tmp}" -pubout -out "${public_tmp}" >/dev/null 2>&1; then
+      rm -f -- "${private_tmp}" "${public_tmp}"
+      echo "could not generate Ed25519 ${key_label} key pair" >&2
+      exit 2
+    fi
+    chmod 400 "${private_tmp}"
+    chmod 444 "${public_tmp}"
+    mv "${private_tmp}" "${private_key}"
+    mv "${public_tmp}" "${public_key}"
+  fi
+
+  local derived_public
+  derived_public="$(mktemp "${SECRETS_DIR}/.${temporary_label}-derived-public.XXXXXX")"
+  if ! openssl pkey -in "${private_key}" -pubout -out "${derived_public}" \
+      >/dev/null 2>&1 || \
+    ! openssl pkey -pubin -in "${public_key}" -text -noout 2>/dev/null | \
+      grep -Fq "ED25519" || \
+    ! cmp -s "${derived_public}" "${public_key}"; then
+    rm -f -- "${derived_public}"
+    echo "${key_label} key pair is invalid or mismatched" >&2
+    exit 2
+  fi
+  rm -f -- "${derived_public}"
+  chmod 400 "${private_key}"
+  chmod 444 "${public_key}"
+}
+
+ensure_ed25519_signing_keys \
+  backup_manifest "backup manifest signing" backup-manifest
+ensure_ed25519_signing_keys \
+  restore_attestation "restore attestation signing" restore-attestation
+if cmp -s \
+  "${SECRETS_DIR}/backup_manifest_signing_public_key.pem" \
+  "${SECRETS_DIR}/restore_attestation_signing_public_key.pem"; then
+  echo "backup manifest and restore attestation must use distinct Ed25519 keys" >&2
+  exit 2
+fi
+
 mysql_root="$(secret_value mysql_root_password "$(random_hex 32)")"
 mysql_runtime="$(secret_value mysql_runtime_password "$(random_hex 32)")"
 mysql_migration="$(secret_value mysql_migration_password "$(random_hex 32)")"
@@ -58,6 +134,7 @@ object_access="$(secret_value object_storage_access_key "auris$(random_hex 10)")
 object_secret="$(secret_value object_storage_secret_key "$(random_hex 32)")"
 qdrant_key="$(secret_value qdrant_api_key "$(random_hex 32)")"
 embedding_key="$(secret_value embedding_api_key "$(random_hex 32)")"
+audio_inference_token="$(secret_value audio_inference_api_token "$(random_hex 32)")"
 completion_key="$(random_hex 32)"
 callback_key="$(random_hex 32)"
 

@@ -5,10 +5,12 @@
 本 Runbook 对应 `production/compose.yaml` 的 Linux 单机基线及
 `production/observability/alerts.yaml`。当前实现已接入 OTel SDK（HTTP、SQLAlchemy、Redis、HTTPX、
 urllib 和 Worker/Dagster 领域 span）、结构化脱敏日志、OTel Collector/Tempo、Prometheus、Grafana 与
-node-exporter；这说明遥测路径存在，不等于端到端生产演练已经完成。
+node-exporter，以及使用 secret-backed 通用 HTTPS webhook 的 Alertmanager；这说明遥测和通知路由
+存在，不等于端到端生产演练已经完成。
 
-当前仍是 `v1.0.0` 候选。Compose 暂未内置 Alertmanager/外部通知路由；正式 RC 必须连接实际
-通知渠道并证明值班人员收到、确认和关闭告警。单机形态没有节点 HA，宿主机离线会造成整体不可用。
+当前仍是 `v1.0.0` 候选。Compose 已内置 Alertmanager 和通用 webhook 路由，但仓库内验证不拥有
+真实通知系统，不能证明消息已送达、被值班人员确认或在 resolved 后关闭。正式 RC 必须连接实际
+通知渠道并保存这三项外部证据。单机形态没有节点 HA，宿主机离线会造成整体不可用。
 
 ## 服务目标（SLO）
 
@@ -29,8 +31,9 @@ node-exporter；这说明遥测路径存在，不等于端到端生产演练已�
 当前 Prometheus 直接覆盖请求量/延迟、认证失败、依赖 readiness、Outbox、callback、Worker、
 数据库连接池、限流结果，以及从 MySQL 权威 `run_records` 派生的 TaskRun 终态、24 小时滚动时长分布
 和监控动作。TaskRun 时长从受理记录 `created_at` 到业务终态 `finished_at`，不是 Dagster 单独的引擎
-运行时间。Outbox 精确投递 P95 仍需单独的权威时间戳分布；在该指标进入 release gate 前，不能声称
-Outbox P95 已自动化闭环。
+运行时间。Outbox 成功投递分布从权威 `outbox_events.created_at` 到 `processed_at` 计算，只纳入最近
+24 小时 `processed` 事件；retry、blocked 和 dead-letter 不会伪装成成功样本，并由 pending age、
+retry/dead-letter 指标分别覆盖失败侧。
 
 Redis 在当前生产基线中的可观测职责是严格 readiness、OTel client span 和固定窗口限流。仓库虽有
 LLM cache-key 规范，但尚未实现 Redis 结果缓存读写，因此没有伪造“cache hit ratio”；未来真正接入
@@ -58,6 +61,13 @@ histogram_quantile(
 )
 ```
 
+```promql
+histogram_quantile(
+  0.95,
+  sum by (le) (auris_outbox_delivery_duration_window_seconds_bucket)
+)
+```
+
 ## 健康、指标、日志与追踪
 
 - 公开 `/healthz` 只表示 edge 进程存活。它返回 200 不能作为开放流量依据。
@@ -65,6 +75,9 @@ histogram_quantile(
   Dagster；强依赖失败返回 503。edge 将公开 `/readyz` 精确反代到该严格检查，负载均衡器必须使用
   它决定是否开放流量。MinIO 检查使用配置凭据对目标 bucket 发起签名 HEAD，Qdrant 只接受 2xx，
   不把匿名健康页或 4xx 当作就绪。OIDC discovery/JWKS 的真实登录仍需另加外部合成检查。
+- edge 对公开 `/readyz` 执行每 IP 限流，并以 200=5 秒、503=1 秒的缓存和 6 秒 cache lock
+  singleflight 防止依赖探针被公网请求放大；该位置不接收外部 trace 上下文。业务 `/api/` 与音频
+  Range 保留 `traceparent` 以维持 E2E，固定丢弃外部 `tracestate` 与 `baggage`。
 - AWS S3 的签名 `HeadBucket` 需要目标 bucket 上的 `s3:ListBucket`。运行身份缺少该权限时，即使仍有
   `GetObject`/`PutObject`，严格 readiness 也会因 403 fail closed；授予最小 bucket 权限，不得改用
   匿名访问或公开 bucket 绕过。其他 S3-compatible provider 使用其等价的 bucket-HEAD 权限。
@@ -113,13 +126,24 @@ callback body。只保留必要 UTC 时间、service、event、request ID、业�
 
 ## dependency-offline
 
-对应 `AurisTargetDown`：`auris-flow-bff`、`otel-collector`、`keycloak` 或 `node` target 连续 2 分钟
-不可抓取。
+对应 `AurisTargetDown`：`alertmanager`、`auris-flow-bff`、`keycloak`、`node`、
+`otel-collector`、`prometheus` 或 `tempo` target 连续 2 分钟不可抓取。Compose 中另有
+`observability-health` 内部后台深探针，直接访问 Collector health extension、Tempo/Prometheus/
+Alertmanager readiness 和 node-exporter metrics，并强制导出 marker、等待 Collector batch、从
+Tempo 按 trace ID 读回；其 `/ready` 状态有严格新鲜度上限。BFF、Worker、Dagster code location
+在该探针健康前不会启动，BFF 严格 readiness 还会导出自身限频 marker，并通过探针的内部
+`/traces/{trace_id}` 校验同一 service/span/trace 已进入 Tempo；首次未可见时 fail closed，轮换后的
+传播宽限最多 10 秒，最近成功证明最多保留 20 秒，计入 edge 缓存后的最坏陈旧窗口不超过 25 秒。
+
+Prometheus 无法可靠报告自身完全离线，Alertmanager 也无法交付自身完全离线的通知。生产 RC
+必须由 Compose 宿主机之外的独立 watchdog 定时访问受控 readiness/合成端点并验证通知回执；仓库
+内联合探针只能作为启动门禁，不能替代这份外部证据。
 
 1. 在 Prometheus Targets 区分 DNS/网络、进程退出、healthcheck 和 scrape authorization。
 2. `docker compose ... ps` 查看容器状态；对单个服务用 `logs --since 15m`，不要输出全环境配置。
-3. BFF/Keycloak 下线会影响用户流量或登录；先关闭 edge。OTel 下线时业务可继续但会失去 trace，
-   若关键操作要求可审计则暂停写入。node-exporter 下线会失去容量告警，应按监控盲区处理。
+3. BFF/Keycloak 下线会影响用户流量或登录；先关闭 edge。Collector/Tempo 下线会破坏 trace
+   闭环，Prometheus/Alertmanager 下线会造成监控或通知盲区；关键操作要求可审计时应暂停写入。
+   node-exporter 下线会失去容量告警，也按监控盲区处理。
 4. 检查磁盘、内存、证书、DNS/NTP 和最近配置；只 recreate 明确故障服务，不重建 volume。
 5. 恢复后确认 target `up==1`、严格 readiness、OIDC 合成登录和一个端到端 trace。
 
@@ -238,10 +262,31 @@ clamp 为 0；cancelled 单独展示，不伪装成 success 或 failed。
 3. 修复后用真实 Dagster 和签名完成回执跑至少 5 个合成任务；失败比例连续两个窗口低于阈值且无
    不可解释重复业务结果后关闭。
 
+## audio-inference-provider
+
+音频执行按 `AUDIO_PROVIDER_CONFIGURATION_INVALID`、`AUDIO_PROVIDER_DEADLINE_EXPIRED`、
+`AUDIO_PROVIDER_REQUEST_REJECTED`、`AUDIO_PROVIDER_RESPONSE_INVALID`、
+`AUDIO_PROVIDER_UNAVAILABLE` 与 `AUDIO_RESULT_PERSISTENCE_FAILED` 分类。配置、4xx 合同拒绝、绑定漂移、
+未知字段和越界结果不重试；网络超时、429/5xx 与结果 manifest 存储故障可按原幂等键和 fencing 重试。
+
+1. code server 无法健康时，先核对 HTTPS endpoint、系统 CA、单独的 token secret file、唯一 Provider、
+   显式模型 allowlist、结果 bucket allowlist 和 MinIO 凭据；禁止临时切换 HTTP、`*` 模型或本地 fake。
+2. 4xx/合同失败只记录稳定 error code、request/response/result SHA-256 和业务 trace；不得把 endpoint、
+   bearer token、bucket/key/version、原始音频、转写或 Provider 异常正文复制进日志与工单。
+3. 结果成功必须先在版本化对象存储形成 canonical manifest，再出现签名 completion。只看到 Provider
+   200 不能判定业务成功；只看到 completion 而无法按哈希核对 manifest 也必须按一致性事故处理。
+4. `production-path` 的音频 HTTPS endpoint 仅验证协议/TLS，固定标记
+   `reference_protocol_only=true`、`model_quality_certified=false`。真实模型准确率、容量、限流和 SLA
+   必须在外部 RC 环境单独认证并留证。
+5. Provider 请求不含对象存储凭据、presigned URL 或音频字节。为 Provider 单独配置受信网络内的最小
+   只读对象存储身份，只允许输入前缀；它必须按 bucket/key/version 读取并校验长度/SHA-256。禁止复用
+   Dagster 凭据。若 Provider POST 或结果 manifest PUT 返回任何 3xx，按凭据边界异常直接失败，不跟随。
+
 ## outbox-delivery-delay
 
-对应 `AurisOutboxDeliveryDelayed`：最老 pending 事件年龄超过 300 秒持续 5 分钟。它直接覆盖候选
-SLO 的最老事件上限，但不等同于 Outbox P95 投递时延；后者仍需权威时间戳直方图补齐。
+对应 `AurisOutboxDeliveryDelayed` 与 `AurisOutboxP95DeliveryLatency`：前者在最老 pending 事件年龄
+超过 300 秒并持续 5 分钟时告警；后者根据权威创建/成功处理时间戳的 24 小时累计桶，在 P95 超过
+60 秒并持续 10 分钟时告警。二者必须同时观察，避免只看成功样本而遗漏持续堆积或 dead-letter。
 
 1. 同时查看 pending 总量、retry pending、dead-letter、Worker processing 和 callback outcome，
    并按 event type 与最老事件的稳定 error code 分类，禁止把原始 payload 放入告警或工单。
@@ -249,19 +294,31 @@ SLO 的最老事件上限，但不等同于 Outbox P95 投递时延；后者仍�
    deploy；远端结果不明时先 reconcile，不得盲目重复外部写。
 3. 对已过最大重试的事件按 dead-letter 流程处置；对仍可重试的事件保留原业务 binding、幂等和
    trace。禁止直接 SQL 修改 `created_at` 或 `status` 来清除告警。
-4. oldest age 连续两个窗口低于 300 秒、无不可解释重复结果且相关业务 trace 完整后关闭。
+4. oldest age 连续两个窗口低于 300 秒、成功投递 P95 连续两个窗口低于 60 秒、无不可解释重复
+   结果且相关业务 trace 完整后关闭。
 
 ## dead-letters
 
-对应 `AurisOutboxDeadLetters`：最近 5 分钟新增至少一个 dead-letter，且条件持续 1 分钟。历史
-dead-letter 为了审计会保留在 `auris_outbox_dead_letter` gauge 中，不应让新增事件告警永久 firing。
+对应 `AurisOutboxDeadLetters`：权威数据库中最近 5 分钟新增至少一个 dead-letter，且条件持续
+1 分钟；该 gauge 每次 scrape 都从数据库重建，因此 BFF 重启不会吞掉告警。另有
+`AurisOutboxDeadLettersUnresolved` 在权威存量连续 10 分钟大于零时告警。历史 dead-letter 为了
+审计会保留在 `auris_outbox_dead_letter` gauge 中，不应让“新增”告警永久 firing，但未处置存量
+仍会由 unresolved 告警覆盖。
 
 1. 立即按 event type、稳定错误 code、tenant/project、attempt ledger 和 trace 分类；不要在工单复制
    原始 payload。
 2. 修复根因并验证外部副作用是否已经发生。状态不确定时先向 provider 查询 receipt，禁止盲目重放。
-3. 只通过受治理的人工 replay 操作，使用新幂等键/原事件 binding、fencing、审计和 trace；不得直接
-   SQL 改状态。
-4. 最近 5 分钟不再新增 dead-letter、无重复结果，且存量 dead-letter 均有明确处置和审计记录后
+3. 只通过 `POST /api/v1/runs/{source_run_id}/retries` 执行受治理重放。为本次人工操作创建新的
+   `Idempotency-Key`，同一次请求重试必须复用该 key 和完全相同的 body；不得直接 SQL 改源 Run、
+   Outbox 或 attempt。系统应创建新的 Run 与 Outbox event，继承源业务 `trace_id`，并在 retry payload
+   中绑定 `retry_of_run_id`、`retry_of_event_id` 和 `retry_of_trace_id`。
+4. 关闭工单前同时核对：源失败 Run/Outbox/完整 attempt ledger 的规范哈希未变化；幂等账本只有一条
+   completed/202 记录；retry audit 的 actor、key、trace 与 lineage 一致；远端结果在 tenant/project
+   filter 下恰好一份且跨 scope 为零；Tempo 能沿一次独立 OTel trace 看到 BFF、MySQL、Outbox、
+   Worker 与目标 provider，且 Outbox 的父 span 必须是唯一的 `SPAN_KIND_SERVER`、`POST`、
+   `/api/v1/runs/{id}/retries` BFF span。用于验证幂等 replay 的第二次 HTTP 请求使用独立 trace，
+   不得污染该因果链。证据只记录哈希和稳定状态，不复制 payload、actor 或幂等键原文。
+5. 最近 5 分钟不再新增 dead-letter、无重复结果，且存量 dead-letter 均有明确处置和审计记录后
    关闭；存量未归零仍应保留运维工单，不能因增量告警恢复就视为已解决。
 
 ## callback-failures
@@ -323,14 +380,12 @@ overlay、tmpfs、squashfs 和伪文件系统。Docker named volume 共用其所
 每季度、每个 RC 以及 alerts/metrics 变更后执行。只在隔离 staging/演练 Compose project；不得
 在生产填盘、制造死信或触发 IdP 账户锁定。
 
-先做静态校验：
+先用固定 digest 的 promtool/amtool 做配置、规则场景和 UTF-8 strict 校验；两个容器均为无网络、
+只读、drop-all-capabilities，Alertmanager 门禁还会验证缺失 secret 时启动失败：
 
 ```bash
-docker compose \
-  --project-directory production \
-  --env-file production/.env \
-  -f production/compose.yaml exec -T prometheus \
-  promtool check rules /etc/prometheus/alerts.yaml
+bash scripts/verify_observability_rules.sh
+bash scripts/verify_alertmanager_config.sh
 ```
 
 然后验证 Prometheus 从 pending 到 firing、通知渠道收到、值班确认、runbook 链接和恢复关闭：
@@ -344,16 +399,32 @@ docker compose \
 | 限流后端 | 在隔离环境短暂停止 Redis，再恢复并验证 production fail closed | `AurisRateLimitBackendUnavailable` |
 | Outbox 积压 | 暂停 staging Worker 并通过受支持 API 创建合成事件 | `AurisOutboxBacklog` |
 | Outbox 延迟 | 暂停 staging Worker 直到最老 pending 超过 300 秒，随后恢复消费 | `AurisOutboxDeliveryDelayed` |
-| 死信 | 让隔离 callback 按测试契约持续失败直至正常最大重试 | `AurisOutboxDeadLetters`、`AurisCallbackFailureRate` |
+| 死信 | 让隔离 callback 按测试契约持续失败直至正常最大重试，并在第一次 scrape 前重启 BFF | `AurisOutboxDeadLetters`、`AurisOutboxDeadLettersUnresolved`、`AurisCallbackFailureRate` |
 | 指标采集失败 | 在 staging 用最小权限测试账户暂时拒绝指标只读查询，随后恢复 | `AurisMetricsCollectionFailed` |
 | TaskRun P95/失败率 | 用真实 Dagster 合成任务注入受控延迟/失败，保留签名回执 | `AurisTaskRunP95Duration`、`AurisTaskRunFailureRatio` |
 | TaskRun monitor | 暂停隔离 Worker 超过 `for` 后恢复，不能手工改 deadline/sync 时间 | `AurisTaskRunDeadlineOverdue`、`AurisTaskRunStatusSyncOverdue` |
 | 磁盘容量 | 使用 `promtool test rules` 的合成 node filesystem series；绝不实际填满磁盘 | `AurisHostDiskWillFill`、`AurisHostDiskCritical`、`AurisHostDiskWillFillIn24Hours` |
 | 备份过期 | 在隔离 node-exporter textfile 目录提供过期时间戳，随后由成功测试 backup 覆盖 | `AurisBackupStale` |
 
-当前仓库没有提交 `promtool test rules` 场景文件，也没有 bundled Alertmanager；在这两项及真实通知
-证据补齐前，告警只能算配置基线，不能声称已完成生产告警验收。演练记录至少包含 source commit、
-alert 名、阈值/for、注入与恢复 UTC、通知/确认耗时和工单链接，不含 secret/客户数据。
+当前仓库已提交 `promtool test rules` 场景并提供 bundled Alertmanager；这些门禁验证表达式、路由、
+resolved 配置和 fail-closed secret 边界，不会伪造真实通知系统的收件/确认/恢复证据。在外部证据补齐
+前仍不能声称已完成生产告警验收。演练记录至少包含 source commit、alert 名、阈值/for、注入与恢复
+UTC、通知/确认耗时和工单链接，不含 webhook URL、其他 secret 或客户数据。
+
+## telemetry-export-failures
+
+对应 `AurisTelemetryExportFailures`。Collector 拒绝 span、无法入队或向 Tempo 发送失败均表示追踪链路
+存在缺口；业务请求可能仍成功，但高风险变更必须暂停。
+
+1. 先确认 `otel-collector` 与 Tempo 的真实健康端点、容器重启次数和磁盘容量，不把 `--version`
+   成功当成服务健康。
+2. 检查 `otelcol_receiver_refused_spans_total`、`otelcol_exporter_enqueue_failed_spans_total` 与
+   `otelcol_exporter_send_failed_spans_total` 的增长点和 exporter 标签；不得通过关闭告警或降低采样率
+   隐藏丢失。
+3. 修复网络、队列或 Tempo 后，用受控请求验证 BFF、Worker、Dagster、Outbox 和 callback span 可沿同一
+   trace 查询；滚动窗口归零且通知恢复关闭后再解除变更冻结。
+4. 若期间发生安全事件或不可追踪写入，按审计日志、业务 `trace_id` 和 Outbox 权威记录重建时间线，
+   并在事件报告中明确遥测盲区。
 
 ## 常见依赖排查
 

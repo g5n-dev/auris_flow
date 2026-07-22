@@ -25,7 +25,33 @@ processors:
         action: delete
       - key: db.statement
         action: delete
+      - key: http.target
+        action: delete
+      - key: url.path
+        action: delete
       - key: url.query
+        action: delete
+      - key: client.address
+        action: delete
+      - key: client.port
+        action: delete
+      - key: network.peer.address
+        action: delete
+      - key: network.peer.port
+        action: delete
+      - key: net.peer.ip
+        action: delete
+      - key: net.peer.port
+        action: delete
+      - key: http.client_ip
+        action: delete
+      - key: http.user_agent
+        action: delete
+      - key: user_agent.original
+        action: delete
+      - key: enduser.id
+        action: delete
+      - key: user.id
         action: delete
   resource:
     attributes:

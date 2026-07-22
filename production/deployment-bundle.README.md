@@ -61,6 +61,12 @@ chmod 600 production/.env
 ${EDITOR:?set EDITOR} production/.env
 bash production/scripts/init-secrets.sh
 
+# init-secrets.sh intentionally does not invent an on-call destination.
+install -m 0600 /dev/null production/secrets/alertmanager_webhook_url
+${EDITOR:?set EDITOR} production/secrets/alertmanager_webhook_url
+test -s production/secrets/alertmanager_webhook_url
+chmod 444 production/secrets/alertmanager_webhook_url
+
 install -d -m 0700 production/tls
 install -m 0600 /secure/source/fullchain.pem production/tls/fullchain.pem
 install -m 0600 /secure/source/privkey.pem production/tls/privkey.pem
@@ -69,6 +75,9 @@ install -m 0600 /secure/source/privkey.pem production/tls/privkey.pem
 必须替换示例 FQDN、外部回调、embedding endpoint/model/dimension 和 OIDC 配置。默认使用随包
 Keycloak 参考 IdP。若企业 IdP 需要 confidential client，只能把 client secret 写入 Docker
 secret file，并额外使用随包 `production/compose.oidc-confidential.yaml`；禁止把 secret 放进 `.env`。
+Alertmanager webhook secret 必须是一行不含空白的 `https://` URL；其 source file 位于权限为 `0700`
+的 `production/secrets/` 目录，`0444` 仅用于让非 root 容器只读挂载。缺失、空白或非法 URL 会让
+Alertmanager 启动失败，不能以示例地址、空接收器或跳过该服务绕过。
 详细边界见 [生产配置说明](production/README.md)与
 [密钥轮换 Runbook](doc/runbooks/key-rotation.md)。
 
@@ -92,10 +101,14 @@ docker --context default compose --project-name auris-flow \
   --file production/compose.yaml pull
 
 docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps minio-volume-init
+
+docker --context default compose --project-name auris-flow \
   --project-directory production \
   --env-file production/.env \
   --file production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
-  mysql redis minio qdrant tempo node-exporter
+  mysql redis minio qdrant tempo node-exporter alertmanager
 
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
@@ -121,8 +134,10 @@ docker --context default compose --project-name auris-flow \
   dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
 
-The four bootstrap/migration services are one-shots and must exit successfully in
+The five volume-initialization/bootstrap/migration services are one-shots and must exit successfully in
 their own foreground phase. Do not include them in a detached `up --wait` command.
+`minio-volume-init` changes only the `/data` mount-point owner and never recursively
+changes existing object data.
 
 confidential client 部署在上述每条 `docker --context default compose --project-name auris-flow`
 命令末尾的子命令前追加：
@@ -146,8 +161,12 @@ curl --fail --silent --show-error https://YOUR_AURIS_HOST/healthz
 curl --fail --silent --show-error https://YOUR_AURIS_HOST/readyz
 ```
 
-`/healthz` 只表示进程存活；`/readyz` 必须对 OIDC、MySQL、Redis、MinIO、Qdrant 与真实
-Dagster 全部严格通过。`/metrics` 不应经公网 edge 暴露。
+`/healthz` 只表示进程存活；`/readyz` 必须对 OIDC、MySQL、Redis、MinIO、Qdrant、真实
+Dagster、应用 exporter 与 OTel→Collector→Tempo 深探针全部严格通过。内部
+`observability-health` 还必须对 Collector、Tempo、Prometheus、Alertmanager 和 node-exporter 的
+实际 HTTP 端点通过，并从 Tempo 读回后台 marker；`/metrics` 不应经公网 edge 暴露。
+Prometheus/Alertmanager 自身完全离线无法由同一 Compose 可靠通知，生产验收须另有宿主机外
+watchdog 和通知回执。
 
 备份维护窗口中，先按 Runbook 停止写入服务，再执行：
 

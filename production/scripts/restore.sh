@@ -10,11 +10,15 @@ COMPOSE_FILE="${PRODUCTION_ROOT}/compose.yaml"
 PRODUCTION_PROJECT_NAME="auris-flow"
 DOCKER_CONTEXT_NAME="default"
 BACKUP_TOOLS="${PRODUCTION_ROOT}/backup"
+RESTORE_STATE_TOOL="${BACKUP_TOOLS}/restore_state.py"
 RELEASE_BUNDLE_TOOL="${REPOSITORY_ROOT}/scripts/release_bundle.py"
 RELEASE_METADATA_FILE="${PRODUCTION_ROOT}/release-metadata.json"
 RELEASE_METADATA_SIGNATURE="${PRODUCTION_ROOT}/release-metadata.sigstore.json"
 PYTHON="${PYTHON:-python3}"
 ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
+SECRETS_DIR="${AURIS_SECRETS_DIR:-${PRODUCTION_ROOT}/secrets}"
+MANIFEST_VERIFY_KEY_FILE="${AURIS_BACKUP_MANIFEST_VERIFY_KEY_FILE:-${SECRETS_DIR}/backup_manifest_signing_public_key.pem}"
+RESTORE_ATTESTATION_VERIFY_KEY_FILE="${AURIS_RESTORE_ATTESTATION_VERIFY_KEY_FILE:-${SECRETS_DIR}/restore_attestation_signing_public_key.pem}"
 BACKUP_ROOT=""
 SOURCE_BACKUP_ROOT=""
 RESTORE_SNAPSHOT_ROOT=""
@@ -24,6 +28,7 @@ ALLOW_RELEASE_MIGRATION_FROM=""
 REPORT_ROOT="${AURIS_RESTORE_REPORT_ROOT:-/var/tmp/auris-flow-restore-reports}"
 REPORT_FILE=""
 RESTORE_STEP="preflight"
+RESTORE_PENDING_EXIT_CODE=3
 
 usage() {
   cat <<'USAGE'
@@ -32,6 +37,9 @@ Usage: production/scripts/restore.sh --backup ABSOLUTE_DIR \
 
 Options:
   --env-file FILE                 Compose environment file
+  --manifest-public-key FILE      Deployment-owned Ed25519 trust-anchor public key
+  --restore-attestation-public-key FILE
+                                  Deployment-owned restore-attestation public key
   --project-name NAME             Exact Compose project (default: auris-flow)
   --docker-context NAME           Exact Docker context (default: default)
   --qdrant-mode snapshot          Restore compatible derived snapshots (default)
@@ -103,6 +111,16 @@ while (($#)); do
       ENV_FILE="$2"
       shift 2
       ;;
+    --manifest-public-key)
+      (($# >= 2)) || fail "--manifest-public-key requires a value"
+      MANIFEST_VERIFY_KEY_FILE="$2"
+      shift 2
+      ;;
+    --restore-attestation-public-key)
+      (($# >= 2)) || fail "--restore-attestation-public-key requires a value"
+      RESTORE_ATTESTATION_VERIFY_KEY_FILE="$2"
+      shift 2
+      ;;
     --project-name)
       (($# >= 2)) || fail "--project-name requires a value"
       PRODUCTION_PROJECT_NAME="$2"
@@ -136,7 +154,7 @@ while (($#)); do
   esac
 done
 
-for command_name in docker gzip cmp mktemp cosign "${PYTHON}"; do
+for command_name in docker gzip cmp mktemp cosign openssl "${PYTHON}"; do
   command -v "${command_name}" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
 done
 [[ -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ]] || fail \
@@ -147,6 +165,8 @@ done
   "signed release metadata is missing or unsafe"
 [[ -f "${RELEASE_METADATA_SIGNATURE}" && ! -L "${RELEASE_METADATA_SIGNATURE}" ]] || fail \
   "release metadata Sigstore bundle is missing or unsafe"
+[[ -f "${RESTORE_STATE_TOOL}" && ! -L "${RESTORE_STATE_TOOL}" ]] || fail \
+  "restore state transition tool is missing or unsafe"
 [[ "${PRODUCTION_PROJECT_NAME}" =~ ^[a-z0-9][a-z0-9_-]{0,62}$ ]] || fail \
   "Compose project name is invalid"
 [[ "${DOCKER_CONTEXT_NAME}" =~ ^[A-Za-z0-9_.-]+$ ]] || fail \
@@ -159,8 +179,25 @@ docker --context "${DOCKER_CONTEXT_NAME}" info >/dev/null 2>&1 || fail \
 has_control_character "${BACKUP_ROOT}" && fail "backup path contains a control character"
 has_control_character "${REPORT_ROOT}" && fail "report path contains a control character"
 has_control_character "${ENV_FILE}" && fail "Compose env path contains a control character"
+has_control_character "${MANIFEST_VERIFY_KEY_FILE}" && fail \
+  "manifest public-key path contains a control character"
+has_control_character "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" && fail \
+  "restore attestation public-key path contains a control character"
 [[ "${BACKUP_ROOT}" == /* ]] || fail "--backup must be an absolute path"
 [[ "${REPORT_ROOT}" == /* ]] || fail "--report-root must be an absolute path"
+[[ "${MANIFEST_VERIFY_KEY_FILE}" == /* && \
+  "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" == /* ]] || fail \
+  "backup and restore trust-key paths must be absolute"
+[[ -f "${MANIFEST_VERIFY_KEY_FILE}" && ! -L "${MANIFEST_VERIFY_KEY_FILE}" ]] || fail \
+  "backup manifest public trust-key file is missing or unsafe"
+[[ -f "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" && \
+  ! -L "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" ]] || fail \
+  "restore attestation public trust-key file is missing or unsafe"
+MANIFEST_VERIFY_KEY_FILE="$(cd "$(dirname "${MANIFEST_VERIFY_KEY_FILE}")" && pwd -P)/$(basename "${MANIFEST_VERIFY_KEY_FILE}")"
+RESTORE_ATTESTATION_VERIFY_KEY_FILE="$(cd "$(dirname "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}")" && pwd -P)/$(basename "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}")"
+"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" key-id \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}" >/dev/null || fail \
+  "backup manifest Ed25519 trust anchor is invalid"
 [[ "${QDRANT_MODE}" == "snapshot" || "${QDRANT_MODE}" == "rebuild-required" ]] || fail \
   "--qdrant-mode must be snapshot or rebuild-required"
 if [[ -n "${ALLOW_RELEASE_MIGRATION_FROM}" && \
@@ -171,6 +208,10 @@ fi
 [[ -d "${BACKUP_ROOT}" && ! -L "${BACKUP_ROOT}" ]] || fail \
   "backup root must be a real directory, not a symlink"
 BACKUP_ROOT="$(cd "${BACKUP_ROOT}" && pwd -P)"
+paths_overlap "${MANIFEST_VERIFY_KEY_FILE}" "${BACKUP_ROOT}" && fail \
+  "backup manifest public trust key must be external to the backup"
+paths_overlap "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" "${BACKUP_ROOT}" && fail \
+  "restore attestation public trust key must be external to the backup"
 paths_overlap "${BACKUP_ROOT}" "${REPOSITORY_ROOT}" && fail \
   "backup path must not be an ancestor or descendant of the release bundle"
 [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] || fail "Compose env file is missing or unsafe"
@@ -187,23 +228,41 @@ SOURCE_BACKUP_ROOT="${BACKUP_ROOT}"
 RESTORE_SNAPSHOT_ROOT="$(mktemp -d "${REPORT_ROOT}/auris-flow-restore-snapshot.XXXXXX")"
 "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" snapshot \
   --source "${SOURCE_BACKUP_ROOT}" \
-  --snapshot-root "${RESTORE_SNAPSHOT_ROOT}" >/dev/null || fail \
+  --snapshot-root "${RESTORE_SNAPSHOT_ROOT}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}" >/dev/null || fail \
   "could not create an isolated no-follow backup snapshot"
 BACKUP_ROOT="${RESTORE_SNAPSHOT_ROOT}/backup"
 
 RESTORE_STEP="verify-backup-snapshot"
-"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify --root "${BACKUP_ROOT}" >/dev/null || fail \
-  "manifest or artifact verification failed"
+verified_manifest_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify \
+  --root "${BACKUP_ROOT}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}")" || fail \
+  "external manifest signature or artifact verification failed"
 gzip -t "${BACKUP_ROOT}/mysql/all-databases.sql.gz" || fail "MySQL dump is corrupt"
-inspect_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" inspect --root "${BACKUP_ROOT}")"
-backup_id="$(printf '%s' "${inspect_json}" | "${PYTHON}" -c \
+backup_id="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["backup_id"])')"
-backup_commit="$(printf '%s' "${inspect_json}" | "${PYTHON}" -c \
+backup_commit="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["git_commit"])')"
-backup_release="$(printf '%s' "${inspect_json}" | "${PYTHON}" -c \
+backup_release="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["release_version"])')"
-backup_metadata_sha256="$(printf '%s' "${inspect_json}" | "${PYTHON}" -c \
+backup_metadata_sha256="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["release_metadata_sha256"])')"
+backup_created_at_utc="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["created_at_utc"])')"
+backup_manifest_sha256="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["manifest_sha256"])')"
+backup_signing_key_id="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["signing_key_id"])')"
+restore_attestation_key_id="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["restore_attestation_key_id"])')"
+provided_restore_attestation_key_id="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" key-id \
+  --public-key "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["key_id"])')" || fail \
+  "restore attestation public key is not a valid Ed25519 key"
+[[ "${provided_restore_attestation_key_id}" == "${restore_attestation_key_id}" ]] || fail \
+  "restore attestation public key does not match the signed manifest delegation"
+[[ "${backup_signing_key_id}" != "${restore_attestation_key_id}" ]] || fail \
+  "manifest signing and restore attestation key roles are not separated"
 [[ "${CONFIRMATION}" == "${backup_id}" ]] || fail \
   "confirmation must exactly equal backup id ${backup_id}"
 release_identity="$("${PYTHON}" "${RELEASE_BUNDLE_TOOL}" identity \
@@ -246,6 +305,12 @@ compose() {
     -f "${COMPOSE_FILE}" "$@"
 }
 
+minio_mc() {
+  compose run --rm --no-deps -T \
+    --entrypoint /opt/auris/minio-client.sh \
+    minio-bootstrap "$@"
+}
+
 RESTORE_STEP="compose-preflight"
 compose config --quiet || fail "Compose configuration is invalid"
 running_services="$(compose ps --status running --services)"
@@ -254,7 +319,7 @@ for required_service in mysql minio qdrant redis; do
     fail "required dependency service is not running: ${required_service}"
   fi
 done
-for writer_service in edge bff worker keycloak dagster-code dagster-webserver dagster-daemon migrate db-bootstrap minio-bootstrap identity-bootstrap; do
+for writer_service in edge bff worker keycloak dagster-code dagster-webserver dagster-daemon migrate db-bootstrap minio-volume-init minio-bootstrap identity-bootstrap; do
   if printf '%s\n' "${running_services}" | grep -Fxq "${writer_service}"; then
     fail "writer service ${writer_service} is running; restore requires an offline application tier"
   fi
@@ -286,7 +351,7 @@ if awk -F '\t' '$3 != "0" { found=1 } END { exit found ? 0 : 1 }' "${target_coun
   fail "target MySQL contains rows; no overwrite escape hatch is provided"
 fi
 target_minio_listing="$(mktemp "${REPORT_ROOT}/target-minio.XXXXXX")"
-compose exec -T minio mc ls --recursive --versions --json local/auris-flow \
+minio_mc ls --recursive --versions --json auris/auris-flow \
   >"${target_minio_listing}"
 if [[ -s "${target_minio_listing}" ]]; then
   fail "target MinIO bucket contains object versions; refusing overwrite"
@@ -294,7 +359,7 @@ fi
 compose run --rm --no-deps \
   --user "$(id -u):$(id -g)" \
   -v "${BACKUP_TOOLS}/qdrant_snapshots.py:/opt/auris/qdrant-snapshots.py:ro" \
-  --entrypoint python bff /opt/auris/qdrant-snapshots.py assert-empty >/dev/null || fail \
+  --entrypoint python qdrant-backup-tool /opt/auris/qdrant-snapshots.py assert-empty >/dev/null || fail \
   "target Qdrant contains collections"
 write_report passed "MySQL rows, MinIO versions, and Qdrant collections are empty"
 
@@ -307,6 +372,10 @@ gzip -dc "${BACKUP_ROOT}/mysql/all-databases.sql.gz" | compose exec -T mysql sh 
 write_report passed "business, Keycloak, and Dagster schemas restored"
 
 RESTORE_STEP="minio-authority"
+"${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" verify-artifacts \
+  --plan "${BACKUP_ROOT}/minio/versions.json" \
+  --backup-root "${BACKUP_ROOT}" >/dev/null || fail \
+  "MinIO backup generations do not match their bound SHA-256 values"
 minio_restore_script="$(mktemp "${REPORT_ROOT}/minio-restore.XXXXXX")"
 "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" emit-restore-shell \
   --plan "${BACKUP_ROOT}/minio/versions.json" \
@@ -320,17 +389,19 @@ compose run --rm --no-deps \
 write_report passed "all content generations and delete markers replayed"
 
 RESTORE_STEP="qdrant-derived-index"
+qdrant_rebuild_pending=false
 if [[ "${QDRANT_MODE}" == "snapshot" ]]; then
   compose run --rm --no-deps \
     --user "$(id -u):$(id -g)" \
     -v "${BACKUP_ROOT}:/backup:ro" \
     -v "${BACKUP_TOOLS}/qdrant_snapshots.py:/opt/auris/qdrant-snapshots.py:ro" \
-    --entrypoint python bff \
+    --entrypoint python qdrant-backup-tool \
     /opt/auris/qdrant-snapshots.py restore --input /backup/qdrant || fail \
     "Qdrant derived snapshot restore failed; MySQL and MinIO remain authoritative"
   write_report passed "derived Qdrant snapshots restored after authoritative sources"
 else
-  write_report action-required \
+  qdrant_rebuild_pending=true
+  write_report "pending-qdrant-rebuild" \
     "Qdrant left empty; start the app and submit governed knowledge-index build-runs/outbox reconciliation"
 fi
 
@@ -344,34 +415,71 @@ compose exec -T mysql sh -c '
 cmp -s "${BACKUP_ROOT}/mysql/table-counts.tsv" "${restored_counts}" || fail \
   "restored MySQL table counts differ from the quiesced backup"
 restored_minio_listing="$(mktemp "${REPORT_ROOT}/restored-minio.XXXXXX")"
-compose exec -T minio mc ls --recursive --versions --json local/auris-flow \
+minio_mc ls --recursive --versions --json auris/auris-flow \
   >"${restored_minio_listing}"
 "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" compare-listing \
   --plan "${BACKUP_ROOT}/minio/versions.json" \
   --listing "${restored_minio_listing}" >/dev/null || fail \
   "restored MinIO semantic version history differs from backup"
+restored_minio_verify_script="$(mktemp "${REPORT_ROOT}/restored-minio-verify.XXXXXX")"
+"${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" emit-verify-shell \
+  --plan "${BACKUP_ROOT}/minio/versions.json" \
+  --listing "${restored_minio_listing}" \
+  --output "${restored_minio_verify_script}" || fail \
+  "could not map restored MinIO generations to target version ids"
+compose run --rm --no-deps \
+  --user "$(id -u):$(id -g)" \
+  -v "${restored_minio_verify_script}:/opt/auris/minio-verify.sh:ro" \
+  --entrypoint /bin/sh minio-bootstrap /opt/auris/minio-verify.sh || fail \
+  "restored MinIO generation content failed SHA-256 or size verification"
 if [[ "${QDRANT_MODE}" == "snapshot" ]]; then
   compose run --rm --no-deps \
     --user "$(id -u):$(id -g)" \
     -v "${BACKUP_ROOT}:/backup:ro" \
     -v "${BACKUP_TOOLS}/qdrant_snapshots.py:/opt/auris/qdrant-snapshots.py:ro" \
-    --entrypoint python bff \
-    /opt/auris/qdrant-snapshots.py verify-counts --input /backup/qdrant >/dev/null || fail \
-    "restored Qdrant collection counts differ from backup"
+    --entrypoint python qdrant-backup-tool \
+    /opt/auris/qdrant-snapshots.py verify-semantics --input /backup/qdrant >/dev/null || fail \
+    "restored Qdrant full fingerprints or scoped probe query differ from backup"
+  write_report passed \
+    "authority counts, MinIO generation hashes, and Qdrant semantic fingerprints are consistent"
+else
+  write_report passed \
+    "MySQL authority counts and MinIO generation hashes are consistent; Qdrant remains pending"
 fi
-write_report passed "authority counts and derived-index counts are consistent"
-
-RESTORE_STEP="complete"
-write_report complete \
-  "Redis cache intentionally omitted; run migrations for the selected release, then start application services"
 rm -f \
   "${target_counts}" \
   "${target_minio_listing}" \
   "${minio_restore_script}" \
   "${restored_counts}" \
-  "${restored_minio_listing}"
-printf 'Restore complete for %s. Report: %s\n' "${backup_id}" "${REPORT_FILE}"
-if [[ "${QDRANT_MODE}" == "rebuild-required" ]]; then
-  printf 'Qdrant remains empty by design; execute governed rebuild jobs before declaring readiness.\n'
+  "${restored_minio_listing}" \
+  "${restored_minio_verify_script}"
+if [[ "${qdrant_rebuild_pending}" == true ]]; then
+  RESTORE_STEP="pending-qdrant-rebuild"
+  RESTORE_STATE_FILE="${REPORT_FILE%.tsv}.state.json"
+  set +e
+  "${PYTHON}" "${RESTORE_STATE_TOOL}" create-pending \
+    --output "${RESTORE_STATE_FILE}" \
+    --backup-id "${backup_id}" \
+    --backup-created-at-utc "${backup_created_at_utc}" \
+    --source-commit "${backup_commit}" \
+    --manifest-sha256 "${backup_manifest_sha256}" \
+    --manifest-signing-key-id "${backup_signing_key_id}" \
+    --attestation-key-id "${restore_attestation_key_id}" \
+    --pending-at-utc "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >/dev/null
+  pending_state_exit_code=$?
+  set -e
+  [[ "${pending_state_exit_code}" -eq "${RESTORE_PENDING_EXIT_CODE}" ]] || fail \
+    "could not publish pending Qdrant rebuild state"
+  write_report "pending-qdrant-rebuild" \
+    "authoritative restore verified; governed Qdrant rebuild finalization is required"
+  printf 'Authoritative restore verified for %s, but Qdrant rebuild is pending.\n' "${backup_id}"
+  printf 'Pending state: %s\n' "${RESTORE_STATE_FILE}"
+  printf 'Run production/scripts/finalize-restore.sh after governed rebuild jobs complete.\n'
+  exit "${RESTORE_PENDING_EXIT_CODE}"
 fi
+
+RESTORE_STEP="complete"
+write_report complete \
+  "Redis cache intentionally omitted; run migrations for the selected release, then start application services"
+printf 'Restore complete for %s. Report: %s\n' "${backup_id}" "${REPORT_FILE}"
 printf 'Redis was not restored because it is a disposable cache, never a business authority.\n'

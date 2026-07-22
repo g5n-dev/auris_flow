@@ -13,7 +13,11 @@ RELEASE_BUNDLE_TOOL="${REPOSITORY_ROOT}/scripts/release_bundle.py"
 DEADLINE_RUNNER="${REPOSITORY_ROOT}/scripts/run_with_deadline.py"
 PYTHON="${PYTHON:-python3}"
 ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
+SECRETS_DIR="${AURIS_SECRETS_DIR:-${PRODUCTION_ROOT}/secrets}"
+MANIFEST_VERIFY_KEY_FILE="${AURIS_BACKUP_MANIFEST_VERIFY_KEY_FILE:-${SECRETS_DIR}/backup_manifest_signing_public_key.pem}"
 BACKUP_ROOT=""
+SOURCE_BACKUP_ROOT=""
+VERIFY_SNAPSHOT_ROOT=""
 RUN_DRILL=false
 CLEANUP_ON_SUCCESS=false
 DRILL_PROJECT=""
@@ -32,6 +36,8 @@ Options:
   --drill                 Restore into a newly named Compose project and verify counts
   --cleanup-on-success    Destroy only the generated drill project/volumes after success
   --env-file FILE         Compose environment file required by --drill
+  --manifest-public-key FILE
+                          Deployment-owned Ed25519 trust-anchor public key
   --allow-release-migration-from COMMIT
                           Drill an exact predecessor only when the installed signed
                           compatibility policy lists its tag, commit and metadata hash
@@ -58,6 +64,18 @@ cleanup() {
     if ! rm -f -- "${VALIDATION_SCRIPT}"; then
       printf 'backup verification cleanup failed for validation script: %s\n' \
         "${VALIDATION_SCRIPT}" >&2
+      cleanup_failed=1
+    fi
+  fi
+  if [[ -n "${VERIFY_SNAPSHOT_ROOT}" && -d "${VERIFY_SNAPSHOT_ROOT}" ]]; then
+    if "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" destroy-snapshot \
+      --snapshot-root "${VERIFY_SNAPSHOT_ROOT}" >/dev/null 2>&1; then
+      VERIFY_SNAPSHOT_ROOT=""
+    elif rmdir -- "${VERIFY_SNAPSHOT_ROOT}" >/dev/null 2>&1; then
+      VERIFY_SNAPSHOT_ROOT=""
+    else
+      printf 'backup verification cleanup failed for private snapshot: %s\n' \
+        "${VERIFY_SNAPSHOT_ROOT}" >&2
       cleanup_failed=1
     fi
   fi
@@ -112,6 +130,11 @@ while (($#)); do
       ENV_FILE="$2"
       shift 2
       ;;
+    --manifest-public-key)
+      (($# >= 2)) || fail "--manifest-public-key requires a value"
+      MANIFEST_VERIFY_KEY_FILE="$2"
+      shift 2
+      ;;
     --allow-release-migration-from)
       (($# >= 2)) || fail "--allow-release-migration-from requires a value"
       ALLOW_RELEASE_MIGRATION_FROM="$2"
@@ -126,24 +149,53 @@ while (($#)); do
 done
 
 command -v "${PYTHON}" >/dev/null 2>&1 || fail "Python is required"
+command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required"
 has_control_character "${BACKUP_ROOT}" && fail "backup path contains a control character"
 has_control_character "${ENV_FILE}" && fail "Compose env path contains a control character"
+has_control_character "${MANIFEST_VERIFY_KEY_FILE}" && fail \
+  "manifest public-key path contains a control character"
 if [[ -n "${ALLOW_RELEASE_MIGRATION_FROM}" && \
   ! "${ALLOW_RELEASE_MIGRATION_FROM}" =~ ^[0-9a-f]{40}$ && \
   ! "${ALLOW_RELEASE_MIGRATION_FROM}" =~ ^[0-9a-f]{64}$ ]]; then
   fail "--allow-release-migration-from must be a complete lowercase Git id"
 fi
 [[ "${BACKUP_ROOT}" == /* ]] || fail "--backup must be an absolute path"
+[[ "${MANIFEST_VERIFY_KEY_FILE}" == /* ]] || fail \
+  "backup manifest public-key path must be absolute"
+[[ -f "${MANIFEST_VERIFY_KEY_FILE}" && ! -L "${MANIFEST_VERIFY_KEY_FILE}" ]] || fail \
+  "backup manifest public trust-key file is missing or unsafe"
+MANIFEST_VERIFY_KEY_FILE="$(cd "$(dirname "${MANIFEST_VERIFY_KEY_FILE}")" && pwd -P)/$(basename "${MANIFEST_VERIFY_KEY_FILE}")"
+"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" key-id \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}" >/dev/null || fail \
+  "backup manifest Ed25519 trust anchor is invalid"
 [[ -d "${BACKUP_ROOT}" && ! -L "${BACKUP_ROOT}" ]] || fail \
   "backup root must be a real directory, not a symlink"
 BACKUP_ROOT="$(cd "${BACKUP_ROOT}" && pwd -P)"
 [[ "${BACKUP_ROOT}" != "/" ]] || fail "backup root is too broad"
+paths_overlap "${MANIFEST_VERIFY_KEY_FILE}" "${BACKUP_ROOT}" && fail \
+  "backup manifest public trust key must be external to the backup"
 paths_overlap "${BACKUP_ROOT}" "${REPOSITORY_ROOT}" && fail \
   "backup path must not be an ancestor or descendant of the release bundle"
 
-"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify --root "${BACKUP_ROOT}"
+SOURCE_BACKUP_ROOT="${BACKUP_ROOT}"
+VERIFY_SNAPSHOT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auris-flow-verify-snapshot.XXXXXX")"
+"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" snapshot \
+  --source "${SOURCE_BACKUP_ROOT}" \
+  --snapshot-root "${VERIFY_SNAPSHOT_ROOT}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}" >/dev/null || fail \
+  "could not create a private signed-backup verification snapshot"
+BACKUP_ROOT="${VERIFY_SNAPSHOT_ROOT}/backup"
+
+verified_manifest_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify \
+  --root "${BACKUP_ROOT}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}")" || fail \
+  "external manifest signature or artifact verification failed"
+printf '%s\n' "${verified_manifest_json}"
 "${PYTHON}" "${BACKUP_TOOLS}/mysql_dump.py" verify \
   --input "${BACKUP_ROOT}/mysql/all-databases.sql.gz"
+"${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" verify-artifacts \
+  --plan "${BACKUP_ROOT}/minio/versions.json" \
+  --backup-root "${BACKUP_ROOT}" >/dev/null
 VALIDATION_SCRIPT="$(mktemp "${TMPDIR:-/tmp}/auris-minio-validate.XXXXXX")"
 "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" emit-restore-shell \
   --plan "${BACKUP_ROOT}/minio/versions.json" \
@@ -184,8 +236,7 @@ docker --context "${DOCKER_CONTEXT_NAME}" info >/dev/null 2>&1 || fail \
   "signed release metadata verification failed"
 [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] || fail \
   "Compose env file is missing or unsafe: ${ENV_FILE}"
-inspect_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" inspect --root "${BACKUP_ROOT}")"
-backup_id="$(printf '%s' "${inspect_json}" | "${PYTHON}" -c \
+backup_id="$(printf '%s' "${verified_manifest_json}" | "${PYTHON}" -c \
   'import json,sys; print(json.load(sys.stdin)["backup_id"])')"
 drill_suffix="$("${PYTHON}" -c 'import secrets; print(secrets.token_hex(6))')"
 DRILL_PROJECT="auris-flow-restore-drill-${drill_suffix}"
@@ -212,8 +263,12 @@ compose_drill_with_deadline "${DRILL_RUN_TIMEOUT}" \
 printf 'Pulling digest-pinned recovery images for isolated drill %s...\n' "${DRILL_PROJECT}"
 compose_drill_with_deadline "${DRILL_PULL_TIMEOUT}" \
   "pull restore drill images" \
-  pull mysql db-bootstrap redis minio minio-bootstrap qdrant bff || fail \
+  pull mysql db-bootstrap redis minio minio-volume-init minio-bootstrap qdrant bff || fail \
   "could not pull the signed recovery-side images"
+compose_drill_with_deadline "${DRILL_RUN_TIMEOUT}" \
+  "prepare restore drill object-storage volume" \
+  run --rm --no-deps minio-volume-init || fail \
+  "restore drill object-storage volume initialization failed"
 compose_drill_with_deadline "${DRILL_WAIT_TIMEOUT}" \
   "start restore drill authority services" \
   up --detach --no-deps --wait --wait-timeout "${DRILL_WAIT_TIMEOUT}" \
@@ -245,6 +300,7 @@ restore_arguments=(
   --backup "${BACKUP_ROOT}"
   --confirm "${backup_id}"
   --env-file "${ENV_FILE}"
+  --manifest-public-key "${MANIFEST_VERIFY_KEY_FILE}"
   --qdrant-mode snapshot
   --project-name "${DRILL_PROJECT}"
   --docker-context "${DOCKER_CONTEXT_NAME}"

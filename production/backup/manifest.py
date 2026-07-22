@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
-"""Create and verify self-contained Auris Flow backup manifests.
+"""Create and verify externally signed Auris Flow backup manifests.
 
-Only Python's standard library is used so operators can verify a backup on a
-clean recovery host before Docker or the application is started.
+Manifest processing uses Python's standard library. Ed25519 signing and
+verification require OpenSSL on the recovery host and a deployment trust key
+that is not stored in the backup.
 """
 
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import json
@@ -15,19 +17,28 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
+import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SCHEMA_VERSION = "auris-flow.backup-manifest/v2"
+SCHEMA_VERSION = "auris-flow.backup-manifest/v3"
 RELEASE_METADATA_SCHEMA = "auris.release-deployment-metadata.v3"
 IMAGE_LOCK_SCHEMA = "auris.release-image-lock.v1"
 REQUIRED_AUTHORITIES = ("mysql", "minio")
 MANIFEST_NAME = "manifest.json"
 CHECKSUM_NAME = "manifest.sha256"
+SIGNATURE_NAME = "manifest.signature.json"
+SIGNATURE_SCHEMA = "auris-flow.backup-manifest-signature/v1"
+SIGNATURE_ALGORITHM = "ed25519"
+SIGNATURE_PURPOSE = "auris-flow-production-backup-manifest"
+RESTORE_ATTESTATION_DELEGATION_SCHEMA = "auris-flow.restore-attestation-delegation/v1"
+RESTORE_ATTESTATION_PURPOSE = "auris-flow-restore-completion"
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 COMMIT_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
@@ -36,14 +47,56 @@ RELEASE_TAG_RE = re.compile(
     r"(?:-rc\.[1-9]\d*)?$"
 )
 BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$")
+KEY_ID_RE = re.compile(r"^ed25519-sha256:[0-9a-f]{64}$")
 IMAGE_REFERENCE_RE = re.compile(r"^[^\s@$]+(?::[^\s@]+)?@sha256:[0-9a-f]{64}$")
 SNAPSHOT_MARKER = ".auris-flow-restore-snapshot"
 SNAPSHOT_MARKER_VALUE = "auris-flow.restore-snapshot.v1\n"
 RELEASE_MEMBER_MODES = frozenset({"0600", "0644", "0755"})
+ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
+CONTROL_NAMES = (MANIFEST_NAME, CHECKSUM_NAME, SIGNATURE_NAME)
+
+
+@dataclass(frozen=True)
+class VerificationBudgets:
+    manifest_bytes: int
+    checksum_bytes: int
+    signature_bytes: int
+    artifact_count: int
+    signed_bytes: int
+
+
+_BUDGET_SPECS = {
+    "AURIS_BACKUP_MAX_MANIFEST_BYTES": (16 * 1024 * 1024, 64 * 1024 * 1024),
+    "AURIS_BACKUP_MAX_CHECKSUM_BYTES": (256, 4096),
+    "AURIS_BACKUP_MAX_SIGNATURE_BYTES": (16 * 1024, 64 * 1024),
+    "AURIS_BACKUP_MAX_ARTIFACTS": (100_000, 1_000_000),
+    "AURIS_BACKUP_MAX_SIGNED_BYTES": (4 * 1024**4, 64 * 1024**4),
+}
 
 
 class ManifestError(ValueError):
     """Raised when an untrusted backup does not satisfy the manifest schema."""
+
+
+def _positive_budget(name: str) -> int:
+    default, ceiling = _BUDGET_SPECS[name]
+    raw = os.environ.get(name, str(default))
+    if not re.fullmatch(r"[1-9][0-9]*", raw):
+        raise ManifestError(f"{name} must be a positive integer")
+    value = int(raw)
+    if value > ceiling:
+        raise ManifestError(f"{name} exceeds the hard safety ceiling {ceiling}")
+    return value
+
+
+def _verification_budgets() -> VerificationBudgets:
+    return VerificationBudgets(
+        manifest_bytes=_positive_budget("AURIS_BACKUP_MAX_MANIFEST_BYTES"),
+        checksum_bytes=_positive_budget("AURIS_BACKUP_MAX_CHECKSUM_BYTES"),
+        signature_bytes=_positive_budget("AURIS_BACKUP_MAX_SIGNATURE_BYTES"),
+        artifact_count=_positive_budget("AURIS_BACKUP_MAX_ARTIFACTS"),
+        signed_bytes=_positive_budget("AURIS_BACKUP_MAX_SIGNED_BYTES"),
+    )
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -69,6 +122,149 @@ def _regular_file(path: Path, *, label: str) -> None:
         raise ManifestError(f"{label} must be a regular file and not a symlink")
 
 
+def _stable_file_identity(metadata: os.stat_result) -> tuple[int, ...]:
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mode,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def _open_directory_fd(path: Path) -> int:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = os.open(path, flags)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISDIR(metadata.st_mode):
+        os.close(descriptor)
+        raise ManifestError("backup root must be a real directory, not a symlink")
+    return descriptor
+
+
+def _read_regular_at_bounded(
+    directory_fd: int,
+    name: str,
+    *,
+    max_bytes: int,
+    label: str,
+) -> bytes:
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_NONBLOCK", 0)
+    )
+    try:
+        descriptor = os.open(name, flags, dir_fd=directory_fd)
+    except FileNotFoundError as exc:
+        raise ManifestError(f"missing {label}: {name}") from exc
+    except OSError as exc:
+        raise ManifestError(
+            f"{label} must be a regular file and not a symlink"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise ManifestError(f"{label} must be a regular file and not a symlink")
+        if before.st_size > max_bytes:
+            raise ManifestError(f"{name} exceeds the configured {label} byte budget")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > max_bytes:
+            raise ManifestError(f"{name} exceeds the configured {label} byte budget")
+        after = os.fstat(descriptor)
+        if _stable_file_identity(before) != _stable_file_identity(after):
+            raise ManifestError(f"{name} changed while its control data was read")
+        return payload
+    finally:
+        os.close(descriptor)
+
+
+def _json_from_bytes(payload: bytes, *, label: str) -> Any:
+    try:
+        return json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
+        raise ManifestError(f"invalid JSON in {label}") from exc
+
+
+def _key_file(raw: str | Path, *, private: bool) -> Path:
+    path = Path(raw)
+    _regular_file(path, label="backup manifest signing key")
+    metadata = path.stat()
+    if metadata.st_size <= 0 or metadata.st_size > 16 * 1024:
+        raise ManifestError("backup manifest signing key size is invalid")
+    if private and stat.S_IMODE(metadata.st_mode) & 0o077:
+        raise ManifestError(
+            "backup manifest private key must not be group/world readable"
+        )
+    return path.resolve(strict=True)
+
+
+def _require_external_key(root: Path, key: Path) -> None:
+    try:
+        key.relative_to(root)
+    except ValueError:
+        return
+    raise ManifestError("backup manifest trust keys must be external to the backup")
+
+
+def _run_openssl(arguments: list[str], *, label: str) -> bytes:
+    try:
+        completed = subprocess.run(
+            ["openssl", *arguments],
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:
+        raise ManifestError("OpenSSL is required for backup manifest trust") from exc
+    if completed.returncode != 0:
+        raise ManifestError(f"OpenSSL rejected the {label}")
+    return completed.stdout
+
+
+def _ed25519_public_der(path: Path, *, private: bool) -> bytes:
+    arguments = ["pkey"]
+    if not private:
+        arguments.append("-pubin")
+    arguments.extend(["-in", str(path), "-pubout", "-outform", "DER"])
+    public_der = _run_openssl(arguments, label="Ed25519 key")
+    if len(public_der) != len(ED25519_SPKI_PREFIX) + 32 or not public_der.startswith(
+        ED25519_SPKI_PREFIX
+    ):
+        raise ManifestError("backup manifest key must be Ed25519")
+    return public_der
+
+
+def _key_id(public_der: bytes) -> str:
+    return f"ed25519-sha256:{hashlib.sha256(public_der).hexdigest()}"
+
+
+def _validated_key_pair(
+    private_key_raw: str | Path, public_key_raw: str | Path
+) -> tuple[Path, Path, str]:
+    private_key = _key_file(private_key_raw, private=True)
+    public_key = _key_file(public_key_raw, private=False)
+    private_public = _ed25519_public_der(private_key, private=True)
+    trusted_public = _ed25519_public_der(public_key, private=False)
+    if not hmac.compare_digest(private_public, trusted_public):
+        raise ManifestError("backup manifest signing key pair does not match")
+    return private_key, public_key, _key_id(trusted_public)
+
+
 def _safe_root(raw: str | Path) -> Path:
     root = Path(raw)
     try:
@@ -86,7 +282,7 @@ def _safe_relative(raw: str) -> PurePosixPath:
     path = PurePosixPath(raw)
     if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
         raise ManifestError(f"unsafe artifact path: {raw!r}")
-    if raw in {MANIFEST_NAME, CHECKSUM_NAME}:
+    if raw in {MANIFEST_NAME, CHECKSUM_NAME, SIGNATURE_NAME}:
         raise ManifestError(f"reserved artifact path: {raw}")
     return path
 
@@ -109,8 +305,11 @@ def _validate_timestamp(raw: Any) -> str:
     return raw
 
 
-def _walk_artifacts(root: Path) -> dict[str, dict[str, Any]]:
+def _walk_artifacts(
+    root: Path, *, budgets: VerificationBudgets | None = None
+) -> dict[str, dict[str, Any]]:
     artifacts: dict[str, dict[str, Any]] = {}
+    total_bytes = 0
     for directory, directory_names, file_names in os.walk(root, followlinks=False):
         base = Path(directory)
         for name in directory_names:
@@ -122,27 +321,133 @@ def _walk_artifacts(root: Path) -> dict[str, dict[str, Any]]:
         for name in file_names:
             candidate = base / name
             relative = candidate.relative_to(root).as_posix()
-            if relative in {MANIFEST_NAME, CHECKSUM_NAME}:
+            if relative in {MANIFEST_NAME, CHECKSUM_NAME, SIGNATURE_NAME}:
                 continue
             _safe_relative(relative)
             _regular_file(candidate, label=f"artifact {relative}")
+            size_bytes = candidate.stat().st_size
+            if budgets is not None:
+                if len(artifacts) >= budgets.artifact_count:
+                    raise ManifestError(
+                        "backup artifact count exceeds the configured resource budget"
+                    )
+                total_bytes += size_bytes
+                if total_bytes > budgets.signed_bytes:
+                    raise ManifestError(
+                        "backup signed artifact bytes exceed the configured resource budget"
+                    )
             artifacts[relative] = {
                 "path": relative,
                 "sha256": _sha256_file(candidate),
-                "size_bytes": candidate.stat().st_size,
+                "size_bytes": size_bytes,
             }
     return dict(sorted(artifacts.items()))
 
 
-def _copy_regular_file_no_follow(
-    *, source_dir_fd: int, name: str, destination: Path
+def _open_relative_regular(root_fd: int, relative: PurePosixPath, *, label: str) -> int:
+    directory_fd = os.dup(root_fd)
+    try:
+        for component in relative.parts[:-1]:
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            next_fd = os.open(component, flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        descriptor = os.open(relative.name, flags, dir_fd=directory_fd)
+    except (FileNotFoundError, NotADirectoryError, OSError) as exc:
+        raise ManifestError(
+            f"{label} must be a regular file and not a symlink"
+        ) from exc
+    finally:
+        os.close(directory_fd)
+    metadata = os.fstat(descriptor)
+    if not stat.S_ISREG(metadata.st_mode):
+        os.close(descriptor)
+        raise ManifestError(f"{label} must be a regular file and not a symlink")
+    return descriptor
+
+
+def _hash_signed_artifact(
+    root_fd: int, relative: PurePosixPath, *, expected_size: int
+) -> str:
+    label = f"artifact {relative.as_posix()}"
+    descriptor = _open_relative_regular(root_fd, relative, label=label)
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size != expected_size:
+            raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+        digest = hashlib.sha256()
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+            digest.update(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+        after = os.fstat(descriptor)
+        if _stable_file_identity(before) != _stable_file_identity(after):
+            raise ManifestError(
+                f"artifact changed while being verified: {relative.as_posix()}"
+            )
+        return digest.hexdigest()
+    finally:
+        os.close(descriptor)
+
+
+def _write_private_file(destination: Path, payload: bytes) -> None:
+    descriptor = os.open(
+        destination,
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0),
+        0o400,
+    )
+    try:
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise ManifestError("snapshot destination write made no progress")
+            view = view[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _copy_signed_artifact(
+    *,
+    source_root_fd: int,
+    relative: PurePosixPath,
+    destination_root: Path,
+    expected_size: int,
 ) -> None:
-    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
-    source_fd = os.open(name, flags, dir_fd=source_dir_fd)
+    label = f"artifact {relative.as_posix()}"
+    source_fd = _open_relative_regular(source_root_fd, relative, label=label)
     try:
         before = os.fstat(source_fd)
-        if not stat.S_ISREG(before.st_mode):
-            raise ManifestError(f"snapshot source is not a regular file: {name}")
+        if before.st_size != expected_size:
+            raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+        destination = destination_root
+        for component in relative.parts[:-1]:
+            destination /= component
+            destination.mkdir(mode=0o700, exist_ok=True)
+            if destination.is_symlink() or not destination.is_dir():
+                raise ManifestError("snapshot destination directory is unsafe")
+        destination /= relative.name
         destination_fd = os.open(
             destination,
             os.O_WRONLY
@@ -153,10 +458,13 @@ def _copy_regular_file_no_follow(
             0o400,
         )
         try:
-            while True:
-                chunk = os.read(source_fd, 1024 * 1024)
+            remaining = expected_size
+            while remaining:
+                chunk = os.read(source_fd, min(1024 * 1024, remaining))
                 if not chunk:
-                    break
+                    raise ManifestError(
+                        f"artifact size mismatch: {relative.as_posix()}"
+                    )
                 view = memoryview(chunk)
                 while view:
                     written = os.write(destination_fd, view)
@@ -165,32 +473,27 @@ def _copy_regular_file_no_follow(
                             "snapshot destination write made no progress"
                         )
                     view = view[written:]
+                remaining -= len(chunk)
+            if os.read(source_fd, 1):
+                raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
             os.fsync(destination_fd)
         finally:
             os.close(destination_fd)
         after = os.fstat(source_fd)
-        stable_fields = (
-            before.st_dev,
-            before.st_ino,
-            before.st_size,
-            before.st_mtime_ns,
-            before.st_ctime_ns,
-        )
-        if stable_fields != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        ):
-            raise ManifestError(f"snapshot source changed while being copied: {name}")
+        if _stable_file_identity(before) != _stable_file_identity(after):
+            raise ManifestError(
+                f"snapshot source changed while being copied: {relative.as_posix()}"
+            )
     finally:
         os.close(source_fd)
 
 
 def snapshot_backup(args: argparse.Namespace) -> int:
+    budgets = _verification_budgets()
     source = _safe_root(args.source)
     snapshot_root = _safe_root(args.snapshot_root)
+    public_key = _key_file(args.public_key, private=False)
+    _require_external_key(source, public_key)
     if (
         source == snapshot_root
         or source.is_relative_to(snapshot_root)
@@ -201,37 +504,60 @@ def snapshot_backup(args: argparse.Namespace) -> int:
         raise ManifestError("snapshot root must start empty")
     os.chmod(snapshot_root, 0o700)
     marker = snapshot_root / SNAPSHOT_MARKER
-    marker.write_text(SNAPSHOT_MARKER_VALUE, encoding="ascii")
-    os.chmod(marker, 0o400)
     destination_root = snapshot_root / "backup"
-    destination_root.mkdir(mode=0o700)
+    source_fd = _open_directory_fd(source)
+    try:
+        marker.write_text(SNAPSHOT_MARKER_VALUE, encoding="ascii")
+        os.chmod(marker, 0o400)
+        destination_root.mkdir(mode=0o700)
 
-    destination_directories: list[Path] = [destination_root]
-    for directory, directory_names, file_names, directory_fd in os.fwalk(
-        source, topdown=True, follow_symlinks=False
-    ):
-        relative = Path(directory).relative_to(source)
-        destination_directory = destination_root / relative
-        for name in sorted(directory_names):
-            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if not stat.S_ISDIR(metadata.st_mode):
-                raise ManifestError(f"symlink or special directory in backup: {name}")
-            child = destination_directory / name
-            child.mkdir(mode=0o700)
-            destination_directories.append(child)
-        for name in sorted(file_names):
-            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
-            if not stat.S_ISREG(metadata.st_mode):
-                raise ManifestError(f"symlink or special file in backup: {name}")
-            _copy_regular_file_no_follow(
-                source_dir_fd=directory_fd,
-                name=name,
-                destination=destination_directory / name,
+        control_payloads = _read_control_payloads(source_fd, budgets, signed=True)
+        for name in CONTROL_NAMES:
+            _write_private_file(destination_root / name, control_payloads[name])
+        destination_fd = _open_directory_fd(destination_root)
+        try:
+            document, _statement, _payloads = _verified_controls_from_fd(
+                destination_root,
+                destination_fd,
+                args.public_key,
+                budgets,
             )
-    for destination_directory_path in reversed(destination_directories):
-        destination_directory_path.chmod(0o500)
-    print(json.dumps({"snapshot": str(destination_root), "status": "created"}))
-    return 0
+        finally:
+            os.close(destination_fd)
+
+        for artifact in document["artifacts"]:
+            relative = _safe_relative(artifact["path"])
+            _copy_signed_artifact(
+                source_root_fd=source_fd,
+                relative=relative,
+                destination_root=destination_root,
+                expected_size=artifact["size_bytes"],
+            )
+        _verify_trusted_backup(destination_root, args.public_key, budgets)
+        destination_directories = sorted(
+            (path for path in destination_root.rglob("*") if path.is_dir()),
+            key=lambda path: len(path.parts),
+            reverse=True,
+        )
+        for destination_directory in destination_directories:
+            destination_directory.chmod(0o500)
+        destination_root.chmod(0o500)
+        print(
+            json.dumps(
+                {
+                    "artifact_count": len(document["artifacts"]),
+                    "snapshot": str(destination_root),
+                    "status": "created",
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    except Exception:
+        shutil.rmtree(snapshot_root, ignore_errors=True)
+        raise
+    finally:
+        os.close(source_fd)
 
 
 def destroy_snapshot(args: argparse.Namespace) -> int:
@@ -465,6 +791,19 @@ def _validate_document(document: Any) -> dict[str, Any]:
         or document.get("schema_version") != SCHEMA_VERSION
     ):
         raise ManifestError(f"manifest schema_version must be {SCHEMA_VERSION}")
+    if set(document) != {
+        "schema_version",
+        "backup_id",
+        "created_at_utc",
+        "source",
+        "restore_attestation",
+        "storage_boundary",
+        "data_authority",
+        "tenant_independent_counts",
+        "tool_versions",
+        "artifacts",
+    }:
+        raise ManifestError("manifest shape is invalid")
     backup_id = document.get("backup_id")
     if not isinstance(backup_id, str) or not BACKUP_ID_RE.fullmatch(backup_id):
         raise ManifestError("invalid backup_id")
@@ -485,6 +824,22 @@ def _validate_document(document: Any) -> dict[str, Any]:
         raise ManifestError("source.git_commit must be a hexadecimal commit id")
     if not isinstance(version, str) or not VERSION_RE.fullmatch(version):
         raise ManifestError("source.release_version is invalid")
+    restore_attestation = document.get("restore_attestation")
+    if not isinstance(restore_attestation, dict) or set(restore_attestation) != {
+        "schema_version",
+        "algorithm",
+        "purpose",
+        "key_id",
+    }:
+        raise ManifestError("restore attestation delegation is invalid")
+    if (
+        restore_attestation.get("schema_version")
+        != RESTORE_ATTESTATION_DELEGATION_SCHEMA
+        or restore_attestation.get("algorithm") != SIGNATURE_ALGORITHM
+        or restore_attestation.get("purpose") != RESTORE_ATTESTATION_PURPOSE
+        or not KEY_ID_RE.fullmatch(str(restore_attestation.get("key_id") or ""))
+    ):
+        raise ManifestError("restore attestation delegation is invalid")
     release_metadata = _validate_release_metadata(source.get("release_metadata"))
     release_metadata_sha256 = source.get("release_metadata_sha256")
     if not isinstance(release_metadata_sha256, str) or not SHA256_RE.fullmatch(
@@ -533,10 +888,7 @@ def _validate_document(document: Any) -> dict[str, Any]:
         if path_text in seen:
             raise ManifestError(f"duplicate artifact: {path_text}")
         seen.add(path_text)
-        if (
-            not isinstance(artifact.get("size_bytes"), int)
-            or artifact["size_bytes"] < 0
-        ):
+        if type(artifact.get("size_bytes")) is not int or artifact["size_bytes"] < 0:
             raise ManifestError(f"invalid artifact size: {path_text}")
         if not isinstance(artifact.get("sha256"), str) or not SHA256_RE.fullmatch(
             artifact["sha256"]
@@ -545,12 +897,35 @@ def _validate_document(document: Any) -> dict[str, Any]:
     return document
 
 
+def _validate_resource_budget(
+    document: Mapping[str, Any], budgets: VerificationBudgets
+) -> None:
+    artifacts = document["artifacts"]
+    if len(artifacts) > budgets.artifact_count:
+        raise ManifestError(
+            "backup artifact count exceeds the configured resource budget"
+        )
+    total_size = sum(int(artifact["size_bytes"]) for artifact in artifacts)
+    if total_size > budgets.signed_bytes:
+        raise ManifestError(
+            "backup signed artifact bytes exceed the configured resource budget"
+        )
+
+
 def create_manifest(args: argparse.Namespace) -> int:
+    budgets = _verification_budgets()
     root = _safe_root(args.root)
     manifest_path = root / MANIFEST_NAME
     checksum_path = root / CHECKSUM_NAME
     if manifest_path.exists() or checksum_path.exists():
         raise ManifestError("refusing to overwrite an existing manifest")
+    restore_attestation_public_key = _key_file(
+        args.restore_attestation_public_key, private=False
+    )
+    _require_external_key(root, restore_attestation_public_key)
+    restore_attestation_key_id = _key_id(
+        _ed25519_public_der(restore_attestation_public_key, private=False)
+    )
     counts = _validate_counts(_load_json(Path(args.counts), label="counts"))
     tool_versions = _load_json(Path(args.tool_versions), label="tool versions")
     if not isinstance(tool_versions, dict):
@@ -568,7 +943,7 @@ def create_manifest(args: argparse.Namespace) -> int:
         raise ManifestError("--git-commit does not match release metadata")
     if release_metadata["release_tag"] != args.release_version:
         raise ManifestError("--release-version does not match release metadata")
-    artifacts = list(_walk_artifacts(root).values())
+    artifacts = list(_walk_artifacts(root, budgets=budgets).values())
     required_paths = {
         "metadata/release-metadata.json",
         "metadata/release-metadata.sigstore.json",
@@ -594,6 +969,12 @@ def create_manifest(args: argparse.Namespace) -> int:
             "running_images": running_images,
             "running_images_sha256": _sha256_file(running_images_path),
         },
+        "restore_attestation": {
+            "schema_version": RESTORE_ATTESTATION_DELEGATION_SCHEMA,
+            "algorithm": SIGNATURE_ALGORITHM,
+            "purpose": RESTORE_ATTESTATION_PURPOSE,
+            "key_id": restore_attestation_key_id,
+        },
         "storage_boundary": {
             "contains_sensitive_data": True,
             "operator_assertion": "encrypted-at-rest-and-copied-off-host",
@@ -614,7 +995,12 @@ def create_manifest(args: argparse.Namespace) -> int:
         "artifacts": artifacts,
     }
     _validate_document(document)
+    _validate_resource_budget(document, budgets)
     manifest_bytes = _canonical_json(document)
+    if len(manifest_bytes) > budgets.manifest_bytes:
+        raise ManifestError(
+            f"{MANIFEST_NAME} exceeds the configured manifest byte budget"
+        )
     temporary = root / f".{MANIFEST_NAME}.tmp"
     temporary.write_bytes(manifest_bytes)
     os.chmod(temporary, 0o600)
@@ -626,50 +1012,172 @@ def create_manifest(args: argparse.Namespace) -> int:
     return 0
 
 
-def verify_manifest(args: argparse.Namespace) -> int:
-    root = _safe_root(args.root)
-    manifest_path = root / MANIFEST_NAME
-    checksum_path = root / CHECKSUM_NAME
-    _regular_file(manifest_path, label="manifest")
-    _regular_file(checksum_path, label="manifest checksum")
-    checksum_line = checksum_path.read_text(encoding="ascii").strip()
+def _read_control_payloads(
+    root_fd: int, budgets: VerificationBudgets, *, signed: bool
+) -> dict[str, bytes]:
+    payloads = {
+        MANIFEST_NAME: _read_regular_at_bounded(
+            root_fd,
+            MANIFEST_NAME,
+            max_bytes=budgets.manifest_bytes,
+            label="manifest control",
+        ),
+        CHECKSUM_NAME: _read_regular_at_bounded(
+            root_fd,
+            CHECKSUM_NAME,
+            max_bytes=budgets.checksum_bytes,
+            label="manifest checksum control",
+        ),
+    }
+    if signed:
+        payloads[SIGNATURE_NAME] = _read_regular_at_bounded(
+            root_fd,
+            SIGNATURE_NAME,
+            max_bytes=budgets.signature_bytes,
+            label="manifest signature control",
+        )
+    return payloads
+
+
+def _validated_manifest_controls(
+    payloads: Mapping[str, bytes], budgets: VerificationBudgets
+) -> tuple[dict[str, Any], str]:
+    manifest_payload = payloads[MANIFEST_NAME]
+    try:
+        checksum_line = payloads[CHECKSUM_NAME].decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise ManifestError("invalid manifest.sha256 format") from exc
     match = re.fullmatch(r"([0-9a-f]{64})  manifest\.json", checksum_line)
     if not match:
         raise ManifestError("invalid manifest.sha256 format")
-    actual_manifest_checksum = _sha256_file(manifest_path)
-    if not hmac.compare_digest(match.group(1), actual_manifest_checksum):
+    manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+    if not hmac.compare_digest(match.group(1), manifest_sha256):
         raise ManifestError("manifest checksum mismatch")
-    document = _validate_document(_load_json(manifest_path, label="manifest"))
-    expected = {artifact["path"]: artifact for artifact in document["artifacts"]}
-    actual = _walk_artifacts(root)
-    if set(expected) != set(actual):
-        missing = sorted(set(expected).difference(actual))
-        unexpected = sorted(set(actual).difference(expected))
+    document = _validate_document(_json_from_bytes(manifest_payload, label="manifest"))
+    _validate_resource_budget(document, budgets)
+    if manifest_payload != _canonical_json(document):
+        raise ManifestError("manifest must use canonical JSON encoding")
+    return document, manifest_sha256
+
+
+def _scan_artifact_set(
+    root_fd: int,
+    expected: set[str],
+    budgets: VerificationBudgets,
+    *,
+    signed: bool,
+) -> None:
+    allowed = expected | {MANIFEST_NAME, CHECKSUM_NAME}
+    if signed:
+        allowed.add(SIGNATURE_NAME)
+    scanned_entries = 0
+    scan_budget = budgets.artifact_count * 4 + 1024
+    for directory, directory_names, file_names, directory_fd in os.fwalk(
+        ".", topdown=True, follow_symlinks=False, dir_fd=root_fd
+    ):
+        base = PurePosixPath() if directory == "." else PurePosixPath(directory)
+        for name in (*directory_names, *file_names):
+            scanned_entries += 1
+            if scanned_entries > scan_budget:
+                raise ManifestError(
+                    "backup tree entries exceed the configured traversal budget"
+                )
+            metadata = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISLNK(metadata.st_mode):
+                relative = (base / name).as_posix()
+                raise ManifestError(f"symlink is forbidden in backup: {relative}")
+        for name in file_names:
+            relative = (base / name).as_posix()
+            if relative not in allowed:
+                raise ManifestError(
+                    "backup artifact set mismatch; missing=[]; "
+                    f"unexpected={[relative]!r}"
+                )
+
+
+def _read_signed_structured_artifact(
+    root_fd: int,
+    artifact: Mapping[str, Any],
+    budgets: VerificationBudgets,
+) -> Any:
+    relative = _safe_relative(str(artifact["path"]))
+    expected_size = int(artifact["size_bytes"])
+    if expected_size > budgets.manifest_bytes:
         raise ManifestError(
-            f"backup artifact set mismatch; missing={missing!r}, unexpected={unexpected!r}"
+            f"structured artifact exceeds the metadata byte budget: {relative}"
+        )
+    descriptor = _open_relative_regular(
+        root_fd, relative, label=f"artifact {relative.as_posix()}"
+    )
+    try:
+        before = os.fstat(descriptor)
+        if before.st_size != expected_size:
+            raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+        chunks: list[bytes] = []
+        remaining = expected_size
+        while remaining:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        if os.read(descriptor, 1):
+            raise ManifestError(f"artifact size mismatch: {relative.as_posix()}")
+        payload = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if _stable_file_identity(before) != _stable_file_identity(after):
+            raise ManifestError(
+                f"artifact changed while being read: {relative.as_posix()}"
+            )
+    finally:
+        os.close(descriptor)
+    if not hmac.compare_digest(
+        hashlib.sha256(payload).hexdigest(), str(artifact["sha256"])
+    ):
+        raise ManifestError(f"artifact checksum mismatch: {relative.as_posix()}")
+    return _json_from_bytes(payload, label=f"artifact {relative.as_posix()}")
+
+
+def _verify_artifacts_and_metadata(
+    root_fd: int,
+    document: Mapping[str, Any],
+    budgets: VerificationBudgets,
+    *,
+    signed: bool,
+) -> dict[str, Any]:
+    expected = {artifact["path"]: artifact for artifact in document["artifacts"]}
+    required_artifacts = {
+        "metadata/release-metadata.json",
+        "metadata/running-images.json",
+    }
+    missing_required = sorted(required_artifacts - set(expected))
+    if missing_required:
+        raise ManifestError(
+            "required signed backup artifact(s) missing: " + ", ".join(missing_required)
         )
     for relative, expected_artifact in expected.items():
-        actual_artifact = actual[relative]
-        if actual_artifact["size_bytes"] != expected_artifact["size_bytes"]:
-            raise ManifestError(f"artifact size mismatch: {relative}")
-        if not hmac.compare_digest(
-            actual_artifact["sha256"], expected_artifact["sha256"]
-        ):
+        actual_checksum = _hash_signed_artifact(
+            root_fd,
+            _safe_relative(relative),
+            expected_size=expected_artifact["size_bytes"],
+        )
+        if not hmac.compare_digest(actual_checksum, expected_artifact["sha256"]):
             raise ManifestError(f"artifact checksum mismatch: {relative}")
-    release_metadata_path = root / "metadata/release-metadata.json"
+    _scan_artifact_set(root_fd, set(expected), budgets, signed=signed)
+    release_metadata_artifact = expected["metadata/release-metadata.json"]
     release_metadata = _validate_release_metadata(
-        _load_json(release_metadata_path, label="release metadata artifact")
+        _read_signed_structured_artifact(root_fd, release_metadata_artifact, budgets)
     )
     source = document["source"]
     if release_metadata != source["release_metadata"]:
         raise ManifestError("release metadata artifact does not match backup source")
     if not hmac.compare_digest(
-        _sha256_file(release_metadata_path), source["release_metadata_sha256"]
+        release_metadata_artifact["sha256"], source["release_metadata_sha256"]
     ):
         raise ManifestError("release metadata artifact checksum does not match source")
-    running_images_path = root / "metadata/running-images.json"
+    running_images_artifact = expected["metadata/running-images.json"]
     running_images = _validate_running_images(
-        _load_json(running_images_path, label="running image evidence artifact"),
+        _read_signed_structured_artifact(root_fd, running_images_artifact, budgets),
         release_metadata,
     )
     if running_images != source["running_images"]:
@@ -677,10 +1185,10 @@ def verify_manifest(args: argparse.Namespace) -> int:
             "running image evidence artifact does not match backup source"
         )
     if not hmac.compare_digest(
-        _sha256_file(running_images_path), source["running_images_sha256"]
+        running_images_artifact["sha256"], source["running_images_sha256"]
     ):
         raise ManifestError("running image evidence checksum does not match source")
-    summary = {
+    return {
         "status": "verified",
         "backup_id": document["backup_id"],
         "artifact_count": len(expected),
@@ -689,13 +1197,261 @@ def verify_manifest(args: argparse.Namespace) -> int:
         "release_metadata_sha256": document["source"]["release_metadata_sha256"],
         "running_images_sha256": document["source"]["running_images_sha256"],
     }
+
+
+def _verify_unsigned_manifest_integrity(
+    root_raw: str | Path, budgets: VerificationBudgets
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    root = _safe_root(root_raw)
+    root_fd = _open_directory_fd(root)
+    try:
+        payloads = _read_control_payloads(root_fd, budgets, signed=False)
+        document, _manifest_sha256 = _validated_manifest_controls(payloads, budgets)
+        summary = _verify_artifacts_and_metadata(
+            root_fd, document, budgets, signed=False
+        )
+        if _read_control_payloads(root_fd, budgets, signed=False) != payloads:
+            raise ManifestError("manifest control files changed during verification")
+        return document, summary
+    finally:
+        os.close(root_fd)
+
+
+def _signature_statement(
+    document: Mapping[str, Any], manifest_sha256: str, key_id: str
+) -> dict[str, str]:
+    if not SHA256_RE.fullmatch(manifest_sha256) or not KEY_ID_RE.fullmatch(key_id):
+        raise ManifestError("backup manifest signature identity is invalid")
+    return {
+        "schema_version": SIGNATURE_SCHEMA,
+        "algorithm": SIGNATURE_ALGORITHM,
+        "purpose": SIGNATURE_PURPOSE,
+        "key_id": key_id,
+        "manifest_sha256": manifest_sha256,
+        "backup_id": str(document["backup_id"]),
+        "created_at_utc": str(document["created_at_utc"]),
+        "source_commit": str(document["source"]["git_commit"]),
+    }
+
+
+def _openssl_sign(payload: bytes, private_key: Path) -> bytes:
+    with tempfile.TemporaryDirectory(prefix="auris-backup-signature.") as temporary:
+        temporary_root = Path(temporary)
+        payload_path = temporary_root / "statement.json"
+        signature_path = temporary_root / "signature.bin"
+        payload_path.write_bytes(payload)
+        payload_path.chmod(0o600)
+        _run_openssl(
+            [
+                "pkeyutl",
+                "-sign",
+                "-rawin",
+                "-inkey",
+                str(private_key),
+                "-in",
+                str(payload_path),
+                "-out",
+                str(signature_path),
+            ],
+            label="backup manifest signature",
+        )
+        _regular_file(signature_path, label="backup manifest signature output")
+        signature = signature_path.read_bytes()
+    if len(signature) != 64:
+        raise ManifestError("Ed25519 backup manifest signature length is invalid")
+    return signature
+
+
+def _openssl_verify(payload: bytes, signature: bytes, public_key: Path) -> None:
+    if len(signature) != 64:
+        raise ManifestError("Ed25519 backup manifest signature length is invalid")
+    with tempfile.TemporaryDirectory(prefix="auris-backup-verification.") as temporary:
+        temporary_root = Path(temporary)
+        payload_path = temporary_root / "statement.json"
+        signature_path = temporary_root / "signature.bin"
+        payload_path.write_bytes(payload)
+        signature_path.write_bytes(signature)
+        payload_path.chmod(0o600)
+        signature_path.chmod(0o600)
+        _run_openssl(
+            [
+                "pkeyutl",
+                "-verify",
+                "-rawin",
+                "-pubin",
+                "-inkey",
+                str(public_key),
+                "-in",
+                str(payload_path),
+                "-sigfile",
+                str(signature_path),
+            ],
+            label="backup manifest signature",
+        )
+
+
+def sign_manifest(args: argparse.Namespace) -> int:
+    budgets = _verification_budgets()
+    root = _safe_root(args.root)
+    document, summary = _verify_unsigned_manifest_integrity(root, budgets)
+    signature_path = root / SIGNATURE_NAME
+    if signature_path.exists() or signature_path.is_symlink():
+        raise ManifestError("refusing to overwrite an existing manifest signature")
+    private_key, public_key, key_id = _validated_key_pair(
+        args.private_key, args.public_key
+    )
+    _require_external_key(root, private_key)
+    _require_external_key(root, public_key)
+    if hmac.compare_digest(key_id, str(document["restore_attestation"]["key_id"])):
+        raise ManifestError(
+            "backup manifest and restore attestation must use distinct keys"
+        )
+    statement = _signature_statement(
+        document, _sha256_file(root / MANIFEST_NAME), key_id
+    )
+    signature = _openssl_sign(_canonical_json(statement), private_key)
+    envelope = {
+        **statement,
+        "signature_base64": base64.b64encode(signature).decode("ascii"),
+    }
+    envelope_payload = _canonical_json(envelope)
+    if len(envelope_payload) > budgets.signature_bytes:
+        raise ManifestError(
+            f"{SIGNATURE_NAME} exceeds the configured signature byte budget"
+        )
+    temporary = root / f".{SIGNATURE_NAME}.tmp"
+    if temporary.exists() or temporary.is_symlink():
+        raise ManifestError("manifest signature temporary path already exists")
+    temporary.write_bytes(envelope_payload)
+    temporary.chmod(0o600)
+    os.replace(temporary, signature_path)
+    print(
+        json.dumps(
+            {
+                "status": "signed",
+                "backup_id": summary["backup_id"],
+                "key_id": key_id,
+                "manifest_sha256": statement["manifest_sha256"],
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+def _verify_manifest_signature(
+    root: Path,
+    document: Mapping[str, Any],
+    public_key_raw: str | Path,
+    envelope: Any,
+    manifest_sha256: str,
+) -> dict[str, str]:
+    public_key = _key_file(public_key_raw, private=False)
+    _require_external_key(root, public_key)
+    trusted_key_id = _key_id(_ed25519_public_der(public_key, private=False))
+    required = {
+        "schema_version",
+        "algorithm",
+        "purpose",
+        "key_id",
+        "manifest_sha256",
+        "backup_id",
+        "created_at_utc",
+        "source_commit",
+        "signature_base64",
+    }
+    if not isinstance(envelope, dict) or set(envelope) != required:
+        raise ManifestError("backup manifest signature envelope is invalid")
+    statement = {key: envelope[key] for key in required - {"signature_base64"}}
+    expected_statement = _signature_statement(document, manifest_sha256, trusted_key_id)
+    if envelope.get("key_id") != trusted_key_id:
+        raise ManifestError("backup manifest signature key identity is untrusted")
+    if hmac.compare_digest(
+        trusted_key_id, str(document["restore_attestation"]["key_id"])
+    ):
+        raise ManifestError(
+            "backup manifest and restore attestation must use distinct keys"
+        )
+    if statement != expected_statement:
+        raise ManifestError(
+            "backup manifest signature identity does not match manifest"
+        )
+    raw_signature = envelope.get("signature_base64")
+    if not isinstance(raw_signature, str):
+        raise ManifestError("backup manifest signature encoding is invalid")
+    try:
+        signature = base64.b64decode(raw_signature, validate=True)
+    except (ValueError, TypeError) as exc:
+        raise ManifestError("backup manifest signature encoding is invalid") from exc
+    _openssl_verify(_canonical_json(statement), signature, public_key)
+    return expected_statement
+
+
+def _verified_controls_from_fd(
+    root: Path,
+    root_fd: int,
+    public_key_raw: str | Path,
+    budgets: VerificationBudgets,
+) -> tuple[dict[str, Any], dict[str, str], dict[str, bytes]]:
+    payloads = _read_control_payloads(root_fd, budgets, signed=True)
+    document, manifest_sha256 = _validated_manifest_controls(payloads, budgets)
+    envelope = _json_from_bytes(payloads[SIGNATURE_NAME], label="manifest signature")
+    statement = _verify_manifest_signature(
+        root,
+        document,
+        public_key_raw,
+        envelope,
+        manifest_sha256,
+    )
+    return document, statement, payloads
+
+
+def _verify_trusted_backup(
+    root_raw: str | Path,
+    public_key_raw: str | Path,
+    budgets: VerificationBudgets,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
+    root = _safe_root(root_raw)
+    root_fd = _open_directory_fd(root)
+    try:
+        document, statement, control_payloads = _verified_controls_from_fd(
+            root, root_fd, public_key_raw, budgets
+        )
+        summary = _verify_artifacts_and_metadata(
+            root_fd, document, budgets, signed=True
+        )
+        final_payloads = _read_control_payloads(root_fd, budgets, signed=True)
+        if final_payloads != control_payloads:
+            raise ManifestError("manifest control files changed during verification")
+        summary.update(
+            {
+                "created_at_utc": statement["created_at_utc"],
+                "manifest_sha256": statement["manifest_sha256"],
+                "signing_key_id": statement["key_id"],
+                "restore_attestation_key_id": document["restore_attestation"]["key_id"],
+            }
+        )
+        return document, summary, statement
+    finally:
+        os.close(root_fd)
+
+
+def verify_manifest(args: argparse.Namespace) -> int:
+    _document, summary, _statement = _verify_trusted_backup(
+        args.root,
+        args.public_key,
+        _verification_budgets(),
+    )
     print(json.dumps(summary, sort_keys=True))
     return 0
 
 
 def inspect_manifest(args: argparse.Namespace) -> int:
-    root = _safe_root(args.root)
-    document = _validate_document(_load_json(root / MANIFEST_NAME, label="manifest"))
+    document, _summary, signature = _verify_trusted_backup(
+        args.root,
+        args.public_key,
+        _verification_budgets(),
+    )
     print(
         json.dumps(
             {
@@ -709,10 +1465,28 @@ def inspect_manifest(args: argparse.Namespace) -> int:
                 ],
                 "running_images": document["source"]["running_images"],
                 "running_images_sha256": document["source"]["running_images_sha256"],
+                "manifest_sha256": signature["manifest_sha256"],
+                "signing_key_id": signature["key_id"],
+                "restore_attestation_key_id": document["restore_attestation"]["key_id"],
             },
             sort_keys=True,
         )
     )
+    return 0
+
+
+def verify_key_pair(args: argparse.Namespace) -> int:
+    _private_key, _public_key, key_id = _validated_key_pair(
+        args.private_key, args.public_key
+    )
+    print(json.dumps({"algorithm": SIGNATURE_ALGORITHM, "key_id": key_id}))
+    return 0
+
+
+def public_key_identity(args: argparse.Namespace) -> int:
+    public_key = _key_file(args.public_key, private=False)
+    key_id = _key_id(_ed25519_public_der(public_key, private=False))
+    print(json.dumps({"algorithm": SIGNATURE_ALGORITHM, "key_id": key_id}))
     return 0
 
 
@@ -824,15 +1598,33 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--tool-versions", required=True)
     create.add_argument("--release-metadata", required=True)
     create.add_argument("--running-images", required=True)
+    create.add_argument("--restore-attestation-public-key", required=True)
     create.set_defaults(handler=create_manifest)
+
+    sign = subparsers.add_parser("sign")
+    sign.add_argument("--root", required=True)
+    sign.add_argument("--private-key", required=True)
+    sign.add_argument("--public-key", required=True)
+    sign.set_defaults(handler=sign_manifest)
 
     verify = subparsers.add_parser("verify")
     verify.add_argument("--root", required=True)
+    verify.add_argument("--public-key", required=True)
     verify.set_defaults(handler=verify_manifest)
 
     inspect = subparsers.add_parser("inspect")
     inspect.add_argument("--root", required=True)
+    inspect.add_argument("--public-key", required=True)
     inspect.set_defaults(handler=inspect_manifest)
+
+    key_pair = subparsers.add_parser("verify-key-pair")
+    key_pair.add_argument("--private-key", required=True)
+    key_pair.add_argument("--public-key", required=True)
+    key_pair.set_defaults(handler=verify_key_pair)
+
+    key_id = subparsers.add_parser("key-id")
+    key_id.add_argument("--public-key", required=True)
+    key_id.set_defaults(handler=public_key_identity)
 
     counts = subparsers.add_parser("build-counts")
     counts.add_argument("--mysql-tsv", required=True)
@@ -851,6 +1643,7 @@ def parser() -> argparse.ArgumentParser:
     snapshot = subparsers.add_parser("snapshot")
     snapshot.add_argument("--source", required=True)
     snapshot.add_argument("--snapshot-root", required=True)
+    snapshot.add_argument("--public-key", required=True)
     snapshot.set_defaults(handler=snapshot_backup)
 
     destroy = subparsers.add_parser("destroy-snapshot")

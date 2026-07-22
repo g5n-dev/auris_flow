@@ -2,12 +2,21 @@ groups:
   - name: auris-flow-availability
     rules:
       - alert: AurisTargetDown
-        expr: up{job=~"auris-flow-bff|otel-collector|keycloak|node"} == 0
+        expr: up{job=~"alertmanager|auris-flow-bff|keycloak|node|otel-collector|prometheus|tempo"} == 0
         for: 2m
         labels:
           severity: critical
         annotations:
           summary: "Auris Flow production dependency is offline"
+          runbook: "operations.md#dependency-offline"
+
+      - alert: AurisDependencyNotReady
+        expr: min by (dependency) (auris_dependency_ready) == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Auris Flow required dependency is not ready"
           runbook: "operations.md#dependency-offline"
 
       - alert: AurisApiHighErrorRate
@@ -64,6 +73,18 @@ groups:
           summary: "The production Redis rate-limit backend is unavailable"
           runbook: "operations.md#rate-limit-backend-unavailable"
 
+      - alert: AurisTelemetryExportFailures
+        expr: |
+          sum(increase(otelcol_exporter_send_failed_spans_total[5m])) > 0
+          or sum(increase(otelcol_exporter_enqueue_failed_spans_total[5m])) > 0
+          or sum(increase(otelcol_receiver_refused_spans_total[5m])) > 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "OpenTelemetry spans are failing to enter or leave the collector"
+          runbook: "operations.md#telemetry-export-failures"
+
   - name: auris-flow-async-delivery
     rules:
       - alert: AurisOutboxBacklog
@@ -84,13 +105,36 @@ groups:
           summary: "Oldest pending Outbox event exceeds the 300 second candidate SLO"
           runbook: "operations.md#outbox-delivery-delay"
 
+      - alert: AurisOutboxP95DeliveryLatency
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (auris_outbox_delivery_duration_window_seconds_bucket)
+          ) > 60
+          and auris_outbox_delivery_duration_window_seconds_count > 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Trailing 24 hour Outbox delivery P95 exceeds 60 seconds"
+          runbook: "operations.md#outbox-delivery-delay"
+
       - alert: AurisOutboxDeadLetters
-        expr: increase(auris_worker_processing_total{outcome="dead_letter"}[5m]) > 0
+        expr: auris_outbox_dead_letter_recent > 0
         for: 1m
         labels:
           severity: critical
         annotations:
           summary: "New Outbox dead-letter events detected in the last five minutes"
+          runbook: "operations.md#dead-letters"
+
+      - alert: AurisOutboxDeadLettersUnresolved
+        expr: auris_outbox_dead_letter > 0
+        for: 10m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Outbox dead-letter events remain unresolved"
           runbook: "operations.md#dead-letters"
 
       - alert: AurisCallbackFailureRate
@@ -221,7 +265,9 @@ groups:
           runbook: "operations.md#disk-capacity"
 
       - alert: AurisBackupStale
-        expr: time() - auris_backup_last_success_timestamp_seconds > 90000
+        expr: |
+          time() - auris_backup_last_success_timestamp_seconds > 90000
+          or absent(auris_backup_last_success_timestamp_seconds)
         for: 30m
         labels:
           severity: critical

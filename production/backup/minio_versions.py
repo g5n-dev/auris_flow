@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan and safely replay every generation of a versioned MinIO bucket."""
+"""Plan, bind, replay, and verify every generation of a versioned MinIO bucket."""
 
 from __future__ import annotations
 
@@ -16,7 +16,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Iterable
 
 
-PLAN_SCHEMA = "auris-flow.minio-version-plan/v1"
+PLAN_SCHEMA = "auris-flow.minio-version-plan/v2"
+CONTENT_HASH_ALGORITHM = "sha256"
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -130,6 +132,7 @@ def _records(lines: Iterable[str], bucket: str) -> list[dict[str, Any]]:
                 "storage_class": storage_class,
                 "delete_marker": delete_marker,
                 "artifact": artifact,
+                "content_sha256": None,
                 "source_order": source_order,
             }
         )
@@ -142,6 +145,7 @@ def build_plan(args: argparse.Namespace) -> int:
     document = {
         "schema_version": PLAN_SCHEMA,
         "bucket": args.bucket,
+        "content_hash_algorithm": CONTENT_HASH_ALGORITHM,
         "ordering": "last_modified_ascending_then_reverse_mc_source_order",
         "summary": {
             "object_keys": len({record["key"] for record in records}),
@@ -153,25 +157,29 @@ def build_plan(args: argparse.Namespace) -> int:
         },
         "versions": records,
     }
-    validate_plan(document)
+    validate_plan(document, require_content_hashes=False)
     Path(args.output).write_text(canonical_json(document), encoding="utf-8")
     return 0
 
 
-def load_plan(path: Path) -> dict[str, Any]:
+def load_plan(
+    path: Path, *, require_content_hashes: bool = True
+) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise PlanError("MinIO plan must be a regular file")
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise PlanError("invalid MinIO plan JSON") from exc
-    validate_plan(document)
+    validate_plan(document, require_content_hashes=require_content_hashes)
     return document
 
 
-def validate_plan(document: Any) -> None:
+def validate_plan(document: Any, *, require_content_hashes: bool = True) -> None:
     if not isinstance(document, dict) or document.get("schema_version") != PLAN_SCHEMA:
         raise PlanError("unsupported MinIO plan schema")
+    if document.get("content_hash_algorithm") != CONTENT_HASH_ALGORITHM:
+        raise PlanError("MinIO plan must bind content with SHA-256")
     bucket = document.get("bucket")
     if not isinstance(bucket, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{1,62}", bucket):
         raise PlanError("invalid bucket name")
@@ -198,6 +206,7 @@ def validate_plan(document: Any) -> None:
         if not isinstance(delete_marker, bool):
             raise PlanError("delete_marker must be boolean")
         artifact = record.get("artifact")
+        content_sha256 = record.get("content_sha256")
         safe_string_map(record.get("metadata"), label="object metadata")
         safe_string_map(record.get("tags"), label="object tags")
         if any(
@@ -209,7 +218,7 @@ def validate_plan(document: Any) -> None:
         if not isinstance(storage_class, str) or not re.fullmatch(r"[A-Za-z0-9._-]{0,64}", storage_class):
             raise PlanError("invalid object storage class")
         if delete_marker:
-            if artifact is not None or size != 0:
+            if artifact is not None or content_sha256 is not None or size != 0:
                 raise PlanError("delete marker must not reference object content")
         else:
             if not isinstance(artifact, str):
@@ -224,6 +233,12 @@ def validate_plan(document: Any) -> None:
                 or any(part in {"", ".", ".."} for part in path.parts)
             ):
                 raise PlanError("unsafe MinIO artifact path")
+            if content_sha256 is None and not require_content_hashes:
+                pass
+            elif not isinstance(content_sha256, str) or not SHA256_RE.fullmatch(
+                content_sha256
+            ):
+                raise PlanError("content version is missing its artifact SHA-256")
         source_order = record.get("source_order")
         if not isinstance(source_order, int) or source_order < 0:
             raise PlanError("invalid mc source order")
@@ -240,33 +255,99 @@ def validate_plan(document: Any) -> None:
         raise PlanError("MinIO plan summary does not match its versions")
 
 
+def _artifact_file(backup_root: Path, relative: str) -> Path:
+    if backup_root.is_symlink() or not backup_root.is_dir():
+        raise PlanError("backup root must be a real directory")
+    candidate = backup_root
+    for part in PurePosixPath(relative).parts:
+        candidate = candidate / part
+        if candidate.is_symlink():
+            raise PlanError("MinIO artifact path must not contain symlinks")
+    if not candidate.is_file():
+        raise PlanError(f"MinIO artifact is missing or not a regular file: {relative}")
+    return candidate
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _artifact_observation(backup_root: Path, record: dict[str, Any]) -> tuple[int, str]:
+    artifact = _artifact_file(backup_root, record["artifact"])
+    size = artifact.stat().st_size
+    return size, _sha256_file(artifact)
+
+
+def bind_artifacts(args: argparse.Namespace) -> int:
+    document = load_plan(Path(args.plan), require_content_hashes=False)
+    backup_root = Path(args.backup_root)
+    for record in document["versions"]:
+        if record["delete_marker"]:
+            continue
+        if record["content_sha256"] is not None:
+            raise PlanError("MinIO plan is already content-bound")
+        size, digest = _artifact_observation(backup_root, record)
+        if size != record["size_bytes"]:
+            raise PlanError(
+                f"MinIO artifact size mismatch for generation: {record['key']}"
+            )
+        record["content_sha256"] = digest
+    validate_plan(document, require_content_hashes=True)
+    output = Path(args.output)
+    if output.is_symlink() or not output.parent.is_dir():
+        raise PlanError("MinIO bound plan output path is unsafe")
+    output.write_text(canonical_json(document), encoding="utf-8")
+    return 0
+
+
+def verify_artifacts(args: argparse.Namespace) -> int:
+    document = load_plan(Path(args.plan))
+    backup_root = Path(args.backup_root)
+    verified = 0
+    for record in document["versions"]:
+        if record["delete_marker"]:
+            continue
+        size, digest = _artifact_observation(backup_root, record)
+        if size != record["size_bytes"]:
+            raise PlanError(
+                f"MinIO artifact size mismatch for generation: {record['key']}"
+            )
+        if digest != record["content_sha256"]:
+            raise PlanError(
+                f"MinIO artifact checksum mismatch for generation: {record['key']}"
+            )
+        verified += 1
+    print(json.dumps({"status": "verified", "content_generations": verified}))
+    return 0
+
+
 def _shell_header(alias: str, bucket: str) -> list[str]:
-    mc = "mc --config-dir /tmp/auris-flow-mc"
+    mc = "/opt/auris/minio-client.sh"
     return [
         "#!/bin/sh",
         "set -eu",
-        'access_key="$(cat /run/secrets/object_storage_access_key)"',
-        'secret_key="$(cat /run/secrets/object_storage_secret_key)"',
-        f"{mc} alias set {shlex.quote(alias)} http://minio:9000 \"$access_key\" \"$secret_key\" >/dev/null",
-        "unset access_key secret_key",
         f"{mc} version enable {shlex.quote(alias + '/' + bucket)} >/dev/null",
     ]
 
 
 def emit_backup_shell(args: argparse.Namespace) -> int:
-    document = load_plan(Path(args.plan))
-    lines = _shell_header("source", document["bucket"])
+    document = load_plan(Path(args.plan), require_content_hashes=False)
+    lines = _shell_header("auris", document["bucket"])
     for record in document["versions"]:
         if record["delete_marker"]:
             continue
         artifact = "/backup/" + record["artifact"]
-        source = f"source/{document['bucket']}/{record['key']}"
+        source = f"auris/{document['bucket']}/{record['key']}"
         lines.append(f"mkdir -p {shlex.quote(str(PurePosixPath(artifact).parent))}")
         version_flag = (
             f" --version-id {shlex.quote(record['version_id'])}" if record["version_id"] else ""
         )
         lines.append(
-            f"mc --config-dir /tmp/auris-flow-mc cp --quiet{version_flag} "
+            f"/opt/auris/minio-client.sh cp --quiet{version_flag} "
             f"{shlex.quote(source)} {shlex.quote(artifact)}"
         )
     Path(args.output).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -288,18 +369,49 @@ def ordered_versions(document: dict[str, Any]) -> list[dict[str, Any]]:
     return ordered
 
 
+def _shell_file_verifier() -> list[str]:
+    return [
+        "verify_file() {",
+        '  expected_size="$1"',
+        '  expected_sha256="$2"',
+        '  artifact_path="$3"',
+        '  generation_label="$4"',
+        '  actual_size="$(wc -c <"${artifact_path}")"',
+        '  [ "${actual_size}" -eq "${expected_size}" ] || {',
+        "    printf 'MinIO generation size mismatch: %s\\n' "
+        '"${generation_label}" >&2',
+        "    exit 42",
+        "  }",
+        '  hash_line="$(sha256sum "${artifact_path}")"',
+        '  actual_sha256="${hash_line%% *}"',
+        '  [ "${actual_sha256}" = "${expected_sha256}" ] || {',
+        "    printf 'MinIO generation SHA-256 mismatch: %s\\n' "
+        '"${generation_label}" >&2',
+        "    exit 43",
+        "  }",
+        "}",
+    ]
+
+
 def emit_restore_shell(args: argparse.Namespace) -> int:
     document = load_plan(Path(args.plan))
-    lines = _shell_header("target", document["bucket"])
+    lines = _shell_header("auris", document["bucket"])
+    lines.extend(_shell_file_verifier())
     for record in ordered_versions(document):
-        target = f"target/{document['bucket']}/{record['key']}"
+        target = f"auris/{document['bucket']}/{record['key']}"
         if record["delete_marker"]:
             lines.append(
-                "mc --config-dir /tmp/auris-flow-mc rm --quiet --force "
+                "/opt/auris/minio-client.sh rm --quiet --force "
                 f"{shlex.quote(target)}"
             )
         else:
             artifact = "/backup/" + record["artifact"]
+            generation_label = f"{record['key']}@{record['version_id']}"
+            lines.append(
+                "verify_file "
+                f"{record['size_bytes']} {record['content_sha256']} "
+                f"{shlex.quote(artifact)} {shlex.quote(generation_label)}"
+            )
             option_parts: list[str] = []
             if record["metadata"]:
                 attributes = ";".join(
@@ -314,7 +426,7 @@ def emit_restore_shell(args: argparse.Namespace) -> int:
                 option_parts.extend(["--storage-class", record["storage_class"]])
             rendered_options = "".join(f" {shlex.quote(value)}" for value in option_parts)
             lines.append(
-                "mc --config-dir /tmp/auris-flow-mc cp --quiet --preserve"
+                "/opt/auris/minio-client.sh cp --quiet --preserve"
                 f"{rendered_options} "
                 f"{shlex.quote(artifact)} {shlex.quote(target)}"
             )
@@ -322,42 +434,130 @@ def emit_restore_shell(args: argparse.Namespace) -> int:
     return 0
 
 
+def _listing_document(path: Path, bucket: str) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as handle:
+        records = _records(handle, bucket)
+    document = {
+        "schema_version": PLAN_SCHEMA,
+        "bucket": bucket,
+        "content_hash_algorithm": CONTENT_HASH_ALGORITHM,
+        "ordering": "last_modified_ascending_then_reverse_mc_source_order",
+        "versions": records,
+        "summary": {
+            "object_keys": len({record["key"] for record in records}),
+            "versions": len(records),
+            "delete_markers": sum(record["delete_marker"] for record in records),
+            "content_bytes": sum(
+                record["size_bytes"] for record in records if not record["delete_marker"]
+            ),
+        },
+    }
+    validate_plan(document, require_content_hashes=False)
+    return document
+
+
+def _semantic_signature(record: dict[str, Any]) -> tuple[bool, int, str, str, str]:
+    return (
+        record["delete_marker"],
+        record["size_bytes"],
+        json.dumps(record["metadata"], sort_keys=True),
+        json.dumps(record["tags"], sort_keys=True),
+        record["storage_class"],
+    )
+
+
+def _aligned_generations(
+    expected: dict[str, Any], actual: dict[str, Any]
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    expected_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    actual_by_key: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for record in ordered_versions(expected):
+        expected_by_key[record["key"]].append(record)
+    for record in ordered_versions(actual):
+        actual_by_key[record["key"]].append(record)
+    if set(expected_by_key) != set(actual_by_key):
+        raise PlanError("restored MinIO object keys differ from the backup plan")
+    aligned: list[tuple[dict[str, Any], dict[str, Any]]] = []
+    for key in sorted(expected_by_key):
+        expected_records = expected_by_key[key]
+        actual_records = actual_by_key[key]
+        if len(expected_records) != len(actual_records):
+            raise PlanError(
+                f"restored MinIO generation count differs from the backup plan: {key}"
+            )
+        for expected_record, actual_record in zip(
+            expected_records, actual_records, strict=True
+        ):
+            if _semantic_signature(expected_record) != _semantic_signature(
+                actual_record
+            ):
+                raise PlanError(
+                    f"restored MinIO version order or attributes differ: {key}"
+                )
+            aligned.append((expected_record, actual_record))
+    return aligned
+
+
 def compare_listing(args: argparse.Namespace) -> int:
     expected = load_plan(Path(args.plan))
-    with Path(args.listing).open(encoding="utf-8") as handle:
-        actual_records = _records(handle, expected["bucket"])
-    actual = dict(expected)
-    actual["versions"] = actual_records
-    actual["summary"] = {
-        "object_keys": len({record["key"] for record in actual_records}),
-        "versions": len(actual_records),
-        "delete_markers": sum(record["delete_marker"] for record in actual_records),
-        "content_bytes": sum(
-            record["size_bytes"] for record in actual_records if not record["delete_marker"]
-        ),
-    }
-    validate_plan(actual)
-
-    def semantic_sequence(
-        document: dict[str, Any],
-    ) -> dict[str, list[tuple[bool, int, str, str, str, str]]]:
-        result: dict[str, list[tuple[bool, int, str, str, str, str]]] = defaultdict(list)
-        for record in ordered_versions(document):
-            result[record["key"]].append(
-                (
-                    record["delete_marker"],
-                    record["size_bytes"],
-                    record["etag"],
-                    json.dumps(record["metadata"], sort_keys=True),
-                    json.dumps(record["tags"], sort_keys=True),
-                    record["storage_class"],
-                )
-            )
-        return dict(result)
-
-    if semantic_sequence(expected) != semantic_sequence(actual):
-        raise PlanError("restored MinIO version history differs from the backup plan")
+    actual = _listing_document(Path(args.listing), expected["bucket"])
+    _aligned_generations(expected, actual)
     print(json.dumps({"status": "verified", **actual["summary"]}, sort_keys=True))
+    return 0
+
+
+def emit_verify_shell(args: argparse.Namespace) -> int:
+    expected = load_plan(Path(args.plan))
+    actual = _listing_document(Path(args.listing), expected["bucket"])
+    aligned = _aligned_generations(expected, actual)
+    lines = [
+        "#!/bin/sh",
+        "set -eu",
+        'verification_root="$(mktemp -d /tmp/auris-flow-minio-verify.XXXXXX)"',
+        "cleanup_verification_root() {",
+        '  case "${verification_root}" in',
+        "    /tmp/auris-flow-minio-verify.*) "
+        'rm -rf -- "${verification_root}" ;;',
+        "    *) printf 'unsafe MinIO verification directory\\n' >&2; exit 44 ;;",
+        "  esac",
+        "}",
+        "trap cleanup_verification_root EXIT",
+        "trap 'exit 129' HUP",
+        "trap 'exit 130' INT",
+        "trap 'exit 143' TERM",
+    ]
+    lines.extend(_shell_file_verifier())
+    content_index = 0
+    for expected_record, actual_record in aligned:
+        if expected_record["delete_marker"]:
+            continue
+        target_version_id = actual_record["version_id"]
+        if not target_version_id:
+            raise PlanError(
+                "restored content generation is missing its target version id"
+            )
+        content_index += 1
+        verification_file = (
+            f'"${{verification_root}}/generation-{content_index:08d}.bin"'
+        )
+        source = f"auris/{expected['bucket']}/{actual_record['key']}"
+        lines.append(
+            f"/opt/auris/minio-client.sh cp --quiet --version-id "
+            f"{shlex.quote(target_version_id)} {shlex.quote(source)} "
+            f"{verification_file}"
+        )
+        generation_label = f"{actual_record['key']}@{target_version_id}"
+        lines.append(
+            "verify_file "
+            f"{expected_record['size_bytes']} "
+            f"{expected_record['content_sha256']} {verification_file} "
+            f"{shlex.quote(generation_label)}"
+        )
+        lines.append(f"rm -f -- {verification_file}")
+    lines.append(
+        f"printf 'verified {content_index} MinIO content generations by SHA-256\\n'"
+    )
+    Path(args.output).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return 0
 
 
@@ -389,6 +589,15 @@ def parser() -> argparse.ArgumentParser:
     plan.add_argument("--bucket", required=True)
     plan.add_argument("--output", required=True)
     plan.set_defaults(handler=build_plan)
+    bind = commands.add_parser("bind-artifacts")
+    bind.add_argument("--plan", required=True)
+    bind.add_argument("--backup-root", required=True)
+    bind.add_argument("--output", required=True)
+    bind.set_defaults(handler=bind_artifacts)
+    verify = commands.add_parser("verify-artifacts")
+    verify.add_argument("--plan", required=True)
+    verify.add_argument("--backup-root", required=True)
+    verify.set_defaults(handler=verify_artifacts)
     backup = commands.add_parser("emit-backup-shell")
     backup.add_argument("--plan", required=True)
     backup.add_argument("--output", required=True)
@@ -401,6 +610,11 @@ def parser() -> argparse.ArgumentParser:
     compare.add_argument("--plan", required=True)
     compare.add_argument("--listing", required=True)
     compare.set_defaults(handler=compare_listing)
+    verify_shell = commands.add_parser("emit-verify-shell")
+    verify_shell.add_argument("--plan", required=True)
+    verify_shell.add_argument("--listing", required=True)
+    verify_shell.add_argument("--output", required=True)
+    verify_shell.set_defaults(handler=emit_verify_shell)
     du = commands.add_parser("du-size")
     du.set_defaults(handler=du_size)
     return root

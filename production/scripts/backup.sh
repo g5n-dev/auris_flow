@@ -18,6 +18,10 @@ ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
 OUTPUT_ROOT="${AURIS_BACKUP_OUTPUT_ROOT:-}"
 RELEASE_VERSION="${AURIS_RELEASE_VERSION:-}"
 RUNTIME_METRICS_DIR="${AURIS_RUNTIME_METRICS_DIR:-${PRODUCTION_ROOT}/runtime-metrics}"
+SECRETS_DIR="${AURIS_SECRETS_DIR:-${PRODUCTION_ROOT}/secrets}"
+MANIFEST_SIGNING_PRIVATE_KEY_FILE="${AURIS_BACKUP_MANIFEST_SIGNING_PRIVATE_KEY_FILE:-${SECRETS_DIR}/backup_manifest_signing_private_key.pem}"
+MANIFEST_VERIFY_KEY_FILE="${AURIS_BACKUP_MANIFEST_VERIFY_KEY_FILE:-${SECRETS_DIR}/backup_manifest_signing_public_key.pem}"
+RESTORE_ATTESTATION_VERIFY_KEY_FILE="${AURIS_RESTORE_ATTESTATION_VERIFY_KEY_FILE:-${SECRETS_DIR}/restore_attestation_signing_public_key.pem}"
 STORAGE_BOUNDARY=""
 INCLUDE_REDIS=false
 STAGING_DIR=""
@@ -30,6 +34,10 @@ Usage: production/scripts/backup.sh --output-root ABSOLUTE_DIR \
 Options:
   --env-file FILE             Compose environment file (default: production/.env)
   --release-version VERSION   Release represented by the backup
+  --manifest-private-key FILE Deployment-owned Ed25519 private-key secret file
+  --manifest-public-key FILE  Deployment-owned Ed25519 trust-anchor public key
+  --restore-attestation-public-key FILE
+                              Deployment-owned restore-attestation public key
   --include-redis             Include a non-authoritative Redis RDB for diagnostics
   -h, --help                  Show this help
 
@@ -77,6 +85,21 @@ while (($#)); do
       RELEASE_VERSION="$2"
       shift 2
       ;;
+    --manifest-private-key)
+      (($# >= 2)) || fail "--manifest-private-key requires a value"
+      MANIFEST_SIGNING_PRIVATE_KEY_FILE="$2"
+      shift 2
+      ;;
+    --manifest-public-key)
+      (($# >= 2)) || fail "--manifest-public-key requires a value"
+      MANIFEST_VERIFY_KEY_FILE="$2"
+      shift 2
+      ;;
+    --restore-attestation-public-key)
+      (($# >= 2)) || fail "--restore-attestation-public-key requires a value"
+      RESTORE_ATTESTATION_VERIFY_KEY_FILE="$2"
+      shift 2
+      ;;
     --include-redis)
       INCLUDE_REDIS=true
       shift
@@ -89,7 +112,7 @@ while (($#)); do
   esac
 done
 
-for command_name in docker gzip df awk mktemp install cosign "${PYTHON}"; do
+for command_name in docker gzip df awk mktemp install cosign openssl "${PYTHON}"; do
   command -v "${command_name}" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
 done
 [[ -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ]] || fail "Compose file is missing or unsafe"
@@ -108,8 +131,44 @@ docker --context "${DOCKER_CONTEXT_NAME}" info >/dev/null 2>&1 || fail \
   "the bound Docker context is unavailable: ${DOCKER_CONTEXT_NAME}"
 has_control_character "${OUTPUT_ROOT}" && fail "output root contains a control character"
 has_control_character "${ENV_FILE}" && fail "Compose env path contains a control character"
+has_control_character "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" && fail \
+  "manifest private-key path contains a control character"
+has_control_character "${MANIFEST_VERIFY_KEY_FILE}" && fail \
+  "manifest public-key path contains a control character"
+has_control_character "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" && fail \
+  "restore attestation public-key path contains a control character"
 [[ -f "${ENV_FILE}" && ! -L "${ENV_FILE}" ]] || fail "Compose env file is missing or unsafe: ${ENV_FILE}"
 [[ "${OUTPUT_ROOT}" == /* ]] || fail "--output-root must be an absolute path"
+[[ "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" == /* && \
+  "${MANIFEST_VERIFY_KEY_FILE}" == /* && \
+  "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" == /* ]] || fail \
+  "backup manifest signing key paths must be absolute"
+[[ -f "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" && \
+  ! -L "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" ]] || fail \
+  "backup manifest private-key secret file is missing or unsafe"
+[[ -f "${MANIFEST_VERIFY_KEY_FILE}" && ! -L "${MANIFEST_VERIFY_KEY_FILE}" ]] || fail \
+  "backup manifest public trust-key file is missing or unsafe"
+[[ -f "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" && \
+  ! -L "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" ]] || fail \
+  "restore attestation public trust-key file is missing or unsafe"
+MANIFEST_SIGNING_PRIVATE_KEY_FILE="$(cd "$(dirname "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}")" && pwd -P)/$(basename "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}")"
+MANIFEST_VERIFY_KEY_FILE="$(cd "$(dirname "${MANIFEST_VERIFY_KEY_FILE}")" && pwd -P)/$(basename "${MANIFEST_VERIFY_KEY_FILE}")"
+RESTORE_ATTESTATION_VERIFY_KEY_FILE="$(cd "$(dirname "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}")" && pwd -P)/$(basename "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}")"
+[[ "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" != "${MANIFEST_VERIFY_KEY_FILE}" ]] || fail \
+  "backup manifest private and public keys must use different files"
+manifest_key_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify-key-pair \
+  --private-key "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}")" || fail \
+  "backup manifest Ed25519 signing key pair is invalid"
+restore_attestation_key_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" key-id \
+  --public-key "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}")" || fail \
+  "restore attestation public key is not a valid Ed25519 key"
+manifest_signing_key_id="$(printf '%s' "${manifest_key_json}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["key_id"])')"
+restore_attestation_key_id="$(printf '%s' "${restore_attestation_key_json}" | "${PYTHON}" -c \
+  'import json,sys; print(json.load(sys.stdin)["key_id"])')"
+[[ "${manifest_signing_key_id}" != "${restore_attestation_key_id}" ]] || fail \
+  "backup manifest and restore attestation must use distinct Ed25519 keys"
 [[ "${STORAGE_BOUNDARY}" == "encrypted-external" ]] || fail \
   "--storage-boundary must explicitly be encrypted-external"
 release_identity="$("${PYTHON}" "${RELEASE_BUNDLE_TOOL}" identity \
@@ -135,6 +194,12 @@ mkdir -p "${OUTPUT_ROOT}"
 OUTPUT_ROOT="$(cd "${OUTPUT_ROOT}" && pwd -P)"
 paths_overlap "${OUTPUT_ROOT}" "${REPOSITORY_ROOT}" && fail \
   "output root must not be an ancestor or descendant of the release bundle"
+paths_overlap "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" "${OUTPUT_ROOT}" && fail \
+  "backup manifest private key must be external to the backup output root"
+paths_overlap "${MANIFEST_VERIFY_KEY_FILE}" "${OUTPUT_ROOT}" && fail \
+  "backup manifest public key must be external to the backup output root"
+paths_overlap "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}" "${OUTPUT_ROOT}" && fail \
+  "restore attestation public key must be external to the backup output root"
 
 compose() {
   COMPOSE_PROJECT_NAME="${PRODUCTION_PROJECT_NAME}" \
@@ -145,6 +210,12 @@ compose() {
     -f "${COMPOSE_FILE}" "$@"
 }
 
+minio_mc() {
+  compose run --rm --no-deps -T \
+    --entrypoint /opt/auris/minio-client.sh \
+    minio-bootstrap "$@"
+}
+
 compose config --quiet || fail "Compose configuration is invalid"
 running_services="$(compose ps --status running --services)"
 for required_service in mysql minio qdrant redis; do
@@ -152,7 +223,7 @@ for required_service in mysql minio qdrant redis; do
     fail "required dependency service is not running: ${required_service}"
   fi
 done
-for writer_service in edge bff worker keycloak dagster-code dagster-webserver dagster-daemon migrate db-bootstrap minio-bootstrap identity-bootstrap; do
+for writer_service in edge bff worker keycloak dagster-code dagster-webserver dagster-daemon migrate db-bootstrap minio-volume-init minio-bootstrap identity-bootstrap; do
   if printf '%s\n' "${running_services}" | grep -Fxq "${writer_service}"; then
     fail "writer service ${writer_service} is running; enter the documented backup maintenance window first"
   fi
@@ -163,7 +234,7 @@ mysql_bytes="$(compose exec -T mysql sh -c '
   exec mysql --protocol=tcp --host=127.0.0.1 --user=root --batch --skip-column-names \
     -e "SELECT COALESCE(SUM(DATA_LENGTH + INDEX_LENGTH), 0) FROM information_schema.TABLES WHERE TABLE_SCHEMA IN (\"auris_flow\", \"keycloak\", \"dagster\")"
 ')"
-minio_bytes="$(compose exec -T minio mc du --versions --json local/auris-flow | \
+minio_bytes="$(minio_mc du --versions --json auris/auris-flow | \
   "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" du-size)"
 qdrant_kib="$(compose exec -T qdrant du -sk /qdrant/storage | awk '{print $1}')"
 redis_kib=0
@@ -235,7 +306,7 @@ compose exec -T mysql sh -c '
 ' <"${BACKUP_TOOLS}/mysql_counts.sql" >"${STAGING_DIR}/mysql/table-counts.tsv"
 
 printf 'Capturing every MinIO object generation and delete marker...\n'
-compose exec -T minio mc ls --recursive --versions --json local/auris-flow \
+minio_mc ls --recursive --versions --json auris/auris-flow \
   >"${STAGING_DIR}/minio/source-listing.jsonl"
 "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" plan \
   --listing "${STAGING_DIR}/minio/source-listing.jsonl" \
@@ -251,13 +322,20 @@ compose run --rm --no-deps \
   -v "${minio_backup_script}:/opt/auris/minio-backup.sh:ro" \
   --entrypoint /bin/sh minio-bootstrap /opt/auris/minio-backup.sh
 rm -f "${minio_backup_script}"
+"${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" bind-artifacts \
+  --plan "${STAGING_DIR}/minio/versions.json" \
+  --backup-root "${STAGING_DIR}" \
+  --output "${STAGING_DIR}/minio/versions.json"
+"${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" verify-artifacts \
+  --plan "${STAGING_DIR}/minio/versions.json" \
+  --backup-root "${STAGING_DIR}" >/dev/null
 
 printf 'Capturing Qdrant derived-index snapshots...\n'
 compose run --rm --no-deps \
   --user "$(id -u):$(id -g)" \
   -v "${STAGING_DIR}:/backup" \
   -v "${BACKUP_TOOLS}/qdrant_snapshots.py:/opt/auris/qdrant-snapshots.py:ro" \
-  --entrypoint python bff \
+  --entrypoint python qdrant-backup-tool \
   /opt/auris/qdrant-snapshots.py backup --output /backup/qdrant
 
 if [[ "${INCLUDE_REDIS}" == true ]]; then
@@ -277,7 +355,7 @@ compose images --format json >"${STAGING_DIR}/metadata/compose-images.jsonl"
   printf 'docker-compose\t%s\n' "$(docker compose version --short)"
   printf 'mysql-dump\t%s\n' "$(compose exec -T mysql mysqldump --version)"
   printf 'minio\t%s\n' "$(compose exec -T minio minio --version | head -n 1)"
-  printf 'minio-client\t%s\n' "$(compose exec -T minio mc --version | head -n 1)"
+  printf 'minio-client\t%s\n' "$(minio_mc --version | head -n 1)"
   printf 'qdrant\t%s\n' "$(compose exec -T qdrant /qdrant/qdrant --version | head -n 1)"
   printf 'redis\t%s\n' "$(compose exec -T redis redis-server --version | head -n 1)"
 } >"${STAGING_DIR}/metadata/tool-versions.tsv"
@@ -306,8 +384,17 @@ fi
   --counts "${STAGING_DIR}/metadata/counts.json" \
   --tool-versions "${STAGING_DIR}/metadata/tool-versions.json" \
   --release-metadata "${STAGING_DIR}/metadata/release-metadata.json" \
-  --running-images "${STAGING_DIR}/metadata/running-images.json"
-"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify --root "${STAGING_DIR}"
+  --running-images "${STAGING_DIR}/metadata/running-images.json" \
+  --restore-attestation-public-key "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}"
+"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" sign \
+  --root "${STAGING_DIR}" \
+  --private-key "${MANIFEST_SIGNING_PRIVATE_KEY_FILE}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}" || fail \
+  "backup manifest signature creation failed"
+"${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify \
+  --root "${STAGING_DIR}" \
+  --public-key "${MANIFEST_VERIFY_KEY_FILE}" || fail \
+  "signed backup manifest verification failed"
 gzip -t "${STAGING_DIR}/mysql/all-databases.sql.gz"
 
 mv "${STAGING_DIR}" "${final_dir}"

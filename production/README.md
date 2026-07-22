@@ -1,7 +1,7 @@
 # Auris Flow 单机生产 Compose 基线
 
 > **发行状态：`v1.0.0` 候选，尚未发布。** 本目录已经包含单机 Linux Compose、真实
-> Dagster、OIDC/PKCE、语义 embedding 接口、OTel Collector、Prometheus、Tempo、Grafana
+> Dagster、OIDC/PKCE、语义 embedding 接口、OTel Collector、Prometheus、Alertmanager、Tempo、Grafana
 > 及备份恢复工具，但这不等于已完成正式生产发行。项目所有者尚未完成许可权利主体签字，
 > `v1.0.0-rc.1` 的真实发布演练与外部干净安装也尚未完成。当前不得把 `:dev` 镜像或本页步骤
 > 描述为已获生产支持的正式版本。
@@ -78,11 +78,36 @@ ${EDITOR:?set EDITOR} production/.env
 bash production/scripts/init-secrets.sh
 ```
 
+该脚本会一次性生成或保留部署级 Ed25519 备份 manifest 密钥对；私钥仅供
+`backup.sh` 通过 secret-file 读取，公钥供离线验证、restore 与 governed finalize 使用，二者都不
+进入数据备份或应用容器。必须把该稳定密钥对复制到独立 secret manager；丢失公钥会失去历史备份
+信任锚，丢失私钥则无法签发新备份。
+
+`init-secrets.sh` **不会**生成通知地址。运维人员必须通过已批准的安全渠道取得一个通用 HTTPS
+webhook URL，并只写入专用 Docker secret source file；不要把 URL 放进命令参数、`.env`、Compose
+配置、工单或日志。首次创建可执行：
+
+```bash
+install -m 0600 /dev/null production/secrets/alertmanager_webhook_url
+${EDITOR:?set EDITOR} production/secrets/alertmanager_webhook_url
+test -s production/secrets/alertmanager_webhook_url
+chmod 444 production/secrets/alertmanager_webhook_url
+```
+
+文件必须只有一行、以 `https://` 开头且不含空白。`production/secrets/` 目录仍保持 `0700`；source
+file 的 `0444` 只为 Compose 的非 root Alertmanager mount 提供只读访问，敏感性不因此降低。缺失、
+空文件或格式无效都会让 Alertmanager 退出并使完整 `docker compose up` fail closed；初始化脚本不会
+用示例地址替代运维输入。
+
 至少替换以下非 secret 配置：
 
 - `AURIS_PUBLIC_HOST`：不带 scheme/path 的公开 FQDN。
 - `AURIS_EXTERNAL_CALLBACK_URL` 与 `AURIS_EXTERNAL_CALLBACK_HOST`：必须相互匹配且使用 HTTPS。
 - `AURIS_EMBEDDING_ENDPOINT`、`AURIS_EMBEDDING_MODEL`、`AURIS_EMBEDDING_DIMENSION`。
+- `AURIS_AUDIO_INFERENCE_PROVIDER`、`AURIS_AUDIO_INFERENCE_ALLOWED_MODELS` 与
+  `AURIS_AUDIO_INFERENCE_ENDPOINT`：endpoint 必须是无凭据/query/fragment 的 HTTPS URL；Provider
+  和模型必须与 BFF 生成的服务端执行策略一致。把真实 Provider 签发的 bearer token 只写入
+  `production/secrets/audio_inference_api_token`，覆盖初始化脚本生成的随机占位凭据并恢复 `0444`。
 - `AURIS_INTERNAL_SUBNET` 与 `AURIS_EDGE_INTERNAL_IP`：两者必须匹配且不得与宿主机/VPN 网段冲突；
   修改后必须重新渲染 Compose 并执行生产策略门禁。
 - 所有应用和上游镜像引用；正式版本必须是发布清单给出的 digest。
@@ -111,12 +136,19 @@ identity 验证 metadata，再校验包内 schema、commit、Compose、image loc
 把源码扫描命令误当成发布包完整性校验。
 
 生产配置会 fail closed：开发认证、demo/弱密码、通配 CORS/TrustedHost、local/fake adapter、
-非严格依赖检查、缺失 OIDC/真实存储/回调配置和生产确定性 embedding 均不被接受。
+非严格依赖检查、缺失 OIDC/真实存储/回调配置、生产确定性 embedding、缺失/HTTP 音频推理
+Provider、空或通配模型策略，以及
+`WEB_CONCURRENCY`/`AURIS_BFF_WORKERS` 不等于 `1` 均不被接受。当前 BFF 固定单进程，避免进程内
+Prometheus registry 在多 Uvicorn worker 下产生不完整或重复的生产指标；横向扩展必须先实现并验证
+Prometheus multiprocess 收集语义。
 
 `GET /api/v1/audio-playback` 的短期 grant 位于 query string，以兼容浏览器原生媒体 Range 请求；
-edge 对该精确 location 关闭 access log，BFF 结构化 HTTP 日志也只记录 path、不记录 query。不要在
-上游负载均衡、WAF、APM 或故障工单中重新记录完整 URL；需要排障时使用 request/trace ID 和服务端
-审计中的 grant nonce。
+edge 对该精确 location 关闭 access log，其余两个 Nginx server 都显式覆盖为 `escape=json` 的安全
+格式，路径字段只允许 `$uri`，禁止 `$request`、`$request_uri`、`$args`、`$query_string` 和
+`$is_args`，也不记录 raw IP。生产 Uvicorn access log 被关闭，BFF 结构化 HTTP 日志也只记录
+path、不记录 query。
+不要在上游负载均衡、WAF、APM 或故障工单中重新记录完整 URL；需要排障时使用 request/trace ID 和
+服务端审计中的 grant nonce。
 
 MySQL 8.4 默认启用 binary log；本项目的不可变事实约束需要 Alembic 创建 `TRIGGER`。Compose
 因此显式固定 `log_bin_trust_function_creators=1`，但 bootstrap 会先撤销历史宽授权，再只给
@@ -177,8 +209,13 @@ docker compose \
 docker compose \
   --project-directory production \
   --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps minio-volume-init
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
   -f production/compose.yaml up -d --no-deps --wait --wait-timeout 240 \
-  mysql redis minio qdrant tempo node-exporter
+  mysql redis minio qdrant tempo node-exporter alertmanager
 
 docker compose \
   --project-directory production \
@@ -213,7 +250,9 @@ docker compose \
   dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
 
-`db-bootstrap`、`minio-bootstrap`、`migrate` 与 `identity-bootstrap` 是必须成功退出的 one-shot；
+`minio-volume-init`、`db-bootstrap`、`minio-bootstrap`、`migrate` 与 `identity-bootstrap`
+是必须成功退出的 one-shot；`minio-volume-init` 只会精确修正 named volume 根目录 `/data`
+的属主，不递归修改内容。
 不要把它们混入 detached `up --wait`。每个阶段失败都应停止上线并查看该阶段日志。
 
 检查状态和公开入口：
@@ -228,9 +267,14 @@ curl --fail --silent --show-error https://auris.example.com/readyz
 ```
 
 公开 `/healthz` 只证明 edge 进程存活，不证明依赖可用。公开 `/readyz` 精确反代 BFF 的严格
-readiness，在生产检查 auth、MySQL、Redis、MinIO、Qdrant 和真实 Dagster，任一强依赖失败返回
-503；MinIO 必须以配置凭据签名访问目标 bucket，Qdrant 必须返回 2xx。不要在负载均衡器上用
+readiness，在生产检查 auth、MySQL、Redis、MinIO、Qdrant、真实 Dagster、应用 exporter 与后台
+OTel→Collector→Tempo 深探针，任一强依赖失败返回 503；MinIO 必须以配置凭据签名访问目标 bucket，
+Qdrant 必须返回 2xx。不要在负载均衡器上用
 `/healthz` 代替它。OIDC discovery/JWKS 的真实登录另行验收。
+edge 对公开 `/readyz` 使用独立的每 IP 限流和 singleflight 缓存：200 最多缓存 5 秒、503 最多缓存
+1 秒，cache lock 等待与失效接管均为 6 秒，避免慢探针触发并发穿透。该位置固定清空
+`traceparent`、`tracestate` 与 `baggage`；业务 `/api/`（包括音频 Range）继续转发
+`traceparent` 以维持真实 E2E 关联，但清空不受信任的 `tracestate` 与 `baggage`。
 若把对象存储切换为 AWS S3，运行身份除实际业务所需的对象级读写权限外，还必须对目标 bucket
 拥有 `s3:ListBucket`，因为严格 readiness 使用签名 `HeadBucket`；缺少该权限会得到 403 并按未就绪
 处理。此要求不需要、也不得通过公开 bucket 或匿名访问来满足；其他 S3-compatible provider 应授予
@@ -240,6 +284,19 @@ readiness，在生产检查 auth、MySQL、Redis、MinIO、Qdrant 和真实 Dags
 完成时长、deadline/status-sync 监控动作，使用 attempt ledger 展示 callback retry/failure，并展示
 真实限流结果。容量告警来自 node-exporter 所见的可写宿主文件系统，不冒充 MinIO bucket quota 或
 单个 Docker volume 的独占容量；详细口径见[运维 Runbook](../doc/runbooks/operations.md)。
+Prometheus 把所有 firing/resolved 告警发送给内部 Alertmanager；Alertmanager 仅从 Docker secret
+读取通用 HTTPS webhook URL，不把地址写入配置或进程参数。固定配置/合成规则验证只能证明路由契约，
+真实通知送达、值班确认和 resolved 关闭仍必须在外部 staging/RC 演练中留证。
+`observability-health` 是仅位于内部网络的后台深探针：除无重定向、限长检查 Collector health
+extension、Tempo/Prometheus/Alertmanager readiness 与 node-exporter 指标外，它还强制导出无敏感
+字段的 marker，等待 Collector batch，并从 Tempo 按 trace ID 读回；自身 `/ready` 只返回带新鲜度
+上限的缓存状态。BFF、Worker 和 Dagster code location 都等待该探针健康；BFF 严格 `/readyz` 另以
+singleflight/短 TTL 导出自身 marker，再通过内部 `/traces/{trace_id}` 精确校验同一 trace 的
+service name、span name 和 trace ID 已进入 Tempo；新 marker 只允许 10 秒传播窗口，公开请求不会
+逐次放大 Tempo 查询。BFF marker 每 10 秒轮换，最近成功证明最多保留 20 秒，因此计入 edge 缓存
+后的最坏陈旧窗口不超过 25 秒。它解决
+Compose 运行门禁，但 Prometheus/Alertmanager 完全离线时仍需宿主机之外的 watchdog 才能可靠
+告警，RC 必须保存该外部回执。
 
 BFF、Worker 与 `dagster-code` 分别使用固定 OTel service name，并仅向内部
 `otel-collector:4318` 发送 OTLP/HTTP。BFF 提交真实 Dagster run 时会通过内部 run config 传递完整
@@ -247,7 +304,30 @@ W3C parent context，code server 据此延续同一 trace；Tempo 中的执行�
 关联领域链路。固定 DNS/IP 的签名外部回调使用显式 HTTP CLIENT 子 span，并向对端注入 W3C
 `traceparent`；该 span 只记录 method、scheme、已校验 host、port 和数字状态码，不记录路径、query、
 请求头、HMAC、body 或异常消息。Collector 在转发 Tempo 前删除认证头、cookie、SQL statement 与
-URL query；run config 和 span attribute 禁止承载凭据、原始音频或转写。
+动态 URL path/query；run config 和 span attribute 禁止承载凭据、原始音频或转写。
+
+音频领域事件固定映射到 `auris_flow_audio_intelligence_v1`，不会采用调用方提供的 job/config。
+生产请求绑定 TaskVersion 时，`model_version` 以已发布快照为权威：请求省略该字段时使用冻结值，显式
+传入不同值返回 `AUDIO_TASK_MODEL_BINDING_MISMATCH`；无 TaskVersion 的真实运行仍必须通过服务端全局
+Provider/模型 allowlist。
+Dagster code location 通过仅挂载给该服务的对象存储 secret，对 execution envelope 绑定的 MinIO
+精确 version ID 执行流式读取并重算 SHA-256；随后使用 TLS 系统信任链调用唯一配置的 HTTPS
+Provider。请求闭合绑定 tenant/project/run/trace、模型、精确输入版本与 SHA-256、deadline、幂等键和
+fencing；响应拒绝未知字段、绑定漂移、非有限值和越界内容。通过校验的结果以 canonical JSON 写回
+版本化 MinIO 派生对象，再仅把 manifest/object-version/Provider 结果的哈希化回执用于受签名 completion，
+不把 endpoint、token、输入/输出 object locator 或转写内容写进公共回执。
+
+Provider 请求只携带 `storage_provider/bucket/object_key/version_id/content_sha256/content_length/content_type`
+这组不可变对象身份，不携带对象存储凭据、长期 token、presigned URL 或原始音频。运维必须把真实
+Provider 放在能够访问该对象存储的受信网络内，并为它配置独立、最小权限、仅允许读取输入前缀和精确
+版本的身份；Provider 读取后仍须按请求中的长度与 SHA-256 校验内容。Dagster 的读写凭据不能复用或
+转发给 Provider。HTTPS Provider 与结果对象 PUT 均拒绝所有重定向，防止 Bearer/SigV4 被跨地址重放。
+
+`production-path` 内的 HTTPS 音频服务只是 `reference_protocol_only=true`、
+`model_quality_certified=false` 的协议夹具，用于启动配置、TLS 和闭合请求/响应合同回归；它不是 ASR
+模型，也不证明准确率、时延、容量或供应商 SLA。正式 RC 仍必须用计划采用的真实 Provider 完成音频
+输入校验→HTTPS 推理→版本化结果 manifest→签名 completion 的外部 Linux E2E 并留证。completion
+目前仍与 compute 同步投递；独立、可恢复的 callback dispatcher 仍是后续可靠性缺口。
 
 Worker 同时执行 TaskRun deadline 与漏回调核对。`AURIS_TASK_RUN_DEFAULT_DEADLINE_SECONDS`、
 `AURIS_TASK_RUN_STATUS_SYNC_INTERVAL_SECONDS`、`AURIS_TASK_RUN_MONITOR_POLL_SECONDS` 和
@@ -260,7 +340,8 @@ generation/fencing token 保护。
 
 - OIDC 登录、登出、会话恢复、用户禁用、角色变化和 JWKS 轮换演练。
 - 核心业务从数据资产到标注、评测、洞察、复核与发布，并沿同一业务 `trace_id` 回溯。
-- 真实 Dagster 提交/完成/失败/取消/超时，语义 embedding/Qdrant，MinIO Range 和签名回调 E2E。
+- 真实 Dagster 提交/完成/失败/取消/超时，真实音频推理 Provider、语义 embedding/Qdrant，MinIO
+  Range/版本化结果 manifest 和签名回调 E2E。
 - MySQL/Worker 重启、重复投递、回调超时以及 Redis/Qdrant 短时故障恢复测试。
 - [备份恢复](../doc/runbooks/backup-restore.md)、[升级回滚](../doc/runbooks/upgrade-rollback.md)、
   [告警](../doc/runbooks/operations.md#alert-testing)和安全事故桌面演练。

@@ -1,0 +1,172 @@
+rule_files:
+  - alerts.yaml
+
+evaluation_interval: 1m
+
+tests:
+  - name: required dependency leaves and regains readiness
+    interval: 1m
+    input_series:
+      - series: 'auris_dependency_ready{dependency="mysql"}'
+        values: '0x3 1x2'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AurisDependencyNotReady
+        exp_alerts:
+          - exp_labels:
+              dependency: mysql
+              severity: critical
+            exp_annotations:
+              summary: "Auris Flow required dependency is not ready"
+              runbook: "operations.md#dependency-offline"
+      - eval_time: 4m
+        alertname: AurisDependencyNotReady
+        exp_alerts: []
+
+  - name: authority backed recent and unresolved dead letters fire after a process restart
+    interval: 1m
+    input_series:
+      - series: 'auris_outbox_dead_letter_recent'
+        values: '0 1 1 1 1 1 0 0 0 0 0 0 0'
+      - series: 'auris_outbox_dead_letter'
+        values: '0 1 1 1 1 1 1 1 1 1 1 1 0'
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: AurisOutboxDeadLetters
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "New Outbox dead-letter events detected in the last five minutes"
+              runbook: "operations.md#dead-letters"
+      - eval_time: 7m
+        alertname: AurisOutboxDeadLetters
+        exp_alerts: []
+      - eval_time: 11m
+        alertname: AurisOutboxDeadLettersUnresolved
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "Outbox dead-letter events remain unresolved"
+              runbook: "operations.md#dead-letters"
+      - eval_time: 12m
+        alertname: AurisOutboxDeadLettersUnresolved
+        exp_alerts: []
+
+  - name: outbox delivery P95 crosses and recovers below sixty seconds
+    interval: 1m
+    input_series:
+      - series: 'auris_outbox_delivery_duration_window_seconds_bucket{le="60"}'
+        values: '90x12 100x3'
+      - series: 'auris_outbox_delivery_duration_window_seconds_bucket{le="120"}'
+        values: '100x15'
+      - series: 'auris_outbox_delivery_duration_window_seconds_bucket{le="+Inf"}'
+        values: '100x15'
+      - series: 'auris_outbox_delivery_duration_window_seconds_count'
+        values: '100x15'
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: AurisOutboxP95DeliveryLatency
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Trailing 24 hour Outbox delivery P95 exceeds 60 seconds"
+              runbook: "operations.md#outbox-delivery-delay"
+      - eval_time: 14m
+        alertname: AurisOutboxP95DeliveryLatency
+        exp_alerts: []
+
+  - name: sustained authentication failures cross and recover below the threshold
+    interval: 1m
+    input_series:
+      - series: 'auris_auth_failures_total{reason="invalid_token"}'
+        values: '0+60x15 900x12'
+    alert_rule_test:
+      - eval_time: 13m
+        alertname: AurisAuthenticationFailureSpike
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+            exp_annotations:
+              summary: "Authentication failures are increasing"
+              runbook: "operations.md#authentication-failures"
+      - eval_time: 22m
+        alertname: AurisAuthenticationFailureSpike
+        exp_alerts: []
+
+  - name: writable host disk crosses and recovers from the critical ratio
+    interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{device="/dev/vda1",fstype="ext4",instance="node:9100",mountpoint="/"}'
+        values: '5x6 20x2'
+      - series: 'node_filesystem_size_bytes{device="/dev/vda1",fstype="ext4",instance="node:9100",mountpoint="/"}'
+        values: '100x8'
+      - series: 'node_filesystem_readonly{device="/dev/vda1",fstype="ext4",instance="node:9100",mountpoint="/"}'
+        values: '0x8'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: AurisHostDiskCritical
+        exp_alerts:
+          - exp_labels:
+              device: /dev/vda1
+              fstype: ext4
+              instance: node:9100
+              mountpoint: /
+              severity: critical
+            exp_annotations:
+              summary: "Host filesystem has less than 8% free space"
+              runbook: "operations.md#disk-capacity"
+      - eval_time: 7m
+        alertname: AurisHostDiskCritical
+        exp_alerts: []
+
+  - name: missing backup success signal is itself stale
+    interval: 1m
+    input_series: []
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AurisBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No successful backup has been observed for 25 hours"
+              runbook: "operations.md#backup-failure"
+
+  - name: stale backup signal recovers only after a fresh success timestamp
+    interval: 1m
+    input_series:
+      - series: 'auris_backup_last_success_timestamp_seconds'
+        values: '-100000x30 1860 1860'
+    alert_rule_test:
+      - eval_time: 30m
+        alertname: AurisBackupStale
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "No successful backup has been observed for 25 hours"
+              runbook: "operations.md#backup-failure"
+      - eval_time: 32m
+        alertname: AurisBackupStale
+        exp_alerts: []
+
+  - name: collector export failure fires and recovers after the rolling window
+    interval: 1m
+    input_series:
+      - series: 'otelcol_exporter_send_failed_spans_total{exporter="otlp/tempo"}'
+        values: '0 1 1 1 1 1 1 1 1'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: AurisTelemetryExportFailures
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+            exp_annotations:
+              summary: "OpenTelemetry spans are failing to enter or leave the collector"
+              runbook: "operations.md#telemetry-export-failures"
+      - eval_time: 8m
+        alertname: AurisTelemetryExportFailures
+        exp_alerts: []

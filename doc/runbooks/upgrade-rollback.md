@@ -95,6 +95,11 @@ docker compose \
 docker compose \
   --project-directory production \
   --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps minio-volume-init
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
   -f production/compose.yaml \
   up -d --no-deps --wait --wait-timeout 240 mysql redis minio qdrant
 
@@ -114,8 +119,9 @@ docker compose \
   -f production/compose.yaml run --rm --no-deps migrate
 ```
 
-两个 bootstrap 与 migration 都是前台 one-shot，必须逐个返回 0；不得把它们混入 detached
+volume init、两个 bootstrap 与 migration 都是前台 one-shot，必须逐个返回 0；不得把它们混入 detached
 `up --wait`，否则“正常完成并退出”会被错误地当成长期服务未就绪。
+volume init 仅对 named volume 挂载点 `/data` 执行非递归属主修正。
 
 该命令必须使用 Compose 注入的 `auris_migration` URL；禁止改成 root/SUPER 后把结果视为生产
 验收。MySQL binary log 保持启用，生产 Compose 固定 trigger creator 策略，bootstrap 只授予
@@ -139,7 +145,7 @@ docker compose \
 
 先保持外部流量关闭，至少确认：
 
-- `/healthz` 返回 200；`/readyz` 的 auth、database、redis、object_storage、qdrant、dagster 全部
+- `/healthz` 返回 200；`/readyz` 的 auth、database、redis、object_storage、qdrant、dagster、observability 全部
   `ok`；
 - OIDC 新登录、已有 session、用户禁用和权限变化符合预期；
 - 一个合成业务操作贯穿 API、MySQL、Worker、真实 Dagster、Outbox 和签名 callback，业务
