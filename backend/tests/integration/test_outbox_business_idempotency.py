@@ -17,7 +17,7 @@ def _context(suffix: str) -> RequestContext:
     return RequestContext(
         tenant_id="aurora_auto",
         project_id="sales_qa",
-        user_id="frank",
+        user_id="sample-operator",
         roles=("project_admin",),
         request_id=f"outbox-business-{suffix}",
         trace_id=f"trace-outbox-business-{suffix}",

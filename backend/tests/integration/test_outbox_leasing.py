@@ -13,7 +13,7 @@ def _context(*, trace_id: str = "trace_outbox_lease") -> RequestContext:
     return RequestContext(
         tenant_id="aurora_auto",
         project_id="sales_qa",
-        user_id="frank",
+        user_id="sample-operator",
         roles=("project_admin",),
         request_id="outbox-lease-test",
         trace_id=trace_id,
