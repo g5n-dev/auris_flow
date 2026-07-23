@@ -68,7 +68,17 @@ CANCELLATION_INTERNAL_EVIDENCE_FIELDS = frozenset(
         "terminate_policy",
     }
 )
-CANCELLATION_ACK_ENGINE_STATUSES = frozenset({"STARTED", "CANCELING", "CANCELED"})
+CANCELLATION_ACK_ENGINE_STATUSES = frozenset(
+    {
+        "QUEUED",
+        "NOT_STARTED",
+        "MANAGED",
+        "STARTING",
+        "STARTED",
+        "CANCELING",
+        "CANCELED",
+    }
+)
 CANCELLATION_TERMINAL_ENGINE_STATUS = "CANCELED"
 _CONFUSABLE_TRANSLATION = str.maketrans(
     {

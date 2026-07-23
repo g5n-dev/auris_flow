@@ -498,7 +498,18 @@ def test_product_gate_binds_persisted_dispatch_to_scope_trace_and_source() -> No
         )
 
 
-@pytest.mark.parametrize("immediate_status", ["STARTED", "CANCELING", "CANCELED"])
+@pytest.mark.parametrize(
+    "immediate_status",
+    [
+        "QUEUED",
+        "NOT_STARTED",
+        "MANAGED",
+        "STARTING",
+        "STARTED",
+        "CANCELING",
+        "CANCELED",
+    ],
+)
 def test_product_gate_requires_monitor_reconciliation_after_safe_terminate(
     immediate_status: str,
 ) -> None:
