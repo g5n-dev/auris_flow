@@ -679,7 +679,6 @@ def verify_bundle_signature(
     bundle_root: Path,
     *,
     cosign_binary: str = "cosign",
-    certificate_identity: str | None = None,
     signature_bundle: Path | None = None,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
@@ -698,16 +697,7 @@ def verify_bundle_signature(
         signature_path = _require_regular_file(
             signature_bundle, "release metadata Sigstore bundle"
         ).resolve()
-    expected_identity = certificate_identity or _official_release_workflow_identity(
-        metadata["release_tag"]
-    )
-    if (
-        not isinstance(expected_identity, str)
-        or not expected_identity.startswith("https://github.com/")
-        or "/.github/workflows/release-images.yml@" not in expected_identity
-        or any(character in expected_identity for character in "\r\n\t")
-    ):
-        raise ReleaseBundleError("release certificate identity is invalid")
+    expected_identity = _official_release_workflow_identity(metadata["release_tag"])
     try:
         completed = run(
             (
@@ -745,14 +735,12 @@ def verify_restore_source(
     backup_metadata_sha256: str,
     verify_signature: bool = False,
     cosign_binary: str = "cosign",
-    certificate_identity: str | None = None,
     signature_bundle: Path | None = None,
 ) -> dict[str, str]:
     metadata = (
         verify_bundle_signature(
             bundle_root,
             cosign_binary=cosign_binary,
-            certificate_identity=certificate_identity,
             signature_bundle=signature_bundle,
         )
         if verify_signature
@@ -986,7 +974,6 @@ def verify_running_images(
     include_all_running: bool = False,
     verify_signature: bool = False,
     cosign_binary: str = "cosign",
-    certificate_identity: str | None = None,
     signature_bundle: Path | None = None,
     run: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
@@ -994,7 +981,6 @@ def verify_running_images(
         verify_bundle_signature(
             bundle_root,
             cosign_binary=cosign_binary,
-            certificate_identity=certificate_identity,
             signature_bundle=signature_bundle,
             run=run,
         )
@@ -1117,7 +1103,6 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     def add_signature_arguments(subparser: argparse.ArgumentParser) -> None:
         subparser.add_argument("--verify-signature", action="store_true")
         subparser.add_argument("--cosign-binary", default="cosign")
-        subparser.add_argument("--certificate-identity")
         subparser.add_argument("--signature-bundle", type=Path)
 
     for command in ("verify", "inspect", "identity"):
@@ -1168,7 +1153,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 include_all_running=args.all_running_release_services,
                 verify_signature=args.verify_signature,
                 cosign_binary=args.cosign_binary,
-                certificate_identity=args.certificate_identity,
                 signature_bundle=args.signature_bundle,
             )
         elif args.command == "verify-restore-source":
@@ -1179,7 +1163,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 backup_metadata_sha256=args.backup_metadata_sha256,
                 verify_signature=args.verify_signature,
                 cosign_binary=args.cosign_binary,
-                certificate_identity=args.certificate_identity,
                 signature_bundle=args.signature_bundle,
             )
         else:
@@ -1187,7 +1170,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 verify_bundle_signature(
                     args.bundle_root,
                     cosign_binary=args.cosign_binary,
-                    certificate_identity=args.certificate_identity,
                     signature_bundle=args.signature_bundle,
                 )
                 if args.verify_signature

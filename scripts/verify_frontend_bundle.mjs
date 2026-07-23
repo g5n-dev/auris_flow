@@ -22,6 +22,7 @@ import {
 } from "../prototype/auris-flow-ui/scripts/frontend-bundle-candidate.mjs";
 import {
   FRONTEND_BUNDLE_APPROVAL_KIND,
+  FRONTEND_BUNDLE_OFFICIAL_REPOSITORY,
   buildDistInventory,
   distInventorySha256,
   frontendBundleLockPath,
@@ -38,7 +39,9 @@ const uiRoot = join(root, "prototype/auris-flow-ui");
 const distDir = join(uiRoot, "dist");
 const checkerPath = join(uiRoot, "scripts/check-bundle-budget.mjs");
 const evidencePath = join(root, "build/release-evidence/frontend-bundle.json");
-const officialRepository = "g5n-dev/auris_flow";
+export const FRONTEND_BUNDLE_VERIFIER_OFFICIAL_REPOSITORY =
+  FRONTEND_BUNDLE_OFFICIAL_REPOSITORY;
+const officialRepository = FRONTEND_BUNDLE_VERIFIER_OFFICIAL_REPOSITORY;
 const officialSource = `https://github.com/${officialRepository}`;
 const candidateMediaType =
   "application/vnd.auris-flow.frontend-bundle-candidate.v1";

@@ -9,7 +9,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from check_platform_readiness import git_staged_files, git_unstaged_files  # noqa: E402
+from check_platform_readiness import (  # noqa: E402
+    git_historical_files,
+    git_staged_files,
+    git_unstaged_files,
+    historical_release_artifacts,
+)
 
 
 class PlatformReadinessGitTreeTests(unittest.TestCase):
@@ -45,6 +50,33 @@ class PlatformReadinessGitTreeTests(unittest.TestCase):
 
         self.assertEqual(("tracked.txt",), git_staged_files(self.root))
         self.assertEqual((), git_unstaged_files(self.root))
+
+    def test_history_inventory_keeps_deleted_release_artifacts_visible(self) -> None:
+        artifact = self.root / "build" / "release-evidence" / "result.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text("{}\n", encoding="utf-8")
+        subprocess.run(["git", "add", str(artifact)], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "add generated artifact"],
+            cwd=self.root,
+            check=True,
+        )
+        artifact.unlink()
+        subprocess.run(["git", "add", "-u"], cwd=self.root, check=True)
+        subprocess.run(
+            ["git", "commit", "-qm", "remove generated artifact"],
+            cwd=self.root,
+            check=True,
+        )
+
+        self.assertIn(
+            "build/release-evidence/result.json",
+            git_historical_files(self.root),
+        )
+        self.assertEqual(
+            ("build/release-evidence/result.json",),
+            historical_release_artifacts(self.root),
+        )
 
 
 if __name__ == "__main__":

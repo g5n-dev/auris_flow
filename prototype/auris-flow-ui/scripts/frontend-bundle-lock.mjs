@@ -8,6 +8,7 @@ export const FRONTEND_BUNDLE_CANDIDATE_KIND = "auris-flow-frontend-bundle-candid
 export const FRONTEND_BUNDLE_APPROVAL_KIND = "auris-flow-frontend-bundle-approval";
 export const FRONTEND_BUNDLE_SIGNATURE_ISSUER =
   "https://token.actions.githubusercontent.com";
+export const FRONTEND_BUNDLE_OFFICIAL_REPOSITORY = "g5n-dev/auris_flow";
 export const frontendBundleLockPath = resolve(
   fileURLToPath(
     new URL(

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
 import sys
 from pathlib import Path
 from types import ModuleType
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -189,6 +191,113 @@ def test_current_release_gate_has_executable_production_path_command() -> None:
     readiness = _load_readiness()
 
     assert readiness.validate_release_gate_wiring(ROOT) == []
+
+
+def test_repository_trust_contract_matches_the_publication_target() -> None:
+    readiness = _load_readiness()
+
+    assert readiness.OFFICIAL_GITHUB_REPOSITORY == "g5n-dev/auris_flow"
+    assert readiness.validate_repository_trust_contract(ROOT) == []
+
+
+def test_repository_trust_contract_rejects_a_legacy_workflow_binding(
+    tmp_path: Path,
+) -> None:
+    readiness = _load_readiness()
+    for relative_path in readiness.REPOSITORY_TRUST_BINDINGS:
+        source = ROOT / relative_path
+        destination = tmp_path / relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    workflow = tmp_path / ".github" / "workflows" / "release-images.yml"
+    workflow.write_text(
+        workflow.read_text(encoding="utf-8").replace(
+            "g5n-dev/auris_flow",
+            "auris-flow/auris-flow",
+        ),
+        encoding="utf-8",
+    )
+
+    failures = readiness.validate_repository_trust_contract(tmp_path)
+
+    assert any(
+        ".github/workflows/release-images.yml" in failure
+        and "legacy repository identity" in failure
+        for failure in failures
+    ), failures
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "original", "replacement"),
+    [
+        (
+            ".github/workflows/release-images.yml",
+            "g5n-dev/auris_flow",
+            "attacker/repo",
+        ),
+        (
+            "scripts/verify_visual_baseline.py",
+            '("g5n-dev", "auris_flow")',
+            '("attacker", "repo")',
+        ),
+        (
+            "scripts/finalize_release_evidence.py",
+            "g5n-dev/auris_flow",
+            "attacker/repo",
+        ),
+        (
+            "prototype/auris-flow-ui/scripts/frontend-bundle-lock.mjs",
+            "g5n-dev",
+            "attacker",
+        ),
+        (
+            "scripts/verify_frontend_bundle.mjs",
+            "FRONTEND_BUNDLE_OFFICIAL_REPOSITORY;",
+            '"attacker/repo";',
+        ),
+        (
+            "scripts/release_bundle.py",
+            "g5n-dev/auris_flow",
+            "attacker/repo",
+        ),
+        (
+            "production/visual/Dockerfile",
+            "g5n-dev/auris_flow",
+            "attacker/repo",
+        ),
+    ],
+)
+def test_repository_trust_contract_rejects_each_component_drift(
+    tmp_path: Path,
+    relative_path: str,
+    original: str,
+    replacement: str,
+) -> None:
+    readiness = _load_readiness()
+    for trust_path in readiness.REPOSITORY_TRUST_BINDINGS:
+        source = ROOT / trust_path
+        destination = tmp_path / trust_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, destination)
+
+    target = tmp_path / relative_path
+    source = target.read_text(encoding="utf-8")
+    assert original in source
+    target.write_text(
+        source.replace(original, replacement),
+        encoding="utf-8",
+    )
+
+    failures = readiness.validate_repository_trust_contract(tmp_path)
+
+    assert any(relative_path in failure for failure in failures), failures
+
+
+def test_release_readiness_executes_repository_trust_validation() -> None:
+    source = READINESS.read_text(encoding="utf-8")
+
+    assert "tree_failures.extend(validate_repository_trust_contract())" in source
 
 
 def test_readiness_contract_targets_the_moduleized_frontend_surface() -> None:

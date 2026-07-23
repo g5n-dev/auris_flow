@@ -2600,6 +2600,10 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
     assert "images.lock.env" not in readme
 
     release_bundle = load_release_bundle()
+    assert release_bundle._official_release_workflow_identity("v1.0.0") == (
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/"
+        "release-images.yml@refs/tags/v1.0.0"
+    )
     commands: list[tuple[str, ...]] = []
 
     def fake_cosign(
@@ -2737,6 +2741,23 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
                 release_bundle.verify_bundle(root)
         finally:
             release_metadata_path.write_bytes(original_metadata)
+
+
+def test_release_bundle_rejects_certificate_identity_override() -> None:
+    release_bundle = load_release_bundle()
+
+    with pytest.raises(SystemExit):
+        release_bundle.parse_args(
+            [
+                "verify",
+                "--verify-signature",
+                "--certificate-identity",
+                (
+                    "https://github.com/attacker/repo/.github/workflows/"
+                    "release-images.yml@refs/tags/v1.0.0"
+                ),
+            ]
+        )
 
 
 def test_running_image_validation_requires_config_and_content_digest() -> None:

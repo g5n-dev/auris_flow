@@ -932,8 +932,7 @@ jobs:
           python3 scripts/release_bundle.py verify \
             --bundle-root build/release/deployment \
             --verify-signature \
-            --signature-bundle "build/release/auris-flow-${RELEASE_TAG}-release-metadata.sigstore.json" \
-            --certificate-identity "${WORKFLOW_IDENTITY}"
+            --signature-bundle "build/release/auris-flow-${RELEASE_TAG}-release-metadata.sigstore.json"
           python3 scripts/verify_production_compose.py --release \
             --compose-file build/release/deployment/production/compose.yaml \
             --env-file build/release/deployment/production/.env.example

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import fnmatch
 import json
 import re
@@ -29,6 +30,54 @@ from finalize_release_evidence import (  # noqa: E402
 
 
 ROOT = Path(__file__).resolve().parents[1]
+OFFICIAL_GITHUB_REPOSITORY = "g5n-dev/auris_flow"
+OFFICIAL_GITHUB_REPOSITORY_PARTS = ("g5n-dev", "auris_flow")
+OFFICIAL_GITHUB_URL = f"https://github.com/{OFFICIAL_GITHUB_REPOSITORY}"
+OFFICIAL_GHCR_REPOSITORY = f"ghcr.io/{OFFICIAL_GITHUB_REPOSITORY}"
+LEGACY_REPOSITORY_MARKERS = (
+    "auris-flow/auris-flow",
+    r"auris-flow\/auris-flow",
+    '("auris-flow", "auris-flow")',
+)
+REPOSITORY_TRUST_BINDINGS: dict[str, tuple[str, ...]] = {
+    ".github/workflows/release-images.yml": (
+        f'if [ "${{GITHUB_REPOSITORY}}" != "{OFFICIAL_GITHUB_REPOSITORY}" ]; then',
+        f"release trust policy only permits {OFFICIAL_GITHUB_REPOSITORY}",
+        'expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/'
+        'release-images.yml@${expected_ref}"',
+    ),
+    "scripts/verify_visual_baseline.py": (
+        'OFFICIAL_VISUAL_REPOSITORY = ("g5n-dev", "auris_flow")',
+    ),
+    "scripts/finalize_release_evidence.py": (
+        'OFFICIAL_VISUAL_REPOSITORY = ("g5n-dev", "auris_flow")',
+        r"ghcr\.io/g5n-dev/auris_flow/frontend-bundle-candidate@",
+        r"ghcr\.io/g5n-dev/auris_flow/frontend-bundle-approval@",
+        r"https://github\.com/g5n-dev/auris_flow/\.github/workflows/",
+    ),
+    "prototype/auris-flow-ui/scripts/frontend-bundle-lock.mjs": (
+        'FRONTEND_BUNDLE_OFFICIAL_REPOSITORY = "g5n-dev/auris_flow"',
+        r"ghcr\.io\/g5n-dev\/auris_flow\/frontend-bundle-candidate@",
+        r"ghcr\.io\/g5n-dev\/auris_flow\/frontend-bundle-approval@",
+        r"github\.com\/g5n-dev\/auris_flow\/\.github\/workflows\/",
+    ),
+    "scripts/verify_frontend_bundle.mjs": (
+        "FRONTEND_BUNDLE_OFFICIAL_REPOSITORY,",
+        "FRONTEND_BUNDLE_VERIFIER_OFFICIAL_REPOSITORY =",
+        "FRONTEND_BUNDLE_OFFICIAL_REPOSITORY;",
+    ),
+    "scripts/release_bundle.py": (
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/",
+    ),
+    "production/visual/Dockerfile": (
+        'org.opencontainers.image.source="https://github.com/g5n-dev/auris_flow"',
+    ),
+    "production/deployment-bundle.README.md": (
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/"
+        "release-images.yml@refs/tags/${RELEASE_TAG}",
+    ),
+    "doc/runbooks/release-supply-chain.md": ("GitHub repository `g5n-dev/auris_flow`",),
+}
 
 
 @dataclass(frozen=True)
@@ -657,8 +706,11 @@ RELEASE_REQUIRED_TRACKED_PATHS = (
     "scripts/verify_visual_baseline.py",
     "scripts/visual_regression.sh",
     "scripts/verify_release.sh",
+    "scripts/release_bundle.py",
     "scripts/verify_production_compose.py",
     "scripts/generate_supply_chain_evidence.py",
+    "scripts/tests/test_platform_readiness_git_tree.py",
+    "backend/tests/unit/test_release_quality_gate_policy.py",
     "scripts/render_release_compose.py",
     "scripts/validate_public_audio_datasets.py",
     "doc/backend-spec/public-audio-datasets-v0.1.json",
@@ -709,6 +761,22 @@ def git_untracked_files() -> tuple[str, ...]:
     return tuple(item.decode("utf-8") for item in completed.stdout.split(b"\0") if item)
 
 
+def git_historical_files(
+    root: Path = ROOT,
+    ref: str = "HEAD",
+) -> tuple[str, ...]:
+    completed = subprocess.run(
+        ("git", "log", "--format=", "--name-only", "-z", ref),
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=False,
+    )
+    return tuple(
+        sorted({item.decode("utf-8") for item in completed.stdout.split(b"\0") if item})
+    )
+
+
 def git_unstaged_files(root: Path = ROOT) -> tuple[str, ...]:
     completed = subprocess.run(
         ("git", "diff", "--name-only", "-z"),
@@ -737,6 +805,15 @@ def is_release_artifact(path: str) -> bool:
 
 def tracked_release_artifacts() -> list[str]:
     return [path for path in git_tracked_files() if is_release_artifact(path)]
+
+
+def historical_release_artifacts(
+    root: Path = ROOT,
+    ref: str = "HEAD",
+) -> tuple[str, ...]:
+    return tuple(
+        path for path in git_historical_files(root, ref) if is_release_artifact(path)
+    )
 
 
 def validate_frontend_bundle_release_lock(lock: object) -> list[str]:
@@ -840,6 +917,391 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
     return failures
 
 
+def _python_assignment(
+    root: Path,
+    relative_path: str,
+    name: str,
+) -> object:
+    path = root / relative_path
+    module = ast.parse(path.read_text(encoding="utf-8"), filename=relative_path)
+    values: list[ast.expr] = []
+    for statement in module.body:
+        if isinstance(statement, ast.Assign):
+            if any(
+                isinstance(target, ast.Name) and target.id == name
+                for target in statement.targets
+            ):
+                values.append(statement.value)
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.target.id == name
+        ):
+            values.append(statement.value)
+    if len(values) != 1:
+        raise ValueError(f"{relative_path} must assign {name} exactly once")
+    value = values[0]
+    if (
+        isinstance(value, ast.Call)
+        and isinstance(value.func, ast.Attribute)
+        and value.func.attr == "compile"
+        and value.args
+    ):
+        value = value.args[0]
+    return ast.literal_eval(value)
+
+
+def _function_argument_names(module: ast.Module, function_name: str) -> tuple[str, ...]:
+    functions = [
+        statement
+        for statement in module.body
+        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and statement.name == function_name
+    ]
+    if len(functions) != 1:
+        raise ValueError(f"must define {function_name} exactly once")
+    arguments = functions[0].args
+    return tuple(
+        argument.arg
+        for argument in (
+            *arguments.posonlyargs,
+            *arguments.args,
+            *arguments.kwonlyargs,
+        )
+    )
+
+
+def _shell_command(run_block: str, prefix: str) -> tuple[str, ...]:
+    lines = [line.strip() for line in run_block.splitlines()]
+    starts = [index for index, line in enumerate(lines) if line.startswith(prefix)]
+    if len(starts) != 1:
+        return ()
+    command: list[str] = []
+    for line in lines[starts[0] :]:
+        command.append(line)
+        if not line.endswith("\\"):
+            break
+    return tuple(command)
+
+
+def _validate_frontend_repository_module(root: Path) -> list[str]:
+    module_path = (
+        root / "prototype/auris-flow-ui/scripts/frontend-bundle-lock.mjs"
+    ).resolve()
+    official_candidate = (
+        f"{OFFICIAL_GHCR_REPOSITORY}/frontend-bundle-candidate@sha256:" + ("a" * 64)
+    )
+    official_approval = (
+        f"{OFFICIAL_GHCR_REPOSITORY}/frontend-bundle-approval@sha256:" + ("b" * 64)
+    )
+    official_candidate_identity = (
+        f"{OFFICIAL_GITHUB_URL}/.github/workflows/"
+        "frontend-bundle-candidate.yml@refs/heads/main"
+    )
+    official_approval_identity = (
+        f"{OFFICIAL_GITHUB_URL}/.github/workflows/"
+        "frontend-bundle-promotion.yml@refs/heads/main"
+    )
+    probe = f"""
+const module = await import({json.dumps(module_path.as_uri())});
+const patterns = module.frontendBundleLockPatterns;
+const result = {{
+  repository: module.FRONTEND_BUNDLE_OFFICIAL_REPOSITORY,
+  officialCandidate: patterns.officialArtifactPattern.test(
+    {json.dumps(official_candidate)}
+  ),
+  officialApproval: patterns.officialApprovalArtifactPattern.test(
+    {json.dumps(official_approval)}
+  ),
+  officialCandidateIdentity: patterns.officialIdentityPattern.test(
+    {json.dumps(official_candidate_identity)}
+  ),
+  officialApprovalIdentity: patterns.officialApprovalIdentityPattern.test(
+    {json.dumps(official_approval_identity)}
+  ),
+  foreignCandidate: patterns.officialArtifactPattern.test(
+    {json.dumps(official_candidate.replace("g5n-dev/auris_flow", "attacker/repo"))}
+  ),
+  foreignApproval: patterns.officialApprovalArtifactPattern.test(
+    {json.dumps(official_approval.replace("g5n-dev/auris_flow", "attacker/repo"))}
+  ),
+  foreignCandidateIdentity: patterns.officialIdentityPattern.test(
+    {json.dumps(official_candidate_identity.replace("g5n-dev/auris_flow", "attacker/repo"))}
+  ),
+  foreignApprovalIdentity: patterns.officialApprovalIdentityPattern.test(
+    {json.dumps(official_approval_identity.replace("g5n-dev/auris_flow", "attacker/repo"))}
+  )
+}};
+process.stdout.write(JSON.stringify(result));
+"""
+    try:
+        completed = subprocess.run(
+            ("node", "--input-type=module", "--eval", probe),
+            cwd=root,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return [f"unable to evaluate frontend repository trust contract: {error}"]
+    if completed.returncode != 0:
+        return ["frontend repository trust module could not be evaluated"]
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return ["frontend repository trust module returned invalid JSON"]
+    expected = {
+        "repository": OFFICIAL_GITHUB_REPOSITORY,
+        "officialCandidate": True,
+        "officialApproval": True,
+        "officialCandidateIdentity": True,
+        "officialApprovalIdentity": True,
+        "foreignCandidate": False,
+        "foreignApproval": False,
+        "foreignCandidateIdentity": False,
+        "foreignApprovalIdentity": False,
+    }
+    if result != expected:
+        return ["frontend repository trust patterns do not fail closed"]
+    return []
+
+
+def validate_repository_trust_contract(root: Path = ROOT) -> list[str]:
+    failures: list[str] = []
+    sources: dict[str, str] = {}
+    for relative_path, required_tokens in REPOSITORY_TRUST_BINDINGS.items():
+        path = root / relative_path
+        if not path.is_file():
+            failures.append(f"repository trust source is missing: {relative_path}")
+            continue
+        try:
+            source = path.read_text(encoding="utf-8")
+        except OSError as error:
+            failures.append(
+                f"repository trust source is unreadable: {relative_path}: {error}"
+            )
+            continue
+        sources[relative_path] = source
+        for token in required_tokens:
+            if token not in source:
+                failures.append(f"repository trust binding drifted: {relative_path}")
+                break
+        if any(marker in source for marker in LEGACY_REPOSITORY_MARKERS):
+            failures.append(
+                f"legacy repository identity remains in trust source: {relative_path}"
+            )
+
+    workflow_source = sources.get(".github/workflows/release-images.yml")
+    if workflow_source is not None:
+        workflow: object = None
+        try:
+            workflow = yaml.safe_load(workflow_source)
+            steps = workflow["jobs"]["release-context"]["steps"]
+        except (KeyError, TypeError, yaml.YAMLError):
+            failures.append("release workflow repository guard is structurally invalid")
+        else:
+            context_steps = [
+                step
+                for step in steps
+                if isinstance(step, dict) and step.get("id") == "context"
+            ]
+            if len(context_steps) != 1 or not isinstance(
+                context_steps[0].get("run"), str
+            ):
+                failures.append(
+                    "release workflow must define one active repository context guard"
+                )
+            else:
+                active_lines = [
+                    line.strip()
+                    for line in context_steps[0]["run"].splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                ]
+                guard = (
+                    f'if [ "${{GITHUB_REPOSITORY}}" != '
+                    f'"{OFFICIAL_GITHUB_REPOSITORY}" ]; then'
+                )
+                guard_indexes = [
+                    index for index, line in enumerate(active_lines) if line == guard
+                ]
+                if len(guard_indexes) != 1:
+                    failures.append("release workflow repository guard is not exact")
+                else:
+                    index = guard_indexes[0]
+                    if active_lines[index + 2 : index + 4] != ["exit 2", "fi"]:
+                        failures.append(
+                            "release workflow repository guard does not fail closed"
+                        )
+                for required_line in (
+                    'expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/'
+                    'release-images.yml@${expected_ref}"',
+                    'if [ "${GITHUB_WORKFLOW_REF}" != "${expected_workflow_ref}" ]; then',
+                ):
+                    if required_line not in active_lines:
+                        failures.append(
+                            "release workflow ref is not bound to the guarded repository"
+                        )
+                        break
+
+        try:
+            if not isinstance(workflow, dict):
+                raise TypeError
+            jobs = workflow["jobs"]
+            assembly_steps = [
+                step
+                for job in jobs.values()
+                if isinstance(job, dict)
+                for step in job.get("steps", [])
+                if isinstance(step, dict)
+                and step.get("name")
+                == "Assemble and sign the verified production release bundle"
+            ]
+        except (KeyError, TypeError, AttributeError):
+            assembly_steps = []
+        if len(assembly_steps) != 1:
+            failures.append("release bundle assembly step is missing or duplicated")
+        else:
+            assembly = assembly_steps[0]
+            environment = assembly.get("env")
+            if (
+                not isinstance(environment, dict)
+                or environment.get("WORKFLOW_IDENTITY")
+                != "https://github.com/${{ github.workflow_ref }}"
+            ):
+                failures.append(
+                    "release bundle assembly signer is not bound to github.workflow_ref"
+                )
+            run_block = assembly.get("run")
+            command = (
+                _shell_command(
+                    run_block,
+                    "python3 scripts/release_bundle.py verify",
+                )
+                if isinstance(run_block, str)
+                else ()
+            )
+            if not command or "--verify-signature \\" not in command:
+                failures.append(
+                    "release bundle assembly does not verify the signed bundle"
+                )
+            if any("--certificate-identity" in line for line in command):
+                failures.append(
+                    "release bundle verifier exposes a workflow identity override"
+                )
+
+    try:
+        visual_repository = _python_assignment(
+            root,
+            "scripts/verify_visual_baseline.py",
+            "OFFICIAL_VISUAL_REPOSITORY",
+        )
+        finalizer_visual_repository = _python_assignment(
+            root,
+            "scripts/finalize_release_evidence.py",
+            "OFFICIAL_VISUAL_REPOSITORY",
+        )
+        release_workflow_prefix = _python_assignment(
+            root,
+            "scripts/release_bundle.py",
+            "OFFICIAL_RELEASE_WORKFLOW_PREFIX",
+        )
+    except (OSError, SyntaxError, ValueError) as error:
+        failures.append(f"Python repository trust constants are invalid: {error}")
+    else:
+        if (
+            visual_repository != OFFICIAL_GITHUB_REPOSITORY_PARTS
+            or finalizer_visual_repository != OFFICIAL_GITHUB_REPOSITORY_PARTS
+        ):
+            failures.append(
+                "visual repository trust root does not match publication target"
+            )
+        expected_prefix = (
+            f"{OFFICIAL_GITHUB_URL}/.github/workflows/release-images.yml@refs/tags/"
+        )
+        if release_workflow_prefix != expected_prefix:
+            failures.append(
+                "release bundle workflow identity does not match publication target"
+            )
+
+    finalizer_patterns = {
+        "FRONTEND_CANDIDATE_OCI_REF_PATTERN": (
+            f"{OFFICIAL_GHCR_REPOSITORY}/frontend-bundle-candidate@sha256:" + ("a" * 64)
+        ),
+        "FRONTEND_APPROVAL_OCI_REF_PATTERN": (
+            f"{OFFICIAL_GHCR_REPOSITORY}/frontend-bundle-approval@sha256:" + ("b" * 64)
+        ),
+        "FRONTEND_CANDIDATE_SIGNATURE_IDENTITY_PATTERN": (
+            f"{OFFICIAL_GITHUB_URL}/.github/workflows/"
+            "frontend-bundle-candidate.yml@refs/heads/main"
+        ),
+        "FRONTEND_APPROVAL_SIGNATURE_IDENTITY_PATTERN": (
+            f"{OFFICIAL_GITHUB_URL}/.github/workflows/"
+            "frontend-bundle-promotion.yml@refs/heads/main"
+        ),
+    }
+    for name, official_value in finalizer_patterns.items():
+        try:
+            pattern = _python_assignment(
+                root,
+                "scripts/finalize_release_evidence.py",
+                name,
+            )
+            compiled = re.compile(pattern)
+        except (OSError, SyntaxError, TypeError, ValueError, re.error) as error:
+            failures.append(
+                f"finalizer repository trust pattern is invalid: {name}: {error}"
+            )
+            continue
+        foreign_value = official_value.replace(
+            OFFICIAL_GITHUB_REPOSITORY,
+            "attacker/repo",
+        )
+        if compiled.fullmatch(official_value) is None or compiled.fullmatch(
+            foreign_value
+        ):
+            failures.append(
+                f"finalizer repository trust pattern does not fail closed: {name}"
+            )
+
+    release_bundle_path = root / "scripts/release_bundle.py"
+    if release_bundle_path.is_file():
+        try:
+            release_bundle_module = ast.parse(
+                release_bundle_path.read_text(encoding="utf-8"),
+                filename="scripts/release_bundle.py",
+            )
+            for function_name in (
+                "verify_bundle_signature",
+                "verify_restore_source",
+                "verify_running_images",
+            ):
+                if "certificate_identity" in _function_argument_names(
+                    release_bundle_module,
+                    function_name,
+                ):
+                    failures.append(
+                        f"{function_name} exposes a certificate identity override"
+                    )
+            for node in ast.walk(release_bundle_module):
+                if (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "add_argument"
+                    and node.args
+                    and isinstance(node.args[0], ast.Constant)
+                    and node.args[0].value == "--certificate-identity"
+                ):
+                    failures.append(
+                        "release bundle CLI exposes a certificate identity override"
+                    )
+        except (OSError, SyntaxError, ValueError) as error:
+            failures.append(f"release bundle trust API is invalid: {error}")
+
+    failures.extend(_validate_frontend_repository_module(root))
+    return failures
+
+
 def run_release_checks() -> list[ReadinessResult]:
     results = run_checks()
     release_results: list[ReadinessResult] = []
@@ -900,13 +1362,23 @@ def run_release_checks() -> list[ReadinessResult]:
             )
     try:
         tracked_artifacts = tracked_release_artifacts()
+        historical_artifacts = historical_release_artifacts()
     except (OSError, subprocess.CalledProcessError) as error:
-        hygiene_failures.append(f"unable to inspect git-tracked files: {error}")
+        hygiene_failures.append(
+            f"unable to inspect Git release artifact history: {error}"
+        )
         tracked_artifacts = []
+        historical_artifacts = ()
     for artifact in tracked_artifacts:
         hygiene_failures.append(
             f"generated or local-only artifact is tracked: {artifact}"
         )
+    for artifact in historical_artifacts:
+        if artifact not in tracked_artifacts:
+            hygiene_failures.append(
+                "generated or local-only artifact exists in published Git history: "
+                f"{artifact}"
+            )
     release_results.append(
         {
             "key": "release_distribution_hygiene",
@@ -939,6 +1411,7 @@ def run_release_checks() -> list[ReadinessResult]:
     for path in RELEASE_REQUIRED_TRACKED_PATHS:
         if path not in tracked_files:
             tree_failures.append(f"required release source is not in Git index: {path}")
+    tree_failures.extend(validate_repository_trust_contract())
 
     visual_lock_failures = validate_visual_baseline_lock(
         ROOT / "production/visual/visual-baseline.lock.json",
