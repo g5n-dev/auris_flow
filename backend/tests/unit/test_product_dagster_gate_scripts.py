@@ -596,6 +596,12 @@ def test_product_gate_shell_is_clean_tree_commit_bound_and_fail_closed() -> None
     assert 'git -C "${ROOT}" ls-files --others --exclude-standard' in source
     assert 'git -C "${ROOT}" rev-parse --verify HEAD' in source
     assert "AURIS_PRODUCT_GATE_SOURCE_COMMIT" in source
+    assert 'export AURIS_AUDIO_INFERENCE_PROVIDER="audio_intelligence_default"' in source
+    assert 'export AURIS_AUDIO_INFERENCE_ALLOWED_MODELS="audio-v2.3.1"' in source
+    assert (
+        'export AURIS_AUDIO_INFERENCE_ENDPOINT="https://audio-inference.invalid/v1/audio-intelligence"'
+        in source
+    )
     assert "build/release-evidence/product-dagster-gate.json" in source
     assert "down --volumes --remove-orphans" in source
     assert "AURIS_SKIP_PRODUCT_DAGSTER_GATE" in source
