@@ -832,6 +832,146 @@ def test_product_gate_sanitizes_unexpected_internal_failures(
     assert not artifact.exists()
 
 
+def test_product_gate_uses_one_absolute_deadline_across_all_phases(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_driver()
+    observed_deadlines: list[float] = []
+    wait_results = iter(
+        [
+            {"run_id": "success", "status": "submitted", "trace_id": "trace-success"},
+            {"run_id": "sync", "status": "success"},
+            {"run_id": "success", "status": "success"},
+            {"run_id": "cancel", "status": "submitted", "trace_id": "trace-cancel"},
+            {"run_id": "cancellation", "status": "success"},
+            {"run_id": "cancel", "status": "cancelled"},
+        ]
+    )
+
+    class FakeClient:
+        def __init__(
+            self,
+            _base_url: str,
+            *,
+            timeout_seconds: float,
+            deadline: float,
+        ) -> None:
+            assert timeout_seconds == 10.0
+            observed_deadlines.append(deadline)
+            self.task_run_count = 0
+
+        def request(
+            self,
+            method: str,
+            path: str,
+            **_kwargs: object,
+        ) -> dict[str, object]:
+            if method == "POST" and path == "/api/v1/task-runs":
+                self.task_run_count += 1
+                run_id = "success" if self.task_run_count == 1 else "cancel"
+                return {"data": {"run_id": run_id}}
+            if method == "POST" and path.endswith("/status-syncs"):
+                return {"data": {"run_id": "sync"}}
+            if method == "POST" and path.endswith("/cancellations"):
+                return {"data": {"run_id": "cancellation"}}
+            if method == "GET" and path.endswith("/success"):
+                return {"data": {"status": "success", "status_version": 5}}
+            if method == "GET" and path.endswith("/cancel"):
+                return {"data": {"status": "cancelled", "status_version": 5}}
+            return {}
+
+    def fake_wait(
+        _client: object,
+        _run_id: str,
+        *,
+        expected: set[str],
+        deadline: float,
+    ) -> dict[str, object]:
+        assert expected
+        observed_deadlines.append(deadline)
+        return next(wait_results)
+
+    def fake_database_proof(
+        *,
+        deadline: float,
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], dict[str, object]]:
+        observed_deadlines.append(deadline)
+        return {}, {}
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(module, "BFFClient", FakeClient)
+    monkeypatch.setattr(module, "_wait_for_run", fake_wait)
+    monkeypatch.setattr(module, "_database_proof", fake_database_proof)
+    monkeypatch.setattr(module, "_terminal_rejection", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        module,
+        "_assert_cross_scope_hidden",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        module,
+        "validate_run_projection",
+        lambda *_args, **_kwargs: {"status_version": 5},
+    )
+    monkeypatch.setattr(
+        module,
+        "build_evidence",
+        lambda **_kwargs: {"status": "ok"},
+    )
+
+    module.run_gate(
+        base_url="http://bff:8000",
+        source_commit="a" * 40,
+        artifact=tmp_path / "product-dagster-gate.json",
+        timeout_seconds=12.5,
+        suffix="absolute-deadline",
+    )
+
+    assert observed_deadlines == [112.5] * 8
+
+
+def test_product_gate_bff_requests_use_only_the_remaining_deadline_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_driver()
+    now = [109.0]
+    observed_timeouts: list[float] = []
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self, _limit: int) -> bytes:
+            return b"{}"
+
+    def fake_urlopen(_request: object, *, timeout: float) -> FakeResponse:
+        observed_timeouts.append(timeout)
+        return FakeResponse()
+
+    monkeypatch.setattr(module.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(module, "urlopen", fake_urlopen)
+    client = module.BFFClient(
+        "http://bff:8000",
+        timeout_seconds=10.0,
+        deadline=112.5,
+    )
+
+    assert client.request("GET", "/readyz") == {}
+    assert observed_timeouts == [3.5]
+
+    now[0] = 112.5
+    with pytest.raises(module.GateFailure, match="deadline exhausted"):
+        client.request("GET", "/readyz")
+    assert observed_timeouts == [3.5]
+
+
 def test_product_gate_compose_uses_bff_worker_and_real_dagster_without_fake() -> None:
     path = ROOT / "production" / "tests" / "dagster-product-gate.compose.yaml"
     source = path.read_text(encoding="utf-8")

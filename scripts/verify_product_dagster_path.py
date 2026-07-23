@@ -404,10 +404,29 @@ def build_evidence(
     }
 
 
+def _remaining_seconds(
+    deadline: float,
+    *,
+    stage: str,
+    maximum: float | None = None,
+) -> float:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise GateFailure(f"product Dagster gate deadline exhausted during {stage}")
+    return min(remaining, maximum) if maximum is not None else remaining
+
+
 class BFFClient:
-    def __init__(self, base_url: str, *, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_seconds: float,
+        deadline: float | None = None,
+    ) -> None:
         self.base_url = base_url.rstrip("/")
         self.timeout_seconds = timeout_seconds
+        self.deadline = deadline
 
     def request(
         self,
@@ -443,8 +462,15 @@ class BFFClient:
             method=method,
             headers=headers,
         )
+        request_timeout = self.timeout_seconds
+        if self.deadline is not None:
+            request_timeout = _remaining_seconds(
+                self.deadline,
+                stage="BFF request",
+                maximum=request_timeout,
+            )
         try:
-            with urlopen(request, timeout=self.timeout_seconds) as response:
+            with urlopen(request, timeout=request_timeout) as response:
                 status = response.status
                 raw = response.read(MAX_RESPONSE_BYTES + 1)
         except HTTPError as exc:
@@ -484,9 +510,8 @@ def _wait_for_run(
     run_id: str,
     *,
     expected: set[str],
-    timeout_seconds: float,
+    deadline: float,
 ) -> dict[str, Any]:
-    deadline = time.monotonic() + timeout_seconds
     last_status = "unknown"
     while time.monotonic() < deadline:
         data = _public_run_data(client.request("GET", f"/api/v1/task-runs/{run_id}"))
@@ -497,7 +522,9 @@ def _wait_for_run(
             raise GateFailure(
                 f"task run reached unexpected terminal status {last_status}"
             )
-        time.sleep(0.25)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.25, remaining))
     raise GateFailure(
         f"timed out waiting for task run state; last_status={last_status}"
     )
@@ -839,14 +866,13 @@ def _database_proof(
     cancellation_id: str,
     success_projection: dict[str, Any],
     cancellation_projection: dict[str, Any],
-    timeout_seconds: float,
+    deadline: float,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     from sqlalchemy import select
 
     from app.core.database import SessionLocal
     from app.models import OutboxEvent, RunCompletionReceipt, RunRecord
 
-    deadline = time.monotonic() + timeout_seconds
     last_error = "database proof not evaluated"
     while time.monotonic() < deadline:
         try:
@@ -1044,7 +1070,9 @@ def _database_proof(
                 return success_proof, cancellation_proof
         except GateFailure as exc:
             last_error = str(exc)
-        time.sleep(0.25)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(0.25, remaining))
     raise GateFailure(f"timed out waiting for database evidence: {last_error}")
 
 
@@ -1056,7 +1084,12 @@ def run_gate(
     timeout_seconds: float,
     suffix: str,
 ) -> dict[str, Any]:
-    client = BFFClient(base_url, timeout_seconds=min(timeout_seconds, 10.0))
+    deadline = time.monotonic() + timeout_seconds
+    client = BFFClient(
+        base_url,
+        timeout_seconds=min(timeout_seconds, 10.0),
+        deadline=deadline,
+    )
     client.request("GET", "/readyz")
     isolation_project_id = (
         "product_gate_isolation_"
@@ -1092,7 +1125,7 @@ def run_gate(
         client,
         success_run_id,
         expected={"submitted"},
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     success_trace_id = _text(success_submitted.get("trace_id"), "task run trace id")
 
@@ -1110,13 +1143,13 @@ def run_gate(
         client,
         success_sync_id,
         expected={"success"},
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     success_final = _wait_for_run(
         client,
         success_run_id,
         expected={"success"},
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     success_api_proof = validate_run_projection(
         success_final,
@@ -1163,7 +1196,7 @@ def run_gate(
         client,
         cancel_run_id,
         expected={"submitted"},
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     cancel_trace_id = _text(cancel_submitted.get("trace_id"), "task run trace id")
     cancellation_created = _public_run_data(
@@ -1182,13 +1215,13 @@ def run_gate(
         client,
         cancellation_id,
         expected={"success"},
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     cancel_final = _wait_for_run(
         client,
         cancel_run_id,
         expected={"cancelled"},
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     cancel_api_proof = validate_run_projection(
         cancel_final,
@@ -1226,7 +1259,7 @@ def run_gate(
         cancellation_id=cancellation_id,
         success_projection=success_api_proof,
         cancellation_projection=cancel_api_proof,
-        timeout_seconds=timeout_seconds,
+        deadline=deadline,
     )
     evidence = build_evidence(
         source_commit=source_commit,
@@ -1235,6 +1268,7 @@ def run_gate(
         cancellation_projection=cancel_api_proof,
         cancellation_internal=cancel_db,
     )
+    _remaining_seconds(deadline, stage="evidence publication")
     artifact.parent.mkdir(parents=True, exist_ok=True)
     temporary = artifact.with_name(f".{artifact.name}.{secrets.token_hex(8)}.tmp")
     temporary.write_text(
