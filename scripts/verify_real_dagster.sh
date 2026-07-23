@@ -49,6 +49,9 @@ export AURIS_EXTERNAL_CALLBACK_HOST="callback.invalid"
 export AURIS_EMBEDDING_ENDPOINT="https://embedding.invalid/v1/embeddings"
 export AURIS_EMBEDDING_MODEL="dagster-gate-unused"
 export AURIS_EMBEDDING_DIMENSION="8"
+export AURIS_AUDIO_INFERENCE_PROVIDER="audio_intelligence_default"
+export AURIS_AUDIO_INFERENCE_ALLOWED_MODELS="audio-v2.3.1"
+export AURIS_AUDIO_INFERENCE_ENDPOINT="https://audio-inference.invalid/v1/audio-intelligence"
 export AURIS_DAGSTER_IMAGE="auris-flow-dagster-gate:${RUN_SUFFIX}"
 
 COMPOSE=(

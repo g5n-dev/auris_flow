@@ -266,6 +266,12 @@ def test_real_dagster_shell_gate_isolated_and_never_starts_protocol_fake() -> No
     assert "${ROOT}/build/tmp" in source
     assert "${TMPDIR:-/tmp}/auris-dagster-gate" not in source
     assert 'export APP_ENV="ci"' in source
+    assert 'export AURIS_AUDIO_INFERENCE_PROVIDER="audio_intelligence_default"' in source
+    assert 'export AURIS_AUDIO_INFERENCE_ALLOWED_MODELS="audio-v2.3.1"' in source
+    assert (
+        'export AURIS_AUDIO_INFERENCE_ENDPOINT="https://audio-inference.invalid/v1/audio-intelligence"'
+        in source
+    )
     assert 'SOURCE_COMMIT="$(git -C "${ROOT}" rev-parse --verify HEAD^{commit})"' in source
     assert '--source-commit "${SOURCE_COMMIT}"' in source
     assert 'DEADLINE_RUNNER="${ROOT}/scripts/run_with_deadline.py"' in source
