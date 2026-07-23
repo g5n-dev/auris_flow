@@ -107,6 +107,158 @@ def _evidence_event(event_id: int, event_type: str, aggregate_id: str) -> dict[s
     }
 
 
+def _persisted_control_event(
+    *,
+    event_id: int,
+    event_type: str,
+    aggregate_id: str,
+    trace_id: str,
+    external_run_id: str | None = None,
+    operation: str | None = None,
+) -> SimpleNamespace:
+    payload: dict[str, object] = {
+        "run_id": aggregate_id,
+        "trace_id": trace_id,
+    }
+    if external_run_id is not None:
+        payload["external_run_id"] = external_run_id
+    if operation is not None:
+        payload["adapter_dispatch"] = {
+            "adapter": "dagster",
+            "operation": operation,
+            "status": "success",
+            "details": {
+                "mode": "real",
+                "external_run_id": external_run_id,
+            },
+        }
+    return SimpleNamespace(
+        event_id=event_id,
+        event_type=event_type,
+        aggregate_id=aggregate_id,
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        status="processed",
+        delivery_state="confirmed",
+        processed_at=datetime.now(UTC),
+        attempt_count=1,
+        lease_generation=1,
+        dispatch_request_sha256=f"{event_id:064x}",
+        last_error=None,
+        dispatch_idempotency_key=f"outbox:{event_id}",
+        payload=payload,
+    )
+
+
+def _async_cancellation_proof(
+    *,
+    immediate_status: str = "CANCELING",
+) -> tuple[SimpleNamespace, SimpleNamespace, list[SimpleNamespace], list[SimpleNamespace]]:
+    source_run_id = "task_run_gate_cancel"
+    source_trace_id = "trace_gate_cancel"
+    cancellation_id = "task_run_cancellation_gate"
+    cancellation_trace_id = "trace_gate_cancel_control"
+    sync_id = "task_run_status_sync_auto_0123456789abcdef01234567"
+    external_run_id = "dagster-run-cancel"
+    source = SimpleNamespace(
+        run_id=source_run_id,
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        run_type="task_run",
+        run_key="task_version_v3_2_1",
+        trace_id=source_trace_id,
+        status="cancelled",
+        status_version=5,
+        engine_status="CANCELED",
+        payload={
+            "run_id": source_run_id,
+            "trace_id": source_trace_id,
+        },
+    )
+    cancellation = SimpleNamespace(
+        run_id=cancellation_id,
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        run_type="task_run_cancellation",
+        run_key=source_run_id,
+        trace_id=cancellation_trace_id,
+        status="success",
+        payload={
+            "run_id": cancellation_id,
+            "trace_id": cancellation_trace_id,
+            "source_run_id": source_run_id,
+            "source_trace_id": source_trace_id,
+            "external_run_id": external_run_id,
+            "dispatch": {
+                "adapter": "dagster",
+                "operation": "cancel_run",
+                "status": "success",
+                "details": {
+                    "mode": "real",
+                    "external_run_id": external_run_id,
+                    "dagster_status": immediate_status,
+                    "terminate_policy": "SAFE_TERMINATE",
+                    "response_typename": "TerminateRunSuccess",
+                },
+            },
+        },
+    )
+    terminal_sync = SimpleNamespace(
+        run_id=sync_id,
+        tenant_id="aurora_auto",
+        project_id="sales_qa",
+        run_type="task_run_status_sync",
+        run_key=source_run_id,
+        trace_id=source_trace_id,
+        status="success",
+        payload={
+            "run_id": sync_id,
+            "trace_id": source_trace_id,
+            "source_run_id": source_run_id,
+            "source_trace_id": source_trace_id,
+            "external_run_id": external_run_id,
+            "monitor_kind": "missed_callback_reconcile",
+            "monitor_control_id": sync_id,
+            "monitor_generation": 1,
+            "dispatch": {
+                "adapter": "dagster",
+                "operation": "run_status",
+                "status": "success",
+                "details": {
+                    "mode": "real",
+                    "external_run_id": external_run_id,
+                    "dagster_status": "CANCELED",
+                },
+            },
+        },
+    )
+    events = [
+        _persisted_control_event(
+            event_id=1,
+            event_type="task_run.cancel_requested",
+            aggregate_id=cancellation_id,
+            trace_id=cancellation_trace_id,
+            external_run_id=external_run_id,
+            operation="cancel_run",
+        ),
+        _persisted_control_event(
+            event_id=2,
+            event_type="task_run.status_sync_requested",
+            aggregate_id=sync_id,
+            trace_id=source_trace_id,
+            external_run_id=external_run_id,
+            operation="run_status",
+        ),
+        _persisted_control_event(
+            event_id=3,
+            event_type="task_run.cancelled",
+            aggregate_id=source_run_id,
+            trace_id=source_trace_id,
+        ),
+    ]
+    return source, cancellation, [terminal_sync], events
+
+
 def test_product_gate_validates_engine_neutral_scoped_projection_and_terminal_monotonicity() -> (
     None
 ):
@@ -346,6 +498,113 @@ def test_product_gate_binds_persisted_dispatch_to_scope_trace_and_source() -> No
         )
 
 
+@pytest.mark.parametrize("immediate_status", ["STARTED", "CANCELING", "CANCELED"])
+def test_product_gate_requires_monitor_reconciliation_after_safe_terminate(
+    immediate_status: str,
+) -> None:
+    module = _load_driver()
+    source, cancellation, sync_controls, events = _async_cancellation_proof(
+        immediate_status=immediate_status
+    )
+
+    proof = module._require_real_async_cancellation_proof(
+        source=source,
+        cancellation=cancellation,
+        status_sync_controls=sync_controls,
+        events=events,
+        external_run_id="dagster-run-cancel",
+    )
+
+    assert proof["acknowledged_engine_status"] == immediate_status
+    assert proof["engine_status"] == "CANCELED"
+    assert proof["status_sync_control"].run_id == sync_controls[0].run_id
+    assert proof["status_sync_event"].event_type == "task_run.status_sync_requested"
+    assert proof["terminal_event"].event_type == "task_run.cancelled"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("response_typename", "TerminateRunFailure"),
+        ("terminate_policy", "MARK_AS_CANCELED_IMMEDIATELY"),
+        ("dagster_status", "SUCCESS"),
+    ],
+)
+def test_product_gate_rejects_invalid_safe_terminate_acknowledgement(
+    field: str,
+    value: str,
+) -> None:
+    module = _load_driver()
+    source, cancellation, sync_controls, events = _async_cancellation_proof()
+    cancellation.payload["dispatch"]["details"][field] = value
+
+    with pytest.raises(module.GateFailure, match="SAFE_TERMINATE acknowledgement"):
+        module._require_real_async_cancellation_proof(
+            source=source,
+            cancellation=cancellation,
+            status_sync_controls=sync_controls,
+            events=events,
+            external_run_id="dagster-run-cancel",
+        )
+
+
+@pytest.mark.parametrize("missing_part", ["control", "event"])
+def test_product_gate_rejects_missing_terminal_monitor_sync(missing_part: str) -> None:
+    module = _load_driver()
+    source, cancellation, sync_controls, events = _async_cancellation_proof()
+    if missing_part == "control":
+        sync_controls.clear()
+    else:
+        events[:] = [
+            event for event in events if event.event_type != "task_run.status_sync_requested"
+        ]
+
+    with pytest.raises(module.GateFailure, match="monitor status synchronization"):
+        module._require_real_async_cancellation_proof(
+            source=source,
+            cancellation=cancellation,
+            status_sync_controls=sync_controls,
+            events=events,
+            external_run_id="dagster-run-cancel",
+        )
+
+
+def test_product_gate_rejects_cross_scope_terminal_monitor_sync() -> None:
+    module = _load_driver()
+    source, cancellation, sync_controls, events = _async_cancellation_proof()
+    sync_controls[0].project_id = "forged-project"
+
+    with pytest.raises(module.GateFailure, match="monitor status synchronization"):
+        module._require_real_async_cancellation_proof(
+            source=source,
+            cancellation=cancellation,
+            status_sync_controls=sync_controls,
+            events=events,
+            external_run_id="dagster-run-cancel",
+        )
+
+
+@pytest.mark.parametrize("invalid_target", ["source", "sync"])
+def test_product_gate_rejects_non_cancelled_terminal_engine_status(
+    invalid_target: str,
+) -> None:
+    module = _load_driver()
+    source, cancellation, sync_controls, events = _async_cancellation_proof()
+    if invalid_target == "source":
+        source.engine_status = "CANCELING"
+    else:
+        sync_controls[0].payload["dispatch"]["details"]["dagster_status"] = "CANCELING"
+
+    with pytest.raises(module.GateFailure, match="terminal CANCELED"):
+        module._require_real_async_cancellation_proof(
+            source=source,
+            cancellation=cancellation,
+            status_sync_controls=sync_controls,
+            events=events,
+            external_run_id="dagster-run-cancel",
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -431,7 +690,12 @@ def test_product_gate_builds_commit_bound_sanitized_evidence() -> None:
                     "task_run.cancel_requested",
                     "task_run_cancellation_cancel",
                 ),
-                _evidence_event(6, "task_run.cancelled", "task_run_cancel"),
+                _evidence_event(
+                    6,
+                    "task_run.status_sync_requested",
+                    "task_run_status_sync_auto_cancel",
+                ),
+                _evidence_event(7, "task_run.cancelled", "task_run_cancel"),
             ],
         },
     )
@@ -562,8 +826,12 @@ def test_product_gate_compose_uses_bff_worker_and_real_dagster_without_fake() ->
     source = path.read_text(encoding="utf-8")
     document = yaml.load(source, Loader=_ComposeLoader)
     services = document["services"]
+    app_environment = document["x-product-gate-app-environment"]
 
     assert "fake_dagster_graphql_server" not in source
+    assert app_environment["TASK_RUN_MONITOR_ENABLED"] == "true"
+    assert app_environment["TASK_RUN_STATUS_SYNC_INTERVAL_SECONDS"] == "5"
+    assert app_environment["TASK_RUN_MONITOR_POLL_SECONDS"] == "1"
     assert services["dagster-code"]["environment"]["AURIS_BFF_INTERNAL_URL"] == ("http://bff:8000")
     assert services["bff"]["environment"]["AURIS_DAGSTER_ADAPTER"] == "real"
     assert services["worker"]["environment"]["AURIS_DAGSTER_ADAPTER"] == "real"

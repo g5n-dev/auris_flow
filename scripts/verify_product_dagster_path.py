@@ -68,6 +68,8 @@ CANCELLATION_INTERNAL_EVIDENCE_FIELDS = frozenset(
         "terminate_policy",
     }
 )
+CANCELLATION_ACK_ENGINE_STATUSES = frozenset({"STARTED", "CANCELING", "CANCELED"})
+CANCELLATION_TERMINAL_ENGINE_STATUS = "CANCELED"
 _CONFUSABLE_TRANSLATION = str.maketrans(
     {
         "Α": "A",
@@ -314,6 +316,7 @@ def build_evidence(
             {
                 "task_run.requested",
                 "task_run.cancel_requested",
+                "task_run.status_sync_requested",
                 "task_run.cancelled",
             }
         ),
@@ -685,6 +688,139 @@ def _require_real_record_dispatch(
     return details
 
 
+def _require_real_async_cancellation_proof(
+    *,
+    source: Any,
+    cancellation: Any,
+    status_sync_controls: list[Any],
+    events: list[Any],
+    external_run_id: str,
+) -> dict[str, Any]:
+    if (
+        source.tenant_id != SCOPE[0]
+        or source.project_id != SCOPE[1]
+        or source.run_type != "task_run"
+        or source.status != "cancelled"
+        or source.engine_status != CANCELLATION_TERMINAL_ENGINE_STATUS
+    ):
+        raise GateFailure("real Dagster cancellation did not reach terminal CANCELED")
+
+    cancel_details = _require_real_record_dispatch(
+        cancellation,
+        operation="cancel_run",
+        expected_run_type="task_run_cancellation",
+        expected_external_run_id=external_run_id,
+        source_record=source,
+    )
+    acknowledged_status = cancel_details.get("dagster_status")
+    if (
+        cancellation.status != "success"
+        or cancel_details.get("response_typename") != "TerminateRunSuccess"
+        or cancel_details.get("terminate_policy") != "SAFE_TERMINATE"
+        or acknowledged_status not in CANCELLATION_ACK_ENGINE_STATUSES
+    ):
+        raise GateFailure("real Dagster SAFE_TERMINATE acknowledgement is invalid")
+    cancel_control_event = _require_confirmed_event(
+        events,
+        event_type="task_run.cancel_requested",
+        aggregate_id=cancellation.run_id,
+        trace_id=cancellation.trace_id,
+    )
+    _require_real_event_dispatch(
+        cancel_control_event,
+        operation="cancel_run",
+        external_run_id=external_run_id,
+    )
+
+    bound_monitor_controls: list[Any] = []
+    for control in status_sync_controls:
+        payload = control.payload if isinstance(control.payload, dict) else {}
+        generation = payload.get("monitor_generation")
+        if (
+            control.tenant_id == source.tenant_id
+            and control.project_id == source.project_id
+            and control.run_type == "task_run_status_sync"
+            and control.run_key == source.run_id
+            and control.trace_id == source.trace_id
+            and isinstance(control.run_id, str)
+            and control.run_id.startswith("task_run_status_sync_auto_")
+            and payload.get("monitor_kind") == "missed_callback_reconcile"
+            and payload.get("monitor_control_id") == control.run_id
+            and isinstance(generation, int)
+            and not isinstance(generation, bool)
+            and generation >= 1
+        ):
+            bound_monitor_controls.append(control)
+    if not bound_monitor_controls:
+        raise GateFailure(
+            "real Dagster monitor status synchronization proof is missing"
+        )
+
+    terminal_monitor_proofs: list[tuple[Any, dict[str, Any], Any]] = []
+    has_valid_monitor_dispatch = False
+    has_terminal_monitor_dispatch = False
+    for control in bound_monitor_controls:
+        try:
+            sync_details = _require_real_record_dispatch(
+                control,
+                operation="run_status",
+                expected_run_type="task_run_status_sync",
+                expected_external_run_id=external_run_id,
+                source_record=source,
+            )
+        except GateFailure:
+            continue
+        if control.status != "success":
+            continue
+        has_valid_monitor_dispatch = True
+        if sync_details.get("dagster_status") != CANCELLATION_TERMINAL_ENGINE_STATUS:
+            continue
+        has_terminal_monitor_dispatch = True
+        try:
+            sync_event = _require_confirmed_event(
+                events,
+                event_type="task_run.status_sync_requested",
+                aggregate_id=control.run_id,
+                trace_id=control.trace_id,
+            )
+            _require_real_event_dispatch(
+                sync_event,
+                operation="run_status",
+                external_run_id=external_run_id,
+            )
+        except GateFailure:
+            continue
+        terminal_monitor_proofs.append((control, sync_details, sync_event))
+    if not terminal_monitor_proofs:
+        if has_valid_monitor_dispatch and not has_terminal_monitor_dispatch:
+            raise GateFailure("real Dagster monitor did not prove terminal CANCELED")
+        raise GateFailure(
+            "real Dagster monitor status synchronization proof is missing"
+        )
+    if len(terminal_monitor_proofs) != 1:
+        raise GateFailure(
+            "real Dagster monitor status synchronization proof is duplicated"
+        )
+
+    terminal_event = _require_confirmed_event(
+        events,
+        event_type="task_run.cancelled",
+        aggregate_id=source.run_id,
+        trace_id=source.trace_id,
+    )
+    status_sync_control, status_sync_details, status_sync_event = (
+        terminal_monitor_proofs[0]
+    )
+    return {
+        "acknowledged_engine_status": str(acknowledged_status),
+        "engine_status": str(status_sync_details["dagster_status"]),
+        "cancel_control_event": cancel_control_event,
+        "status_sync_control": status_sync_control,
+        "status_sync_event": status_sync_event,
+        "terminal_event": terminal_event,
+    }
+
+
 def _database_proof(
     *,
     success_run_id: str,
@@ -719,6 +855,16 @@ def _database_proof(
                 sync = scoped_run(success_sync_id)
                 cancelled = scoped_run(cancel_run_id)
                 cancellation = scoped_run(cancellation_id)
+                cancellation_syncs = list(
+                    session.scalars(
+                        select(RunRecord).where(
+                            RunRecord.tenant_id == SCOPE[0],
+                            RunRecord.project_id == SCOPE[1],
+                            RunRecord.run_type == "task_run_status_sync",
+                            RunRecord.run_key == cancel_run_id,
+                        )
+                    )
+                )
                 events = list(
                     session.scalars(
                         select(OutboxEvent).where(
@@ -730,6 +876,7 @@ def _database_proof(
                                     success_sync_id,
                                     cancel_run_id,
                                     cancellation_id,
+                                    *(control.run_id for control in cancellation_syncs),
                                 ]
                             ),
                         )
@@ -776,18 +923,6 @@ def _database_proof(
                 cancel_requested = _require_confirmed_event(
                     events,
                     event_type="task_run.requested",
-                    aggregate_id=cancel_run_id,
-                    trace_id=cancelled.trace_id,
-                )
-                cancel_control_event = _require_confirmed_event(
-                    events,
-                    event_type="task_run.cancel_requested",
-                    aggregate_id=cancellation_id,
-                    trace_id=cancellation.trace_id,
-                )
-                cancel_terminal = _require_confirmed_event(
-                    events,
-                    event_type="task_run.cancelled",
                     aggregate_id=cancel_run_id,
                     trace_id=cancelled.trace_id,
                 )
@@ -839,23 +974,11 @@ def _database_proof(
                     external_run_id=cancel_external_id,
                 )
 
-                cancel_details = _require_real_record_dispatch(
-                    cancellation,
-                    operation="cancel_run",
-                    expected_run_type="task_run_cancellation",
-                    expected_external_run_id=cancel_external_id,
-                    source_record=cancelled,
-                )
-                if (
-                    cancellation.status != "success"
-                    or cancel_details.get("terminate_policy") != "SAFE_TERMINATE"
-                    or cancel_details.get("dagster_status")
-                    not in {"CANCELED", "CANCELLED"}
-                ):
-                    raise GateFailure("real Dagster SAFE_TERMINATE proof is invalid")
-                _require_real_event_dispatch(
-                    cancel_control_event,
-                    operation="cancel_run",
+                cancellation_dispatch_proof = _require_real_async_cancellation_proof(
+                    source=cancelled,
+                    cancellation=cancellation,
+                    status_sync_controls=cancellation_syncs,
+                    events=events,
                     external_run_id=cancel_external_id,
                 )
 
@@ -894,13 +1017,18 @@ def _database_proof(
                     "dagster_run_id": cancel_external_id,
                     "adapter_mode": "real",
                     "terminate_policy": "SAFE_TERMINATE",
-                    "engine_status": str(cancel_details["dagster_status"]),
+                    "engine_status": str(cancellation_dispatch_proof["engine_status"]),
                     "outbox_confirmed": True,
                     "evidence_sources": sorted(CANCELLATION_INTERNAL_EVIDENCE_SOURCES),
                     "outbox_events": [
                         _event_summary(cancel_requested),
-                        _event_summary(cancel_control_event),
-                        _event_summary(cancel_terminal),
+                        _event_summary(
+                            cancellation_dispatch_proof["cancel_control_event"]
+                        ),
+                        _event_summary(
+                            cancellation_dispatch_proof["status_sync_event"]
+                        ),
+                        _event_summary(cancellation_dispatch_proof["terminal_event"]),
                     ],
                 }
                 return success_proof, cancellation_proof
