@@ -14,7 +14,7 @@ import sys
 import tempfile
 import tomllib
 from datetime import UTC, date, datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple
 
 
@@ -38,6 +38,7 @@ MAX_TEXT_BYTES = 64 * 1024 * 1024
 SUPPLY_SOURCE_INPUTS = frozenset(
     {
         "backend/uv.lock",
+        "config/release/exact-artifact-license-conclusions.json",
         "config/release/license-review-exceptions.json",
         "production/dagster/uv.lock",
         "prototype/auris-flow-ui/package-lock.json",
@@ -71,12 +72,19 @@ REVIEW_EXCEPTION_OBLIGATIONS = frozenset(
 LICENSE_POLICY = {
     "allowed_expression_operators": ["AND", "OR"],
     "allowed_license_identifiers": sorted(APPROVED_LICENSE_IDENTIFIERS),
-    "denied_without_exact_review_exception": [
+    "denied_without_exact_conclusion_or_review_exception": [
         "license-outside-allowlist",
         "missing-or-unknown-license",
         "non-spdx-or-ambiguous-license",
         "spdx-license-exception",
     ],
+    "exact_artifact_conclusion_scope": (
+        "all-locked-artifacts-for-exact-ecosystem-name-version-sha256"
+    ),
+    "exact_artifact_conclusion_schema": ("auris.exact-artifact-license-conclusions.v2"),
+    "exact_artifact_license_text_scope": (
+        "repository-relative-nonempty-regular-file-sha256"
+    ),
     "review_exception_scope": "exact-ecosystem-name-version",
     "review_exception_schema": "auris.license-review-exceptions.v1",
 }
@@ -147,6 +155,26 @@ COMMITTED_REVIEW_EXCEPTION_FIELDS = REVIEW_EXCEPTION_FIELDS | {
     "name",
     "version",
 }
+COMMITTED_ARTIFACT_CONCLUSION_FIELDS = frozenset(
+    {
+        "artifact_sha256",
+        "concluded_license",
+        "declared_license",
+        "ecosystem",
+        "license_text_path",
+        "license_text_sha256",
+        "name",
+        "version",
+    }
+)
+ARTIFACT_CONCLUSION_EVIDENCE_FIELDS = frozenset(
+    {
+        "artifact_sha256s",
+        "kind",
+        "license_text_path",
+        "license_text_sha256",
+    }
+)
 REQUIREMENT_PATTERN = re.compile(
     r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)=="
     r"(?P<version>[A-Za-z0-9][A-Za-z0-9.+!_-]*)"
@@ -330,6 +358,71 @@ def _nonempty_text(value: object) -> bool:
 
 def _canonical_package_name(value: str) -> str:
     return re.sub(r"[-_.]+", "-", value).lower()
+
+
+def _normalize_license_text_path(value: object) -> str:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\\" in value
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise EvidenceError(
+            "exact-artifact license text path must be repository-relative"
+        )
+    relative = PurePosixPath(value)
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != value
+        or any(part in {"", ".", ".."} for part in relative.parts)
+        or relative.parts[:2] != ("third_party", "licenses")
+        or len(relative.parts) < 3
+    ):
+        raise EvidenceError(
+            "exact-artifact license text path must be under third_party/licenses"
+        )
+    return relative.as_posix()
+
+
+def _read_repository_source_bytes(
+    repository_root: Path,
+    relative_path: str,
+) -> bytes:
+    try:
+        root = repository_root.resolve(strict=True)
+    except OSError as exc:
+        raise EvidenceError("supply-chain repository root does not exist") from exc
+    cursor = root
+    parts = PurePosixPath(relative_path).parts
+    for index, part in enumerate(parts):
+        cursor /= part
+        try:
+            metadata = cursor.lstat()
+        except OSError as exc:
+            raise EvidenceError(
+                f"supply-chain source input does not exist: {relative_path}"
+            ) from exc
+        if stat.S_ISLNK(metadata.st_mode):
+            if index == len(parts) - 1:
+                raise EvidenceError(
+                    "supply-chain source input must be a regular file, not a "
+                    f"symlink: {relative_path}"
+                )
+            raise EvidenceError(
+                f"supply-chain source input path contains a symlink: {relative_path}"
+            )
+        if index < len(parts) - 1 and not stat.S_ISDIR(metadata.st_mode):
+            raise EvidenceError(
+                f"supply-chain source input parent is not a directory: {relative_path}"
+            )
+    try:
+        cursor.resolve(strict=True).relative_to(root)
+    except (OSError, ValueError) as exc:
+        raise EvidenceError(
+            f"supply-chain source input escapes the repository: {relative_path}"
+        ) from exc
+    return _read_regular_bytes(cursor, size_limit=MAX_TEXT_BYTES)
 
 
 def _marker_operand(
@@ -759,7 +852,7 @@ def _validate_supply_manifest(
         raise EvidenceError("evidence-manifest.json source_commit does not match")
     if payload.get("generator") != {
         "name": "auris-supply-chain-evidence",
-        "version": "2",
+        "version": "4",
     }:
         raise EvidenceError("evidence-manifest.json generator is invalid")
     component_counts = payload.get("component_counts")
@@ -786,20 +879,16 @@ def _validate_supply_manifest(
         expected_sha256 = item.get("sha256")
         if (
             not isinstance(relative_path, str)
-            or relative_path not in SUPPLY_SOURCE_INPUTS
+            or (
+                relative_path not in SUPPLY_SOURCE_INPUTS
+                and _normalize_license_text_path(relative_path) != relative_path
+            )
             or relative_path in seen_inputs
             or not isinstance(expected_sha256, str)
             or SHA256_PATTERN.fullmatch(expected_sha256) is None
         ):
             raise EvidenceError("supply-chain source input is invalid or duplicated")
-        candidate = repository_root / relative_path
-        try:
-            candidate.relative_to(repository_root)
-        except ValueError as exc:
-            raise EvidenceError(
-                "supply-chain source input escapes the repository"
-            ) from exc
-        source_bytes = _read_regular_bytes(candidate, size_limit=MAX_TEXT_BYTES)
+        source_bytes = _read_repository_source_bytes(repository_root, relative_path)
         current_sha256 = _sha256_bytes(source_bytes)
         if current_sha256 != expected_sha256:
             raise EvidenceError(
@@ -807,10 +896,28 @@ def _validate_supply_manifest(
             )
         seen_inputs.add(relative_path)
         source_input_bytes[relative_path] = source_bytes
-    if seen_inputs != SUPPLY_SOURCE_INPUTS:
-        missing_inputs = ", ".join(sorted(SUPPLY_SOURCE_INPUTS - seen_inputs))
+    try:
+        conclusion_bytes = source_input_bytes[
+            "config/release/exact-artifact-license-conclusions.json"
+        ]
+    except KeyError as exc:
         raise EvidenceError(
-            f"supply-chain source input manifest is incomplete: {missing_inputs}"
+            "supply-chain source input manifest is missing the conclusion policy"
+        ) from exc
+    committed_conclusions = _load_committed_artifact_conclusions(
+        conclusion_bytes,
+        source_input_bytes=source_input_bytes,
+    )
+    expected_inputs = SUPPLY_SOURCE_INPUTS | {
+        conclusion["license_text_path"] for conclusion in committed_conclusions.values()
+    }
+    if seen_inputs != expected_inputs:
+        missing_inputs = ", ".join(sorted(expected_inputs - seen_inputs))
+        unexpected_inputs = ", ".join(sorted(seen_inputs - expected_inputs))
+        raise EvidenceError(
+            "supply-chain source input manifest does not exactly match the "
+            "committed policy; "
+            f"missing={missing_inputs or '-'}, unexpected={unexpected_inputs or '-'}"
         )
 
     artifacts = payload.get("artifacts")
@@ -1869,6 +1976,110 @@ def _load_committed_review_exceptions(
     return result
 
 
+def _load_committed_artifact_conclusions(
+    raw: bytes,
+    *,
+    source_input_bytes: dict[str, bytes],
+) -> dict[tuple[str, str, str, str], dict[str, str]]:
+    filename = "config/release/exact-artifact-license-conclusions.json"
+    payload = _load_json_bytes(raw, label=filename)
+    if set(payload) != {"schema_version", "conclusions"}:
+        raise EvidenceError(
+            "committed exact-artifact license conclusion fields are invalid"
+        )
+    if payload.get("schema_version") != "auris.exact-artifact-license-conclusions.v2":
+        raise EvidenceError(
+            "committed exact-artifact license conclusion schema is invalid"
+        )
+    entries = payload.get("conclusions")
+    if not isinstance(entries, list):
+        raise EvidenceError(
+            "committed exact-artifact license conclusions must be an array"
+        )
+
+    result: dict[tuple[str, str, str, str], dict[str, str]] = {}
+    package_license_bindings: dict[tuple[str, str, str], tuple[str, str]] = {}
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != COMMITTED_ARTIFACT_CONCLUSION_FIELDS
+        ):
+            raise EvidenceError("committed artifact conclusion entry is invalid")
+        if not all(
+            isinstance(entry[field], str) and str(entry[field]).strip()
+            for field in COMMITTED_ARTIFACT_CONCLUSION_FIELDS
+        ):
+            raise EvidenceError(
+                "committed exact-artifact license conclusion fields are incomplete"
+            )
+        ecosystem = str(entry["ecosystem"]).strip().lower()
+        name = _canonical_package_name(str(entry["name"]).strip())
+        version = str(entry["version"]).strip()
+        artifact_sha256 = str(entry["artifact_sha256"]).strip()
+        declared_license = " ".join(str(entry["declared_license"]).strip().split())
+        concluded_license = str(entry["concluded_license"]).strip()
+        license_text_path = _normalize_license_text_path(entry["license_text_path"])
+        license_text_sha256 = str(entry["license_text_sha256"]).strip()
+        if ecosystem not in {"backend-python", "dagster-python"}:
+            raise EvidenceError(
+                "committed exact-artifact license conclusion ecosystem is invalid"
+            )
+        if str(entry["name"]).strip() != name:
+            raise EvidenceError(
+                "committed exact-artifact license conclusion name is not canonical"
+            )
+        _require_sha256(
+            artifact_sha256,
+            label="committed exact-artifact license conclusion",
+            prefixed=True,
+        )
+        _require_sha256(
+            license_text_sha256,
+            label="committed exact-artifact license text",
+            prefixed=True,
+        )
+        try:
+            license_text = source_input_bytes[license_text_path]
+        except KeyError as exc:
+            raise EvidenceError(
+                "committed exact-artifact license text is absent from source inputs"
+            ) from exc
+        if f"sha256:{_sha256_bytes(license_text)}" != license_text_sha256:
+            raise EvidenceError(
+                "committed exact-artifact license text SHA-256 does not match"
+            )
+        identifiers = _spdx_license_identifiers(concluded_license)
+        if not identifiers.issubset(APPROVED_LICENSE_IDENTIFIERS):
+            raise EvidenceError(
+                "committed exact-artifact concluded license is outside the allowlist"
+            )
+        key = (ecosystem, name, version, artifact_sha256)
+        if key in result:
+            raise EvidenceError("duplicate committed exact-artifact license conclusion")
+        package_key = (ecosystem, name, version)
+        license_binding = (license_text_path, license_text_sha256)
+        existing_binding = package_license_bindings.setdefault(
+            package_key,
+            license_binding,
+        )
+        if existing_binding != license_binding:
+            raise EvidenceError(
+                "all committed exact-artifact conclusions for a package must "
+                "bind the same license text"
+            )
+        result[key] = {
+            "artifact_sha256": artifact_sha256,
+            "concluded_license": concluded_license,
+            "declared_license": declared_license,
+            "ecosystem": ecosystem,
+            "license_text_path": license_text_path,
+            "license_text_sha256": license_text_sha256,
+            "name": name,
+            "version": version,
+        }
+    return result
+
+
 def _build_supply_expectations(
     source_input_bytes: dict[str, bytes],
 ) -> SupplyExpectations:
@@ -1921,7 +2132,12 @@ def _validate_supply_artifacts(
     committed_exceptions = _load_committed_review_exceptions(
         source_input_bytes["config/release/license-review-exceptions.json"]
     )
+    committed_conclusions = _load_committed_artifact_conclusions(
+        source_input_bytes["config/release/exact-artifact-license-conclusions.json"],
+        source_input_bytes=source_input_bytes,
+    )
     consumed_exceptions: set[tuple[str, str, str]] = set()
+    consumed_conclusions: set[tuple[str, str, str, str]] = set()
     component_licenses: dict[tuple[str, str, str], str | None] = {}
     for filename, sbom_ecosystem in (
         ("backend-python.cdx.json", "backend-python"),
@@ -1982,7 +2198,7 @@ def _validate_supply_artifacts(
         raise EvidenceError("dependency license inventory fields are invalid")
     dependencies = inventory.get("dependencies")
     if (
-        inventory.get("schema_version") != "auris.dependency-license-inventory.v1"
+        inventory.get("schema_version") != "auris.dependency-license-inventory.v3"
         or inventory.get("policy") != LICENSE_POLICY
         or not isinstance(dependencies, list)
         or len(dependencies) != component_counts["total"]
@@ -2012,10 +2228,16 @@ def _validate_supply_artifacts(
             )
         seen_dependencies.add(key)
         dependency_order.append(key)
-        conclusion = dependency.get("license")
-        if conclusion is not None and not _nonempty_text(conclusion):
+        declared_license = dependency.get("declared_license")
+        concluded_license = dependency.get("concluded_license")
+        if declared_license is not None and not _nonempty_text(declared_license):
+            raise EvidenceError("dependency declared license is invalid")
+        if concluded_license is not None and not _nonempty_text(concluded_license):
             raise EvidenceError("dependency license conclusion is invalid")
-        if conclusion != component_licenses[key]:
+        effective_license = (
+            concluded_license if concluded_license is not None else declared_license
+        )
+        if effective_license != component_licenses[key]:
             raise EvidenceError("dependency license conclusion does not match its SBOM")
         obligations = dependency.get("obligations")
         if not isinstance(obligations, list) or not all(
@@ -2028,14 +2250,20 @@ def _validate_supply_artifacts(
             "ecosystem",
             "name",
             "version",
-            "license",
+            "declared_license",
+            "concluded_license",
             "license_status",
             "obligations",
         }
         if status == "approved-compatible":
-            if set(dependency) != base_fields or not isinstance(conclusion, str):
+            if (
+                set(dependency) != base_fields
+                or not isinstance(declared_license, str)
+                or not isinstance(concluded_license, str)
+                or declared_license != concluded_license
+            ):
                 raise EvidenceError("approved dependency license proof is invalid")
-            identifiers = _spdx_license_identifiers(conclusion)
+            identifiers = _spdx_license_identifiers(concluded_license)
             if not identifiers.issubset(APPROVED_LICENSE_IDENTIFIERS):
                 raise EvidenceError(
                     "approved dependency license is outside the allowlist"
@@ -2044,16 +2272,131 @@ def _validate_supply_artifacts(
                 raise EvidenceError(
                     "approved dependency license obligations are invalid"
                 )
+        elif status == "approved-exact-artifact-conclusion":
+            if (
+                set(dependency) != base_fields | {"conclusion_evidence"}
+                or not isinstance(declared_license, str)
+                or not isinstance(concluded_license, str)
+                or key[0] not in {"backend-python", "dagster-python"}
+            ):
+                raise EvidenceError(
+                    "exact-artifact dependency license proof is invalid"
+                )
+            identifiers = _spdx_license_identifiers(concluded_license)
+            if not identifiers.issubset(APPROVED_LICENSE_IDENTIFIERS):
+                raise EvidenceError(
+                    "exact-artifact concluded license is outside the allowlist"
+                )
+            try:
+                declared_identifiers = _spdx_license_identifiers(declared_license)
+            except EvidenceError:
+                declared_identifiers = frozenset()
+            if declared_identifiers and declared_identifiers.issubset(
+                APPROVED_LICENSE_IDENTIFIERS
+            ):
+                raise EvidenceError(
+                    "exact-artifact conclusion is unnecessary for an approved "
+                    "declared license"
+                )
+            if frozenset(obligations) != _expected_license_obligations(identifiers):
+                raise EvidenceError(
+                    "exact-artifact dependency license obligations are invalid"
+                )
+
+            locked_hashes = expectations.python_hashes[key[0]].get((key[1], key[2]))
+            if locked_hashes is None:
+                raise EvidenceError(
+                    "exact-artifact dependency is absent from its committed lock"
+                )
+            exact_entries = {
+                conclusion_key: conclusion
+                for conclusion_key, conclusion in committed_conclusions.items()
+                if conclusion_key[:3] == key
+            }
+            if not exact_entries:
+                raise EvidenceError(
+                    "dependency has no exact committed artifact conclusion: "
+                    f"{key[0]}:{key[1]}@{key[2]}"
+                )
+            configured_hashes = frozenset(
+                conclusion_key[3] for conclusion_key in exact_entries
+            )
+            if configured_hashes != locked_hashes:
+                raise EvidenceError(
+                    "exact committed artifact conclusion must cover every "
+                    f"locked artifact: {key[0]}:{key[1]}@{key[2]}"
+                )
+            if {
+                conclusion["declared_license"] for conclusion in exact_entries.values()
+            } != {declared_license}:
+                raise EvidenceError(
+                    "exact committed artifact conclusion declared license "
+                    "does not match the dependency inventory"
+                )
+            if {
+                conclusion["concluded_license"] for conclusion in exact_entries.values()
+            } != {concluded_license}:
+                raise EvidenceError(
+                    "exact committed artifact concluded license does not match "
+                    "the dependency inventory"
+                )
+            configured_license_texts = {
+                (
+                    conclusion["license_text_path"],
+                    conclusion["license_text_sha256"],
+                )
+                for conclusion in exact_entries.values()
+            }
+            if len(configured_license_texts) != 1:
+                raise EvidenceError(
+                    "exact committed artifact conclusions must bind one license "
+                    "text per package"
+                )
+            configured_license_text_path, configured_license_text_sha256 = (
+                configured_license_texts.pop()
+            )
+
+            conclusion_evidence = dependency.get("conclusion_evidence")
+            if (
+                not isinstance(conclusion_evidence, dict)
+                or set(conclusion_evidence) != ARTIFACT_CONCLUSION_EVIDENCE_FIELDS
+                or conclusion_evidence.get("kind") != "committed-exact-artifact-map"
+            ):
+                raise EvidenceError("exact-artifact conclusion evidence is invalid")
+            evidence_hashes = conclusion_evidence.get("artifact_sha256s")
+            if (
+                not isinstance(evidence_hashes, list)
+                or evidence_hashes != sorted(locked_hashes)
+                or len(set(evidence_hashes)) != len(evidence_hashes)
+            ):
+                raise EvidenceError(
+                    "exact-artifact conclusion evidence hashes are invalid"
+                )
+            if (
+                conclusion_evidence.get("license_text_path")
+                != configured_license_text_path
+                or conclusion_evidence.get("license_text_sha256")
+                != configured_license_text_sha256
+            ):
+                raise EvidenceError(
+                    "exact-artifact conclusion evidence license text proof does "
+                    "not match the committed policy"
+                )
+            consumed_conclusions.update(exact_entries)
         elif status == "reviewed-exception":
             if set(dependency) != base_fields | {"review_exception"}:
                 raise EvidenceError("reviewed dependency license proof is invalid")
+            if concluded_license is not None:
+                raise EvidenceError(
+                    "reviewed dependency must not assert a concluded license"
+                )
             if frozenset(obligations) != REVIEW_EXCEPTION_OBLIGATIONS:
                 raise EvidenceError(
                     "reviewed dependency license obligations are invalid"
                 )
-            if isinstance(conclusion, str):
+            if isinstance(declared_license, str):
                 try:
-                    identifiers = _spdx_license_identifiers(conclusion)
+                    identifiers = _spdx_license_identifiers(declared_license)
                 except EvidenceError:
                     identifiers = frozenset()
                 if identifiers and identifiers.issubset(APPROVED_LICENSE_IDENTIFIERS):
@@ -2093,6 +2436,13 @@ def _validate_supply_artifacts(
         ecosystem, name, version = sorted(unused_exceptions)[0]
         raise EvidenceError(
             f"unused committed license review exception: {ecosystem}:{name}@{version}"
+        )
+    unused_conclusions = set(committed_conclusions) - consumed_conclusions
+    if unused_conclusions:
+        ecosystem, name, version, artifact_sha256 = sorted(unused_conclusions)[0]
+        raise EvidenceError(
+            "unused committed exact-artifact license conclusion: "
+            f"{ecosystem}:{name}@{version}#{artifact_sha256}"
         )
     return expectations
 

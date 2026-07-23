@@ -1,0 +1,45 @@
+{
+  "conclusions": [
+    {
+      "artifact_sha256": "sha256:909b647e1d2fc2b70180ac586df3933e38919c85f98ccc656a96cd3f25ef3916",
+      "concluded_license": "BSD-3-Clause",
+      "declared_license": "BSD",
+      "ecosystem": "dagster-python",
+      "license_text_path": "third_party/licenses/antlr4-python3-runtime-4.13.2.LICENSE.txt",
+      "license_text_sha256": "sha256:3db1fb3ee79a4b4f9918fc4d0f6133bf18a3cf787f126cd22f8aa9b862281c0c",
+      "name": "antlr4-python3-runtime",
+      "version": "4.13.2"
+    },
+    {
+      "artifact_sha256": "sha256:fe3835eb8d33daece0e799090eda89719dbccee7aa39ef94eed3818cafa5a7e8",
+      "concluded_license": "BSD-3-Clause",
+      "declared_license": "BSD",
+      "ecosystem": "dagster-python",
+      "license_text_path": "third_party/licenses/antlr4-python3-runtime-4.13.2.LICENSE.txt",
+      "license_text_sha256": "sha256:3db1fb3ee79a4b4f9918fc4d0f6133bf18a3cf787f126cd22f8aa9b862281c0c",
+      "name": "antlr4-python3-runtime",
+      "version": "4.13.2"
+    },
+    {
+      "artifact_sha256": "sha256:37dd54208da7e1cd875388217d5e00ebd4179249f90fb72437e91a35459a0ad3",
+      "concluded_license": "BSD-3-Clause",
+      "declared_license": "Dual License",
+      "ecosystem": "dagster-python",
+      "license_text_path": "third_party/licenses/python-dateutil-2.9.0.post0.LICENSE",
+      "license_text_sha256": "sha256:9313256b27c4a1b7666c433acbf70a447383df0ea8c4b59bee0b6e412a281f92",
+      "name": "python-dateutil",
+      "version": "2.9.0.post0"
+    },
+    {
+      "artifact_sha256": "sha256:a8b2bc7bffae282281c8140a97d3aa9c14da0b136dfe83f850eea9a5f7470427",
+      "concluded_license": "BSD-3-Clause",
+      "declared_license": "Dual License",
+      "ecosystem": "dagster-python",
+      "license_text_path": "third_party/licenses/python-dateutil-2.9.0.post0.LICENSE",
+      "license_text_sha256": "sha256:9313256b27c4a1b7666c433acbf70a447383df0ea8c4b59bee0b6e412a281f92",
+      "name": "python-dateutil",
+      "version": "2.9.0.post0"
+    }
+  ],
+  "schema_version": "auris.exact-artifact-license-conclusions.v2"
+}

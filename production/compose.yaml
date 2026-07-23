@@ -159,6 +159,25 @@ services:
       mysql:
         condition: service_healthy
 
+  dagster-storage-bootstrap:
+    <<: *service-security
+    image: ${AURIS_DAGSTER_IMAGE:-auris-flow-dagster:dev}
+    build:
+      context: ..
+      dockerfile: production/dagster/Dockerfile
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    command: [storage-bootstrap]
+    environment:
+      DAGSTER_HOME: /opt/dagster/home
+    secrets:
+      - dagster_database_url
+    depends_on:
+      db-bootstrap:
+        condition: service_completed_successfully
+
   redis:
     <<: *service-security
     image: ${REDIS_IMAGE:-redis:7.4.2-alpine3.21}
@@ -443,7 +462,7 @@ services:
       retries: 20
       start_period: 20s
     depends_on:
-      db-bootstrap:
+      dagster-storage-bootstrap:
         condition: service_completed_successfully
       otel-collector:
         condition: service_started
@@ -470,6 +489,8 @@ services:
       retries: 30
       start_period: 30s
     depends_on:
+      dagster-storage-bootstrap:
+        condition: service_completed_successfully
       dagster-code:
         condition: service_healthy
 
@@ -493,6 +514,8 @@ services:
       retries: 10
       start_period: 30s
     depends_on:
+      dagster-storage-bootstrap:
+        condition: service_completed_successfully
       dagster-code:
         condition: service_healthy
 

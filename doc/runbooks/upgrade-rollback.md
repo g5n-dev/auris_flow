@@ -111,6 +111,11 @@ docker compose \
 docker compose \
   --project-directory production \
   --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps dagster-storage-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
   -f production/compose.yaml run --rm --no-deps minio-bootstrap
 
 docker compose \
@@ -119,8 +124,10 @@ docker compose \
   -f production/compose.yaml run --rm --no-deps migrate
 ```
 
-volume init、两个 bootstrap 与 migration 都是前台 one-shot，必须逐个返回 0；不得把它们混入 detached
-`up --wait`，否则“正常完成并退出”会被错误地当成长期服务未就绪。
+volume init、三个 bootstrap 与 migration 都是前台 one-shot，必须逐个返回 0；其中
+`dagster-storage-bootstrap` 必须在 code location、webserver、daemon 前独占完成 Dagster
+MySQL schema 初始化和升级。不得把它们混入 detached `up --wait`，否则“正常完成并退出”会被
+错误地当成长期服务未就绪。
 volume init 仅对 named volume 挂载点 `/data` 执行非递归属主修正。
 
 该命令必须使用 Compose 注入的 `auris_migration` URL；禁止改成 root/SUPER 后把结果视为生产

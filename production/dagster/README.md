@@ -112,6 +112,7 @@ can be queried back from Tempo with the expected service name, span name, and tr
 
 The same pinned, non-root image supports:
 
+- `storage-bootstrap`: one-shot MySQL schema initialization and migration;
 - `grpc`: code location on port 4000;
 - `webserver`: internal GraphQL/web process on port 3000;
 - `daemon`: run coordinator and heartbeat writer;
@@ -120,6 +121,9 @@ The same pinned, non-root image supports:
 `dagster_database_url` is loaded from its Docker secret file into `DAGSTER_MYSQL_URL` by the
 entrypoint. Inline and file sources cannot be configured simultaneously, and the value is never
 printed. Run, event-log, and schedule storage all use the same MySQL URL via `dagster.yaml`.
+Compose runs `storage-bootstrap` with only that secret and a read-only root filesystem. The code
+location, webserver, and daemon all require its successful completion, so no long-running Dagster
+process races another process to create the initial schema.
 
 ## Verification
 

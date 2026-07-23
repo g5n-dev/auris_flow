@@ -18,6 +18,9 @@ CANDIDATE_REPOSITORY_TREE = "3" * 40
 FRONTEND_TREE = "4" * 40
 SHA256 = "a" * 64
 TIMESTAMP = "2026-07-18T08:00:00+00:00"
+BACKEND_LICENSE_TEXT_PATH = "third_party/licenses/backend-1.LICENSE"
+BACKEND_LICENSE_TEXT = b"Fixture BSD 3-Clause license text.\n"
+BACKEND_LICENSE_TEXT_SHA256 = hashlib.sha256(BACKEND_LICENSE_TEXT).hexdigest()
 AUDIO_STORAGE_OBJECT_PROOF = {
     "storage_object_id": "sto_rec_A_1001_20250526_122300",
     "provider": "minio",
@@ -38,6 +41,7 @@ FRONTEND_BUNDLE_VERIFIED_CHECKS = [
 ]
 SOURCE_INPUTS = (
     "backend/uv.lock",
+    "config/release/exact-artifact-license-conclusions.json",
     "config/release/license-review-exceptions.json",
     "production/dagster/uv.lock",
     "prototype/auris-flow-ui/package-lock.json",
@@ -150,6 +154,13 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             encoding="utf-8",
         )
         _write_json(
+            self.repository / "config/release/exact-artifact-license-conclusions.json",
+            {
+                "conclusions": [],
+                "schema_version": "auris.exact-artifact-license-conclusions.v2",
+            },
+        )
+        _write_json(
             self.repository / "config/release/license-review-exceptions.json",
             {
                 "exceptions": [],
@@ -258,8 +269,9 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             "dependency-licenses.json": {
                 "dependencies": [
                     {
+                        "concluded_license": license_name,
+                        "declared_license": license_name,
                         "ecosystem": ecosystem,
-                        "license": license_name,
                         "license_status": "approved-compatible",
                         "name": name,
                         "obligations": obligations,
@@ -290,7 +302,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                     )
                 ],
                 "policy": self.module.LICENSE_POLICY,
-                "schema_version": "auris.dependency-license-inventory.v1",
+                "schema_version": "auris.dependency-license-inventory.v3",
             },
             "npm.cdx.json": {
                 "bomFormat": "CycloneDX",
@@ -326,7 +338,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 },
                 "generator": {
                     "name": "auris-supply-chain-evidence",
-                    "version": "2",
+                    "version": "4",
                 },
                 "schema_version": "auris.release-evidence-manifest.v1",
                 "source_commit": SOURCE_COMMIT,
@@ -652,6 +664,20 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 ).hexdigest()
         _write_json(path, manifest)
 
+    def _add_source_input(self, relative_path: str) -> None:
+        path = self.evidence / "evidence-manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["source_inputs"].append(
+            {
+                "path": relative_path,
+                "sha256": hashlib.sha256(
+                    (self.repository / relative_path).read_bytes()
+                ).hexdigest(),
+            }
+        )
+        manifest["source_inputs"].sort(key=lambda item: item["path"])
+        _write_json(path, manifest)
+
     @staticmethod
     def _review_exception_fields() -> dict[str, str]:
         return {
@@ -667,7 +693,8 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
         inventory["dependencies"][0].update(
             {
-                "license": "GPL-2.0-only",
+                "concluded_license": None,
+                "declared_license": "GPL-2.0-only",
                 "license_status": "reviewed-exception",
                 "obligations": sorted(self.module.REVIEW_EXCEPTION_OBLIGATIONS),
                 "review_exception": self._review_exception_fields(),
@@ -678,6 +705,64 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         sbom_path = self.evidence / "backend-python.cdx.json"
         sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
         sbom["components"][0]["licenses"] = [{"expression": "GPL-2.0-only"}]
+        _write_json(sbom_path, sbom)
+        self._refresh_supply_hashes(
+            "backend-python.cdx.json", "dependency-licenses.json"
+        )
+
+    def _configure_backend_exact_artifact_conclusion(self) -> None:
+        license_text_path = self.repository / BACKEND_LICENSE_TEXT_PATH
+        license_text_path.parent.mkdir(parents=True, exist_ok=True)
+        license_text_path.write_bytes(BACKEND_LICENSE_TEXT)
+        self._add_source_input(BACKEND_LICENSE_TEXT_PATH)
+        conclusion_path = (
+            self.repository / "config/release/exact-artifact-license-conclusions.json"
+        )
+        _write_json(
+            conclusion_path,
+            {
+                "conclusions": [
+                    {
+                        "artifact_sha256": f"sha256:{SHA256}",
+                        "concluded_license": "BSD-3-Clause",
+                        "declared_license": "BSD",
+                        "ecosystem": "backend-python",
+                        "license_text_path": BACKEND_LICENSE_TEXT_PATH,
+                        "license_text_sha256": (
+                            f"sha256:{BACKEND_LICENSE_TEXT_SHA256}"
+                        ),
+                        "name": "backend",
+                        "version": "1",
+                    }
+                ],
+                "schema_version": "auris.exact-artifact-license-conclusions.v2",
+            },
+        )
+        self._refresh_source_hashes(
+            "config/release/exact-artifact-license-conclusions.json"
+        )
+
+        inventory_path = self.evidence / "dependency-licenses.json"
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        inventory["dependencies"][0].update(
+            {
+                "concluded_license": "BSD-3-Clause",
+                "conclusion_evidence": {
+                    "artifact_sha256s": [f"sha256:{SHA256}"],
+                    "kind": "committed-exact-artifact-map",
+                    "license_text_path": BACKEND_LICENSE_TEXT_PATH,
+                    "license_text_sha256": f"sha256:{BACKEND_LICENSE_TEXT_SHA256}",
+                },
+                "declared_license": "BSD",
+                "license_status": "approved-exact-artifact-conclusion",
+                "obligations": ["retain-upstream-license-and-copyright-notices"],
+            }
+        )
+        _write_json(inventory_path, inventory)
+
+        sbom_path = self.evidence / "backend-python.cdx.json"
+        sbom = json.loads(sbom_path.read_text(encoding="utf-8"))
+        sbom["components"][0]["licenses"] = [{"expression": "BSD-3-Clause"}]
         _write_json(sbom_path, sbom)
         self._refresh_supply_hashes(
             "backend-python.cdx.json", "dependency-licenses.json"
@@ -1146,7 +1231,8 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
     def test_rejects_forged_approved_status_for_unapproved_license(self) -> None:
         inventory_path = self.evidence / "dependency-licenses.json"
         inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
-        inventory["dependencies"][0]["license"] = "GPL-2.0-only"
+        inventory["dependencies"][0]["concluded_license"] = "GPL-2.0-only"
+        inventory["dependencies"][0]["declared_license"] = "GPL-2.0-only"
         _write_json(inventory_path, inventory)
 
         sbom_path = self.evidence / "backend-python.cdx.json"
@@ -1158,6 +1244,152 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(self.module.EvidenceError, "outside the allowlist"):
+            self._finalize()
+
+    def test_accepts_exact_artifact_license_conclusion_without_fake_review(
+        self,
+    ) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+
+        result = self._finalize()
+
+        self.assertEqual("ok", result["status"])
+        inventory = json.loads(
+            (self.evidence / "dependency-licenses.json").read_text(encoding="utf-8")
+        )
+        dependency = inventory["dependencies"][0]
+        self.assertEqual("BSD", dependency["declared_license"])
+        self.assertEqual("BSD-3-Clause", dependency["concluded_license"])
+        self.assertEqual(
+            BACKEND_LICENSE_TEXT_PATH,
+            dependency["conclusion_evidence"]["license_text_path"],
+        )
+        self.assertEqual(
+            f"sha256:{BACKEND_LICENSE_TEXT_SHA256}",
+            dependency["conclusion_evidence"]["license_text_sha256"],
+        )
+        self.assertNotIn("reviewed_by", dependency["conclusion_evidence"])
+
+    def test_rejects_exact_conclusion_when_license_text_hash_drifts(self) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        license_path = self.repository / BACKEND_LICENSE_TEXT_PATH
+        license_path.write_bytes(b"tampered license text\n")
+        self._refresh_source_hashes(BACKEND_LICENSE_TEXT_PATH)
+
+        with self.assertRaisesRegex(self.module.EvidenceError, "license text SHA-256"):
+            self._finalize()
+
+    def test_rejects_forged_inventory_license_text_proof(self) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        inventory_path = self.evidence / "dependency-licenses.json"
+        inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+        inventory["dependencies"][0]["conclusion_evidence"]["license_text_sha256"] = (
+            f"sha256:{'f' * 64}"
+        )
+        _write_json(inventory_path, inventory)
+        self._refresh_supply_hashes("dependency-licenses.json")
+
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "license text proof",
+        ):
+            self._finalize()
+
+    def test_rejects_symlinked_exact_conclusion_license_text(self) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        license_path = self.repository / BACKEND_LICENSE_TEXT_PATH
+        real_path = license_path.with_name("backend-1-real.LICENSE")
+        real_path.write_bytes(BACKEND_LICENSE_TEXT)
+        license_path.unlink()
+        license_path.symlink_to(real_path.name)
+
+        with self.assertRaisesRegex(self.module.EvidenceError, "regular file"):
+            self._finalize()
+
+    def test_rejects_symlinked_exact_conclusion_license_parent(self) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        license_path = self.repository / BACKEND_LICENSE_TEXT_PATH
+        license_directory = license_path.parent
+        outside_directory = self.root / "outside-licenses"
+        outside_directory.mkdir()
+        (outside_directory / license_path.name).write_bytes(BACKEND_LICENSE_TEXT)
+        license_path.unlink()
+        license_directory.rmdir()
+        license_directory.symlink_to(outside_directory, target_is_directory=True)
+
+        with self.assertRaisesRegex(self.module.EvidenceError, "contains a symlink"):
+            self._finalize()
+
+    def test_rejects_forged_exact_artifact_conclusion_without_committed_map(
+        self,
+    ) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        conclusion_path = (
+            self.repository / "config/release/exact-artifact-license-conclusions.json"
+        )
+        _write_json(
+            conclusion_path,
+            {
+                "conclusions": [],
+                "schema_version": "auris.exact-artifact-license-conclusions.v2",
+            },
+        )
+        self._refresh_source_hashes(
+            "config/release/exact-artifact-license-conclusions.json"
+        )
+        manifest_path = self.evidence / "evidence-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["source_inputs"] = [
+            source_input
+            for source_input in manifest["source_inputs"]
+            if source_input["path"] != BACKEND_LICENSE_TEXT_PATH
+        ]
+        _write_json(manifest_path, manifest)
+
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "exact committed artifact conclusion"
+        ):
+            self._finalize()
+
+    def test_rejects_partial_exact_artifact_conclusion_coverage(self) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        backend_lock = self.repository / "backend/uv.lock"
+        backend_lock.write_text(
+            backend_lock.read_text(encoding="utf-8").replace(
+                f'wheels = [{{ hash = "sha256:{SHA256}" }}]',
+                (
+                    "wheels = ["
+                    f'{{ hash = "sha256:{SHA256}" }}, '
+                    f'{{ hash = "sha256:{"b" * 64}" }}'
+                    "]"
+                ),
+            ),
+            encoding="utf-8",
+        )
+        self._refresh_source_hashes("backend/uv.lock")
+
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "cover every locked artifact"
+        ):
+            self._finalize()
+
+    def test_exact_artifact_conclusion_schema_rejects_fake_review_fields(
+        self,
+    ) -> None:
+        self._configure_backend_exact_artifact_conclusion()
+        conclusion_path = (
+            self.repository / "config/release/exact-artifact-license-conclusions.json"
+        )
+        payload = json.loads(conclusion_path.read_text(encoding="utf-8"))
+        payload["conclusions"][0]["reviewed_by"] = "release-security"
+        _write_json(conclusion_path, payload)
+        self._refresh_source_hashes(
+            "config/release/exact-artifact-license-conclusions.json"
+        )
+
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "artifact conclusion entry is invalid"
+        ):
             self._finalize()
 
     def test_rejects_forged_reviewed_exception_not_bound_to_committed_policy(

@@ -1047,6 +1047,7 @@ def test_product_gate_shell_runs_bootstrap_services_to_completion() -> None:
         "dagster-product-gate-db-bootstrap",
         "migrate",
         "dagster-product-gate-seed",
+        "dagster-storage-bootstrap",
     ):
         assert service in source
     assert 'if is_one_shot_service "${service}"; then' in source

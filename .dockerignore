@@ -1,5 +1,10 @@
 .git
-.github
+.github/*
+!.github/workflows/
+.github/workflows/*
+!.github/workflows/frontend-bundle-candidate.yml
+!.github/workflows/frontend-bundle-promotion.yml
+!.github/workflows/verify.yml
 .DS_Store
 **/.DS_Store
 **/.env

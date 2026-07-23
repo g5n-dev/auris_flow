@@ -115,6 +115,9 @@ docker --context default compose --project-name auris-flow \
   --file production/compose.yaml run --rm --no-deps db-bootstrap
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps dagster-storage-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
   --file production/compose.yaml run --rm --no-deps minio-bootstrap
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
@@ -134,8 +137,10 @@ docker --context default compose --project-name auris-flow \
   dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
 
-The five volume-initialization/bootstrap/migration services are one-shots and must exit successfully in
+The six volume-initialization/bootstrap/migration services are one-shots and must exit successfully in
 their own foreground phase. Do not include them in a detached `up --wait` command.
+`dagster-storage-bootstrap` receives only the Dagster database URL and must finish schema
+initialization and migration before any Dagster long-running process starts.
 `minio-volume-init` changes only the `/data` mount-point owner and never recursively
 changes existing object data.
 

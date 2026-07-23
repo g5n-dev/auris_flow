@@ -30,6 +30,7 @@ REQUIRED_SERVICES = frozenset(
         "migrate",
         "keycloak",
         "identity-bootstrap",
+        "dagster-storage-bootstrap",
         "dagster-code",
         "dagster-webserver",
         "dagster-daemon",
@@ -52,6 +53,7 @@ ONE_SHOT_SERVICES = frozenset(
         "minio-bootstrap",
         "migrate",
         "identity-bootstrap",
+        "dagster-storage-bootstrap",
     }
 )
 PROFILE_UTILITY_SERVICES = frozenset({"qdrant-backup-tool"})
@@ -604,6 +606,65 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
         if not expected_checks.issubset(required_checks):
             errors.append(
                 f"{name}: all production dependencies must be strict readiness checks"
+            )
+
+    dagster_storage_bootstrap = services.get("dagster-storage-bootstrap")
+    if isinstance(dagster_storage_bootstrap, dict):
+        mounted_sources = {
+            str(item.get("source") or "") if isinstance(item, dict) else str(item)
+            for item in (dagster_storage_bootstrap.get("secrets") or [])
+        }
+        bootstrap_environment = _environment_map(dagster_storage_bootstrap)
+        bootstrap_dependencies = dagster_storage_bootstrap.get("depends_on") or {}
+        database_dependency = (
+            bootstrap_dependencies.get("db-bootstrap")
+            if isinstance(bootstrap_dependencies, dict)
+            else None
+        )
+        if dagster_storage_bootstrap.get("restart") != "no":
+            errors.append("dagster-storage-bootstrap: restart policy must be no")
+        if dagster_storage_bootstrap.get("read_only") is not True:
+            errors.append(
+                "dagster-storage-bootstrap: root filesystem must be read-only"
+            )
+        if dagster_storage_bootstrap.get("command") != ["storage-bootstrap"]:
+            errors.append(
+                "dagster-storage-bootstrap: dedicated entrypoint role is required"
+            )
+        if bootstrap_environment != {"DAGSTER_HOME": "/opt/dagster/home"}:
+            errors.append(
+                "dagster-storage-bootstrap: environment must contain only DAGSTER_HOME"
+            )
+        if mounted_sources != {"dagster_database_url"}:
+            errors.append(
+                "dagster-storage-bootstrap: only the Dagster database URL may be mounted"
+            )
+        if dagster_storage_bootstrap.get("volumes"):
+            errors.append("dagster-storage-bootstrap: persistent volumes are forbidden")
+        if dagster_storage_bootstrap.get("tmpfs") != ["/tmp:size=32m,mode=1777"]:
+            errors.append(
+                "dagster-storage-bootstrap: bounded temporary storage is required"
+            )
+        if (
+            not isinstance(database_dependency, dict)
+            or database_dependency.get("condition") != "service_completed_successfully"
+            or set(bootstrap_dependencies) != {"db-bootstrap"}
+        ):
+            errors.append(
+                "dagster-storage-bootstrap: database bootstrap dependency must complete successfully"
+            )
+
+    for name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+        service = services.get(name)
+        if not isinstance(service, dict):
+            continue
+        dependency = (service.get("depends_on") or {}).get("dagster-storage-bootstrap")
+        if (
+            not isinstance(dependency, dict)
+            or dependency.get("condition") != "service_completed_successfully"
+        ):
+            errors.append(
+                f"{name}: Dagster storage bootstrap dependency must complete successfully"
             )
 
     observability_health = services.get("observability-health")

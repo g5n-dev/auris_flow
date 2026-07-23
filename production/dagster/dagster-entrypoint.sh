@@ -50,6 +50,12 @@ if [ "${1:-}" = "/opt/auris/dagster-entrypoint.sh" ]; then
 fi
 
 case "${1:-webserver}" in
+  storage-bootstrap)
+    if [ "$#" -gt 0 ]; then
+      shift
+    fi
+    exec dagster instance migrate "$@"
+    ;;
   webserver)
     shift || true
     exec dagster-webserver \

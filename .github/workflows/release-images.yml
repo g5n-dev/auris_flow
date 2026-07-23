@@ -281,6 +281,7 @@ jobs:
             org.opencontainers.image.revision=${{ needs.release-context.outputs.source_commit }}
             org.opencontainers.image.version=${{ needs.release-context.outputs.release_tag }}
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=Apache-2.0
           # Signed GitHub attestations below replace BuildKit's independently
           # unverified automatic metadata while retaining explicit CycloneDX.
           provenance: false
@@ -734,7 +735,7 @@ jobs:
         run: |
           image_bindings=(
             bff:bff,migrate,identity-bootstrap,worker,qdrant-backup-tool
-            dagster:dagster-code,dagster-webserver,dagster-daemon
+            dagster:dagster-storage-bootstrap,dagster-code,dagster-webserver,dagster-daemon
             edge:edge
           )
           for binding in "${image_bindings[@]}"; do

@@ -33,6 +33,8 @@ COPY --from=builder --chown=10001:10001 /opt/auris/venv /opt/auris/venv
 COPY --chown=10001:10001 production/dagster/dagster.yaml /opt/dagster/home/dagster.yaml
 COPY --chown=10001:10001 production/dagster/workspace.yaml /opt/dagster/app/workspace.yaml
 COPY --chown=10001:10001 production/dagster/dagster-entrypoint.sh /opt/auris/dagster-entrypoint.sh
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/auris-flow/
+COPY third_party/licenses /usr/share/licenses/auris-flow/third_party/licenses/
 
 RUN chmod 0555 /opt/auris/dagster-entrypoint.sh \
     && chmod 0444 /opt/dagster/home/dagster.yaml /opt/dagster/app/workspace.yaml

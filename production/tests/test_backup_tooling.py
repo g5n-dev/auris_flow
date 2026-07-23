@@ -1548,6 +1548,7 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
     assert "--routines --triggers --events" in backup
     assert "--storage-boundary must explicitly be encrypted-external" in backup
     assert "writer service" in backup
+    assert "dagster-storage-bootstrap" in backup
     assert "mc ls --recursive --versions" in backup
     assert "auris_backup_last_success_timestamp_seconds" in backup
     assert "auris_backup.prom" in backup
@@ -1592,6 +1593,7 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
         < restore.index('RESTORE_STEP="qdrant-derived-index"')
     )
     assert "target MySQL contains rows" in restore
+    assert "dagster-storage-bootstrap" in restore
     assert "target MinIO bucket contains object versions" in restore
     assert "target Qdrant contains collections" in restore
     assert "Redis was not restored" in restore

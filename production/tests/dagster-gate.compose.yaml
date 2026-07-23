@@ -127,6 +127,14 @@ services:
       dagster-gate-secrets-init:
         condition: service_completed_successfully
 
+  dagster-storage-bootstrap:
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    depends_on: !override
+      dagster-gate-db-bootstrap:
+        condition: service_completed_successfully
+
   dagster-code:
     environment:
       APP_ENV: ci
@@ -139,7 +147,7 @@ services:
     # This gate validates Dagster itself. Keep MySQL-backed Dagster bootstrap,
     # but do not pull unrelated OTel/Tempo or product-database users into the gate.
     depends_on: !override
-      dagster-gate-db-bootstrap:
+      dagster-storage-bootstrap:
         condition: service_completed_successfully
       dagster-gate-callback:
         condition: service_healthy

@@ -223,7 +223,7 @@ for required_service in mysql minio qdrant redis; do
     fail "required dependency service is not running: ${required_service}"
   fi
 done
-for writer_service in edge bff worker keycloak dagster-code dagster-webserver dagster-daemon migrate db-bootstrap minio-volume-init minio-bootstrap identity-bootstrap; do
+for writer_service in edge bff worker keycloak dagster-code dagster-webserver dagster-daemon migrate dagster-storage-bootstrap db-bootstrap minio-volume-init minio-bootstrap identity-bootstrap; do
   if printf '%s\n' "${running_services}" | grep -Fxq "${writer_service}"; then
     fail "writer service ${writer_service} is running; enter the documented backup maintenance window first"
   fi

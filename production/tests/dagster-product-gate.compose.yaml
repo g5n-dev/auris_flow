@@ -181,7 +181,7 @@ services:
       AURIS_BFF_INTERNAL_URL: http://bff:8000
       AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: dagster-v1
     depends_on: !override
-      dagster-gate-db-bootstrap:
+      dagster-storage-bootstrap:
         condition: service_completed_successfully
 
   bff:

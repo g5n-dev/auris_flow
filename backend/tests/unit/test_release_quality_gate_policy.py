@@ -123,6 +123,7 @@ def test_readiness_contract_requires_every_production_release_gate() -> None:
     for path in (
         "backend/pyproject.toml",
         "backend/uv.lock",
+        "config/release/exact-artifact-license-conclusions.json",
         "prototype/auris-flow-ui/package.json",
         "prototype/auris-flow-ui/package-lock.json",
         "scripts/verify_production_path.sh",

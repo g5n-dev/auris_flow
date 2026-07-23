@@ -57,6 +57,7 @@ REQUIRED_BASE_SERVICES = frozenset(
         "minio",
         "qdrant",
         "keycloak",
+        "dagster-storage-bootstrap",
         "dagster-code",
         "dagster-webserver",
         "dagster-daemon",
@@ -569,6 +570,7 @@ REQUIRED_RUNNING_SERVICES = frozenset(
 REQUIRED_COMPLETED_SERVICES = frozenset(
     {
         "db-bootstrap",
+        "dagster-storage-bootstrap",
         "minio-volume-init",
         "minio-bootstrap",
         "migrate",
@@ -879,7 +881,12 @@ def _expected_service_image(service: str, source_commit: str) -> str | None:
     if external is not None:
         return external
     suffix = source_commit[:12]
-    if service in {"dagster-code", "dagster-webserver", "dagster-daemon"}:
+    if service in {
+        "dagster-storage-bootstrap",
+        "dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+    }:
         return f"auris-flow-production-gate-dagster:{suffix}"
     if service == "edge":
         return f"auris-flow-production-gate-edge:{suffix}"

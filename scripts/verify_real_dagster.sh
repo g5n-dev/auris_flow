@@ -79,7 +79,8 @@ cleanup() {
   if [ "${status}" -ne 0 ]; then
     compose_with_deadline "${CLEANUP_TIMEOUT}" "collect real Dagster logs" \
       logs --tail 120 \
-      dagster-gate-callback dagster-code dagster-webserver dagster-daemon >&2 || true
+      dagster-gate-callback dagster-storage-bootstrap \
+      dagster-code dagster-webserver dagster-daemon >&2 || true
   fi
   if [[ "${PROJECT_NAME}" =~ ^auris-dagster-gate-[0-9]+-[0-9]+$ ]]; then
     if ! compose_with_deadline "${CLEANUP_TIMEOUT}" "clean real Dagster project" \
@@ -149,6 +150,7 @@ START_ORDER=(
   mysql
   dagster-gate-callback
   dagster-gate-db-bootstrap
+  dagster-storage-bootstrap
   dagster-code
   dagster-webserver
   dagster-daemon
@@ -156,6 +158,7 @@ START_ORDER=(
 ONE_SHOT_SERVICES=(
   dagster-gate-secrets-init
   dagster-gate-db-bootstrap
+  dagster-storage-bootstrap
 )
 
 is_one_shot_service() {

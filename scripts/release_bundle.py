@@ -42,6 +42,11 @@ RELEASE_TAG_PATTERN = re.compile(
 )
 COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
+LICENSE_MATERIAL_FILES = (
+    "third_party/licenses/README.md",
+    "third_party/licenses/antlr4-python3-runtime-4.13.2.LICENSE.txt",
+    "third_party/licenses/python-dateutil-2.9.0.post0.LICENSE",
+)
 REQUIRED_BUNDLE_FILES = (
     "README.md",
     "VERSION",
@@ -75,6 +80,7 @@ REQUIRED_BUNDLE_FILES = (
     "doc/runbooks/release-supply-chain.md",
     "doc/runbooks/security-incident-response.md",
     "doc/runbooks/upgrade-rollback.md",
+    *LICENSE_MATERIAL_FILES,
 )
 PRODUCTION_DIRECTORIES = (
     "backup",
@@ -870,6 +876,10 @@ def assemble_bundle(
             output_root / "production" / directory,
         )
     for relative in DOCUMENTATION_FILES:
+        _copy_regular_file(
+            repository_root / relative, output_root / relative, mode=0o644
+        )
+    for relative in LICENSE_MATERIAL_FILES:
         _copy_regular_file(
             repository_root / relative, output_root / relative, mode=0o644
         )

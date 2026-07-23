@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import yaml  # type: ignore[import-untyped]
+
 ROOT = Path(__file__).resolve().parents[3]
 WORKFLOW = ROOT / ".github" / "workflows" / "release-images.yml"
 VERIFY_WORKFLOW = ROOT / ".github" / "workflows" / "verify.yml"
@@ -122,6 +124,113 @@ def test_release_workflow_enforces_multiarch_scan_sign_verify_and_no_latest() ->
         "Promote only verified and signed digests to immutable release tags"
     ) < text.index("Render final digest-pinned production release Compose")
     assert ":latest" not in text
+
+
+def test_first_party_release_images_embed_commit_bound_license_materials() -> None:
+    license_root = "/usr/share/licenses/auris-flow"
+    dockerfiles = {
+        "bff": ROOT / "production" / "backend" / "Dockerfile",
+        "dagster": ROOT / "production" / "dagster" / "Dockerfile",
+        "edge": ROOT / "production" / "edge" / "Dockerfile",
+    }
+    for image_id, path in dockerfiles.items():
+        text = path.read_text(encoding="utf-8")
+        runtime_start = text.index(" AS runtime")
+        governance_copy = f"COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md {license_root}/"
+        third_party_copy = f"COPY third_party/licenses {license_root}/third_party/licenses/"
+
+        assert text.count(governance_copy) == 1, image_id
+        assert text.count(third_party_copy) == 1, image_id
+        assert runtime_start < text.index(governance_copy), image_id
+        assert runtime_start < text.index(third_party_copy), image_id
+        assert "USER root" not in text[runtime_start:], image_id
+
+    build_job = _job_blocks(_workflow_text())["build-images"]
+    for image_id, path in dockerfiles.items():
+        assert f"- image_id: {image_id}" in build_job
+        assert f"dockerfile: {path.relative_to(ROOT).as_posix()}" in build_job
+    assert build_job.count("org.opencontainers.image.licenses=Apache-2.0") == 1
+
+
+def test_edge_builder_preserves_repository_relative_bundle_policy_inputs() -> None:
+    path = ROOT / "production" / "edge" / "Dockerfile"
+    text = path.read_text(encoding="utf-8")
+    builder = text[: text.index("\nFROM nginxinc/nginx-unprivileged:")]
+
+    required_lines = [
+        "WORKDIR /workspace/prototype/auris-flow-ui",
+        ("COPY prototype/auris-flow-ui/package.json prototype/auris-flow-ui/package-lock.json ./"),
+        "COPY prototype/auris-flow-ui ./",
+        (
+            "COPY production/frontend/frontend-bundle.lock.json "
+            "/workspace/production/frontend/frontend-bundle.lock.json"
+        ),
+        (
+            "COPY .github/workflows/frontend-bundle-candidate.yml "
+            ".github/workflows/frontend-bundle-promotion.yml "
+            ".github/workflows/verify.yml /workspace/.github/workflows/"
+        ),
+        (
+            "COPY scripts/verify_frontend_bundle.mjs "
+            "scripts/verify_frontend_bundle.test.mjs "
+            "scripts/verify_release.sh /workspace/scripts/"
+        ),
+        "RUN npm run build",
+    ]
+    for line in required_lines:
+        assert builder.count(line) == 1, line
+
+    assert "COPY . " not in builder
+    assert "COPY ./" not in builder
+    assert "COPY .github " not in builder
+    assert "COPY scripts " not in builder
+    assert (
+        "COPY --from=ui-builder /workspace/prototype/auris-flow-ui/dist /usr/share/nginx/html"
+    ) in text
+
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    github_rules = [line for line in dockerignore if ".github" in line]
+    assert github_rules == [
+        ".github/*",
+        "!.github/workflows/",
+        ".github/workflows/*",
+        "!.github/workflows/frontend-bundle-candidate.yml",
+        "!.github/workflows/frontend-bundle-promotion.yml",
+        "!.github/workflows/verify.yml",
+    ]
+
+
+def test_production_compose_binds_every_first_party_service_to_licensed_dockerfile() -> None:
+    document = yaml.safe_load((ROOT / "production" / "compose.yaml").read_text(encoding="utf-8"))
+    services = document["services"]
+    expected_services = {
+        "production/backend/Dockerfile": {
+            "bff",
+            "identity-bootstrap",
+            "migrate",
+            "observability-health",
+            "qdrant-backup-tool",
+            "worker",
+        },
+        "production/dagster/Dockerfile": {
+            "dagster-code",
+            "dagster-daemon",
+            "dagster-storage-bootstrap",
+            "dagster-webserver",
+        },
+        "production/edge/Dockerfile": {"edge"},
+    }
+    actual_services: dict[str, set[str]] = {dockerfile: set() for dockerfile in expected_services}
+    for service_name, service in services.items():
+        build = service.get("build")
+        if not isinstance(build, dict):
+            continue
+        dockerfile = build.get("dockerfile")
+        if dockerfile in actual_services:
+            assert build.get("context") == "..", service_name
+            actual_services[dockerfile].add(service_name)
+
+    assert actual_services == expected_services
 
 
 def test_release_image_tag_promotion_only_treats_authenticated_404_as_absent() -> None:
@@ -347,7 +456,10 @@ def test_release_workflow_runs_final_digest_images_before_bundle_assembly() -> N
     )
     assert "build/release/images.lock.json" in signature_block
     assert "bff:bff,migrate,identity-bootstrap,worker,qdrant-backup-tool" in signature_block
-    assert "dagster:dagster-code,dagster-webserver,dagster-daemon" in signature_block
+    assert (
+        "dagster:dagster-storage-bootstrap,dagster-code,dagster-webserver,dagster-daemon"
+        in signature_block
+    )
     assert "edge:edge" in signature_block
     assert 'signed_image="$(jq -er \'.image\' "${record}")"' in signature_block
     assert '"${locked_image}" != "${signed_image}"' in signature_block

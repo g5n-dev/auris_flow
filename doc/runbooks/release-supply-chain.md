@@ -230,6 +230,9 @@ docker --context default compose --project-name auris-flow \
   --file production/compose.yaml run --rm --no-deps db-bootstrap
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps dagster-storage-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
   --file production/compose.yaml run --rm --no-deps minio-bootstrap
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
@@ -248,8 +251,9 @@ docker --context default compose --project-name auris-flow \
 ```
 
 The volume initializer, bootstrap and migration services are foreground one-shots. Each must exit zero
-before the next phase; never mix an exited one-shot into detached `up --wait` health
-semantics.
+before the next phase; `dagster-storage-bootstrap` must serialize Dagster MySQL schema initialization
+and migration ahead of every long-running Dagster process. Never mix an exited one-shot into detached
+`up --wait` health semantics.
 
 The release validator rejects missing digests, `latest`, unresolved image
 variables, and any release service that still contains `build:`. Rollback means

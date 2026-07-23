@@ -184,6 +184,7 @@ REQUIRED_RUNNING_SERVICES = (
 )
 REQUIRED_COMPLETED_SERVICES = (
     "db-bootstrap",
+    "dagster-storage-bootstrap",
     "minio-volume-init",
     "minio-bootstrap",
     "migrate",

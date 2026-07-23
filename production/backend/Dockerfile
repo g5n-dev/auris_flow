@@ -25,6 +25,8 @@ COPY --chown=10001:10001 backend/app /app/app
 COPY --chown=10001:10001 backend/migrations /app/migrations
 COPY --chown=10001:10001 backend/scripts /app/scripts
 COPY --chown=10001:10001 backend/alembic.ini /app/alembic.ini
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/auris-flow/
+COPY third_party/licenses /usr/share/licenses/auris-flow/third_party/licenses/
 
 USER 10001:10001
 EXPOSE 8000

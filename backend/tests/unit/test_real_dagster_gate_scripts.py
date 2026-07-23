@@ -286,6 +286,7 @@ def test_real_dagster_shell_gate_runs_one_shot_services_to_completion() -> None:
     assert "ONE_SHOT_SERVICES=(" in source
     assert "dagster-gate-secrets-init" in source
     assert "dagster-gate-db-bootstrap" in source
+    assert "dagster-storage-bootstrap" in source
     assert 'if is_one_shot_service "${service}"; then' in source
     assert "up --no-build --no-deps --abort-on-container-exit" in source
     assert '--exit-code-from "${service}" "${service}"' in source
@@ -342,11 +343,17 @@ def test_real_dagster_compose_overlay_uses_real_services_and_loopback_ports() ->
     assert "depends_on: !override" in source
     assert set(services["dagster-code"]["depends_on"]) == {
         "dagster-gate-callback",
-        "dagster-gate-db-bootstrap",
+        "dagster-storage-bootstrap",
     }
     bootstrap = services["dagster-gate-db-bootstrap"]
     assert bootstrap["image"] == "${MYSQL_IMAGE:-mysql:8.4.5}"
     assert bootstrap["secrets"] == []
+    storage_bootstrap = services["dagster-storage-bootstrap"]
+    assert storage_bootstrap["secrets"] == []
+    assert storage_bootstrap["depends_on"] == {
+        "dagster-gate-db-bootstrap": {"condition": "service_completed_successfully"}
+    }
+    assert "dagster_gate_secrets:/run/secrets:ro" in storage_bootstrap["volumes"]
     assert services["dagster-webserver"]["ports"] == ["127.0.0.1:${AURIS_DAGSTER_GATE_PORT}:3000"]
     callback = services["dagster-gate-callback"]
     assert callback["build"]["dockerfile"] == ("production/tests/dagster-gate-callback.Dockerfile")
@@ -361,7 +368,13 @@ def test_real_dagster_compose_overlay_uses_real_services_and_loopback_ports() ->
         "internal": False,
         "attachable": False,
     }
-    for service_name in ("mysql", "dagster-code", "dagster-webserver", "dagster-daemon"):
+    for service_name in (
+        "mysql",
+        "dagster-storage-bootstrap",
+        "dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+    ):
         assert services[service_name]["secrets"] == []
         assert "dagster_gate_secrets:/run/secrets:ro" in services[service_name]["volumes"]
     callback_source = (ROOT / "scripts" / "verify_real_dagster_callback_server.py").read_text(

@@ -236,9 +236,16 @@ docker --context default compose --project-name auris-flow \
   --file production/compose.yaml run --rm migrate
 docker --context default compose --project-name auris-flow \
   --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps dagster-storage-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
   --file production/compose.yaml \
   up -d keycloak dagster-code dagster-webserver dagster-daemon bff worker edge
 ```
+
+`dagster-storage-bootstrap` 必须在恢复后的长期 Dagster 进程之前返回 0；它只挂载
+`dagster_database_url`，用于核验或升级已恢复的 Dagster MySQL schema。失败时保持写入面关闭，
+不得绕过该阶段直接启动 webserver 或 daemon。
 
 确认：
 

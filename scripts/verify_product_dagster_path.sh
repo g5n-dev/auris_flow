@@ -134,7 +134,8 @@ cleanup() {
   if [ "${status}" -ne 0 ]; then
     compose_with_deadline "${CLEANUP_TIMEOUT}" "collect product Dagster logs" \
       logs --tail 120 \
-      bff worker dagster-code dagster-webserver dagster-daemon >&2 || true
+      bff worker dagster-storage-bootstrap \
+      dagster-code dagster-webserver dagster-daemon >&2 || true
   fi
   if [[ "${PROJECT_NAME}" =~ ^auris-product-dagster-gate-[0-9]+-[0-9]+$ ]]; then
     if ! compose_with_deadline "${CLEANUP_TIMEOUT}" "clean product Dagster project" \
@@ -186,6 +187,7 @@ START_ORDER=(
   mysql
   redis
   dagster-gate-db-bootstrap
+  dagster-storage-bootstrap
   dagster-product-gate-db-bootstrap
   migrate
   dagster-product-gate-seed
@@ -198,6 +200,7 @@ START_ORDER=(
 ONE_SHOT_SERVICES=(
   dagster-gate-secrets-init
   dagster-gate-db-bootstrap
+  dagster-storage-bootstrap
   dagster-product-gate-db-bootstrap
   migrate
   dagster-product-gate-seed

@@ -107,6 +107,80 @@ def test_rendered_networks_confine_egress_to_authorized_services() -> None:
         assert "app-egress" not in networks
 
 
+def test_dagster_storage_bootstrap_policy_is_fail_closed() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    services = document["services"]
+    bootstrap = services["dagster-storage-bootstrap"]
+
+    assert bootstrap["restart"] == "no"
+    assert bootstrap["read_only"] is True
+    assert bootstrap["command"] == ["storage-bootstrap"]
+    assert bootstrap["environment"] == {"DAGSTER_HOME": "/opt/dagster/home"}
+    assert bootstrap["secrets"] == [
+        {
+            "source": "dagster_database_url",
+            "target": "/run/secrets/dagster_database_url",
+        }
+    ]
+    assert bootstrap.get("volumes", []) == []
+    assert bootstrap["depends_on"] == {
+        "db-bootstrap": {
+            "condition": "service_completed_successfully",
+            "required": True,
+        }
+    }
+    for service_name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+        assert services[service_name]["depends_on"]["dagster-storage-bootstrap"] == {
+            "condition": "service_completed_successfully",
+            "required": True,
+        }
+
+    missing = policy._render_compose()
+    missing["services"].pop("dagster-storage-bootstrap")
+    excessive_secret = policy._render_compose()
+    excessive_secret["services"]["dagster-storage-bootstrap"]["secrets"].append(
+        {
+            "source": "completion_receipt_key_bindings",
+            "target": "completion_receipt_key_bindings",
+        }
+    )
+    writable = policy._render_compose()
+    writable["services"]["dagster-storage-bootstrap"]["read_only"] = False
+    wrong_role = policy._render_compose()
+    wrong_role["services"]["dagster-storage-bootstrap"]["command"] = ["webserver"]
+    premature = policy._render_compose()
+    premature["services"]["dagster-storage-bootstrap"]["depends_on"]["db-bootstrap"][
+        "condition"
+    ] = "service_started"
+    detached = policy._render_compose()
+    detached["services"]["dagster-webserver"]["depends_on"].pop("dagster-storage-bootstrap")
+
+    assert "missing production services: dagster-storage-bootstrap" in policy.validate_compose(
+        missing
+    )
+    assert (
+        "dagster-storage-bootstrap: only the Dagster database URL may be mounted"
+        in policy.validate_compose(excessive_secret)
+    )
+    assert (
+        "dagster-storage-bootstrap: root filesystem must be read-only"
+        in policy.validate_compose(writable)
+    )
+    assert (
+        "dagster-storage-bootstrap: dedicated entrypoint role is required"
+        in policy.validate_compose(wrong_role)
+    )
+    assert (
+        "dagster-storage-bootstrap: database bootstrap dependency must complete successfully"
+        in policy.validate_compose(premature)
+    )
+    assert (
+        "dagster-webserver: Dagster storage bootstrap dependency must complete successfully"
+        in policy.validate_compose(detached)
+    )
+
+
 def test_qdrant_backup_tool_has_a_single_secret_and_no_application_egress() -> None:
     policy = _load_policy()
     document = policy._render_compose()

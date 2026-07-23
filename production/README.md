@@ -225,6 +225,11 @@ docker compose \
 docker compose \
   --project-directory production \
   --env-file production/.env \
+  -f production/compose.yaml run --rm --no-deps dagster-storage-bootstrap
+
+docker compose \
+  --project-directory production \
+  --env-file production/.env \
   -f production/compose.yaml run --rm --no-deps minio-bootstrap
 
 docker compose \
@@ -250,9 +255,11 @@ docker compose \
   dagster-code dagster-webserver dagster-daemon bff worker prometheus grafana edge
 ```
 
-`minio-volume-init`、`db-bootstrap`、`minio-bootstrap`、`migrate` 与 `identity-bootstrap`
-是必须成功退出的 one-shot；`minio-volume-init` 只会精确修正 named volume 根目录 `/data`
-的属主，不递归修改内容。
+`minio-volume-init`、`db-bootstrap`、`dagster-storage-bootstrap`、`minio-bootstrap`、
+`migrate` 与 `identity-bootstrap` 是必须成功退出的 one-shot。Dagster storage bootstrap
+使用唯一的 Dagster 数据库 URL，先独占初始化并升级 run、event-log 与 schedule schema，
+webserver、daemon 和 code location 只有在它成功后才会启动；`minio-volume-init` 只会精确
+修正 named volume 根目录 `/data` 的属主，不递归修改内容。
 不要把它们混入 detached `up --wait`。每个阶段失败都应停止上线并查看该阶段日志。
 
 检查状态和公开入口：

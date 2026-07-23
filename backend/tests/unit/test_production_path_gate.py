@@ -797,6 +797,7 @@ def _valid_evidence() -> dict[str, object]:
         "keycloak",
         "identity-bootstrap",
         "production-path-seed",
+        "dagster-storage-bootstrap",
         "dagster-code",
         "dagster-webserver",
         "dagster-daemon",
@@ -883,6 +884,7 @@ def _valid_evidence() -> dict[str, object]:
         service: runtime_observation(service, completed=True)
         for service in (
             "db-bootstrap",
+            "dagster-storage-bootstrap",
             "minio-volume-init",
             "minio-bootstrap",
             "migrate",
@@ -1434,6 +1436,23 @@ def test_minio_volume_initializer_is_bound_as_an_external_one_shot() -> None:
     assert gate.EXPECTED_EXTERNAL_SERVICE_IMAGES["minio-volume-init"] == minio_image
     assert "minio-volume-init" in driver.REQUIRED_COMPLETED_SERVICES
     assert "minio-volume-init" in driver.EXTERNAL_IMAGE_SERVICES
+
+
+def test_dagster_storage_bootstrap_is_bound_as_a_first_party_one_shot() -> None:
+    gate = _load_gate()
+    runtime_driver_path = ROOT / "scripts" / "verify_production_path_runtime.py"
+    driver_spec = importlib.util.spec_from_file_location(
+        "production_path_runtime_dagster_bootstrap_contract", runtime_driver_path
+    )
+    assert driver_spec and driver_spec.loader
+    driver = importlib.util.module_from_spec(driver_spec)
+    driver_spec.loader.exec_module(driver)
+
+    assert "dagster-storage-bootstrap" in gate.REQUIRED_BASE_SERVICES
+    assert "dagster-storage-bootstrap" in gate.REQUIRED_COMPLETED_SERVICES
+    assert "dagster-storage-bootstrap" not in gate.EXPECTED_EXTERNAL_SERVICE_IMAGES
+    assert "dagster-storage-bootstrap" in driver.REQUIRED_COMPLETED_SERVICES
+    assert "dagster-storage-bootstrap" not in driver.EXTERNAL_IMAGE_SERVICES
 
 
 def test_alertmanager_is_bound_as_a_required_external_runtime_service() -> None:

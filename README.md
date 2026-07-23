@@ -229,6 +229,12 @@ Smoke、前端架构检查、生产构建、Bundle Budget 与 Playwright UI Smok
 > [!NOTE]
 > `verify_fast.sh` 和开发真实栈用于工程反馈，不等同于公开发行证据。严格 Release 要求所有证据
 > 绑定同一个干净 commit，并通过不可变前端制品、视觉基线、供应链与人工授权检查。
+>
+> `scripts/verify_real_stack.sh` 的 Dagster 端点由
+> `scripts/fake_dagster_graphql_server.py` 提供，只验证开发协议与故障恢复；它不能替代
+> `bash scripts/verify_real_dagster.sh`。后者启动生产 Compose 的真实 Dagster，并验证
+> `SAFE_TERMINATE` 取消语义。该证明仍只覆盖 **Dagster 引擎层**，产品级 BFF、Outbox、
+> 状态回写与签名回调必须由产品执行链路门禁独立验收。
 
 ## 📁 仓库结构
 

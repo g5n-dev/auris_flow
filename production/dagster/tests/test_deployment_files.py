@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -40,6 +41,52 @@ def test_entrypoint_is_valid_shell_and_does_not_enable_trace_or_echo_secret() ->
     assert "dagster-daemon liveness-check" in source
 
 
+def test_entrypoint_has_fail_closed_storage_bootstrap_role() -> None:
+    source = (ROOT / "dagster-entrypoint.sh").read_text(encoding="utf-8")
+    bootstrap = source.split("storage-bootstrap)", 1)[1].split(";;", 1)[0]
+
+    assert 'exec dagster instance migrate "$@"' in bootstrap
+    assert "|| true" not in bootstrap
+    assert "set +e" not in bootstrap
+
+
+def test_storage_bootstrap_role_propagates_migration_failure_without_secret_leak(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    call_file = tmp_path / "dagster-call"
+    fake_dagster = fake_bin / "dagster"
+    fake_dagster.write_text(
+        "#!/bin/sh\n"
+        'printf \'%s\\n\' "$*" >"$AURIS_DAGSTER_CALL_FILE"\n'
+        'exit "${AURIS_FAKE_DAGSTER_EXIT_CODE:-0}"\n',
+        encoding="utf-8",
+    )
+    fake_dagster.chmod(0o755)
+    database_url = "mysql+pymysql://dagster:private-value@mysql:3306/dagster"
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+        "DAGSTER_MYSQL_URL": database_url,
+        "AURIS_DAGSTER_CALL_FILE": str(call_file),
+        "AURIS_FAKE_DAGSTER_EXIT_CODE": "73",
+    }
+
+    completed = subprocess.run(  # noqa: S603 - argv and executable are fixed test fixtures.
+        ["/bin/sh", str(ROOT / "dagster-entrypoint.sh"), "storage-bootstrap"],
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 73
+    assert call_file.read_text(encoding="utf-8") == "instance migrate\n"
+    assert database_url not in completed.stdout
+    assert database_url not in completed.stderr
+
+
 def test_dockerfile_is_pinned_multistage_and_non_root() -> None:
     source = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert source.count("FROM ") == 2
@@ -54,6 +101,42 @@ def test_runtime_dependencies_match_compose_mysql_url_driver() -> None:
     source = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     assert '"pymysql==1.1.1"' in source
     assert '"cryptography==49.0.0"' in source
+
+
+def test_compose_serializes_dagster_storage_bootstrap_with_least_privilege() -> None:
+    compose = yaml.safe_load((ROOT.parent / "compose.yaml").read_text(encoding="utf-8"))
+    services = compose["services"]
+    bootstrap = services["dagster-storage-bootstrap"]
+
+    assert bootstrap["command"] == ["storage-bootstrap"]
+    assert bootstrap["restart"] == "no"
+    assert bootstrap["read_only"] is True
+    assert bootstrap["cap_drop"] == ["ALL"]
+    assert bootstrap["security_opt"] == ["no-new-privileges:true"]
+    assert bootstrap["environment"] == {"DAGSTER_HOME": "/opt/dagster/home"}
+    assert bootstrap["secrets"] == ["dagster_database_url"]
+    assert bootstrap.get("volumes", []) == []
+    assert set(bootstrap["networks"]) == {"internal"}
+    assert bootstrap["depends_on"] == {
+        "db-bootstrap": {"condition": "service_completed_successfully"}
+    }
+
+    for service_name in ("dagster-code", "dagster-webserver", "dagster-daemon"):
+        assert services[service_name]["depends_on"]["dagster-storage-bootstrap"] == {
+            "condition": "service_completed_successfully"
+        }
+
+    database_url_consumers = {
+        name
+        for name, service in services.items()
+        if "dagster_database_url" in service.get("secrets", [])
+    }
+    assert database_url_consumers == {
+        "dagster-storage-bootstrap",
+        "dagster-code",
+        "dagster-webserver",
+        "dagster-daemon",
+    }
 
 
 def test_compose_gives_only_code_location_exact_version_audio_read_credentials() -> None:

@@ -45,26 +45,35 @@ generate separate BFF Python, Dagster Python, and npm CycloneDX documents from
 `prototype/auris-flow-ui/package-lock.json`, then retain them with the release
 artifacts. Any dependency with missing, ambiguous, or non-allowlisted license
 metadata in any of the three graphs is a release blocker until a maintainer
-records a reviewed, expiring exception for that exact ecosystem, package, and
-version.
+records either a concluded license for every immutable artifact hash of that
+exact ecosystem, package, and version, or a reviewed, expiring exception.
 
 The automated policy approves only expressions composed from the repository's
 explicit permissive/weak-copyleft allowlist (`0BSD`, `Apache-2.0`,
 `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `MIT`, `MIT-0`, `MPL-2.0`, and
 `PSF-2.0`) with SPDX `AND`/`OR`. Generic or ambiguous labels, SPDX `WITH`
 exceptions, and identifiers outside that allowlist fail closed unless an
-unexpired review exception exists for the exact ecosystem, package, and locked
-version. An exception is evidence of a scoped human review; it is not a
+exact-artifact conclusion or unexpired review exception exists. Exact-artifact
+conclusions are committed factual mappings keyed by ecosystem, canonical
+package name, version, and every locked SHA-256; they preserve the upstream
+declared license separately and are not represented as human approvals. A
+review exception remains evidence of a scoped human review and is not a
 repository-wide approval of that license family.
 
-As of the current Dagster lock, the following upstream metadata remains outside
-the automatic allowlist and therefore blocks a release until separately
-reviewed: `antlr4-python3-runtime@4.13.2` (`BSD`),
-`python-dateutil@2.9.0.post0` (`Dual License`), and
-`mysql-connector-python@9.7.0` (`GNU GPLv2 (with FOSS License Exception)`). No
-review exception is asserted here for those packages. The existing Jinja2
-exception remains limited to the exact package/version recorded in
-`config/release/license-review-exceptions.json`.
+For the current Dagster lock,
+`config/release/exact-artifact-license-conclusions.json` records
+`BSD-3-Clause` as the concluded license for every locked sdist and wheel digest
+of `antlr4-python3-runtime@4.13.2` while preserving its declared `BSD`, and for
+every locked sdist and wheel digest of `python-dateutil@2.9.0.post0` while
+preserving its declared `Dual License`. These records are exact-artifact
+conclusions, not review exceptions, and any name, version, ecosystem, metadata,
+or artifact-hash drift fails closed.
+
+`mysql-connector-python@9.7.0` remains a release blocker because its upstream
+metadata declares `GNU GPLv2 (with FOSS License Exception)` and the repository
+contains neither an exact-artifact conclusion nor a reviewed exception for it.
+The existing Jinja2 exception remains limited to the exact package/version
+recorded in `config/release/license-review-exceptions.json`.
 
 ## Public datasets
 
