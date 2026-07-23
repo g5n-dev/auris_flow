@@ -2572,6 +2572,7 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
     assert "production/scripts/finalize-restore.sh" in manifested_paths
     assert "production/backup/restore_state.py" in manifested_paths
     assert "doc/runbooks/backup-restore.md" in manifested_paths
+    assert "VERSION" in manifested_paths
     assert "production/release-metadata.json" not in manifested_paths
     assert "production/release-metadata.sigstore.json" not in manifested_paths
     assert all(
@@ -2581,6 +2582,7 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
         for item in release_metadata["members"]
     )
     assert (root / "production/compose.yaml").read_bytes() == compose_path.read_bytes()
+    assert (root / "VERSION").read_text(encoding="utf-8") == "1.0.0\n"
     assert not (root / "production/compose.release.json").exists()
     assert not (root / ".git").exists()
     assert (root / "production/compose.oidc-confidential.yaml").is_file()

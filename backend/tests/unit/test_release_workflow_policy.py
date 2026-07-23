@@ -428,6 +428,7 @@ def test_release_bundle_contains_governance_migrations_and_signed_checksums() ->
     assembler = (ROOT / "scripts" / "release_bundle.py").read_text(encoding="utf-8")
 
     for source in (
+        "VERSION",
         "LICENSE",
         "NOTICE",
         "CHANGELOG.md",

@@ -111,7 +111,7 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(
     title="Auris Flow BFF",
-    version="0.1.0",
+    version="1.0.0",
     lifespan=lifespan,
     responses={
         422: {

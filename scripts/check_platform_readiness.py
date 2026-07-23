@@ -8,8 +8,11 @@ import json
 import re
 import subprocess
 import sys
+import tomllib
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
+from functools import partial
 from pathlib import Path
 from typing import Literal, TypedDict
 
@@ -34,6 +37,10 @@ OFFICIAL_GITHUB_REPOSITORY = "g5n-dev/auris_flow"
 OFFICIAL_GITHUB_REPOSITORY_PARTS = ("g5n-dev", "auris_flow")
 OFFICIAL_GITHUB_URL = f"https://github.com/{OFFICIAL_GITHUB_REPOSITORY}"
 OFFICIAL_GHCR_REPOSITORY = f"ghcr.io/{OFFICIAL_GITHUB_REPOSITORY}"
+PRODUCT_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
+RELEASE_TAG_PATTERN = re.compile(
+    rf"v(?P<version>{PRODUCT_VERSION_PATTERN.pattern})(?:-rc\.[1-9]\d*)?"
+)
 LEGACY_REPOSITORY_MARKERS = (
     "auris-flow/auris-flow",
     r"auris-flow\/auris-flow",
@@ -43,6 +50,7 @@ REPOSITORY_TRUST_BINDINGS: dict[str, tuple[str, ...]] = {
     ".github/workflows/release-images.yml": (
         f'if [ "${{GITHUB_REPOSITORY}}" != "{OFFICIAL_GITHUB_REPOSITORY}" ]; then',
         f"release trust policy only permits {OFFICIAL_GITHUB_REPOSITORY}",
+        "release tag does not match VERSION",
         'expected_workflow_ref="${GITHUB_REPOSITORY}/.github/workflows/'
         'release-images.yml@${expected_ref}"',
     ),
@@ -626,6 +634,7 @@ RELEASE_ARTIFACT_PATTERNS = (
     "datasets-cache/**",
 )
 RELEASE_REQUIRED_TRACKED_PATHS = (
+    "VERSION",
     "NOTICE",
     "THIRD_PARTY_NOTICES.md",
     ".github/workflows/release-images.yml",
@@ -914,6 +923,272 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
         failures.append("NOTICE does not identify the approved rights holder")
     if fields["Copyright notice"] not in notice:
         failures.append("NOTICE does not contain the approved copyright notice")
+    return failures
+
+
+def release_tag_matches_version(tag: str, version: str) -> bool:
+    if PRODUCT_VERSION_PATTERN.fullmatch(version) is None:
+        return False
+    match = RELEASE_TAG_PATTERN.fullmatch(tag)
+    return match is not None and match.group("version") == version
+
+
+def _required_version_source(
+    root: Path,
+    relative_path: str,
+    failures: list[str],
+) -> str | None:
+    path = root / relative_path
+    if not path.is_file():
+        failures.append(f"release version source is missing: {relative_path}")
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            f"release version source is unreadable: {relative_path}: {error}"
+        )
+        return None
+
+
+def _toml_component_versions(
+    source: str,
+    *,
+    expected_name: str,
+    lock: bool,
+) -> tuple[tuple[str, str], ...]:
+    document = tomllib.loads(source)
+    if lock:
+        packages = document.get("package")
+        matches = (
+            [
+                package
+                for package in packages
+                if isinstance(package, dict) and package.get("name") == expected_name
+            ]
+            if isinstance(packages, list)
+            else []
+        )
+        if len(matches) != 1:
+            raise ValueError(f"must contain exactly one {expected_name} package")
+        component = matches[0]
+    else:
+        project = document.get("project")
+        if not isinstance(project, dict) or project.get("name") != expected_name:
+            raise ValueError(f"[project].name must be {expected_name}")
+        component = project
+    version = component.get("version")
+    if not isinstance(version, str):
+        raise ValueError(f"{expected_name} version must be a string")
+    return (("", version),)
+
+
+def _json_component_versions(
+    source: str,
+    expected_name: str,
+    lock: bool,
+) -> tuple[tuple[str, str], ...]:
+    document = json.loads(source)
+    if not isinstance(document, dict) or document.get("name") != expected_name:
+        raise ValueError(f"name must be {expected_name}")
+    version = document.get("version")
+    if not isinstance(version, str):
+        raise ValueError("version must be a string")
+    values: list[tuple[str, str]] = [("", version)]
+    if lock:
+        packages = document.get("packages")
+        root_package = packages.get("") if isinstance(packages, dict) else None
+        lock_version = (
+            root_package.get("version") if isinstance(root_package, dict) else None
+        )
+        if (
+            not isinstance(root_package, dict)
+            or root_package.get("name") != expected_name
+            or not isinstance(lock_version, str)
+        ):
+            raise ValueError(
+                f"packages[''] must identify {expected_name} with a version"
+            )
+        values.append((" packages['']", lock_version))
+    return tuple(values)
+
+
+def _python_literal_version(
+    source: str,
+    relative_path: str,
+    assignment_name: str,
+    call_keyword: tuple[str, str] | None = None,
+) -> str:
+    module = ast.parse(source, filename=relative_path)
+    values: list[ast.expr] = []
+    for node in ast.walk(module):
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+            continue
+        value: ast.expr | None
+        if isinstance(node, ast.Assign):
+            targets = node.targets
+            value = node.value
+        else:
+            targets = [node.target]
+            value = node.value
+        if value is None or not any(
+            isinstance(target, ast.Name) and target.id == assignment_name
+            for target in targets
+        ):
+            continue
+        if call_keyword is None:
+            values.append(value)
+        elif isinstance(value, ast.Call):
+            function = value.func
+            actual_call = (
+                function.id
+                if isinstance(function, ast.Name)
+                else function.attr
+                if isinstance(function, ast.Attribute)
+                else None
+            )
+            if actual_call == call_keyword[0]:
+                values.extend(
+                    keyword.value
+                    for keyword in value.keywords
+                    if keyword.arg == call_keyword[1]
+                )
+    if len(values) != 1:
+        raise ValueError(f"must define one literal {assignment_name} version source")
+    value = ast.literal_eval(values[0])
+    if not isinstance(value, str):
+        raise ValueError(f"{assignment_name} version source must be a string literal")
+    return value
+
+
+def _record_component_versions(
+    failures: list[str],
+    relative_path: str,
+    product_version: str,
+    values: tuple[tuple[str, str], ...],
+) -> None:
+    failures.extend(
+        f"{relative_path}{suffix} version {version!r} does not match "
+        f"VERSION {product_version!r}"
+        for suffix, version in values
+        if version != product_version
+    )
+
+
+def validate_release_version_contract(root: Path = ROOT) -> list[str]:
+    failures: list[str] = []
+    version_source = _required_version_source(root, "VERSION", failures)
+    if version_source is None:
+        return failures
+    if re.fullmatch(rf"{PRODUCT_VERSION_PATTERN.pattern}\n?", version_source) is None:
+        return ["VERSION must contain one stable SemVer value"]
+    product_version = version_source.removesuffix("\n")
+    expected_api_prefix = f"/api/v{product_version.split('.', 1)[0]}"
+
+    def check(
+        relative_path: str,
+        parser: Callable[[str], tuple[tuple[str, str], ...]],
+    ) -> None:
+        source = _required_version_source(root, relative_path, failures)
+        if source is None:
+            return
+        try:
+            values = parser(source)
+        except (SyntaxError, TypeError, ValueError, yaml.YAMLError) as error:
+            failures.append(
+                f"release version source is invalid: {relative_path}: {error}"
+            )
+            return
+        _record_component_versions(
+            failures,
+            relative_path,
+            product_version,
+            values,
+        )
+
+    for relative_path, expected_name, lock in (
+        ("backend/pyproject.toml", "auris-flow-bff", False),
+        ("backend/uv.lock", "auris-flow-bff", True),
+        ("production/dagster/pyproject.toml", "auris-flow-dagster", False),
+        ("production/dagster/uv.lock", "auris-flow-dagster", True),
+    ):
+        check(
+            relative_path,
+            partial(
+                _toml_component_versions,
+                expected_name=expected_name,
+                lock=lock,
+            ),
+        )
+
+    for relative_path, lock in (
+        ("prototype/auris-flow-ui/package.json", False),
+        ("prototype/auris-flow-ui/package-lock.json", True),
+    ):
+        check(
+            relative_path,
+            partial(
+                _json_component_versions,
+                expected_name="auris-flow-ui",
+                lock=lock,
+            ),
+        )
+
+    check(
+        "backend/app/main.py",
+        lambda source: (
+            (
+                "",
+                _python_literal_version(
+                    source,
+                    "backend/app/main.py",
+                    "app",
+                    ("FastAPI", "version"),
+                ),
+            ),
+        ),
+    )
+
+    def api_prefix(source: str) -> tuple[tuple[str, str], ...]:
+        actual = _python_literal_version(
+            source,
+            "backend/app/core/config.py",
+            "api_prefix",
+        )
+        if actual != expected_api_prefix:
+            raise ValueError(
+                f"API major does not match VERSION: "
+                f"expected {expected_api_prefix}, found {actual}"
+            )
+        return ()
+
+    check("backend/app/core/config.py", api_prefix)
+
+    def openapi(source: str) -> tuple[tuple[str, str], ...]:
+        document = yaml.safe_load(source)
+        if not isinstance(document, dict):
+            raise ValueError("root must be an object")
+        info, servers = document.get("info"), document.get("servers")
+        version = info.get("version") if isinstance(info, dict) else None
+        urls = (
+            {
+                server.get("url")
+                for server in servers
+                if isinstance(server, dict) and isinstance(server.get("url"), str)
+            }
+            if isinstance(servers, list)
+            else set()
+        )
+        if not isinstance(version, str):
+            raise ValueError("info.version must be a string")
+        if expected_api_prefix not in urls:
+            raise ValueError(
+                f"API major does not match VERSION: "
+                f"expected server {expected_api_prefix}"
+            )
+        return (("", version),)
+
+    check("doc/backend-spec/openapi-v0.1.yaml", openapi)
     return failures
 
 
@@ -1428,6 +1703,7 @@ def run_release_checks() -> list[ReadinessResult]:
         if path not in tracked_files:
             tree_failures.append(f"required release source is not in Git index: {path}")
     tree_failures.extend(validate_repository_trust_contract())
+    tree_failures.extend(validate_release_version_contract())
 
     visual_lock_failures = validate_visual_baseline_lock(
         ROOT / "production/visual/visual-baseline.lock.json",

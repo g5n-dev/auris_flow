@@ -44,6 +44,7 @@ COMMIT_PATTERN = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
 REQUIRED_BUNDLE_FILES = (
     "README.md",
+    "VERSION",
     "LICENSE",
     "NOTICE",
     "CHANGELOG.md",
@@ -85,6 +86,7 @@ PRODUCTION_DIRECTORIES = (
     "scripts",
 )
 ROOT_GOVERNANCE_FILES = (
+    "VERSION",
     "LICENSE",
     "NOTICE",
     "CHANGELOG.md",

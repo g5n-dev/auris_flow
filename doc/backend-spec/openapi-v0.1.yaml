@@ -1,7 +1,7 @@
 openapi: 3.0.3
 info:
   title: Auris Flow BFF API
-  version: 0.1.0
+  version: 1.0.0
   description: >
     Auris Flow 一期 FastAPI BFF 契约草案。前端只访问 BFF，
     不直接访问 MySQL、Qdrant、对象存储或执行引擎。MySQL 是标签、Prompt、评测与发布唯一业务真相源；

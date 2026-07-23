@@ -76,6 +76,14 @@ jobs:
           tag, commit = sys.argv[1:]
           if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-rc\.[1-9]\d*)?", tag) is None:
               raise SystemExit("release tag must be SemVer or an rc.N prerelease")
+          with open("VERSION", encoding="utf-8") as version_file:
+              version_source = version_file.read()
+          if re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\n?", version_source) is None:
+              raise SystemExit("VERSION must contain one stable SemVer value")
+          product_version = version_source.removesuffix("\n")
+          tag_version = tag[1:].split("-rc.", 1)[0]
+          if tag_version != product_version:
+              raise SystemExit("release tag does not match VERSION")
           if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit) is None:
               raise SystemExit("workflow must run from a complete Git object id")
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
