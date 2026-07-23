@@ -1,84 +1,179 @@
+<div align="center">
+
 # Auris Flow
 
-Auris Flow 是一个面向音频证据、标签治理、任务编排、知识库和业务洞察的企业级中台原型。当前仓库包含：
+### 面向音频证据的智能质检与洞察中台
 
-- React + TypeScript + Vite 高保真前端原型。
-- FastAPI BFF 后端骨架。
-- MySQL + Qdrant 后端规格包。
-- 固定 seed fixture、OpenAPI 草案、数据库迁移、契约测试和一键验证脚本。
-- 平台 readiness eval，用于持续检查评测、标注、洞察三域是否保持同一工程闭环。
+从音频接入、转写调听、标签治理到评测、知识沉淀与业务洞察，<br>
+用同一条可追溯链路连接数据、模型、任务与人。
 
-当前树是 Auris Flow `v1.0.0` 的**候选实现**，不是已经发布或获生产支持的版本。仓库已包含 Apache-2.0 文本、单机 Linux Docker Compose、通用 OIDC/PKCE、真实 Dagster、语义 embedding 接口及可观测性/备份基线；项目 owner 的许可权利主体签字、`v1.0.0-rc.1` 真实发布演练、外部干净安装和正式 release 审批仍未完成。在这些人工与运行门禁通过前，不得宣称正式开源发布或生产可部署验收完成。
+<p>
+  <img alt="React" src="https://img.shields.io/badge/React-18-149ECA?logo=react&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-BFF-009688?logo=fastapi&logoColor=white">
+  <img alt="MySQL" src="https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white">
+  <img alt="Qdrant" src="https://img.shields.io/badge/Qdrant-Vector_DB-DC244C">
+  <img alt="Dagster" src="https://img.shields.io/badge/Dagster-Orchestration-654FF0">
+</p>
 
-## Repository Layout
+<p>
+  <a href="#-为什么是-auris-flow">产品定位</a> ·
+  <a href="#-系统架构">系统架构</a> ·
+  <a href="#-快速开始">快速开始</a> ·
+  <a href="#-验证与质量门禁">质量门禁</a> ·
+  <a href="#-项目状态">项目状态</a>
+</p>
 
-```text
-backend/                  FastAPI BFF、SQLAlchemy models、Alembic、tests
-doc/                      产品、UI、Agentic 和后端设计文档
-doc/backend-spec/         OpenAPI、DB schema、状态机、RBAC、seed、runbook
-docker/local/             MySQL、Redis、MinIO、Qdrant 本地依赖
-production/               单机生产 Compose、Dagster、edge、可观测性与备份工具
-prototype/auris-flow-ui/  React 高保真中台原型
-scripts/verify_all.sh     后端规格、测试、smoke 和前端构建验证入口
-scripts/check_platform_readiness.py  开源平台完整性与三域闭环检查
-AGENTS.md                 后续 agent / 协作者的工程边界和验证要求
+<sub>Enterprise audio evidence, quality evaluation and insight platform.</sub>
+
+</div>
+
+---
+
+## ✨ 为什么是 Auris Flow
+
+传统音频质检系统往往把“音频、转写、标签、评测、洞察”拆成彼此孤立的页面。Auris Flow
+把它们建模为同一条证据链：每次运行、人工操作和业务结论都能追溯至对应的租户、项目、对象与
+`trace_id`。
+
+| 闭环 | 能力 |
+| --- | --- |
+| **数据进入** | 连接器、批次、音频资产、转写与说话人分离 |
+| **证据生产** | 波形调听、片段证据、人工标注、标签版本与发布 |
+| **质量评测** | 评测集、规则/模型评测、badcase、校准与复核 |
+| **知识沉淀** | 知识库、证据索引、语义召回与可解释引用 |
+| **业务洞察** | 指标聚合、趋势分析、洞察 Agent 与报告导出 |
+| **可信运行** | 租户隔离、幂等、审计、Outbox、回写签名与全链路追踪 |
+
+> [!IMPORTANT]
+> 本仓库是 Auris Flow `v1.0.0` 的**候选实现**，可用于原型评审、后端联调和工程验证；它尚未完成正式
+> Release 审批与生产支持验收。详见[项目状态](#-项目状态)。
+
+## 🧭 产品工作台
+
+前端原型是后端开发的真实交互基线，覆盖以下一级模块：
+
+- **任务画布**：配置处理链路、提交运行、查看状态与失败原因。
+- **数据资产**：管理音频、批次、转写结果、派生文件和血缘。
+- **调听工作台**：波形、说话人、转写、片段证据与人工标签协同。
+- **标签中心**：标签定义、版本、样本、发布与生命周期统计。
+- **评测中心**：评测集、执行记录、指标、badcase 与校准闭环。
+- **知识库**：知识条目、证据引用、向量索引和检索解释。
+- **洞察中心**：业务指标、趋势、归因、报告与行动建议。
+- **平台设置**：连接器、成员、角色、项目与运行环境治理。
+
+这些模块共享同一套业务对象和状态语义。Dagster 只负责底层执行映射，不会作为产品画布或业务
+API 暴露给用户。
+
+## 🏗 系统架构
+
+```mermaid
+flowchart LR
+    UI["React 工作台"] --> BFF["FastAPI BFF<br/>/api/v1/*"]
+
+    BFF --> DB[("MySQL<br/>权威业务状态")]
+    BFF --> CACHE[("Redis<br/>限流与运行辅助")]
+    BFF --> OBJ[("S3 / MinIO<br/>音频与证据文件")]
+    BFF --> VECTOR[("Qdrant<br/>语义派生索引")]
+
+    BFF --> OUTBOX["Transactional Outbox"]
+    OUTBOX --> WORKER["异步 Worker"]
+    WORKER --> DAGSTER["Dagster<br/>执行引擎"]
+    DAGSTER --> CALLBACK["签名回写"]
+    CALLBACK --> BFF
+
+    BFF -. trace .-> OTEL["OpenTelemetry"]
+    WORKER -. trace .-> OTEL
 ```
 
-## Architecture Baseline
+### 技术基线
 
-第一阶段后端基线：
+| 层次 | 选型 | 职责 |
+| --- | --- | --- |
+| Web | React 18、TypeScript、Vite | 高保真中台原型与 BFF 联调 |
+| API | FastAPI、Pydantic、SQLAlchemy、Alembic | 认证、投影、业务契约与迁移 |
+| 数据 | MySQL 8.4、Redis 7.4 | 权威状态、聚合、限流与运行辅助 |
+| 文件 | MinIO / S3 / OBS / OSS | 音频、转写、证据包、报告与导出 |
+| 检索 | Qdrant | 知识、证据、样本和 badcase 的派生向量索引 |
+| 编排 | Dagster | 后台任务执行、状态同步与签名 completion |
+| 可观测性 | OpenTelemetry、Prometheus、Tempo、Grafana | Trace、Metrics、Logs 与告警基线 |
 
-- FastAPI BFF：统一认证、通用 OIDC Authorization Code + PKCE、不透明 HttpOnly 浏览器会话、租户/项目上下文、UI Projection、错误结构和幂等入口。
-- MySQL：权威业务状态，包括租户、项目、连接器、任务、音频、标签、评测、资产、审计和运行状态。
-- Redis：当前承担连接 readiness、固定窗口限流和运行辅助职责；仓库已有缓存键规范但尚未实现结果缓存读写，因此不宣称 cache hit 能力。幂等权威状态仍在 MySQL。单机基线不承诺 Redis HA，故障时不得把 Redis 当作唯一业务事实来源。
-- MinIO / S3 / OBS / OSS：原始音频、处理后 WAV、ASR/Diar JSON、证据包、报告和导出文件；音频播放由 BFF 基于短时授权按登记 Provider 流式代理 HTTP Range，前端不直接持有云存储凭据。
-- Dagster：`production/` 提供真实 Dagster code server、webserver、daemon 与 MySQL storage，承接提交、运行和签名 completion；Dagster 仍只是底层执行引擎，不作为业务 API 主语言或产品画布。开发专项 `verify_real_stack.sh` 仍使用协议 fake，不能替代生产 Compose E2E。
-- Qdrant：承载知识、证据、标签样本、badcase 和可选声纹 embedding 的派生索引。生产配置必须接入 HTTPS 语义 embedding provider 并校验模型/维度；确定性向量只允许 local/test，在 `prod/release` fail closed。
-- OpenTelemetry：已接入 OTel SDK、结构化脱敏日志、受限 `/metrics`，生产 Compose 包含 Collector、Tempo、Prometheus、Grafana 和 node-exporter；业务 `trace_id` 会与活动 OTel trace/span 关联。真实 RC 的全链路追踪、告警通知与负载/SLO 演练仍是发行门禁。
+第一阶段不以 ClickHouse 为默认组件。洞察与大盘使用 MySQL 聚合/预计算、Redis 辅助和 Qdrant
+召回解释。
 
-目标架构不使用 ClickHouse。洞察和运营大盘第一阶段计划使用 MySQL 聚合表、预计算结果、Redis 缓存和 Qdrant 召回解释；当前实现不代表这些组件已经达到生产级完备性。
+## 🚀 快速开始
 
-## Local Development
+### 环境要求
 
-仓库的可复现工具链基线是 Python 3.12、`uv 0.10.0`、Node.js 22 和已提交的
-`backend/uv.lock`、`production/dagster/uv.lock`、`package-lock.json`。下面默认使用锁定安装；
-`pip install -e ".[dev]"` 或 `npm install` 只适合作为“最新兼容依赖”探测，不能作为 P0
-干净克隆或正式发行证据。
+- Python `3.12`（项目代码兼容 `>=3.11`）
+- [`uv`](https://docs.astral.sh/uv/) `0.10.x`
+- Node.js `22`
+- Docker Engine / Docker Desktop
 
-一键启动本地开发栈：
+仓库已提交 Python 与 Node 锁文件，建议始终使用锁定依赖安装。
+
+### 一键启动
 
 ```bash
+git clone https://github.com/g5n-dev/auris_flow.git
+cd auris_flow
 bash scripts/dev_up.sh
 ```
 
-该脚本会检查后端/前端依赖，尝试启动 Docker 本地依赖，执行迁移和 seed，并以前台方式启动 BFF、outbox worker 和 Vite。退出脚本会清理本轮启动的子进程。
+脚本会检查依赖、启动 MySQL/Redis/MinIO/Qdrant、执行迁移与 seed，并以前台方式运行：
 
-### Backend
+- Web：`http://127.0.0.1:5173`
+- BFF：`http://127.0.0.1:8000`
+- OpenAPI：`http://127.0.0.1:8000/docs`
+- MinIO Console：`http://127.0.0.1:9001`
+
+本地演示账户：
+
+```text
+邮箱：demo.operator@auris.local
+密码：auris-demo
+租户：aurora_auto
+项目：sales_qa
+```
+
+开发登录仅在 `local/test/ci` 且 `ALLOW_DEV_AUTH=true` 时启用，不得用于生产环境。
+
+### 分步启动
+
+<details>
+<summary><strong>1. 启动基础依赖</strong></summary>
+
+```bash
+docker compose -f docker/local/docker-compose.yml up -d
+```
+
+</details>
+
+<details>
+<summary><strong>2. 启动 BFF 与 Worker</strong></summary>
 
 ```bash
 cd backend
 uv sync --frozen --all-extras --python 3.12
-source .venv/bin/activate
 cp .env.example .env
+uv run alembic upgrade head
+uv run python -m app.seed local_demo
+
+APP_ENV=local ALLOW_DEV_AUTH=true \
+  uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --no-access-log
 ```
 
-启动本地依赖：
-
-```bash
-docker compose -f docker/local/docker-compose.yml up -d mysql redis minio qdrant
-```
-
-初始化和启动：
+在另一个终端启动 Outbox Worker：
 
 ```bash
 cd backend
-alembic upgrade head
-python -m app.seed local_demo
-APP_ENV=local ALLOW_DEV_AUTH=true uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --no-access-log
-python -m app.workers.outbox_worker
+uv run python -m app.workers.outbox_worker
 ```
 
-### Frontend
+</details>
+
+<details>
+<summary><strong>3. 启动前端</strong></summary>
 
 ```bash
 cd prototype/auris-flow-ui
@@ -86,218 +181,111 @@ npm ci --ignore-scripts
 npm run dev
 ```
 
-默认前端原型通过 `POST /api/v1/auth/dev-login` 获取服务端签发的短期兼容会话和 HttpOnly cookie，随后把会话绑定到本地演示上下文：
+</details>
 
-- tenant: `aurora_auto`
-- project: `sales_qa`
-- 预置账户：`demo.operator@auris.local`
-- 本地密码：`auris-demo`
-- session scope：`aurora_auto / sales_qa`
+## 🔐 可信工程基线
 
-开发登录只在 `local/test/ci` 且 `ALLOW_DEV_AUTH=true` 时可用；未知邮箱不会回退成管理员。浏览器 bundle 不包含共享 bearer token，前端会主动清理旧版本遗留的 localStorage/sessionStorage 会话；开发兼容 bearer 只在当前 React 运行内存持有，刷新恢复依赖 HttpOnly cookie。
+Auris Flow 的写操作从第一阶段即按企业系统约束设计：
 
-`prod/release` 使用通用 OIDC Authorization Code + PKCE：`GET /api/v1/auth/oidc/login`
-生成一次性 state/nonce/verifier 并 303 至 IdP，回调只接受明确 provision 的内部 identity，随后设置
-`__Host-auris_session` 不透明 cookie。数据库只保存会话 token 与 CSRF 的 SHA-256，IdP token 不返回
-前端。`GET /api/v1/auth/session` 可直接从 cookie 恢复 scope、当前动态角色和会话绑定的 CSRF token；
-cookie 认证的写操作与 `POST /api/v1/auth/logout` 必须同时提交 `X-CSRF-Token` 和受信 Origin。
-生产 Compose 包含 Keycloak 参考 IdP，产品认证协议保持通用 OIDC，不依赖其私有 claim 或管理 API。
+- **隔离**：每个业务请求显式绑定租户与项目上下文。
+- **认证**：生产基线采用 OIDC Authorization Code + PKCE 和不透明 HttpOnly 浏览器会话。
+- **防护**：Cookie 写请求强制 CSRF Token 与可信 Origin 校验。
+- **幂等**：写入入口、任务提交和外部回写具备幂等语义。
+- **审计**：关键操作记录主体、作用域、对象、结果和 `trace_id`。
+- **可靠异步**：数据库事务与 Outbox 协同，失败支持重试与死信治理。
+- **安全回写**：外部 callback 使用 HMAC 签名、时间窗与重放防护。
+- **可观测**：业务 `trace_id` 与活动 OpenTelemetry trace/span 关联。
 
-交互审计脚本需要先启动前端服务，然后在另一个终端运行：
+生产环境不得使用仓库内的示例密码、开发 Token、确定性向量或本地对象存储凭据。完整说明见
+[安全策略](SECURITY.md)与[安全事件响应](doc/runbooks/security-incident-response.md)。
 
-```bash
-cd prototype/auris-flow-ui
-AURIS_AUDIT_URL=http://127.0.0.1:5173/ npm run audit:tabs
-AURIS_AUDIT_URL=http://127.0.0.1:5173/ npm run audit:capture
-```
+## ✅ 验证与质量门禁
 
-如果只想跑一次完整 UI 审计，可以使用自动临时栈入口；它会创建临时 SQLite BFF、执行迁移和 seed、启动临时 Vite，并在 1920px 主视图和 1440px 高风险视图中检查 tab 相似度、大块空白层、横向溢出、关键文字裁切、操作反馈和工程词暴露，结束后清理本轮进程与临时库：
-
-```bash
-npm --prefix prototype/auris-flow-ui run audit:auto
-```
-
-纯前端冒烟脚本会自动启动一个临时 Vite 服务，适合本地和 CI 验证原型主导航、关键 tab 和顶部操作反馈：
-
-```bash
-cd prototype/auris-flow-ui
-npm run e2e:ui
-```
-
-## Production Candidate
-
-Linux 单机部署入口见 [production/README.md](production/README.md)。该基线包含 FastAPI BFF、
-Worker、MySQL、Redis、MinIO、Qdrant、真实 Dagster、Keycloak 参考 IdP、TLS edge、OTel
-Collector、Tempo、Prometheus 与 Grafana，并明确不提供节点 HA 或自动容灾。
-
-`.env.example` 的 `:dev` 镜像只用于候选构建；正式安装必须使用 release 提供的固定 digest、SBOM、
-签名和 checksum。当前尚无已批准的 `v1.0.0` 制品，不能把源码 `docker compose up` 结果当作正式
-生产发行。运维入口：
-
-- [SLO、告警与故障排查](doc/runbooks/operations.md)
-- [备份与空环境恢复](doc/runbooks/backup-restore.md)
-- [升级与回滚](doc/runbooks/upgrade-rollback.md)
-- [密钥与证书轮换](doc/runbooks/key-rotation.md)
-- [安全事件响应](doc/runbooks/security-incident-response.md)
-- [版本与兼容策略](doc/release/versioning-and-compatibility.md)
-
-## Verification
-
-普通工作区验证入口：
+日常开发验证：
 
 ```bash
 bash scripts/verify_fast.sh
 ```
 
-`verify_fast.sh` 会调用 `scripts/verify_all.sh`，优先使用 `backend/.venv/bin/python`，否则使用当前 `PATH` 里的 `python3`。如果本机有多个 Python 发行版，可以显式指定：
+如果本机存在多个 Python 环境：
 
 ```bash
 PYTHON=/absolute/path/to/python bash scripts/verify_fast.sh
 ```
 
-该入口会复用现有 `.venv` 和 `node_modules`，因此是开发反馈门禁，不是干净克隆证明。
-P0 锁定源码复现必须从清洁 HEAD 运行：
+该门禁覆盖规格校验、Readiness、Ruff、mypy、Alembic 升降级、后端单元/契约/集成测试、BFF
+Smoke、前端架构检查、生产构建、Bundle Budget 与 Playwright UI Smoke。
 
-```bash
-bash scripts/verify_clean_clone.sh
+| 场景 | 命令 | 适用范围 |
+| --- | --- | --- |
+| 快速反馈 | `bash scripts/verify_fast.sh` | 复用本地依赖的日常开发门禁 |
+| 干净克隆 | `bash scripts/verify_clean_clone.sh` | 锁文件与源码可复现性 |
+| UI / BFF | `AURIS_RUN_E2E=1 bash scripts/verify_all.sh` | 浏览器交互与 API 联调 |
+| 真实依赖栈 | `bash scripts/verify_real_stack.sh` | MySQL、Redis、MinIO、Qdrant |
+| 真实 Dagster | `bash scripts/verify_real_dagster.sh` | 执行引擎、取消和回写 |
+| 产品执行链路 | `bash scripts/verify_product_dagster_path.sh` | BFF → Outbox → Dagster → 状态同步 |
+| 发布候选 | `bash scripts/verify_release.sh` | 严格、Fail-closed 的完整发行门禁 |
+
+> [!NOTE]
+> `verify_fast.sh` 和开发真实栈用于工程反馈，不等同于公开发行证据。严格 Release 要求所有证据
+> 绑定同一个干净 commit，并通过不可变前端制品、视觉基线、供应链与人工授权检查。
+
+## 📁 仓库结构
+
+```text
+.
+├── backend/                   # FastAPI BFF、领域模型、迁移与测试
+├── prototype/auris-flow-ui/  # React + TypeScript 高保真工作台
+├── docker/local/             # 本地 MySQL、Redis、MinIO、Qdrant
+├── production/               # 单机生产候选、Dagster 与可观测性
+├── doc/backend-spec/         # API、数据模型、状态机、RBAC 与事件契约
+├── doc/runbooks/             # 运维、恢复、轮换、升级与安全响应
+├── scripts/                  # 验证、审计、E2E 与发布证据工具
+└── plans/                    # 设计与闭环演进计划
 ```
 
-该脚本用 `git clone --no-local` 重建 Git 对象，在克隆内执行两套 `uv sync --frozen`、
-`npm ci`、静态分析、迁移、后端/Dagster 测试、前端架构与生产构建，并拒绝任何未跟踪源码依赖。
+## 📚 文档导航
 
-当前脚本覆盖：
+| 主题 | 文档 |
+| --- | --- |
+| 产品与交互 | [产品设计](doc/设计文档.md) · [UI 设计](doc/UI设计文档.md) · [Agentic 设计](doc/Agentic智能化设计文档.md) |
+| 后端契约 | [后端规格入口](doc/backend-spec/README.md) · [API 契约](doc/backend-spec/api-contract.md) · [领域模型](doc/backend-spec/domain-model.md) |
+| 权限与事件 | [RBAC 矩阵](doc/backend-spec/rbac-matrix.md) · [状态机](doc/backend-spec/state-machines.md) · [事件契约](doc/backend-spec/event-contracts.md) |
+| 部署与运维 | [生产候选安装](production/README.md) · [运维手册](doc/runbooks/operations.md) · [备份恢复](doc/runbooks/backup-restore.md) |
+| 开源协作 | [贡献指南](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md) · [安全策略](SECURITY.md) · [支持范围](SUPPORT.md) |
+| 发行治理 | [Release Checklist](RELEASE_CHECKLIST.md) · [版本策略](doc/release/versioning-and-compatibility.md) · [变更记录](CHANGELOG.md) |
 
-- `doc/backend-spec/validate_backend_spec.py`
-- `scripts/check_platform_readiness.py`：开源入口、后端契约、运行底座、核心链路测试和 eval harness
-- 后端与仓库脚本 Ruff format / lint
-- 后端与关键验证脚本 mypy
-- Alembic 迁移 upgrade / 幂等 upgrade / downgrade 烟测
-- 校准迁移会在 `0018` 注入历史兼容夹具后升级 `0019`；默认验证临时 SQLite。MySQL 验证只接受显式的独立可销毁 `MIGRATION_DATABASE_URL`，该库会被完整升降级，严禁与应用 `DATABASE_URL` 共用。
-- 后端 unit / contract / integration tests
-- 后端 TestClient smoke
-- 前端 TypeScript build + Vite production build
-- 前端 bundle budget：检查最大 JS/CSS 资产和总 JS 体积，防止原型继续无感膨胀
-- 前端 Playwright UI smoke：登录、一级模块、关键 tab、搜索/筛选/导出反馈
-- 浏览器 UI/BFF 联调：`AURIS_RUN_E2E=1 bash scripts/verify_all.sh` 会自动启动临时 SQLite BFF 和 Vite 服务，并在内容寻址的 `linux/amd64` Playwright 容器内比对由 Git 锁文件指向的不可变视觉 OCI 制品；跑完后清理进程与临时库。该路径需要可启动新容器的 Docker Engine 和 ORAS。
-- 真实依赖栈专项：`AURIS_REAL_STACK_E2E=1 bash scripts/verify_ui_bff_e2e.sh` 会启动 MySQL、Redis、MinIO、Qdrant、一个 Dagster-compatible GraphQL fake endpoint 和一个 fake 平台回调接收端，用 MySQL 跑迁移和 seed，并要求 `/readyz` 在 strict 模式下确认 `database/redis/object_storage/qdrant/dagster` 全部 `ok`；该模式还会提交 Dagster protocol run request 并回读 receipt、真实写入并回读 Qdrant point 和 MinIO manifest 对象、发送 HMAC 签名外部 callback 并回读接收端 receipt，避免把本地 receipt 当作真实副作用。
-- 上述开发“real-stack”只表示 MySQL、Redis、MinIO、Qdrant 等依赖服务和网络 I/O 被实际调用，不表示生产 Compose 已验收：Dagster 是 `scripts/fake_dagster_graphql_server.py` 提供的协议 fake，Qdrant point 使用确定性测试向量，且该路径不启动 OTel Collector。`production/` 已有真实实现，但 release candidate 必须另外执行真实 Dagster、语义 embedding、OIDC、遥测、故障恢复和备份恢复 E2E，不能用本项门禁替代。
-- 独立真实栈门禁：`bash scripts/verify_real_stack.sh` 会等待四项 Compose healthcheck，执行上述 UI/BFF E2E，并硬校验 artifact 为隔离 MySQL、`real_qdrant`、真实 MinIO 回执和对象存储来源的 HTTP 206 Range；SQLite、mock 或 local receipt 会直接失败。
-- 正式真实 Dagster 门禁：`bash scripts/verify_real_dagster.sh` 使用独立 Compose project 启动生产 Dagster code server、webserver、daemon 和 MySQL storage，精确校验 `auris_flow_defs` / `__repository__` / `auris_flow_generic_job` 以及 `instance.daemonHealth.allDaemonStatuses` 中全部 required daemon，再通过生产 `RealDagsterClient` 提交 BFF/outbox 形状的 payload，轮询真实 Dagster run 状态，覆盖成功、受控失败、`SAFE_TERMINATE` 取消、签名 completion receipt、进程重启后的终态持久化与再次提交。该门禁从不启动 `scripts/fake_dagster_graphql_server.py`，失败时不生成 release artifact。
-- 该真实 Dagster artifact 的取消证明范围仅为 **Dagster 引擎层**：它证明 engine run 被取消且未产生成功/失败 completion receipt，不代替产品 BFF 的取消路由、`RunRecord` submitted/callback 顺序、业务状态回写和 outbox 重试闭环；这些必须由独立产品链路测试验收。`bash scripts/verify_real_dagster_local_process.sh` 只生成明确标记 `execution_environment=local-process` 的补充诊断证据，不能满足 Compose release 门禁。
-- UI/BFF 联调评分：检查标签、评测、洞察、任务、知识库、资产、设置 7 类前端写动作是否都返回后端对象 id 和 `trace_id`；浏览器页面不得出现 console error、request failure 或 4xx/5xx 响应。403/400 负向契约在 Node 侧单独验证，避免污染真实页面观测。
+## 🗺 项目状态
 
-Docker Desktop Engine 不可用时，只能走不含浏览器视觉发布证据的快速开发验证：
+当前仓库定位为 **Open-source Release Candidate**：
 
-```bash
-PYTHON=/absolute/path/to/python bash scripts/verify_fast.sh
-```
+- 已具备完整前端原型、FastAPI BFF、数据库迁移、真实 Dagster 执行基线和多层验证脚本。
+- 已包含 Apache License 2.0 标准文本、候选 `NOTICE` 与第三方许可清单。
+- 尚需项目所有者完成许可权利主体/版权归属授权、NOTICE 定稿和正式 Release 审批。
+- 尚需完成受保护环境中的不可变视觉与前端制品批准、外部干净安装和生产演练。
 
-该路径完成契约测试、迁移烟测和前端构建等快速检查，但不生成 UI/BFF、冻结视觉基线或真实依赖栈的发布证据。Docker 恢复后，必须补跑：
+因此，在这些人工与运行门禁完成前，不应把当前代码描述为“正式开源发布完成”或“已通过生产
+部署验收”。进度以[开源发布清单](RELEASE_CHECKLIST.md)和
+[Release Readiness](doc/reports/open-source-release-readiness.md)为准。
+
+## 🤝 参与贡献
+
+欢迎围绕契约补全、前后端联调、可观测性、安全、测试和文档提出改进。提交前请先阅读
+[CONTRIBUTING.md](CONTRIBUTING.md)，并至少运行：
 
 ```bash
-AURIS_RUN_E2E=1 bash scripts/verify_all.sh
-bash scripts/verify_real_stack.sh
-bash scripts/verify_real_dagster.sh
-bash scripts/verify_product_dagster_path.sh
+bash scripts/verify_fast.sh
 ```
 
-前端固定硬预算与“是否批准该精确产物”是两道独立门禁。旧四项 totals 只保留为
-`LEGACY_REFERENCE`，不得改名伪装成批准证据；正式指针是
-`production/frontend/frontend-bundle.lock.json`，当前明确为 `PENDING`。当构建产物仍满足
-硬预算、动态 import、fixture 分类、route closure 和预压缩规则，但尚未获批准时，常规
-`bundle:check` 仍拒绝畸形锁和任何硬门禁失败，同时把批准状态漂移作为诊断输出而不阻断
-`verify_fast` 与 base clean-clone。`bundle:check:release`（以及继承
-`AURIS_RELEASE_CHECK=1` 的严格发布路径）必须要求 APPROVED 且逐字节匹配锁，否则 fail closed。
-候选 CLI 会显式启用批准比较模式，并可在干净 commit 上生成不改变 policy/limits/lock 的
-确定性候选：
+安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要直接创建公开 Issue。
 
-```bash
-npm --prefix prototype/auris-flow-ui run build
-node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs generate \
-  --source-commit "$(git rev-parse HEAD)" \
-  --output "$PWD/build/frontend-bundle-candidate"
-node prototype/auris-flow-ui/scripts/frontend-bundle-candidate-cli.mjs verify \
-  --candidate-dir "$PWD/build/frontend-bundle-candidate"
-```
+## 📄 许可
 
-候选永久标记为 `PENDING_REVIEW`，绑定 commit、根 tree、前端子 tree、npm lock、Vite/检查器/
-policy 哈希，以及包含 `.vite/*`、全部 `.br` 在内的完整 dist inventory；目录拒绝 extra、
-symlink、hardlink、路径逃逸和同尺寸内容替换。正式候选只允许由受保护的
-`.github/workflows/frontend-bundle-candidate.yml` 从默认分支精确 tip 构建；npm/仓库代码只在
-无 OIDC、无 packages write 的低权 job 执行，隔离的 publisher 仅校验 transfer 后推送不可变
-GHCR digest，并以精确 GitHub workflow SHA/repository/ref/event 的 OIDC identity 进行 Cosign
-签名。独立的 `.github/workflows/frontend-bundle-promotion.yml` 先在低权 job 重建出相同
-inventory，再由 `frontend-bundle-production` protected environment 的隔离 job 生成并签名
-第二份 approval OCI。schema-3 production lock 必须同时绑定 candidate 与 approval 两个 digest；
-严格 `verify_release.sh` 会在线复验双签、OCI annotations、候选/批准 payload、Git 祖先与前端
-子树、当前 dist，并生成 `build/release-evidence/frontend-bundle.json`。不得手写 `APPROVED`、
-artifact digest、签名 identity 或 approval reference，也不得在同一变更中自动抬高 limits。
-GitHub 环境名写入 YAML 不等于已配置 required reviewers；该外部控制仍须由仓库管理员核验。
+仓库包含 [Apache License 2.0](LICENSE) 文本。当前许可权利主体和版权归属授权仍处于 Release
+门禁中；在项目所有者完成签署并定稿 `NOTICE` 前，不得据此宣称正式开源发行已完成。
 
-视觉场景、runner contract 与规范化 seed 是 Git 源码；PNG、geometry、生成 manifest 和 Playwright 输出不是源码，必须留在忽略的 diagnostics 目录或不可变 OCI 制品中。正式基线只由 `production/visual/visual-baseline.lock.json` 指向，并且只接受 `ghcr.io/...@sha256:...`；下载后会校验 OCI 包哈希、manifest、76 张 PNG 哈希、场景/runner/seed digest 与生成时 source commit。`production/visual/runtime-contract.json` 继续固定 `linux/amd64` Playwright 镜像 digest、锁文件版本、Chromium 和镜像字体。release 模式禁止 goal/seed override、host runtime 与 update mode。
+---
 
-当前锁明确为 `PENDING`，表示尚无经过人工批准的 Linux 制品，因此严格 release 门禁会 fail closed。现有 Darwin 截图只能作为本机 diagnostics，不能改写锁或生成 `status=ok` 的发布证据。需要生成诊断或候选截图时，只能写到 `prototype/auris-flow-ui/e2e/artifacts/` 下的命名目录，例如：
-
-```bash
-AURIS_UPDATE_VISUAL_BASELINE=1 \
-AURIS_VISUAL_GOAL_DIR="$PWD/prototype/auris-flow-ui/e2e/artifacts/visual-linux-candidate" \
-AURIS_VISUAL_RUNTIME=container \
-bash scripts/visual_regression.sh
-```
-
-候选 manifest 会记录 source commit、runner/scenario/seed digest、Playwright/Chromium/Node/OS 版本和全部 76 张截图的 SHA-256。正式候选只能由受保护的 `.github/workflows/visual-baseline-build.yml` 从精确 commit 调用固定 digest 的 `linux/amd64` Playwright 容器生成；它用 `create-package` 创建单 layer OCI 包，推送到当前仓库的 GHCR，取得 registry 返回的真实 digest，再以该 workflow 的 GitHub OIDC identity 进行 Cosign keyless 签名。仓库管理员必须在 GitHub 宿主端分别为 `visual-baseline-build` 与 `visual-baseline-production` 配置 required reviewers；YAML 中声明 environment 本身不是已启用人工保护的证据。promotion 会以当前仓库 build workflow 的精确 identity 和 GitHub token issuer 重新执行 `cosign verify`，然后下载并验证 76 张图片与全部契约，只产生 `visual-baseline.lock.json` 一处候选修改；人工审核后用独立 commit 提交该指针。不得手写 digest、签名 identity 或批准状态，host runtime 仅用于本机 diagnostics。
-
-视觉比较只在真实通过后写入 `build/release-evidence/visual-regression.json`，并包含 `status=ok`、当前 release `source_commit`、生成基线的 `baseline_source_commit`、OCI digest、runner digest、`signature_identity`、固定 GitHub OIDC issuer 以及 `scenario_count=passed=76`。严格 release 每次都会在下载前对锁定 digest 重新执行 Cosign 验签，不能依赖 promotion 时的一次性结果。基线 commit 必须是 release commit 的祖先，两者之间任何前端、后端 seed/runtime 或视觉 runner 输入变化都会使证据失效；非视觉文档修改不会被误称为基线来自当前 commit。`PENDING`、签名/identity 不可信、下载失败、哈希漂移或截图差异时不会保留伪成功 evidence。
-
-严格开源发布验证还会强制运行 UI/BFF E2E、前端视觉布局审计、真实依赖栈 E2E、真实 Dagster Compose 门禁、产品级 BFF→Outbox Worker→真实 Dagster→状态同步/签名回写/安全取消门禁、前端 `npm audit --audit-level=high`，以及对 `backend/uv.lock` 和 Dagster lock 导出的带哈希运行时依赖图执行严格 `pip-audit`。如果只运行 `AURIS_RELEASE_CHECK=1 bash scripts/verify_all.sh` 而未开启 `AURIS_RUN_E2E=1`，脚本会直接失败，避免发布前漏掉浏览器/BFF 链路。`bash scripts/verify_release.sh` 会依次调用 `bash scripts/verify_real_stack.sh`、`bash scripts/verify_real_dagster.sh` 与 `bash scripts/verify_product_dagster_path.sh`；第一个验证 MySQL/Redis/MinIO/Qdrant 的开发真实依赖栈（其中 Dagster 仍是协议 fake），第二个验证真实 Dagster 引擎协议，第三个证明产品业务链路确实经过 BFF、Worker 和真实 Dagster，而不是只测底层 GraphQL。该入口拒绝 `AURIS_SKIP_REAL_STACK_E2E=1`、`AURIS_SKIP_REAL_DAGSTER=1` 和 `AURIS_SKIP_PRODUCT_DAGSTER_GATE=1`。所有门禁证据必须绑定同一干净 HEAD，最终由 `scripts/finalize_release_evidence.py` 校验并生成带逐文件 SHA-256 的 `build/release-evidence/release-gate-manifest.json`；缺失、陈旧、路径泄漏、非 Compose 证据或来源 commit 不一致均 fail closed。Docker 受限时请改跑 `bash scripts/verify_fast.sh` 或 `AURIS_RUN_E2E=1 bash scripts/verify_all.sh`，但不能把结果作为公开发布候选。
-
-### Public Open-Source Release Check
-
-当前仓库只能作为 `v1.0.0` 候选继续开发和联调。正式开源发布除通过严格自动门禁、生产 Compose 与恢复演练、外部干净安装外，还必须由项目 owner 完成 [Apache-2.0 许可权利主体和版权归属授权记录](open-source-rights-authorization.md)：
-
-```bash
-python3 scripts/check_platform_readiness.py --release
-```
-
-推荐使用一键 release 验证：
-
-```bash
-bash scripts/verify_release.sh
-```
-
-`bash scripts/verify_clean_clone.sh` 单独运行时只生成 `readiness_scope=base` 的功能性锁定源码复现证据，便于在权利签字或视觉基线尚未批准的 RC 阶段发现漏跟踪文件；它不是发行授权。`verify_release.sh` 会强制以 `AURIS_RELEASE_CHECK=1` 重新运行该门禁，使克隆内的 `--release` 12/12、权利记录和不可变视觉指针仍然 fail closed。
-
-release check 会校验许可证文本存在、发布包卫生、安全披露、供应链审计、UI/BFF E2E、开发真实依赖栈 E2E、真实 Dagster Compose 门禁、产品级 Dagster 业务链路、同 commit 证据清单和 failed-response gate，不应绕过；自动检查不能替代项目 owner 对 Apache-2.0 许可权利主体和版权归属的确认。
-
-## Important Documents
-
-- [后端规格入口](doc/backend-spec/README.md)
-- [产品设计文档](doc/设计文档.md)
-- [UI 设计文档](doc/UI设计文档.md)
-- [Agentic 智能化设计文档](doc/Agentic智能化设计文档.md)
-- [当前原型评审与优化计划](doc/当前原型评审与优化计划.md)
-- [开源发布清单](RELEASE_CHECKLIST.md)
-- [平台 readiness 检查](doc/reports/platform-readiness.md)
-- [正式开源发布 readiness](doc/reports/open-source-release-readiness.md)
-- [仓库目录评审](doc/reports/repository-layout-review.md)
-- [变更提交计划](doc/reports/change-submission-plan.md)
-- [单机生产候选安装](production/README.md)
-- [生产运维 Runbook](doc/runbooks/operations.md)
-- [备份恢复 Runbook](doc/runbooks/backup-restore.md)
-- [版本与兼容策略](doc/release/versioning-and-compatibility.md)
-
-## Security Posture
-
-当前后端已具备通用 OIDC Authorization Code + PKCE、issuer/audience/JWKS 校验、不透明 HttpOnly browser session、CSRF/Origin 防护、开发认证隔离、动态用户/项目角色检查、租户/项目上下文、幂等、审计、Outbox、HMAC v2 callback/replay protection 和 OTel 技术基线。仍需完成的发行验收包括：
-
-- 真实企业 IdP 的登录、禁用、JWKS 轮换与权限运维演练。
-- 完整资源级 RBAC 负向矩阵和跨租户/项目安全验收。
-- 外部 secret manager/KMS 托管、各类 key overlap/retire 与应急吊销演练。
-- 真实 callback、死信人工重放、告警通知和安全事故响应演练。
-- 审计/OTel 脱敏、托管 CI 安全功能、恢复后的数据一致性与外部干净安装验收。
-
-请不要把本地开发登录、兼容测试 token、Docker 默认密码或 demo 账号用于生产环境。
-
-## License
-
-仓库当前包含 [Apache License 2.0](LICENSE) 标准文本、`NOTICE` 候选文本和第三方许可清单。Apache-2.0 的个人许可权利主体和版权归属授权记录仍标记为 blocked；在 owner 完成签字并替换 NOTICE 占位内容前，不得 tag、发布或把当前候选状态表述为正式开源发布完成。
+<div align="center">
+  <strong>Auris Flow</strong> · 让每一条业务洞察都能回到它的音频证据。
+</div>
