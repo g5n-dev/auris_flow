@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -68,9 +69,15 @@ def emit_task_run_terminal_event(
     }.get(record.status)
     if event_type is None or record.run_type != "task_run":
         return None
+    event_ctx = replace(
+        ctx,
+        trace_id=record.trace_id,
+        parent_trace_id=(ctx.trace_id if ctx.trace_id != record.trace_id else ctx.parent_trace_id),
+        correlation_id=record.trace_id,
+    )
     return enqueue_event(
         session,
-        ctx,
+        event_ctx,
         event_type=event_type,
         aggregate_type="task_run",
         aggregate_id=record.run_id,

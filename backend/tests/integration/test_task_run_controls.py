@@ -777,9 +777,18 @@ def test_signed_completion_can_finalize_a_run_observed_as_started(
     assert completed.json()["data"]["status"] == "success"
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
+        terminal_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.event_type == "task_run.succeeded",
+            )
+        )
         assert run is not None
+        assert terminal_event is not None
         assert run.status == "success"
         assert run.engine_status == "STARTED"
+        assert terminal_event.payload["trace_id"] == run.trace_id
+        assert terminal_event.payload["correlation_id"] == run.trace_id
 
 
 def _signed_completion_headers(
