@@ -63,9 +63,10 @@ Both local bundles are verified immediately and again in `assemble-release`. Aft
 authenticating to GHCR, `assemble-release` also performs independent SLSA and CycloneDX
 lookups with `gh attestation verify --bundle-from-oci`, before the image lock is created
 or any SemVer image tag is promoted. Every `gh attestation verify`
-invocation is bound to the exact OCI repository and digest, `auris-flow/auris-flow`,
-`.github/workflows/release-images.yml`, signer and source commit, tag ref, expected
-predicate URI, and `--deny-self-hosted-runners`. OCI lookup may return more than one
+invocation is bound to the exact GitHub repository `g5n-dev/auris_flow`, OCI image
+repository and digest, `.github/workflows/release-images.yml`, signer and source
+commit, tag ref, expected predicate URI, and `--deny-self-hosted-runners`. OCI lookup
+may return more than one
 compliant attestation; the gate requires at least one, validates every returned subject
 and predicate type, and requires every returned CycloneDX predicate to equal the
 downloadable `.cdx.json` document. The retained verification JSON excludes

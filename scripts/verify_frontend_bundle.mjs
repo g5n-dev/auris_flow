@@ -38,7 +38,7 @@ const uiRoot = join(root, "prototype/auris-flow-ui");
 const distDir = join(uiRoot, "dist");
 const checkerPath = join(uiRoot, "scripts/check-bundle-budget.mjs");
 const evidencePath = join(root, "build/release-evidence/frontend-bundle.json");
-const officialRepository = "auris-flow/auris-flow";
+const officialRepository = "g5n-dev/auris_flow";
 const officialSource = `https://github.com/${officialRepository}`;
 const candidateMediaType =
   "application/vnd.auris-flow.frontend-bundle-candidate.v1";

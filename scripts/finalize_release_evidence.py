@@ -82,7 +82,7 @@ LICENSE_POLICY = {
 }
 SPDX_TOKEN_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+-]*|[()]")
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
-OFFICIAL_VISUAL_REPOSITORY = ("auris-flow", "auris-flow")
+OFFICIAL_VISUAL_REPOSITORY = ("g5n-dev", "auris_flow")
 VISUAL_OCI_REF_PATTERN = re.compile(
     r"ghcr\.io/(?P<owner>[a-z0-9._-]+)/(?P<repository>[a-z0-9._-]+)/"
     r"visual-baseline@(?P<digest>sha256:[0-9a-f]{64})"
@@ -94,19 +94,19 @@ VISUAL_SIGNATURE_IDENTITY_PATTERN = re.compile(
     r"(?P<branch>[A-Za-z0-9._/-]+)"
 )
 FRONTEND_CANDIDATE_OCI_REF_PATTERN = re.compile(
-    r"ghcr\.io/auris-flow/auris-flow/frontend-bundle-candidate@"
+    r"ghcr\.io/g5n-dev/auris_flow/frontend-bundle-candidate@"
     r"(?P<digest>sha256:[0-9a-f]{64})"
 )
 FRONTEND_APPROVAL_OCI_REF_PATTERN = re.compile(
-    r"ghcr\.io/auris-flow/auris-flow/frontend-bundle-approval@"
+    r"ghcr\.io/g5n-dev/auris_flow/frontend-bundle-approval@"
     r"(?P<digest>sha256:[0-9a-f]{64})"
 )
 FRONTEND_CANDIDATE_SIGNATURE_IDENTITY_PATTERN = re.compile(
-    r"https://github\.com/auris-flow/auris-flow/\.github/workflows/"
+    r"https://github\.com/g5n-dev/auris_flow/\.github/workflows/"
     r"frontend-bundle-candidate\.yml@refs/heads/(?P<branch>[A-Za-z0-9._/-]+)"
 )
 FRONTEND_APPROVAL_SIGNATURE_IDENTITY_PATTERN = re.compile(
-    r"https://github\.com/auris-flow/auris-flow/\.github/workflows/"
+    r"https://github\.com/g5n-dev/auris_flow/\.github/workflows/"
     r"frontend-bundle-promotion\.yml@refs/heads/(?P<branch>[A-Za-z0-9._/-]+)"
 )
 FRONTEND_BUNDLE_VERIFIED_CHECKS = frozenset(

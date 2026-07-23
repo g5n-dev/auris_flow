@@ -406,8 +406,8 @@ def test_release_workflow_binds_manual_and_push_runs_to_the_tag_commit() -> None
     assert "release tag must be an annotated tag object" in text
     assert "refs/tags/${REQUESTED_TAG}^{commit}" in text
     assert '"${RESOLVED_COMMIT}" != "${GITHUB_SHA}"' in text
-    assert '"${GITHUB_REPOSITORY}" != "auris-flow/auris-flow"' in text
-    assert "release trust policy only permits auris-flow/auris-flow" in text
+    assert '"${GITHUB_REPOSITORY}" != "g5n-dev/auris_flow"' in text
+    assert "release trust policy only permits g5n-dev/auris_flow" in text
     assert '"${GITHUB_REF}" != "${expected_ref}"' in text
     assert '"${GITHUB_WORKFLOW_REF}" != "${expected_workflow_ref}"' in text
     assert "release workflow must execute from the exact requested tag ref" in text

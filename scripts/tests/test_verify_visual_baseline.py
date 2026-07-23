@@ -287,9 +287,9 @@ class VisualBaselineManifestTests(unittest.TestCase):
 
 class ImmutableVisualArtifactTests(unittest.TestCase):
     source_commit = "1" * 40
-    artifact_ref = "ghcr.io/auris-flow/auris-flow/visual-baseline@sha256:" + ("2" * 64)
+    artifact_ref = "ghcr.io/g5n-dev/auris_flow/visual-baseline@sha256:" + ("2" * 64)
     signature_identity = (
-        "https://github.com/auris-flow/auris-flow/.github/workflows/"
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/"
         "visual-baseline-build.yml@refs/heads/main"
     )
     signature_issuer = "https://token.actions.githubusercontent.com"
@@ -354,9 +354,9 @@ class ImmutableVisualArtifactTests(unittest.TestCase):
             root = Path(temp_dir)
             baseline, package_path = self._release_candidate(root)
             for invalid_ref in (
-                "ghcr.io/auris-flow/auris-flow/visual-baseline:latest",
+                "ghcr.io/g5n-dev/auris_flow/visual-baseline:latest",
                 "docker.io/auris-flow/visual-baseline@sha256:" + ("2" * 64),
-                "ghcr.io/auris-flow/auris-flow/visual-baseline@sha256:short",
+                "ghcr.io/g5n-dev/auris_flow/visual-baseline@sha256:short",
                 "ghcr.io/auris-flow/visual-baseline@sha256:" + ("2" * 64),
             ):
                 with self.subTest(invalid_ref=invalid_ref):

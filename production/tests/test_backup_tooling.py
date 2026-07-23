@@ -2624,7 +2624,7 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
     assert signed["schema_version"] == "auris.release-deployment-metadata.v3"
     assert commands[0][0:2] == ("cosign", "verify-blob")
     assert (
-        "https://github.com/auris-flow/auris-flow/.github/workflows/"
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/"
         "release-images.yml@refs/tags/v1.0.0"
     ) in commands[0]
 

@@ -8,7 +8,7 @@ ENV AURIS_VISUAL_RUNNER_CONTRACT_SHA256=${AURIS_VISUAL_RUNNER_CONTRACT_SHA256} \
     AURIS_VISUAL_REPRODUCIBILITY_SCOPE="exact Playwright Linux image digest, linux/amd64, npm lock, browser and image fonts"
 
 LABEL org.opencontainers.image.title="Auris Flow visual release runner" \
-      org.opencontainers.image.source="https://github.com/auris-flow/auris-flow" \
+      org.opencontainers.image.source="https://github.com/g5n-dev/auris_flow" \
       io.auris.visual.runner-contract-sha256=${AURIS_VISUAL_RUNNER_CONTRACT_SHA256}
 
 WORKDIR /opt/auris-visual

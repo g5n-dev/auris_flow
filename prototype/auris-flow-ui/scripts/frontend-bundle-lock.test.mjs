@@ -29,9 +29,9 @@ function approvedV3Lock() {
     reason: "Dual-signed protected promotion.",
     candidate: {
       artifact_ref:
-        "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate@sha256:" + sha256("1"),
+        "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate@sha256:" + sha256("1"),
       signature_identity:
-        "https://github.com/auris-flow/auris-flow/.github/workflows/" +
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/" +
         "frontend-bundle-candidate.yml@refs/heads/main",
       signature_issuer: "https://token.actions.githubusercontent.com",
       source_commit: gitObject("2"),
@@ -48,7 +48,7 @@ function approvedV3Lock() {
     },
     approval: {
       artifact_ref:
-        "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval@sha256:" +
+        "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval@sha256:" +
         sha256("b"),
       statement_sha256: sha256("c"),
       rebuild_evidence_sha256: sha256("d"),
@@ -56,7 +56,7 @@ function approvedV3Lock() {
       environment: "frontend-bundle-production",
       promotion_workflow_sha: gitObject("2"),
       signature_identity:
-        "https://github.com/auris-flow/auris-flow/.github/workflows/" +
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/" +
         "frontend-bundle-promotion.yml@refs/heads/main",
       signature_issuer: "https://token.actions.githubusercontent.com",
       run_id: "123456789",
@@ -141,7 +141,7 @@ test("mutable and cross-repository approved locks fail closed", () => {
 
   const mutable = approvedV3Lock();
   mutable.candidate.artifact_ref =
-    "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate:latest";
+    "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate:latest";
   assert.ok(validateFrontendBundleLock(mutable).length > 0);
 
   const attacker = approvedV3Lock();
@@ -152,7 +152,7 @@ test("mutable and cross-repository approved locks fail closed", () => {
 
   const unsignedApproval = approvedV3Lock();
   unsignedApproval.approval.artifact_ref =
-    "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval:latest";
+    "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval:latest";
   assert.ok(validateFrontendBundleLock(unsignedApproval).length > 0);
 });
 

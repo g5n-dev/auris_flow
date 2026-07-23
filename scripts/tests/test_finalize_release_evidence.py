@@ -176,7 +176,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             "approval": {
                 "approval_reference": "CAB-2026-0718",
                 "artifact_ref": (
-                    "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval"
+                    "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval"
                     f"@sha256:{SHA256}"
                 ),
                 "environment": "frontend-bundle-production",
@@ -185,7 +185,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "run_attempt": 1,
                 "run_id": "123456789",
                 "signature_identity": (
-                    "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                    "https://github.com/g5n-dev/auris_flow/.github/workflows/"
                     "frontend-bundle-promotion.yml@refs/heads/main"
                 ),
                 "signature_issuer": "https://token.actions.githubusercontent.com",
@@ -193,7 +193,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             },
             "candidate": {
                 "artifact_ref": (
-                    "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate"
+                    "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate"
                     f"@sha256:{SHA256}"
                 ),
                 "brotli_manifest_sha256": SHA256,
@@ -209,7 +209,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 ).hexdigest(),
                 "repository_tree": CANDIDATE_REPOSITORY_TREE,
                 "signature_identity": (
-                    "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                    "https://github.com/g5n-dev/auris_flow/.github/workflows/"
                     "frontend-bundle-candidate.yml@refs/heads/main"
                 ),
                 "signature_issuer": "https://token.actions.githubusercontent.com",
@@ -374,7 +374,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             {
                 "baseline_oci_digest": f"sha256:{SHA256}",
                 "baseline_oci_ref": (
-                    f"ghcr.io/auris-flow/auris-flow/visual-baseline@sha256:{SHA256}"
+                    f"ghcr.io/g5n-dev/auris_flow/visual-baseline@sha256:{SHA256}"
                 ),
                 "baseline_sha256": SHA256,
                 "baseline_source_commit": "2" * 40,
@@ -386,7 +386,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "scenario_count": 76,
                 "schema_version": 1,
                 "signature_identity": (
-                    "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                    "https://github.com/g5n-dev/auris_flow/.github/workflows/"
                     "visual-baseline-build.yml@refs/heads/main"
                 ),
                 "signature_issuer": "https://token.actions.githubusercontent.com",
@@ -777,7 +777,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "approval branch",
                 "approval",
                 "signature_identity",
-                "https://github.com/auris-flow/auris-flow/.github/workflows/"
+                "https://github.com/g5n-dev/auris_flow/.github/workflows/"
                 "frontend-bundle-promotion.yml@refs/heads/release/other",
                 "branches differ",
             ),

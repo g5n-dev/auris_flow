@@ -102,20 +102,20 @@ function candidateInput(overrides = {}) {
 function approvalOptions(candidate, overrides = {}) {
   return {
     candidateArtifactRef:
-      "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate@sha256:" +
+      "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate@sha256:" +
       digest("a"),
     approvalArtifactRef:
-      "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval@sha256:" +
+      "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval@sha256:" +
       digest("b"),
     candidateSha256: digest("5"),
     approvalStatementSha256: digest("c"),
     rebuildEvidenceSha256: digest("d"),
     approvalReference: "CAB-2026-0718",
     candidateSignatureIdentity:
-      "https://github.com/auris-flow/auris-flow/.github/workflows/" +
+      "https://github.com/g5n-dev/auris_flow/.github/workflows/" +
       "frontend-bundle-candidate.yml@refs/heads/main",
     approvalSignatureIdentity:
-      "https://github.com/auris-flow/auris-flow/.github/workflows/" +
+      "https://github.com/g5n-dev/auris_flow/.github/workflows/" +
       "frontend-bundle-promotion.yml@refs/heads/main",
     signatureIssuer: "https://token.actions.githubusercontent.com",
     buildWorkflowSha: candidate.source.commit,
@@ -263,7 +263,7 @@ test("promotion rejects placeholders, mutable artifacts and wrong signer identit
     () => createApprovedBundleLock(candidate, {
       ...valid,
       candidateArtifactRef:
-        "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate:latest"
+        "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate:latest"
     }),
     /immutable official GHCR digest/
   );
@@ -280,7 +280,7 @@ test("promotion rejects placeholders, mutable artifacts and wrong signer identit
     () => createApprovedBundleLock(candidate, {
       ...valid,
       approvalArtifactRef:
-        "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval:latest"
+        "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval:latest"
     }),
     /approval artifact reference/
   );

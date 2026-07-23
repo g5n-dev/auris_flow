@@ -21,7 +21,7 @@ function approvedLock() {
     reason: "Dual-signed protected promotion.",
     candidate: {
       artifact_ref:
-        "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate@sha256:" +
+        "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate@sha256:" +
         sha256("1"),
       candidate_sha256: sha256("2"),
       source_commit: gitObject("3"),
@@ -29,7 +29,7 @@ function approvedLock() {
       frontend_tree: gitObject("5"),
       build_workflow_sha: gitObject("3"),
       signature_identity:
-        "https://github.com/auris-flow/auris-flow/.github/workflows/" +
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/" +
         "frontend-bundle-candidate.yml@refs/heads/main",
       signature_issuer: "https://token.actions.githubusercontent.com",
       bundle_report_sha256: sha256("6"),
@@ -46,7 +46,7 @@ function approvedLock() {
     },
     approval: {
       artifact_ref:
-        "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval@sha256:" +
+        "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval@sha256:" +
         sha256("b"),
       statement_sha256: sha256("c"),
       rebuild_evidence_sha256: sha256("d"),
@@ -54,7 +54,7 @@ function approvedLock() {
       environment: "frontend-bundle-production",
       promotion_workflow_sha: gitObject("3"),
       signature_identity:
-        "https://github.com/auris-flow/auris-flow/.github/workflows/" +
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/" +
         "frontend-bundle-promotion.yml@refs/heads/main",
       signature_issuer: "https://token.actions.githubusercontent.com",
       run_id: "123456789",
@@ -79,7 +79,7 @@ function approvalStatement(lock) {
     approval: {
       reference: lock.approval.approval_reference,
       environment: lock.approval.environment,
-      repository: "auris-flow/auris-flow",
+      repository: "g5n-dev/auris_flow",
       ref: "refs/heads/main",
       event: "workflow_dispatch",
       workflow_sha: lock.approval.promotion_workflow_sha,
@@ -98,7 +98,7 @@ test("candidate and approval OCI manifests bind signed immutable provenance", ()
     annotations: {
       "org.opencontainers.image.revision": lock.candidate.source_commit,
       "org.opencontainers.image.source":
-        "https://github.com/auris-flow/auris-flow",
+        "https://github.com/g5n-dev/auris_flow",
       "io.auris.frontend.candidate-sha256": lock.candidate.candidate_sha256,
       "io.auris.frontend.frontend-tree": lock.candidate.frontend_tree,
       "io.auris.frontend.job-workflow-sha": lock.candidate.build_workflow_sha
@@ -109,7 +109,7 @@ test("candidate and approval OCI manifests bind signed immutable provenance", ()
     annotations: {
       "org.opencontainers.image.revision": lock.candidate.source_commit,
       "org.opencontainers.image.source":
-        "https://github.com/auris-flow/auris-flow",
+        "https://github.com/g5n-dev/auris_flow",
       "io.auris.frontend.approval-statement-sha256":
         lock.approval.statement_sha256,
       "io.auris.frontend.candidate-ref": lock.candidate.artifact_ref,

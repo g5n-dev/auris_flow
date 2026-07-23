@@ -49,7 +49,7 @@ CANONICAL_SEED_OVERLAY_PATH = ROOT / "production/visual/seed-overlay.json"
 ARTIFACT_PACKAGE_NAME = "visual-baseline.tar"
 ARTIFACT_MEDIA_TYPE = "application/vnd.auris-flow.visual-baseline.v1+tar"
 GITHUB_ACTIONS_OIDC_ISSUER = "https://token.actions.githubusercontent.com"
-OFFICIAL_VISUAL_REPOSITORY = ("auris-flow", "auris-flow")
+OFFICIAL_VISUAL_REPOSITORY = ("g5n-dev", "auris_flow")
 OCI_ARTIFACT_PATTERN = re.compile(
     r"^ghcr\.io/(?P<owner>[a-z0-9._-]+)/(?P<repository>[a-z0-9._-]+)/"
     r"visual-baseline@sha256:[0-9a-f]{64}$"

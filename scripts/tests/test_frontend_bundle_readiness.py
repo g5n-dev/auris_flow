@@ -15,11 +15,11 @@ from check_platform_readiness import (  # noqa: E402
 def _approved_lock() -> dict[str, object]:
     source_commit = "a" * 40
     candidate_identity = (
-        "https://github.com/auris-flow/auris-flow/.github/workflows/"
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/"
         "frontend-bundle-candidate.yml@refs/heads/main"
     )
     approval_identity = (
-        "https://github.com/auris-flow/auris-flow/.github/workflows/"
+        "https://github.com/g5n-dev/auris_flow/.github/workflows/"
         "frontend-bundle-promotion.yml@refs/heads/main"
     )
     return {
@@ -29,7 +29,7 @@ def _approved_lock() -> dict[str, object]:
         "reason": "Dual-signed protected promotion.",
         "candidate": {
             "artifact_ref": (
-                "ghcr.io/auris-flow/auris-flow/frontend-bundle-candidate@sha256:"
+                "ghcr.io/g5n-dev/auris_flow/frontend-bundle-candidate@sha256:"
                 + "1" * 64
             ),
             "signature_identity": candidate_identity,
@@ -53,8 +53,7 @@ def _approved_lock() -> dict[str, object]:
         },
         "approval": {
             "artifact_ref": (
-                "ghcr.io/auris-flow/auris-flow/frontend-bundle-approval@sha256:"
-                + "8" * 64
+                "ghcr.io/g5n-dev/auris_flow/frontend-bundle-approval@sha256:" + "8" * 64
             ),
             "statement_sha256": "9" * 64,
             "rebuild_evidence_sha256": "d" * 64,
@@ -107,7 +106,7 @@ class FrontendBundleReadinessTests(unittest.TestCase):
 
         branch_mismatch = copy.deepcopy(_approved_lock())
         branch_mismatch["approval"]["signature_identity"] = (  # type: ignore[index]
-            "https://github.com/auris-flow/auris-flow/.github/workflows/"
+            "https://github.com/g5n-dev/auris_flow/.github/workflows/"
             "frontend-bundle-promotion.yml@refs/heads/release/v1"
         )
         mutations.append(branch_mismatch)

@@ -41,8 +41,8 @@ jobs:
         env:
           REQUESTED_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
-          if [ "${GITHUB_REPOSITORY}" != "auris-flow/auris-flow" ]; then
-            echo "release trust policy only permits auris-flow/auris-flow" >&2
+          if [ "${GITHUB_REPOSITORY}" != "g5n-dev/auris_flow" ]; then
+            echo "release trust policy only permits g5n-dev/auris_flow" >&2
             exit 2
           fi
           expected_ref="refs/tags/${REQUESTED_TAG}"

@@ -20,13 +20,13 @@ export const frontendBundleLockPath = resolve(
 const gitObjectPattern = /^[0-9a-f]{40}$/;
 const sha256Pattern = /^[0-9a-f]{64}$/;
 const officialCandidateArtifactPattern =
-  /^ghcr\.io\/auris-flow\/auris-flow\/frontend-bundle-candidate@sha256:[0-9a-f]{64}$/;
+  /^ghcr\.io\/g5n-dev\/auris_flow\/frontend-bundle-candidate@sha256:[0-9a-f]{64}$/;
 const officialApprovalArtifactPattern =
-  /^ghcr\.io\/auris-flow\/auris-flow\/frontend-bundle-approval@sha256:[0-9a-f]{64}$/;
+  /^ghcr\.io\/g5n-dev\/auris_flow\/frontend-bundle-approval@sha256:[0-9a-f]{64}$/;
 const officialCandidateIdentityPattern =
-  /^https:\/\/github\.com\/auris-flow\/auris-flow\/\.github\/workflows\/frontend-bundle-candidate\.yml@refs\/heads\/(?<branch>[A-Za-z0-9._\/-]+)$/;
+  /^https:\/\/github\.com\/g5n-dev\/auris_flow\/\.github\/workflows\/frontend-bundle-candidate\.yml@refs\/heads\/(?<branch>[A-Za-z0-9._\/-]+)$/;
 const officialApprovalIdentityPattern =
-  /^https:\/\/github\.com\/auris-flow\/auris-flow\/\.github\/workflows\/frontend-bundle-promotion\.yml@refs\/heads\/(?<branch>[A-Za-z0-9._\/-]+)$/;
+  /^https:\/\/github\.com\/g5n-dev\/auris_flow\/\.github\/workflows\/frontend-bundle-promotion\.yml@refs\/heads\/(?<branch>[A-Za-z0-9._\/-]+)$/;
 
 const exactKeys = (value, expected) => {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;

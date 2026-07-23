@@ -33,7 +33,7 @@ RELEASE_METADATA_MODE = 0o644
 INSTALLED_SIGNATURE_MODE = 0o444
 BUNDLE_DIRECTORY_MODE = 0o755
 OFFICIAL_RELEASE_WORKFLOW_PREFIX = (
-    "https://github.com/auris-flow/auris-flow/.github/workflows/"
+    "https://github.com/g5n-dev/auris_flow/.github/workflows/"
     "release-images.yml@refs/tags/"
 )
 RELEASE_TAG_PATTERN = re.compile(

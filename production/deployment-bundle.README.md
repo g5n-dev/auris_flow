@@ -20,7 +20,7 @@ RELEASE_TAG=v1.0.0 # 必须替换为实际下载的精确 tag
 cosign verify-blob \
   --bundle SHA256SUMS.sigstore.json \
   --certificate-identity \
-  "https://github.com/auris-flow/auris-flow/.github/workflows/release-images.yml@refs/tags/${RELEASE_TAG}" \
+  "https://github.com/g5n-dev/auris_flow/.github/workflows/release-images.yml@refs/tags/${RELEASE_TAG}" \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   SHA256SUMS
 grep "  auris-flow-${RELEASE_TAG}-deployment.tar.gz$" SHA256SUMS \
