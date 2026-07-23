@@ -5,7 +5,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
-WORKDIR /build
+WORKDIR /app
 
 COPY --from=ghcr.io/astral-sh/uv:0.10.0@sha256:78a7ff97cd27b7124a5f3c2aefe146170793c56a1e03321dd31a289f6d82a04f /uv /uvx /bin/
 COPY backend/pyproject.toml backend/uv.lock ./
@@ -20,7 +20,7 @@ WORKDIR /app
 
 RUN groupadd --gid 10001 auris \
     && useradd --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin auris
-COPY --from=builder --chown=10001:10001 /build/.venv /app/.venv
+COPY --from=builder --chown=10001:10001 /app/.venv /app/.venv
 COPY --chown=10001:10001 backend/app /app/app
 COPY --chown=10001:10001 backend/migrations /app/migrations
 COPY --chown=10001:10001 backend/scripts /app/scripts
