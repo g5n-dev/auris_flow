@@ -936,6 +936,7 @@ def _python_assignment(
             isinstance(statement, ast.AnnAssign)
             and isinstance(statement.target, ast.Name)
             and statement.target.id == name
+            and statement.value is not None
         ):
             values.append(statement.value)
     if len(values) != 1:
@@ -1094,10 +1095,21 @@ def validate_repository_trust_contract(root: Path = ROOT) -> list[str]:
 
     workflow_source = sources.get(".github/workflows/release-images.yml")
     if workflow_source is not None:
-        workflow: object = None
+        workflow: dict[object, object] | None = None
         try:
-            workflow = yaml.safe_load(workflow_source)
-            steps = workflow["jobs"]["release-context"]["steps"]
+            workflow_payload = yaml.safe_load(workflow_source)
+            if not isinstance(workflow_payload, dict):
+                raise TypeError
+            jobs_payload = workflow_payload.get("jobs")
+            if not isinstance(jobs_payload, dict):
+                raise TypeError
+            release_context = jobs_payload.get("release-context")
+            if not isinstance(release_context, dict):
+                raise TypeError
+            steps = release_context.get("steps")
+            if not isinstance(steps, list):
+                raise TypeError
+            workflow = workflow_payload
         except (KeyError, TypeError, yaml.YAMLError):
             failures.append("release workflow repository guard is structurally invalid")
         else:
@@ -1145,9 +1157,11 @@ def validate_repository_trust_contract(root: Path = ROOT) -> list[str]:
                         break
 
         try:
-            if not isinstance(workflow, dict):
+            if workflow is None:
                 raise TypeError
-            jobs = workflow["jobs"]
+            jobs = workflow.get("jobs")
+            if not isinstance(jobs, dict):
+                raise TypeError
             assembly_steps = [
                 step
                 for job in jobs.values()
@@ -1247,6 +1261,8 @@ def validate_repository_trust_contract(root: Path = ROOT) -> list[str]:
                 "scripts/finalize_release_evidence.py",
                 name,
             )
+            if not isinstance(pattern, str):
+                raise TypeError("compiled pattern must be a string")
             compiled = re.compile(pattern)
         except (OSError, SyntaxError, TypeError, ValueError, re.error) as error:
             failures.append(
