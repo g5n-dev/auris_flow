@@ -996,9 +996,7 @@ def create_manifest(args: argparse.Namespace) -> int:
         "storage_boundary": {
             "contains_sensitive_data": True,
             "mode": args.storage_boundary,
-            "operator_assertion": STORAGE_BOUNDARY_ASSERTIONS[
-                args.storage_boundary
-            ],
+            "operator_assertion": STORAGE_BOUNDARY_ASSERTIONS[args.storage_boundary],
             "repository_never_contains_backup_payloads": True,
         },
         "data_authority": {

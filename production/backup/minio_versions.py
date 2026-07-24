@@ -37,7 +37,9 @@ def parse_timestamp(raw: Any) -> str:
     try:
         datetime.fromisoformat(normalized)
     except ValueError as exc:
-        raise PlanError("MinIO version has an invalid UTC lastModified timestamp") from exc
+        raise PlanError(
+            "MinIO version has an invalid UTC lastModified timestamp"
+        ) from exc
     return raw
 
 
@@ -118,13 +120,17 @@ def _records(lines: Iterable[str], bucket: str) -> list[dict[str, Any]]:
         if not delete_marker:
             if not etag:
                 raise PlanError("content version is missing its ETag")
-            identity_hash = hashlib.sha256(f"{key}\0{version_id}".encode("utf-8")).hexdigest()
+            identity_hash = hashlib.sha256(
+                f"{key}\0{version_id}".encode("utf-8")
+            ).hexdigest()
             artifact = f"minio/objects/{identity_hash[:2]}/{identity_hash}.bin"
         records.append(
             {
                 "key": key,
                 "version_id": version_id,
-                "last_modified": parse_timestamp(item.get("lastModified") or item.get("last_modified")),
+                "last_modified": parse_timestamp(
+                    item.get("lastModified") or item.get("last_modified")
+                ),
                 "size_bytes": size,
                 "etag": etag,
                 "metadata": metadata,
@@ -152,7 +158,9 @@ def build_plan(args: argparse.Namespace) -> int:
             "versions": len(records),
             "delete_markers": sum(record["delete_marker"] for record in records),
             "content_bytes": sum(
-                record["size_bytes"] for record in records if not record["delete_marker"]
+                record["size_bytes"]
+                for record in records
+                if not record["delete_marker"]
             ),
         },
         "versions": records,
@@ -162,9 +170,7 @@ def build_plan(args: argparse.Namespace) -> int:
     return 0
 
 
-def load_plan(
-    path: Path, *, require_content_hashes: bool = True
-) -> dict[str, Any]:
+def load_plan(path: Path, *, require_content_hashes: bool = True) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file():
         raise PlanError("MinIO plan must be a regular file")
     try:
@@ -181,7 +187,9 @@ def validate_plan(document: Any, *, require_content_hashes: bool = True) -> None
     if document.get("content_hash_algorithm") != CONTENT_HASH_ALGORITHM:
         raise PlanError("MinIO plan must bind content with SHA-256")
     bucket = document.get("bucket")
-    if not isinstance(bucket, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.-]{1,62}", bucket):
+    if not isinstance(bucket, str) or not re.fullmatch(
+        r"[A-Za-z0-9][A-Za-z0-9.-]{1,62}", bucket
+    ):
         raise PlanError("invalid bucket name")
     versions = document.get("versions")
     if not isinstance(versions, list):
@@ -213,9 +221,13 @@ def validate_plan(document: Any, *, require_content_hashes: bool = True) -> None
             ";" in key or "=" in key or ";" in value
             for key, value in record["metadata"].items()
         ):
-            raise PlanError("object metadata cannot be represented safely by mc cp --attr")
+            raise PlanError(
+                "object metadata cannot be represented safely by mc cp --attr"
+            )
         storage_class = record.get("storage_class")
-        if not isinstance(storage_class, str) or not re.fullmatch(r"[A-Za-z0-9._-]{0,64}", storage_class):
+        if not isinstance(storage_class, str) or not re.fullmatch(
+            r"[A-Za-z0-9._-]{0,64}", storage_class
+        ):
             raise PlanError("invalid object storage class")
         if delete_marker:
             if artifact is not None or content_sha256 is not None or size != 0:
@@ -344,7 +356,9 @@ def emit_backup_shell(args: argparse.Namespace) -> int:
         source = f"auris/{document['bucket']}/{record['key']}"
         lines.append(f"mkdir -p {shlex.quote(str(PurePosixPath(artifact).parent))}")
         version_flag = (
-            f" --version-id {shlex.quote(record['version_id'])}" if record["version_id"] else ""
+            f" --version-id {shlex.quote(record['version_id'])}"
+            if record["version_id"]
+            else ""
         )
         lines.append(
             f"/opt/auris/minio-client.sh cp --quiet{version_flag} "
@@ -401,8 +415,7 @@ def emit_restore_shell(args: argparse.Namespace) -> int:
         target = f"auris/{document['bucket']}/{record['key']}"
         if record["delete_marker"]:
             lines.append(
-                "/opt/auris/minio-client.sh rm --quiet --force "
-                f"{shlex.quote(target)}"
+                f"/opt/auris/minio-client.sh rm --quiet --force {shlex.quote(target)}"
             )
         else:
             artifact = "/backup/" + record["artifact"]
@@ -415,7 +428,8 @@ def emit_restore_shell(args: argparse.Namespace) -> int:
             option_parts: list[str] = []
             if record["metadata"]:
                 attributes = ";".join(
-                    f"{key}={value}" for key, value in sorted(record["metadata"].items())
+                    f"{key}={value}"
+                    for key, value in sorted(record["metadata"].items())
                 )
                 option_parts.extend(["--attr", attributes])
             if record["tags"]:
@@ -424,7 +438,9 @@ def emit_restore_shell(args: argparse.Namespace) -> int:
                 )
             if record["storage_class"]:
                 option_parts.extend(["--storage-class", record["storage_class"]])
-            rendered_options = "".join(f" {shlex.quote(value)}" for value in option_parts)
+            rendered_options = "".join(
+                f" {shlex.quote(value)}" for value in option_parts
+            )
             lines.append(
                 "/opt/auris/minio-client.sh cp --quiet --preserve"
                 f"{rendered_options} "
@@ -448,7 +464,9 @@ def _listing_document(path: Path, bucket: str) -> dict[str, Any]:
             "versions": len(records),
             "delete_markers": sum(record["delete_marker"] for record in records),
             "content_bytes": sum(
-                record["size_bytes"] for record in records if not record["delete_marker"]
+                record["size_bytes"]
+                for record in records
+                if not record["delete_marker"]
             ),
         },
     }
@@ -516,8 +534,7 @@ def emit_verify_shell(args: argparse.Namespace) -> int:
         'verification_root="$(mktemp -d /tmp/auris-flow-minio-verify.XXXXXX)"',
         "cleanup_verification_root() {",
         '  case "${verification_root}" in',
-        "    /tmp/auris-flow-minio-verify.*) "
-        'rm -rf -- "${verification_root}" ;;',
+        '    /tmp/auris-flow-minio-verify.*) rm -rf -- "${verification_root}" ;;',
         "    *) printf 'unsafe MinIO verification directory\\n' >&2; exit 44 ;;",
         "  esac",
         "}",

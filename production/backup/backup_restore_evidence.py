@@ -120,9 +120,7 @@ def _host_observation(
     endpoints = _mapping(context.get("Endpoints"), "Docker context endpoints")
     docker_endpoint = _mapping(endpoints.get("docker"), "Docker context endpoint")
     if docker_endpoint.get("Host") != "unix:///var/run/docker.sock":
-        raise EvidenceError(
-            "formal evidence requires the local rootful Docker socket"
-        )
+        raise EvidenceError("formal evidence requires the local rootful Docker socket")
 
     info = _mapping(docker_info, "Docker daemon observation")
     if info.get("OSType") != "linux":
@@ -176,9 +174,7 @@ def _authority_counts(document: Mapping[str, Any]) -> dict[str, object]:
     qdrant = _mapping(counts.get("qdrant"), "Qdrant backup counts")
     if qdrant.get("included") is not True:
         raise EvidenceError("formal restore proof requires Qdrant snapshots")
-    qdrant_collections = _mapping(
-        qdrant.get("collections"), "Qdrant collection counts"
-    )
+    qdrant_collections = _mapping(qdrant.get("collections"), "Qdrant collection counts")
     collections_total = _positive_int(
         len(qdrant_collections), "Qdrant collections_total"
     )
@@ -275,8 +271,7 @@ def _signed_backup_identity(
     }
     expected_boundary = supported_boundaries.get(str(boundary_mode))
     if (
-        signed_manifest.get("schema_version")
-        != "auris-flow.backup-manifest/v4"
+        signed_manifest.get("schema_version") != "auris-flow.backup-manifest/v4"
         or expected_boundary is None
         or boundary_assertion != expected_boundary[0]
         or boundary.get("contains_sensitive_data") is not True
@@ -365,8 +360,7 @@ def build_evidence(
         raise EvidenceError("backup/restore/cleanup time ordering is invalid")
     repository_root = root.resolve()
     tool_bindings = {
-        relative: _sha256_file(repository_root / relative)
-        for relative in TOOL_PATHS
+        relative: _sha256_file(repository_root / relative) for relative in TOOL_PATHS
     }
     return {
         "schema_version": SCHEMA_VERSION,
@@ -541,12 +535,8 @@ def _prepared_input(
         "verified_manifest": _load_json(
             verified_manifest_json, "verified backup summary"
         ),
-        "docker_context": _load_json(
-            docker_context_json, "Docker context observation"
-        ),
-        "docker_info": _load_json(
-            docker_info_json, "Docker daemon observation"
-        ),
+        "docker_context": _load_json(docker_context_json, "Docker context observation"),
+        "docker_info": _load_json(docker_info_json, "Docker daemon observation"),
     }
 
 

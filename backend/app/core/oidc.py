@@ -435,8 +435,7 @@ class OIDCBackChannelLogoutTokenValidator(_OIDCSignedTokenValidator):
         if (
             numeric_issued_at < 0
             or numeric_expires_at <= numeric_issued_at
-            or numeric_expires_at - numeric_issued_at
-            > _MAX_BACKCHANNEL_LOGOUT_LIFETIME_SECONDS
+            or numeric_expires_at - numeric_issued_at > _MAX_BACKCHANNEL_LOGOUT_LIFETIME_SECONDS
             or numeric_issued_at > current_time + self.config.clock_skew_seconds
         ):
             raise OIDCTokenValidationError

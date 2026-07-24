@@ -40,9 +40,7 @@ def timestamp_columns() -> tuple[sa.Column, sa.Column]:
 
 def upgrade() -> None:
     with op.batch_alter_table("browser_auth_sessions") as batch:
-        batch.add_column(
-            sa.Column("oidc_session_id_sha256", sa.String(64), nullable=True)
-        )
+        batch.add_column(sa.Column("oidc_session_id_sha256", sa.String(64), nullable=True))
         batch.create_index(
             "ix_browser_auth_sessions_oidc_sid_active",
             ["oidc_session_id_sha256", "revoked_at", "expires_at"],

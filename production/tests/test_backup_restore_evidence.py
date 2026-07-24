@@ -17,9 +17,7 @@ SHA256 = "a" * 64
 
 
 def _load_emitter() -> ModuleType:
-    spec = importlib.util.spec_from_file_location(
-        "backup_restore_evidence", EMITTER
-    )
+    spec = importlib.util.spec_from_file_location("backup_restore_evidence", EMITTER)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -107,9 +105,7 @@ def _docker_context() -> list[dict[str, object]]:
     return [
         {
             "Name": "default",
-            "Endpoints": {
-                "docker": {"Host": "unix:///var/run/docker.sock"}
-            },
+            "Endpoints": {"docker": {"Host": "unix:///var/run/docker.sock"}},
         }
     ]
 
@@ -184,9 +180,7 @@ def test_builds_commit_bound_native_linux_evidence_from_signed_backup() -> None:
     }
     bindings = evidence["tool_bindings"]
     assert isinstance(bindings, dict)
-    assert (
-        "production/backup/backup_restore_evidence.py" in bindings
-    )
+    assert "production/backup/backup_restore_evidence.py" in bindings
 
 
 @pytest.mark.parametrize(
@@ -391,7 +385,9 @@ def test_evidence_output_requires_drill_and_cleanup_before_backup_access(
     )
 
     assert result.returncode == 2
-    assert "--evidence-output requires --drill and --cleanup-on-success" in result.stderr
+    assert (
+        "--evidence-output requires --drill and --cleanup-on-success" in result.stderr
+    )
     assert not output.exists()
 
 
@@ -399,16 +395,10 @@ def test_verify_backup_publishes_only_after_exact_cleanup_is_proven() -> None:
     source = VERIFY_BACKUP.read_text(encoding="utf-8")
 
     assert "--evidence-output ABSOLUTE_FILE" in source
-    cleanup = source.index('down --volumes --remove-orphans')
-    no_containers = source.index(
-        'label=com.docker.compose.project=${DRILL_PROJECT}'
-    )
-    no_volumes = source.index(
-        'volume ls --quiet --filter'
-    )
-    no_networks = source.index(
-        'network ls --quiet --filter'
-    )
+    cleanup = source.index("down --volumes --remove-orphans")
+    no_containers = source.index("label=com.docker.compose.project=${DRILL_PROJECT}")
+    no_volumes = source.index("volume ls --quiet --filter")
+    no_networks = source.index("network ls --quiet --filter")
     emit = source.index('"${BACKUP_EVIDENCE_TOOL}" emit-gate')
     assert cleanup < no_containers < no_volumes < no_networks < emit
     assert "verify_backup_restore_gate.py" in source

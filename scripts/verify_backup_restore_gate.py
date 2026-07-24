@@ -31,12 +31,8 @@ RELEASE_TAG_PATTERN = re.compile(
     r"^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
     r"(?:-rc\.[1-9]\d*)?$"
 )
-BACKUP_ID_PATTERN = re.compile(
-    r"^auris-flow-\d{8}T\d{6}Z-[0-9a-f]{12}$"
-)
-DRILL_PROJECT_PATTERN = re.compile(
-    r"^auris-flow-restore-drill-[0-9a-f]{12}$"
-)
+BACKUP_ID_PATTERN = re.compile(r"^auris-flow-\d{8}T\d{6}Z-[0-9a-f]{12}$")
+DRILL_PROJECT_PATTERN = re.compile(r"^auris-flow-restore-drill-[0-9a-f]{12}$")
 WINDOWS_ABSOLUTE_PATTERN = re.compile(r"^[A-Za-z]:[\\/]")
 VIRTUALIZED_DOCKER_MARKERS = (
     "docker desktop",
@@ -123,7 +119,9 @@ def _nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
 
-def _parse_timestamp(value: object, *, label: str, errors: list[str]) -> datetime | None:
+def _parse_timestamp(
+    value: object, *, label: str, errors: list[str]
+) -> datetime | None:
     if not isinstance(value, str) or not value.endswith("Z"):
         errors.append(f"{label} must be an RFC3339 UTC timestamp ending in Z")
         return None
@@ -156,17 +154,13 @@ def _validate_interval(
     )
     duration = value.get(duration_field)
     if not _nonnegative_int(duration):
-        errors.append(
-            f"{label}.{duration_field} must be a non-negative integer"
-        )
+        errors.append(f"{label}.{duration_field} must be a non-negative integer")
     if started is not None and completed is not None:
         actual_duration = int((completed - started).total_seconds())
         if actual_duration < 0:
             errors.append(f"{label} time ordering is invalid")
         elif _nonnegative_int(duration) and duration != actual_duration:
-            errors.append(
-                f"{label}.{duration_field} does not match its timestamps"
-            )
+            errors.append(f"{label}.{duration_field} does not match its timestamps")
     return started, completed
 
 
@@ -245,9 +239,7 @@ def _scan_for_sensitive_content(
             _scan_for_sensitive_content(child, path=f"{path}.{key}", errors=errors)
     elif isinstance(value, list):
         for index, child in enumerate(value):
-            _scan_for_sensitive_content(
-                child, path=f"{path}[{index}]", errors=errors
-            )
+            _scan_for_sensitive_content(child, path=f"{path}[{index}]", errors=errors)
     elif isinstance(value, str):
         if value.startswith("/") or WINDOWS_ABSOLUTE_PATTERN.match(value):
             errors.append(f"evidence contains an absolute path: {path}")
@@ -302,9 +294,9 @@ def validate_evidence(
         errors=errors,
     )
     if release is not None:
-        if not isinstance(release.get("release_tag"), str) or not RELEASE_TAG_PATTERN.fullmatch(
-            release["release_tag"]
-        ):
+        if not isinstance(
+            release.get("release_tag"), str
+        ) or not RELEASE_TAG_PATTERN.fullmatch(release["release_tag"]):
             errors.append("release.release_tag is invalid")
         elif (
             expected_release_tag is not None
@@ -340,7 +332,9 @@ def validate_evidence(
     )
     if host is not None:
         if host.get("platform") != "linux" or host.get("native_linux") is not True:
-            errors.append("backup/restore release evidence requires a native Linux host")
+            errors.append(
+                "backup/restore release evidence requires a native Linux host"
+            )
         if host.get("docker_context") != "default":
             errors.append("Docker context must be default")
         if host.get("docker_ostype") != "linux":
@@ -378,13 +372,13 @@ def validate_evidence(
     backup_started: datetime | None = None
     backup_completed: datetime | None = None
     if backup is not None:
-        if not isinstance(backup.get("backup_id"), str) or not BACKUP_ID_PATTERN.fullmatch(
-            backup["backup_id"]
-        ):
+        if not isinstance(
+            backup.get("backup_id"), str
+        ) or not BACKUP_ID_PATTERN.fullmatch(backup["backup_id"]):
             errors.append("backup.backup_id is invalid")
-        if not isinstance(backup.get("manifest_sha256"), str) or not SHA256_PATTERN.fullmatch(
-            backup["manifest_sha256"]
-        ):
+        if not isinstance(
+            backup.get("manifest_sha256"), str
+        ) or not SHA256_PATTERN.fullmatch(backup["manifest_sha256"]):
             errors.append("backup.manifest_sha256 is invalid")
         if backup.get("manifest_signature_verified") is not True:
             errors.append("backup manifest signature was not verified")
@@ -409,9 +403,7 @@ def validate_evidence(
         if counts is not None:
             mysql = _exact_fields(
                 counts.get("mysql"),
-                frozenset(
-                    {"business_rows_total", "tables_total", "rows_total"}
-                ),
+                frozenset({"business_rows_total", "tables_total", "rows_total"}),
                 label="backup.authority_counts.mysql",
                 errors=errors,
             )
@@ -433,7 +425,9 @@ def validate_evidence(
                 _positive_int(minio.get(field))
                 for field in ("object_keys", "versions", "content_bytes")
             ):
-                errors.append("restore proof must contain non-empty MinIO authority data")
+                errors.append(
+                    "restore proof must contain non-empty MinIO authority data"
+                )
             qdrant = _exact_fields(
                 counts.get("qdrant"),
                 frozenset({"collections", "points_total"}),
@@ -444,7 +438,9 @@ def validate_evidence(
                 _positive_int(qdrant.get(field))
                 for field in ("collections", "points_total")
             ):
-                errors.append("restore proof must contain non-empty Qdrant derived data")
+                errors.append(
+                    "restore proof must contain non-empty Qdrant derived data"
+                )
 
     restore = _exact_fields(
         document.get("restore"),
@@ -477,9 +473,7 @@ def validate_evidence(
                 edge_internal_ip_value, str
             ):
                 raise ValueError
-            restore_network = ipaddress.ip_network(
-                network_subnet_value, strict=True
-            )
+            restore_network = ipaddress.ip_network(network_subnet_value, strict=True)
             edge_internal_ip = ipaddress.ip_address(edge_internal_ip_value)
         except (TypeError, ValueError):
             errors.append("restore network allocation is invalid")
@@ -647,10 +641,7 @@ def validate_release_bindings(
         return ["expected_commit must be a complete lowercase Git object id"]
     if not RELEASE_TAG_PATTERN.fullmatch(expected_release_tag):
         return ["expected_release_tag must be a supported SemVer release tag"]
-    if (
-        not release_bundle_root.is_dir()
-        or release_bundle_root.is_symlink()
-    ):
+    if not release_bundle_root.is_dir() or release_bundle_root.is_symlink():
         return ["release bundle root must be a real directory"]
     document = evidence if isinstance(evidence, dict) else {}
     release = document.get("release")
@@ -719,10 +710,7 @@ def verify_sigstore_attestation(
     signature_bundle: Path,
     release_tag: str,
     cosign_binary: str = "cosign",
-    run: Callable[
-        [tuple[str, ...]], subprocess.CompletedProcess[str]
-    ]
-    | None = None,
+    run: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Verify evidence was signed by the exact official tag workflow identity."""
 
@@ -777,17 +765,11 @@ def verify_sigstore_attestation(
 def verify_signed_release_bundle(
     release_bundle_root: Path,
     *,
-    run: Callable[
-        [tuple[str, ...]], subprocess.CompletedProcess[str]
-    ]
-    | None = None,
+    run: Callable[[tuple[str, ...]], subprocess.CompletedProcess[str]] | None = None,
 ) -> None:
     """Verify an external bundle with this checkout's trusted verifier."""
 
-    if (
-        not release_bundle_root.is_dir()
-        or release_bundle_root.is_symlink()
-    ):
+    if not release_bundle_root.is_dir() or release_bundle_root.is_symlink():
         raise FormalEvidenceError("release bundle root must be a real directory")
     verifier = ROOT / "scripts" / "release_bundle.py"
     try:
@@ -853,9 +835,7 @@ def main() -> int:
                 "--formal requires --expected-release-tag, --signature-bundle, "
                 "and --release-bundle-root"
             )
-        validation_root = (
-            args.release_bundle_root if args.formal else args.root
-        )
+        validation_root = args.release_bundle_root if args.formal else args.root
         if validation_root is None:
             raise ValueError("release validation root is missing")
         if validation_root.is_symlink():

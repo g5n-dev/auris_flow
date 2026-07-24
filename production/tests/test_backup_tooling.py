@@ -337,9 +337,7 @@ def create_manifest(root: Path) -> tuple[Path, Path]:
 def test_manifest_records_truthful_storage_boundary_mode(tmp_path: Path) -> None:
     external_root = make_backup_root(tmp_path / "external")
     create_unsigned_manifest(external_root)
-    external = json.loads(
-        (external_root / "manifest.json").read_text(encoding="utf-8")
-    )
+    external = json.loads((external_root / "manifest.json").read_text(encoding="utf-8"))
     assert external["storage_boundary"] == {
         "contains_sensitive_data": True,
         "mode": "encrypted-external",

@@ -567,8 +567,9 @@ def test_release_bundle_contains_governance_migrations_and_signed_checksums() ->
     assert "release-metadata.sigstore.json" in text
     assert "build/release/SHA256SUMS.sigstore.json" in text
     manifest_step = text[
-        text.index("Produce commit-bound checksums and release manifest") :
-        text.index("Keyless sign and verify the release checksum set")
+        text.index("Produce commit-bound checksums and release manifest") : text.index(
+            "Keyless sign and verify the release checksum set"
+        )
     ]
     assert manifest_step.count('--artifact "') == 8
     assert '--artifact "build/release/final-runtime/production-path-gate.json"' in text

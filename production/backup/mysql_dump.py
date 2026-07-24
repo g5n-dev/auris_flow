@@ -37,7 +37,9 @@ def verify(args: argparse.Namespace) -> int:
         raise DumpError("MySQL gzip stream is corrupt or not UTF-8 SQL") from exc
     if not saw_dump_header:
         raise DumpError("MySQL dump header is missing")
-    if not required_databases.issubset(created) or not required_databases.issubset(used):
+    if not required_databases.issubset(created) or not required_databases.issubset(
+        used
+    ):
         raise DumpError("MySQL dump does not contain all required databases")
     print("MySQL logical dump structure verified")
     return 0

@@ -362,8 +362,7 @@ def test_backchannel_logout_opportunistically_cleans_a_bounded_expired_replay_ba
         # an unbounded delete, while repeated valid deliveries converge to one row.
         assert 1 < len(remaining) < 301
         assert any(
-            replay.logout_event_sha256
-            not in {f"{index:064x}" for index in range(300)}
+            replay.logout_event_sha256 not in {f"{index:064x}" for index in range(300)}
             for replay in remaining
         )
 
@@ -461,9 +460,7 @@ def test_backchannel_logout_maps_database_failure_to_standard_non_leaking_400(
     del oidc_settings
     monkeypatch.setattr(
         "app.api.routers.auth.get_oidc_backchannel_logout_validator",
-        lambda: StubLogoutTokenValidator(
-            _claims(token_id="database-failure-event")
-        ),
+        lambda: StubLogoutTokenValidator(_claims(token_id="database-failure-event")),
     )
 
     def fail_processing(*_args, **_kwargs) -> None:

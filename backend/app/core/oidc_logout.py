@@ -102,9 +102,7 @@ def process_backchannel_logout(
             BrowserAuthSession.oidc_session_id_sha256 == _sha256(claims.session_id)
         )
     if claims.subject is not None:
-        statement = statement.where(
-            OidcIdentity.subject_sha256 == _sha256(claims.subject)
-        )
+        statement = statement.where(OidcIdentity.subject_sha256 == _sha256(claims.subject))
 
     for record in session.scalars(statement):
         record.revoked_at = current

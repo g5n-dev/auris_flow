@@ -1126,9 +1126,7 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
 
         self._write_valid_fixture()
         self.module.validate_backup_restore_evidence = (
-            lambda evidence, *, root, expected_commit: [
-                "cleanup proof is invalid"
-            ]
+            lambda evidence, *, root, expected_commit: ["cleanup proof is invalid"]
         )
         with self.assertRaisesRegex(
             self.module.EvidenceError, "cleanup proof is invalid"
@@ -1169,11 +1167,11 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             return []
 
         self.module.validate_backup_restore_release_bindings = accept_bindings
-        self.module.verify_signed_release_bundle = (
-            lambda root: calls.append(("bundle", root))
+        self.module.verify_signed_release_bundle = lambda root: calls.append(
+            ("bundle", root)
         )
-        self.module.verify_backup_restore_sigstore_attestation = (
-            lambda **kwargs: calls.append(("sigstore", kwargs["release_tag"]))
+        self.module.verify_backup_restore_sigstore_attestation = lambda **kwargs: (
+            calls.append(("sigstore", kwargs["release_tag"]))
         )
 
         self._finalize(

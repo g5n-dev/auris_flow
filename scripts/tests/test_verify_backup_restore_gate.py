@@ -260,9 +260,11 @@ def _write_release_bundle(tmp_path: Path) -> tuple[Path, dict[str, object]]:
     bundle = tmp_path / "deployment"
     production = bundle / "production"
     production.mkdir(parents=True)
-    compose = b'{"services":{"bff":{"image":"example.invalid/bff@sha256:' + (
-        b"b" * 64
-    ) + b'"}}}\n'
+    compose = (
+        b'{"services":{"bff":{"image":"example.invalid/bff@sha256:'
+        + (b"b" * 64)
+        + b'"}}}\n'
+    )
     image_lock = (
         b'{"images":{"bff":"example.invalid/bff@sha256:'
         + (b"b" * 64)

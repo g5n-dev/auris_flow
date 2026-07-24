@@ -1060,9 +1060,7 @@ def _validate_backup_restore(
         expected_commit=source_commit,
     )
     if errors:
-        raise EvidenceError(
-            "backup/restore evidence is invalid: " + "; ".join(errors)
-        )
+        raise EvidenceError("backup/restore evidence is invalid: " + "; ".join(errors))
 
 
 def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
@@ -2517,9 +2515,7 @@ def _validate_core_evidence(
         repository_root=repository_root,
     )
 
-    backup_restore, raw = _load_json_object(
-        evidence_dir / "backup-restore-gate.json"
-    )
+    backup_restore, raw = _load_json_object(evidence_dir / "backup-restore-gate.json")
     verified_bytes["backup-restore-gate.json"] = raw
     _validate_backup_restore(
         backup_restore,
@@ -2550,9 +2546,7 @@ def _validate_core_evidence(
             verify_signed_release_bundle(release_bundle_root)
             verify_backup_restore_sigstore_attestation(
                 evidence_path=evidence_dir / "backup-restore-gate.json",
-                signature_bundle=(
-                    evidence_dir / "backup-restore-gate.sigstore.json"
-                ),
+                signature_bundle=(evidence_dir / "backup-restore-gate.sigstore.json"),
                 release_tag=expected_release_tag,
             )
         except FormalEvidenceError as exc:
@@ -2954,8 +2948,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
         if args.require_audits and (
-            args.expected_release_tag is None
-            or args.release_bundle_root is None
+            args.expected_release_tag is None or args.release_bundle_root is None
         ):
             raise EvidenceError(
                 "--require-audits requires --expected-release-tag and "

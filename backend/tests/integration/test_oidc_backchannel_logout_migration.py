@@ -37,8 +37,7 @@ def test_0044_adds_hash_only_sid_and_persistent_unique_jti_replay_guard(
         inspector = inspect(engine)
         assert "oidc_logout_token_replays" in inspector.get_table_names()
         session_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("browser_auth_sessions")
+            column["name"]: column for column in inspector.get_columns("browser_auth_sessions")
         }
         assert session_columns["oidc_session_id_sha256"]["nullable"] is True
         assert {"oidc_session_id", "sid"}.isdisjoint(session_columns)
@@ -48,8 +47,7 @@ def test_0044_adds_hash_only_sid_and_persistent_unique_jti_replay_guard(
         assert "ix_browser_auth_sessions_oidc_sid_active" in session_indexes
 
         replay_columns = {
-            column["name"]
-            for column in inspector.get_columns("oidc_logout_token_replays")
+            column["name"] for column in inspector.get_columns("oidc_logout_token_replays")
         }
         assert {
             "logout_event_sha256",
@@ -63,9 +61,7 @@ def test_0044_adds_hash_only_sid_and_persistent_unique_jti_replay_guard(
         assert {"issuer", "jti", "logout_token"}.isdisjoint(replay_columns)
         replay_uniques = {
             constraint["name"]
-            for constraint in inspector.get_unique_constraints(
-                "oidc_logout_token_replays"
-            )
+            for constraint in inspector.get_unique_constraints("oidc_logout_token_replays")
         }
         assert "uq_oidc_logout_token_replays_issuer_jti" in replay_uniques
 
@@ -119,8 +115,7 @@ def test_0044_downgrade_removes_only_backchannel_logout_expansion(
         inspector = inspect(engine)
         assert "oidc_logout_token_replays" not in inspector.get_table_names()
         session_columns = {
-            column["name"]
-            for column in inspector.get_columns("browser_auth_sessions")
+            column["name"] for column in inspector.get_columns("browser_auth_sessions")
         }
         assert "oidc_session_id_sha256" not in session_columns
         assert "oidc_authorization_states" in inspector.get_table_names()

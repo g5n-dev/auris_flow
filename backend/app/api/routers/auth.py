@@ -187,9 +187,7 @@ async def _backchannel_logout_token(request: Request) -> str:
     if media_type != "application/x-www-form-urlencoded":
         raise _invalid_logout_token()
     content_lengths = [
-        value.strip()
-        for key, value in request.headers.raw
-        if key.lower() == b"content-length"
+        value.strip() for key, value in request.headers.raw if key.lower() == b"content-length"
     ]
     if len(content_lengths) > 1:
         raise _invalid_logout_token()
