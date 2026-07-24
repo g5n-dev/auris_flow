@@ -2,160 +2,182 @@
 
 # Auris Flow
 
-### 面向音频证据的智能质检与洞察中台
+### 让每一条业务洞察，都能回到它的音频证据
 
-从音频接入、转写调听、标签治理到评测、知识沉淀与业务洞察，<br>
-用同一条可追溯链路连接数据、模型、任务与人。
+面向音频质检、标注、评测与洞察的可追溯工作台。<br>
+一条链路连接音频、转写、标签、模型、任务、人和最终业务结论。
 
 <p>
-  <img alt="React" src="https://img.shields.io/badge/React-18-149ECA?logo=react&logoColor=white">
-  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
+  <a href="https://github.com/g5n-dev/auris_flow/actions/workflows/verify.yml">
+    <img alt="Verify" src="https://github.com/g5n-dev/auris_flow/actions/workflows/verify.yml/badge.svg">
+  </a>
+  <a href="https://github.com/g5n-dev/auris_flow/actions/workflows/codeql.yml">
+    <img alt="CodeQL" src="https://github.com/g5n-dev/auris_flow/actions/workflows/codeql.yml/badge.svg">
+  </a>
+  <img alt="Release candidate" src="https://img.shields.io/badge/status-release%20candidate-F59E0B">
+  <img alt="API v1" src="https://img.shields.io/badge/API-%2Fapi%2Fv1-009688">
+  <img alt="Single-node Compose" src="https://img.shields.io/badge/deploy-single--node%20Compose-2496ED?logo=docker&logoColor=white">
+</p>
+
+<p>
+  <img alt="React 18" src="https://img.shields.io/badge/React-18-149ECA?logo=react&logoColor=white">
+  <img alt="TypeScript 5" src="https://img.shields.io/badge/TypeScript-5-3178C6?logo=typescript&logoColor=white">
   <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-BFF-009688?logo=fastapi&logoColor=white">
-  <img alt="MySQL" src="https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white">
-  <img alt="Qdrant" src="https://img.shields.io/badge/Qdrant-Vector_DB-DC244C">
-  <img alt="Dagster" src="https://img.shields.io/badge/Dagster-Orchestration-654FF0">
+  <img alt="MySQL 8.4" src="https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white">
+  <img alt="Dagster" src="https://img.shields.io/badge/Dagster-execution-654FF0">
+  <img alt="Qdrant" src="https://img.shields.io/badge/Qdrant-vector%20index-DC244C">
 </p>
 
 <p>
-  <a href="#-为什么是-auris-flow">产品定位</a> ·
-  <a href="#-系统架构">系统架构</a> ·
-  <a href="#-快速开始">快速开始</a> ·
-  <a href="#-验证与质量门禁">质量门禁</a> ·
-  <a href="#-项目状态">项目状态</a>
+  <a href="#quickstart"><strong>5 分钟启动</strong></a>
+  · <a href="#tour">能力导览</a>
+  · <a href="#architecture">系统架构</a>
+  · <a href="#quality">验证门禁</a>
+  · <a href="#release-status">发行状态</a>
+  · <a href="production/README.md">生产候选部署</a>
 </p>
 
-<sub>Enterprise audio evidence, quality evaluation and insight platform.</sub>
+<sub>Audio evidence · quality evaluation · governed AI workflows · explainable insight</sub>
 
 </div>
 
 ---
 
-## ✨ 为什么是 Auris Flow
+> [!IMPORTANT]
+> 当前仓库是 Auris Flow `v1.0.0` 的 **Release Candidate 实现**，适合产品评审、前后端联调和工程
+> 验证；它尚未完成正式 Release 审批，也尚未获得生产支持承诺。项目状态和剩余门禁见
+> [发行状态](#release-status)。
 
-传统音频质检系统往往把“音频、转写、标签、评测、洞察”拆成彼此孤立的页面。Auris Flow
-把它们建模为同一条证据链：每次运行、人工操作和业务结论都能追溯至对应的租户、项目、对象与
+<a id="tour"></a>
+
+## 从音频到行动，不丢失上下文
+
+传统音频质检系统把音频、转写、标签、评测和报表拆成互不相干的页面。Auris Flow 把它们建模为
+同一条证据链：每次运行、人工判断、版本变更和业务结论都绑定 `tenant_id`、`project_id` 与
 `trace_id`。
 
-| 闭环 | 能力 |
-| --- | --- |
-| **数据进入** | 连接器、批次、音频资产、转写与说话人分离 |
-| **证据生产** | 波形调听、片段证据、人工标注、标签版本与发布 |
-| **质量评测** | 评测集、规则/模型评测、badcase、校准与复核 |
-| **知识沉淀** | 知识库、证据索引、语义召回与可解释引用 |
-| **业务洞察** | 指标聚合、趋势分析、洞察 Agent 与报告导出 |
-| **可信运行** | 租户隔离、幂等、审计、Outbox、回写签名与全链路追踪 |
-
-> [!IMPORTANT]
-> 本仓库是 Auris Flow `v1.0.0` 的**候选实现**，可用于原型评审、后端联调和工程验证；它尚未完成正式
-> Release 审批与生产支持验收。详见[项目状态](#-项目状态)。
-
-## 🧭 产品工作台
-
-前端原型是后端开发的真实交互基线，覆盖以下一级模块：
-
-- **任务画布**：配置处理链路、提交运行、查看状态与失败原因。
-- **数据资产**：管理音频、批次、转写结果、派生文件和血缘。
-- **调听工作台**：波形、说话人、转写、片段证据与人工标签协同。
-- **标签中心**：标签定义、版本、样本、发布与生命周期统计。
-- **评测中心**：评测集、执行记录、指标、badcase 与校准闭环。
-- **知识库**：知识条目、证据引用、向量索引和检索解释。
-- **洞察中心**：业务指标、趋势、归因、报告与行动建议。
-- **平台设置**：连接器、成员、角色、项目与运行环境治理。
-
-这些模块共享同一套业务对象和状态语义。Dagster 只负责底层执行映射，不会作为产品画布或业务
-API 暴露给用户。
-
-## 🏗 系统架构
+| 进入系统 | 形成证据 | 做出判断 | 推动行动 |
+| --- | --- | --- | --- |
+| 连接器、批次、音频资产 | 转写、说话人、片段、人工标注 | 标签版本、评测集、校准、复核 | 洞察报告、实验、发布、回滚 |
+| 对象身份与内容哈希 | 原始对象与派生结果可追溯 | 规则、模型与人保持版本绑定 | 结果可回到证据和执行记录 |
 
 ```mermaid
 flowchart LR
-    UI["React 工作台"] --> BFF["FastAPI BFF<br/>/api/v1/*"]
+    A["音频与业务对象"] --> B["转写 / 说话人 / 片段"]
+    B --> C["调听与证据标注"]
+    C --> D["标签版本与事实集"]
+    D --> E["评测 / 校准 / 人工复核"]
+    E --> F["洞察报告与行动"]
+    F --> G["实验 / 发布 / 回滚"]
 
-    BFF --> DB[("MySQL<br/>权威业务状态")]
-    BFF --> CACHE[("Redis<br/>限流与运行辅助")]
-    BFF --> OBJ[("S3 / MinIO<br/>音频与证据文件")]
-    BFF --> VECTOR[("Qdrant<br/>语义派生索引")]
-
-    BFF --> OUTBOX["Transactional Outbox"]
-    OUTBOX --> WORKER["异步 Worker"]
-    WORKER --> DAGSTER["Dagster<br/>执行引擎"]
-    DAGSTER --> CALLBACK["签名回写"]
-    CALLBACK --> BFF
-
-    BFF -. trace .-> OTEL["OpenTelemetry"]
-    WORKER -. trace .-> OTEL
+    T["tenant · project · trace_id"] -. 贯穿 .-> A
+    T -. 贯穿 .-> C
+    T -. 贯穿 .-> E
+    T -. 贯穿 .-> G
 ```
 
-### 技术基线
+<details open>
+<summary><strong>🎧 我想先体验产品工作台</strong></summary>
 
-| 层次 | 选型 | 职责 |
-| --- | --- | --- |
-| Web | React 18、TypeScript、Vite | 高保真中台原型与 BFF 联调 |
-| API | FastAPI、Pydantic、SQLAlchemy、Alembic | 认证、投影、业务契约与迁移 |
-| 数据 | MySQL 8.4、Redis 7.4 | 权威状态、聚合、限流与运行辅助 |
-| 文件 | MinIO / S3 / OBS / OSS | 音频、转写、证据包、报告与导出 |
-| 检索 | Qdrant | 知识、证据、样本和 badcase 的派生向量索引 |
-| 编排 | Dagster | 后台任务执行、状态同步与签名 completion |
-| 可观测性 | OpenTelemetry、Prometheus、Tempo、Grafana | Trace、Metrics、Logs 与告警基线 |
+启动本地环境后，从任务画布进入完整演示链路：
 
-第一阶段不以 ClickHouse 为默认组件。洞察与大盘使用 MySQL 聚合/预计算、Redis 辅助和 Qdrant
-召回解释。
+1. 在**数据资产**查看音频、转写、派生对象和血缘。
+2. 在**调听工作台**使用波形、说话人、转写和片段证据协同复核。
+3. 在**标签中心**查看标签定义、样本、版本、发布和生命周期统计。
+4. 在**评测中心**执行评测，追踪指标、badcase、校准与人工复核。
+5. 在**知识库**查看证据引用、派生向量索引和召回解释。
+6. 在**洞察中心**把指标、归因、报告和后续行动重新绑定到源证据。
 
-## 🚀 快速开始
+</details>
 
-### 环境要求
+<details>
+<summary><strong>🔌 我想联调 API</strong></summary>
 
-- Python `3.12`（项目代码兼容 `>=3.11`）
+- 业务接口统一位于 `/api/v1/*`，资源使用复数与 kebab-case。
+- OpenAPI：[`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs)
+- 存活检查：[`/healthz`](http://127.0.0.1:8000/healthz)
+- 强依赖就绪检查：[`/readyz`](http://127.0.0.1:8000/readyz)
+- 错误响应使用稳定 envelope，并携带 request ID 与 trace ID。
+- 前端只访问 BFF，不直连 MySQL、Redis、对象存储、Qdrant 或 Dagster。
+
+完整契约从 [后端规格入口](doc/backend-spec/README.md) 开始阅读。
+
+</details>
+
+<details>
+<summary><strong>🏭 我想评估单机生产候选</strong></summary>
+
+生产候选由 FastAPI BFF、异步 Worker、MySQL、Redis、MinIO、Qdrant、真实 Dagster、Keycloak
+参考 IdP、反向代理和可观测性组件组成。它只面向一台 64 位 Linux 主机，不宣称节点级高可用或
+宿主机故障自动容灾。
+
+不要直接复用本地示例凭据。先阅读 [生产候选安装与支持边界](production/README.md)，再按
+[备份恢复](doc/runbooks/backup-restore.md)和[升级回滚](doc/runbooks/upgrade-rollback.md)完成演练。
+
+</details>
+
+<a id="quickstart"></a>
+
+## 5 分钟启动本地工作台
+
+### 需要什么
+
+- Python `3.12`（代码兼容 `>=3.11`）
 - [`uv`](https://docs.astral.sh/uv/) `0.10.x`
 - Node.js `22`
-- Docker Engine / Docker Desktop
+- 正在运行的 Docker Engine / Docker Desktop
 
-仓库已提交 Python 与 Node 锁文件，建议始终使用锁定依赖安装。
-
-### 一键启动
+### 安装并启动
 
 ```bash
 git clone https://github.com/g5n-dev/auris_flow.git
 cd auris_flow
-bash scripts/dev_up.sh
+
+(cd backend && uv sync --frozen --all-extras --python 3.12)
+npm ci --prefix prototype/auris-flow-ui --ignore-scripts
+
+PYTHON="$PWD/backend/.venv/bin/python" bash scripts/dev_up.sh
 ```
 
-脚本会检查依赖、启动 MySQL/Redis/MinIO/Qdrant、执行迁移与 seed，并以前台方式运行：
+`dev_up.sh` 会启动本地 MySQL、Redis、MinIO、Qdrant，执行迁移和演示数据初始化，再托管 BFF、
+Outbox Worker 与 Vite。按 <kbd>Ctrl</kbd> + <kbd>C</kbd> 可停止应用进程；基础依赖容器仍会保留，
+方便下次快速启动。
 
-- Web：`http://127.0.0.1:5173`
-- BFF：`http://127.0.0.1:8000`
-- OpenAPI：`http://127.0.0.1:8000/docs`
-- MinIO Console：`http://127.0.0.1:9001`
+| 入口 | 地址 |
+| --- | --- |
+| 工作台 | [`http://127.0.0.1:5173`](http://127.0.0.1:5173) |
+| BFF | [`http://127.0.0.1:8000`](http://127.0.0.1:8000) |
+| OpenAPI | [`http://127.0.0.1:8000/docs`](http://127.0.0.1:8000/docs) |
+| Readiness | [`http://127.0.0.1:8000/readyz`](http://127.0.0.1:8000/readyz) |
+| MinIO Console | [`http://127.0.0.1:9001`](http://127.0.0.1:9001) |
 
-本地演示账户：
+本地演示登录：
 
 ```text
-邮箱：demo.operator@auris.local
-密码：auris-demo
-租户：aurora_auto
-项目：sales_qa
+邮箱    demo.operator@auris.local
+密码    auris-demo
+租户    aurora_auto
+项目    sales_qa
 ```
 
-开发登录仅在 `local/test/ci` 且 `ALLOW_DEV_AUTH=true` 时启用，不得用于生产环境。
-
-### 分步启动
+> [!CAUTION]
+> 这个账户和 `ALLOW_DEV_AUTH=true` 只允许出现在 `local/test/ci`。生产配置发现 demo credential、
+> 弱签名密钥、通配 CORS、开发认证或 fake adapter 时会 fail closed。
 
 <details>
-<summary><strong>1. 启动基础依赖</strong></summary>
+<summary><strong>手动分三步启动</strong></summary>
+
+**1. 基础依赖**
 
 ```bash
 docker compose -f docker/local/docker-compose.yml up -d
 ```
 
-</details>
-
-<details>
-<summary><strong>2. 启动 BFF 与 Worker</strong></summary>
+**2. BFF 与 Worker**
 
 ```bash
 cd backend
 uv sync --frozen --all-extras --python 3.12
-cp .env.example .env
 uv run alembic upgrade head
 uv run python -m app.seed local_demo
 
@@ -163,17 +185,14 @@ APP_ENV=local ALLOW_DEV_AUTH=true \
   uv run uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload --no-access-log
 ```
 
-在另一个终端启动 Outbox Worker：
+在另一个终端：
 
 ```bash
 cd backend
-uv run python -m app.workers.outbox_worker
+APP_ENV=local ALLOW_DEV_AUTH=true uv run python -m app.workers.outbox_worker
 ```
 
-</details>
-
-<details>
-<summary><strong>3. 启动前端</strong></summary>
+**3. 前端**
 
 ```bash
 cd prototype/auris-flow-ui
@@ -183,115 +202,246 @@ npm run dev
 
 </details>
 
-## 🔐 可信工程基线
+<a id="architecture"></a>
 
-Auris Flow 的写操作从第一阶段即按企业系统约束设计：
+## 系统架构
 
-- **隔离**：每个业务请求显式绑定租户与项目上下文。
-- **认证**：生产基线采用 OIDC Authorization Code + PKCE 和不透明 HttpOnly 浏览器会话。
-- **防护**：Cookie 写请求强制 CSRF Token 与可信 Origin 校验。
-- **幂等**：写入入口、任务提交和外部回写具备幂等语义。
-- **审计**：关键操作记录主体、作用域、对象、结果和 `trace_id`。
-- **可靠异步**：数据库事务与 Outbox 协同，失败支持重试与死信治理。
-- **安全回写**：外部 callback 使用 HMAC 签名、时间窗与重放防护。
-- **可观测**：业务 `trace_id` 与活动 OpenTelemetry trace/span 关联。
+```mermaid
+flowchart TB
+    USER["浏览器"] --> EDGE["Edge / TLS / security headers"]
+    EDGE --> UI["React 工作台"]
+    EDGE --> BFF["FastAPI BFF<br/>/api/v1/*"]
+    IDP["通用 OIDC IdP<br/>Keycloak 仅作参考"] --> BFF
 
-生产环境不得使用仓库内的示例密码、开发 Token、确定性向量或本地对象存储凭据。完整说明见
-[安全策略](SECURITY.md)与[安全事件响应](doc/runbooks/security-incident-response.md)。
+    subgraph truth["权威事实"]
+        MYSQL[("MySQL<br/>业务状态 / 审计 / Outbox")]
+        OBJECTS[("MinIO / S3 / OBS / OSS<br/>音频与证据对象")]
+    end
 
-## ✅ 验证与质量门禁
+    subgraph derived["可重建与运行辅助"]
+        REDIS[("Redis<br/>限流 / 锁 / 运行辅助")]
+        QDRANT[("Qdrant<br/>派生语义索引")]
+    end
 
-日常开发验证：
+    BFF --> MYSQL
+    BFF --> OBJECTS
+    BFF --> REDIS
+    BFF --> QDRANT
 
-```bash
-bash scripts/verify_fast.sh
+    MYSQL --> OUTBOX["Transactional Outbox"]
+    OUTBOX --> WORKER["异步 Worker"]
+    WORKER --> DAGSTER["Dagster<br/>底层执行引擎"]
+    DAGSTER --> CALLBACK["签名 completion / 状态同步"]
+    CALLBACK --> BFF
+
+    BFF -. traces / metrics .-> OTEL["OpenTelemetry Collector"]
+    WORKER -. traces / metrics .-> OTEL
+    DAGSTER -. traces / metrics .-> OTEL
+    OTEL --> OBS["Prometheus · Tempo · Grafana · Alertmanager"]
 ```
 
-如果本机存在多个 Python 环境：
+### 不可跨越的边界
 
-```bash
-PYTHON=/absolute/path/to/python bash scripts/verify_fast.sh
-```
+| 边界 | 约束 |
+| --- | --- |
+| 权威数据 | MySQL 是权威业务存储；对象存储保存权威对象。Redis 与 Qdrant 不能成为唯一业务事实来源。 |
+| 执行引擎 | Dagster 只承担后台执行，不作为业务 API 语言，也不在产品界面暴露为“Dagster 画布”。 |
+| 前端访问 | 浏览器只访问 Edge/BFF，不持有长期 bearer token，不直连基础设施。 |
+| 洞察路径 | 第一阶段使用 MySQL 聚合/预计算、Redis 辅助和 Qdrant 召回解释，不引入 ClickHouse。 |
+| 部署边界 | 首发目标是 Linux 单机 Docker Compose；不承诺自动故障转移或节点级高可用。 |
 
-该门禁覆盖规格校验、Readiness、Ruff、mypy、Alembic 升降级、后端单元/契约/集成测试、BFF
-Smoke、前端架构检查、生产构建、Bundle Budget 与 Playwright UI Smoke。
+### 技术基线
 
-| 场景 | 命令 | 适用范围 |
+| 层 | 组件 | 主要职责 |
 | --- | --- | --- |
-| 快速反馈 | `bash scripts/verify_fast.sh` | 复用本地依赖的日常开发门禁 |
-| 干净克隆 | `bash scripts/verify_clean_clone.sh` | 锁文件与源码可复现性 |
-| UI / BFF | `AURIS_RUN_E2E=1 bash scripts/verify_all.sh` | 浏览器交互与 API 联调 |
-| 真实依赖栈 | `bash scripts/verify_real_stack.sh` | MySQL、Redis、MinIO、Qdrant |
-| 真实 Dagster | `bash scripts/verify_real_dagster.sh` | 执行引擎、取消和回写 |
-| 产品执行链路 | `bash scripts/verify_product_dagster_path.sh` | BFF → Outbox → Dagster → 状态同步 |
-| 发布候选 | `bash scripts/verify_release.sh` | 严格、Fail-closed 的完整发行门禁 |
+| Web | React 18、TypeScript、Vite | 模块化工作台、可见交互反馈、BFF 联调 |
+| API | FastAPI、Pydantic、SQLAlchemy、Alembic | 认证、业务契约、强表、迁移 |
+| Data | MySQL 8.4、Redis 7.4 | 权威状态、审计、Outbox、限流与运行辅助 |
+| Object | MinIO / S3 / OBS / OSS | 音频、转写、证据包、报告与导出 |
+| Recall | Qdrant | 知识、证据、样本和 badcase 的派生语义索引 |
+| Execution | Dagster | 提交、状态同步、取消、超时、重试与恢复 |
+| Observability | OpenTelemetry、Prometheus、Tempo、Grafana | Trace、Metrics、Dashboard 与告警 |
 
-> [!NOTE]
-> `verify_fast.sh` 和开发真实栈用于工程反馈，不等同于公开发行证据。严格 Release 要求所有证据
-> 绑定同一个干净 commit，并通过不可变前端制品、视觉基线、供应链与人工授权检查。
->
-> `scripts/verify_real_stack.sh` 的 Dagster 端点由
-> `scripts/fake_dagster_graphql_server.py` 提供，只验证开发协议与故障恢复；它不能替代
-> `bash scripts/verify_real_dagster.sh`。后者启动生产 Compose 的真实 Dagster，并验证
-> `SAFE_TERMINATE` 取消语义。该证明仍只覆盖 **Dagster 引擎层**，产品级 BFF、Outbox、
-> 状态回写与签名回调必须由产品执行链路门禁独立验收。
+<details>
+<summary><strong>音频为什么可以拖动播放：HTTP Range 链路</strong></summary>
 
-## 📁 仓库结构
+浏览器原生媒体元素可以直接使用短期 playback grant 请求
+`GET /api/v1/audio-playback?grant=…`，无需把长期 Authorization header 暴露给媒体组件。
+
+```mermaid
+sequenceDiagram
+    participant UI as Browser
+    participant BFF as FastAPI BFF
+    participant OBJ as Object Storage
+
+    UI->>BFF: 申请短期 playback grant
+    BFF-->>UI: /api/v1/audio-playback?grant=…
+    UI->>BFF: GET + Range: bytes=…
+    BFF->>OBJ: Provider-signed ranged GET
+    OBJ-->>BFF: 206 + Content-Range
+    BFF-->>UI: 206 + Accept-Ranges + ETag
+```
+
+- 支持 `GET` / `HEAD`、闭区间、开放区间、suffix range 和 `If-Range`。
+- 合法部分请求返回 `206`；不可满足或多区间请求稳定返回 `416`。
+- MinIO、S3、华为云 OBS 与阿里云 OSS 的 provider 签名不会交叉复用配置。
+- Edge 对该精确 playback location 关闭 access log，避免 query 中的短期 grant 落盘；上游 WAF、
+  LB 与 APM 也必须遵守同一约束。
+
+</details>
+
+<a id="trust"></a>
+
+## 可信运行基线
+
+写操作从一开始就按多租户生产系统约束建模：
+
+- **身份**：OIDC Authorization Code + PKCE；浏览器只持有 Secure、HttpOnly、不透明会话。
+- **授权**：资源级 default-deny，租户、项目、角色与对象范围同时校验。
+- **浏览器防护**：Cookie 写请求校验 CSRF token 与可信 Origin。
+- **幂等与审计**：写入口、任务提交和回写都记录主体、作用域、结果、request ID 与 `trace_id`。
+- **可靠异步**：事务 Outbox、租约、fencing、退避、死信与人工重放形成闭环。
+- **安全回写**：HMAC key id、时间窗、nonce、幂等键、重放防护和轮换窗口。
+- **Secret**：生产值只允许通过 Docker secret 或外部 secret file/reference 注入。
+- **可观测性**：业务 `trace_id` 与 OTel trace/span 关联，日志执行字段级脱敏。
+
+安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要创建公开 Issue。运维处置见
+[安全事件响应 Runbook](doc/runbooks/security-incident-response.md)。
+
+<a id="quality"></a>
+
+## 验证与质量门禁
+
+日常开发使用同一个入口：
+
+```bash
+PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
+```
+
+它覆盖规格与 OpenAPI、secret scan、Ruff、mypy、Alembic 升降级、后端单元/契约/集成测试、
+前端架构与构建、bundle budget 和 UI smoke。
+
+| 要证明什么 | 命令 |
+| --- | --- |
+| 日常工程反馈 | `bash scripts/verify_fast.sh` |
+| 干净克隆可复现 | `bash scripts/verify_clean_clone.sh` |
+| 浏览器与 BFF 闭环 | `AURIS_RUN_E2E=1 bash scripts/verify_all.sh` |
+| MySQL / Redis / MinIO / Qdrant | `bash scripts/verify_real_stack.sh` |
+| 真实 Dagster 引擎 | `bash scripts/verify_real_dagster.sh` |
+| BFF → Outbox → Dagster → 回写 | `bash scripts/verify_product_dagster_path.sh` |
+| 完整发行候选 | `bash scripts/verify_release.sh` |
+
+<details>
+<summary><strong>为什么“真实栈通过”不等于“真实 Dagster 通过”</strong></summary>
+
+`scripts/verify_real_stack.sh` 的 Dagster 端点由 `scripts/fake_dagster_graphql_server.py` 提供，用来
+验证开发协议、对象存储、Qdrant 与故障恢复；它不能替代 `bash scripts/verify_real_dagster.sh`。
+
+后者启动生产 Compose 的真实 Dagster，并验证 `SAFE_TERMINATE` 取消语义。该证明仍只覆盖
+**Dagster 引擎层**；产品级 BFF、Outbox、状态回写与签名 callback 由
+`bash scripts/verify_product_dagster_path.sh` 独立验收。
+
+</details>
+
+<details>
+<summary><strong>为什么本地全绿仍不能直接发布</strong></summary>
+
+公开 Release 证据必须全部绑定同一个干净 commit，并同时满足：
+
+- 不可变且独立审批的前端 bundle 与 Linux 视觉基线；
+- 真实依赖 E2E、备份恢复演练与告警演练；
+- 固定镜像 digest、SBOM、漏洞扫描、签名与 checksum；
+- 权利人授权、最终 `NOTICE` 和第三方依赖许可结论；
+- 外部维护者在干净主机上的安装、升级、回滚与恢复验证。
+
+因此发布门禁刻意 fail closed，不接受“把 `PENDING` 手工改成 `APPROVED`”。
+
+</details>
+
+<a id="repository"></a>
+
+## 仓库地图
 
 ```text
 .
-├── backend/                   # FastAPI BFF、领域模型、迁移与测试
-├── prototype/auris-flow-ui/  # React + TypeScript 高保真工作台
+├── backend/                   # FastAPI BFF、领域服务、迁移与测试
+├── prototype/auris-flow-ui/  # React + TypeScript 产品工作台
 ├── docker/local/             # 本地 MySQL、Redis、MinIO、Qdrant
-├── production/               # 单机生产候选、Dagster 与可观测性
-├── doc/backend-spec/         # API、数据模型、状态机、RBAC 与事件契约
-├── doc/runbooks/             # 运维、恢复、轮换、升级与安全响应
-├── scripts/                  # 验证、审计、E2E 与发布证据工具
-└── plans/                    # 设计与闭环演进计划
+├── production/               # 单机生产候选、Dagster、Edge、可观测性
+├── doc/backend-spec/         # API、模型、RBAC、状态机与事件契约
+├── doc/runbooks/             # 安装、升级、恢复、轮换与事件响应
+├── scripts/                  # 验证、审计、E2E 与发行证据工具
+└── plans/                    # 设计决策与闭环演进计划
 ```
 
-## 📚 文档导航
-
-| 主题 | 文档 |
+| 我在找…… | 从这里开始 |
 | --- | --- |
 | 产品与交互 | [产品设计](doc/设计文档.md) · [UI 设计](doc/UI设计文档.md) · [Agentic 设计](doc/Agentic智能化设计文档.md) |
-| 后端契约 | [后端规格入口](doc/backend-spec/README.md) · [API 契约](doc/backend-spec/api-contract.md) · [领域模型](doc/backend-spec/domain-model.md) |
-| 权限与事件 | [RBAC 矩阵](doc/backend-spec/rbac-matrix.md) · [状态机](doc/backend-spec/state-machines.md) · [事件契约](doc/backend-spec/event-contracts.md) |
-| 部署与运维 | [生产候选安装](production/README.md) · [运维手册](doc/runbooks/operations.md) · [备份恢复](doc/runbooks/backup-restore.md) |
-| 开源协作 | [贡献指南](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md) · [安全策略](SECURITY.md) · [支持范围](SUPPORT.md) |
-| 发行治理 | [Release Checklist](RELEASE_CHECKLIST.md) · [版本策略](doc/release/versioning-and-compatibility.md) · [变更记录](CHANGELOG.md) |
+| API 与领域模型 | [后端规格](doc/backend-spec/README.md) · [API 契约](doc/backend-spec/api-contract.md) · [领域模型](doc/backend-spec/domain-model.md) |
+| 权限与异步事件 | [RBAC 矩阵](doc/backend-spec/rbac-matrix.md) · [状态机](doc/backend-spec/state-machines.md) · [事件契约](doc/backend-spec/event-contracts.md) |
+| 部署与运维 | [生产候选](production/README.md) · [运维手册](doc/runbooks/operations.md) · [备份恢复](doc/runbooks/backup-restore.md) |
+| 参与协作 | [贡献指南](CONTRIBUTING.md) · [行为准则](CODE_OF_CONDUCT.md) · [支持范围](SUPPORT.md) |
+| 发行治理 | [Release Checklist](RELEASE_CHECKLIST.md) · [版本策略](doc/release/versioning-and-compatibility.md) · [CHANGELOG](CHANGELOG.md) |
 
-## 🗺 项目状态
+<a id="release-status"></a>
 
-当前仓库定位为 **Open-source Release Candidate**：
+## 发行状态
 
-- 已具备完整前端原型、FastAPI BFF、数据库迁移、真实 Dagster 执行基线和多层验证脚本。
-- 已包含 Apache License 2.0 标准文本、候选 `NOTICE` 与第三方许可清单。
-- 尚需项目所有者完成许可权利主体/版权归属授权、NOTICE 定稿和正式 Release 审批。
-- 尚需完成受保护环境中的不可变视觉与前端制品批准、外部干净安装和生产演练。
+当前定位：**Open-source Release Candidate，尚无正式 `v1.0.0` Release。**
 
-因此，在这些人工与运行门禁完成前，不应把当前代码描述为“正式开源发布完成”或“已通过生产
-部署验收”。进度以[开源发布清单](RELEASE_CHECKLIST.md)和
-[Release Readiness](doc/reports/open-source-release-readiness.md)为准。
+严格就绪度检查当前为 `10/12`。自动化工程项已通过，剩余门禁必须由真实授权或受保护环境产生，
+不能由代码侧伪造：
 
-## 🤝 参与贡献
+| 门禁 | 当前状态 | 完成条件 |
+| --- | --- | --- |
+| 工程与发布树 | 通过 | OpenAPI、迁移、secret scan、运行源码、Compose 与发布工具受 Git 约束 |
+| 权利人 / `NOTICE` | `PENDING` | 权利人确认 Apache-2.0 授权、真实版权主体、最终 `NOTICE` 与审批证据 |
+| 前端 bundle / 视觉基线 | `PENDING` | Linux 不可变制品生成、密码学验证、独立审核与受保护环境 promotion |
+| 第三方依赖许可 | 部分待法律结论 | 对 `mysql-connector-python` 的 GPLv2 + FOSS exception 作授权结论，或更换依赖 |
+| 正式发行演练 | 未完成 | 外部干净安装、升级/回滚、备份恢复、签名 RC 与正式审批 |
 
-欢迎围绕契约补全、前后端联调、可观测性、安全、测试和文档提出改进。提交前请先阅读
-[CONTRIBUTING.md](CONTRIBUTING.md)，并至少运行：
+可在本地复核前两项聚合门禁：
 
 ```bash
-bash scripts/verify_fast.sh
+backend/.venv/bin/python scripts/check_platform_readiness.py --release
 ```
 
-安全问题请按 [SECURITY.md](SECURITY.md) 私下报告，不要直接创建公开 Issue。
+> [!WARNING]
+> 仓库包含 Apache License 2.0 标准文本和候选 `NOTICE`，但在权利主体授权完成前，不应把当前
+> candidate 描述为“正式开源发布完成”或“已通过生产部署验收”。
 
-## 📄 许可
+进度以 [Release Checklist](RELEASE_CHECKLIST.md) 和
+[Open-source Release Readiness](doc/reports/open-source-release-readiness.md) 为准。
 
-仓库包含 [Apache License 2.0](LICENSE) 文本。当前许可权利主体和版权归属授权仍处于 Release
-门禁中；在项目所有者完成签署并定稿 `NOTICE` 前，不得据此宣称正式开源发行已完成。
+## 参与贡献
+
+欢迎围绕契约、前后端联调、可观测性、安全、测试和文档提出改进。开始前请阅读
+[CONTRIBUTING.md](CONTRIBUTING.md)，提交前至少运行：
+
+```bash
+PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
+```
+
+<details>
+<summary><strong>English overview</strong></summary>
+
+Auris Flow is an evidence-first workspace for audio quality operations. It connects audio assets,
+transcripts, human review, label versions, evaluations, knowledge retrieval and business insights
+through tenant-, project- and trace-scoped workflows.
+
+The repository currently represents a `v1.0.0` release candidate. Its target production baseline is
+a single Linux host running Docker Compose with FastAPI, MySQL, Redis, object storage, Qdrant,
+Dagster, a standards-compatible OIDC provider and an observable edge. It does **not** claim
+node-level high availability or a completed public release.
+
+Start with [the local quickstart](#quickstart), [the API specification](doc/backend-spec/README.md),
+or [the production candidate guide](production/README.md).
+
+</details>
 
 ---
 
 <div align="center">
-  <strong>Auris Flow</strong> · 让每一条业务洞察都能回到它的音频证据。
+  <strong>Auris Flow</strong><br>
+  <sub>Evidence in. Decisions out. Traceability throughout.</sub>
 </div>
