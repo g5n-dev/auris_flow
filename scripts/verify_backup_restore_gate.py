@@ -58,8 +58,10 @@ SENSITIVE_KEY_PARTS = (
 TOOL_BINDING_PATHS = (
     "production/backup/backup_restore_evidence.py",
     "production/backup/manifest.py",
+    "production/backup/recovery_linkage.py",
     "production/backup/restore_network_allocator.py",
     "production/scripts/backup.sh",
+    "production/scripts/recovery-linkage.sh",
     "production/scripts/restore.sh",
     "production/scripts/verify-backup.sh",
     "scripts/release_bundle.py",

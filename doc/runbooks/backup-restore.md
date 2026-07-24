@@ -10,7 +10,10 @@
 - 在替代宿主机、相同 release 镜像、Compose 配置、外部 secrets 和备份均可用，且权威数据不超过 100 GiB 时，目标 `RTO <= 4h`。
 - 数据量、磁盘/网络吞吐或镜像拉取时间超出上述前提时，RTO 必须通过本环境的季度恢复演练重新测量，不能沿用默认值。
 
-MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的派生索引；Redis 是可丢弃缓存。Dagster 运行元数据与 Keycloak 配置随 MySQL 一并备份，但仍不改变业务数据权威边界。
+MySQL 和 MinIO 是权威来源。Qdrant 按架构是派生索引、不得成为唯一业务事实来源，但当前候选只
+验证了兼容 snapshot 恢复和固定合成夹具的跨存储绑定；全部 collection 的治理化重建器与第二空
+目标演练仍是正式发行阻断项。Redis 是可丢弃缓存。Dagster 运行元数据与 Keycloak 配置随 MySQL
+一并备份，但仍不改变业务数据权威边界。
 
 ## 安全边界
 
@@ -40,6 +43,9 @@ MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的�
 - `qdrant/snapshots.json` 与 `qdrant/snapshots/**`：单节点 collection snapshots、aliases，以及停写点逐 collection 全量 scroll 得到的 v2 语义证据。证据只保存顺序无关的逐点强 SHA-256 聚合指纹，以及一个确定性 probe 的 point ID、payload/vector hash 和 tenant/project scope；不保存原始 payload 或向量。Qdrant 官方要求源/目标使用相同 major/minor 版本，脚本会 fail closed。
 - 可选 `redis/cache.rdb`：只用于故障诊断，不参与自动恢复，也不计入业务一致性。
 - `metadata/release-metadata.json`、`metadata/release-metadata.sigstore.json`、`metadata/running-images.json`：签名部署包的 tag/commit、Compose、image-lock 与恢复兼容策略哈希，以及备份时全部正在运行的 release service 实际容器/RepoDigest 校验证据；MySQL、MinIO、Qdrant、Redis 始终为必选。
+- `metadata/recovery-linkage.json`：仅在 `--release-gate-drill` 出现。它是已签 manifest 保护的
+  digest-only 合成夹具源 proof，绑定 MySQL 权威记录、MinIO 不可变对象和 Qdrant point，但不公开
+  路径、对象正文、payload、向量或凭据。
 - `manifest.json`、`manifest.sha256`、`manifest.signature.json`：v4 manifest 强绑定上述 release
   metadata/运行镜像证据、UTC、每个文件的 SHA-256/大小、工具版本、deployment-wide counts、
   权威边界、固定恢复顺序及 `auris-flow.restore-attestation-delegation/v1` 恢复证明 key ID；独立 v1
@@ -49,7 +55,7 @@ MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的�
   `regular-file` 类型与精确 mode）；这不会替代恢复前对目标 release bundle 的独立 Sigstore 与
   全成员校验。
 
-MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历史，因此本实现不使用 mirror，而是逐代读取并重放版本。生产 Qdrant 写路径当前只支持未命名 dense vector，并要求每个非空 collection 的每个 point payload 都包含非空、非通配的 `tenant_id` 与 `project_id`；空 collection 以 `empty-collection` 显式建模。备份遇到 named/sparse vector、缺失 scope、重复 point ID、分页循环或数量漂移都会拒绝继续，不会静默降级。Qdrant collection snapshot 始终只是派生数据恢复加速器，不得替代 MySQL/MinIO 重建能力。
+MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历史，因此本实现不使用 mirror，而是逐代读取并重放版本。生产 Qdrant 写路径当前只支持未命名 dense vector，并要求每个非空 collection 的每个 point payload 都包含非空、非通配的 `tenant_id` 与 `project_id`；空 collection 以 `empty-collection` 显式建模。备份遇到 named/sparse vector、缺失 scope、重复 point ID、分页循环或数量漂移都会拒绝继续，不会静默降级。Qdrant collection snapshot 只用于当前候选的兼容恢复；在通用治理化重建器通过独立正式门禁前，不得把“派生索引”的架构目标描述为已经具备完整重建能力。
 
 ## 创建备份
 
@@ -168,11 +174,12 @@ production/scripts/restore.sh \
 5. 比较 MySQL 全局表行数；校验 MinIO 每代 key/大小/属性/删除序列，并按目标 version ID 逐代读回验证 SHA-256；对 Qdrant 重做全量 scroll 指纹，再按 ID 精确读取 probe 校验 payload/vector hash，并使用该向量执行同时限定 tenant、project 与 probe ID 的真实 nearest-query，要求只命中自身且返回 payload 不跨 scope；
 6. 明确丢弃 Redis cache。
 
-任一步失败都会留下 TSV 诊断报告。MySQL 或 MinIO 成功、Qdrant 失败时，不回滚权威数据，也不伪装成完整成功；修复版本兼容问题后重做空环境恢复，或选择下述治理化重建。
+任一步失败都会留下 TSV 诊断报告。MySQL 或 MinIO 成功、Qdrant 失败时，不回滚权威数据，也不
+伪装成完整成功；当前候选必须修复版本兼容问题后重做空环境 snapshot 恢复。
 
-### 3. 不使用 Qdrant snapshot 的重建路径
+### 3. 不使用 Qdrant snapshot 的路径（当前为阻断状态）
 
-若 snapshot 缺失或选择从权威数据重建：
+以下命令只用于验证恢复器会 fail closed，不是当前候选支持的生产恢复完成路径：
 
 ```bash
 production/scripts/restore.sh \
@@ -183,51 +190,20 @@ production/scripts/restore.sh \
 
 此模式把 Qdrant 留空，创建权限 `0600` 的 `*.state.json`，状态固定为
 `pending-qdrant-rebuild`，并以退出码 **3** 结束；它不会写 `complete`，也不会声称 Qdrant 一致。
-随后运行当前 release 的 migration，启动 BFF/Worker，再对 MySQL 中每个有效 knowledge index 提交
-带 tenant/project、幂等键和 trace 的 `POST /api/v1/knowledge-indexes/{id}/build-runs`，并执行受治理
-的 Outbox reconciliation。voiceprint 等其他派生 collection 同样通过其权威 MySQL/对象引用和
-Outbox 重建，禁止手工拼装无审计向量。
+当前没有任何受支持命令能把该状态转换为生产可接受的 `complete`：现有业务 build run 会生成新的
+trace/point identity，无法证明恢复为备份时的完整语义集合；voiceprint 等 collection 也尚未具备
+统一的权威对象重建契约。不要手工 upsert、重放历史 Outbox、启动 BFF/Worker 后批量提交 build，
+也不要调用 `finalize-restore.sh` 掩盖这一缺口。
 
-全部 build 完成后，使用 restore 输出的精确 pending state 执行唯一的 finalize 路径：
-
-```bash
-production/scripts/finalize-restore.sh \
-  --backup /mnt/restore/auris-flow-BACKUP_ID \
-  --state /var/tmp/auris-flow-restore-reports/BACKUP_ID-TIMESTAMP.state.json \
-  --confirm auris-flow-BACKUP_ID
-```
-
-finalizer 会先通过稳定文件描述符把 owner-only Compose `.env` 固定到私有快照，随后重新建立只读
-私有 backup snapshot、验证外部 Ed25519 签名和 pending identity，并确认当前运行镜像属于已签
-release。它先在 edge、OIDC 路径、Dagster daemon、Worker、BFF 与 code location 均完整运行时取得
-严格 `/readyz` 证据，随后一次性停止 edge、Dagster daemon、BFF 与 code location，切断公网、调度、
-回调和内部 API 新写入，仅保留 Worker 把既有 Outbox 的 `pending/processing` 递归排空；这避免停止
-edge 后切断 OIDC discovery，也避免用已停止 daemon 的陈旧 heartbeat 冒充健康。Outbox 归零后再
-停止 Worker 并终检仍为零，写入面从此持续保持围栏状态。最后对实时 Qdrant 重算所有 collection
-的全量 fingerprint、scoped probe 与 alias，并在
-签名前再次确认 Outbox 没有变化。readiness 取证后到入口冻结之间若发生写入，也必须被后续 Outbox
-排空与双重终检吸收，否则 finalize 失败。
-
-运行镜像、Qdrant 语义结果和规范化 readiness 响应不仅计算 SHA-256，还以限长、规范化正文嵌入
-`complete` 状态；状态同时绑定证据 schema、大小、哈希与校验器，供离线审计复算。创建 pending
-状态时工具内部生成 256-bit `restore_challenge`，并同时记录 manifest digest、manifest 签名 key ID
-与被委托的 attestation key ID；调用方不能指定 challenge。操作员应在开始重建时把 pending 状态或
-至少其 challenge 另存到受控审计记录，离线验收时据此拒绝整份旧 complete 状态的回放。
-
-finalizer 在停止服务前验证独立恢复证明密钥对及其 key ID 与签名 manifest 的委托完全一致；它不
-读取 manifest 私钥。最后一次 Qdrant/Outbox 验证后立即记录 `observed_at_utc`，要求
-`pending_at_utc <= observed_at_utc <= completed_at_utc`，再用恢复证明私钥签署包含完整 unsigned
-state 摘要、challenge、observed time 和 manifest provenance 的 domain-separated statement，并
-立即用固定恢复证明公钥复验。状态文件通过独占锁、同目录原子替换和父目录 `fsync` 完成唯一转换。
-只有全部检查通过，状态才转为带 `auris-flow.restore-complete-attestation/v2` 的 `complete`；错误
-identity、角色密钥复用、错误委托、签名/challenge/时间篡改、并发或重复 finalize、证据篡改、
-缺失/跨 scope point、alias 漂移或 readiness 失败都返回非零。恢复证明私钥不可用时必须从 secret
-manager 恢复与 `attestation_key_id` 匹配的原密钥，不能使用 manifest 私钥或生成替代签名掩盖信任
-链断裂。成功后 edge、Worker 与 Dagster daemon 仍保持停止；操作员必须先离线执行
-`restore_state.py verify-complete`、比对预先归档的 challenge、归档签名状态，再按下一节显式恢复
-写入面和入口流量。
+正式支持该模式前，必须在第二个独立空 Compose project 中，用版本化治理化 reconciler 仅从恢复的
+MySQL/MinIO 重建全部受支持 collection，校验 embedding provider/model/dimension/fingerprint、
+tenant/project/trace、Audit/Outbox/receipt 和全量 point 指纹，再把 snapshot/rebuild 两次观测绑定
+到同一 signed backup、tag 与新鲜 challenge 的正式证据。上述门禁未完成时，snapshot 缺失意味着
+恢复保持阻断，写入面不得重新开放。
 
 ### 4. 启动与业务校验
+
+本节只适用于 `--qdrant-mode snapshot` 已完整成功的恢复；`pending-qdrant-rebuild` 状态不得执行。
 
 ```bash
 cd /opt/auris-flow
@@ -277,6 +253,11 @@ MySQL 行数、MinIO 全版本与内容 SHA-256、Qdrant 全量指纹、随机 p
 使用仅含 synthetic fixture、明确不保留的 `ephemeral-ci-drill` 边界；这证明恢复机制，不冒充
 生产备份已经加密并复制到外部故障域。生产运营备份仍必须使用 `encrypted-external`。
 
+release-gate drill 的签名 manifest 还必须包含 digest-only 源 linkage proof。snapshot 恢复后，
+验证器分别从实时 MySQL、MinIO 和 Qdrant 再次读取同一固定合成夹具，重建规范 proof，并要求与
+已签源 proof 逐字节一致。该检查证明固定夹具的跨存储恢复链路，不证明真实业务全集、embedding
+质量或全部 collection 的 `rebuild-required` 能力；第二空目标治理化重建仍须独立验收。
+
 JSON 本身只是结构化观测，不是不可伪造证明。官方 tag workflow 会用精确
 `release-images.yml@refs/tags/<tag>` GitHub OIDC 身份生成
 `backup-restore-gate.sigstore.json`。验证下载的正式证据时必须同时提供 sidecar 和对应签名
@@ -306,5 +287,8 @@ tenant/project/trace 边界的 recovery fixture；Alembic 版本行、Dagster �
 - 单机 Compose 无节点 HA；本地 named volume 不是备份。
 - 该基线是完整停写恢复点，不提供 MySQL binlog 增量/PITR。需要低于 24 小时 RPO 时，应增加加密 binlog 外送和相应恢复演练。
 - MinIO 恢复保留内容版本、删除语义、大小和属性；provider 分配的新 version ID 与 ETag 均不要求等于源值。恢复器以代际顺序建立源/目标 version 映射，并以实际内容 SHA-256 判定等价；应用不把 provider version ID 或 ETag 当作不可替代的唯一业务事实。
-- Qdrant snapshot 只支持兼容版本；v2 以前缺少全量语义指纹和 scoped probe 的 metadata 会 fail closed，必须重新备份或从权威数据重建。任何 snapshot 都可以丢弃并从 MySQL/MinIO 重建。
+- Qdrant snapshot 只支持兼容版本；v2 以前缺少全量语义指纹和 scoped probe 的 metadata 会 fail
+  closed。架构要求 Qdrant 不成为唯一事实来源；但在全部 collection 的治理化 rebuilder、第二空
+  目标 `rebuild-required` 演练及其正式签名证据完成前，不得宣称任意 snapshot 都可安全丢弃并从
+  MySQL/MinIO 完整重建。
 - Redis RDB 不自动恢复。缓存预热时间应计入本环境 RTO。

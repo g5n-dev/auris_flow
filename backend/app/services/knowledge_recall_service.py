@@ -13,7 +13,7 @@ from app.core.errors import ApiError
 from app.models import RunRecord
 from app.services.adapters import (
     QDRANT_AUTHORIZED_POINT_IDS_FIELD,
-    RealQdrantIndexClient,
+    configured_real_qdrant_client,
     configured_real_qdrant_embedding_space_fingerprint,
     real_qdrant_filter_reference,
     validate_real_qdrant_authorized_point_ids,
@@ -237,7 +237,7 @@ def recall_from_real_qdrant(
     qdrant_payload: dict[str, Any], *, query: str, top_k: int
 ) -> dict[str, Any]:
     try:
-        return RealQdrantIndexClient().search_index_payload(
+        return configured_real_qdrant_client().search_index_payload(
             qdrant_payload, query=query, top_k=top_k
         )
     except (OSError, URLError, HTTPError, TimeoutError, ValueError) as exc:

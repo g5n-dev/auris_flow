@@ -367,6 +367,7 @@ RESTORE_STEP="mysql-authority"
 gzip -dc "${BACKUP_ROOT}/mysql/all-databases.sql.gz" | compose exec -T mysql sh -c '
   export MYSQL_PWD="$(cat /run/secrets/mysql_root_password)"
   exec mysql --protocol=tcp --host=127.0.0.1 --user=root \
+    --binary-mode=1 \
     --default-character-set=utf8mb4
 ' || fail "MySQL authoritative restore failed"
 write_report passed "business, Keycloak, and Dagster schemas restored"

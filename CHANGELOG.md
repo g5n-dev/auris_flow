@@ -16,6 +16,10 @@ All notable changes to Auris Flow are tracked here.
 - Added request-bound callback HMAC v2 key rotation/replay protection and real Dagster completion callbacks.
 - Added quiesced MySQL/MinIO/Qdrant backup, offline manifest verification and empty-environment restore/drill
   tooling for the single-host baseline.
+- Added a manifest-signed, digest-only synthetic MySQL/MinIO/Qdrant linkage proof; the snapshot restore gate
+  independently re-reads all three restored stores and requires an exact canonical proof match without
+  publishing raw paths, objects, payloads, vectors or credentials. Full governed `rebuild-required` coverage
+  remains a separate release gate.
 - Added production installation, SLO/alert, upgrade/rollback, key rotation, security incident and compatibility
   runbooks.
 
@@ -23,6 +27,8 @@ All notable changes to Auris Flow are tracked here.
 
 - Hardened production configuration to fail closed on development authentication, weak/demo credentials,
   wildcard origins/hosts, fake/local adapters, non-strict readiness and missing real dependency settings.
+- Fixed real Qdrant clients to consume the validated secret-file-backed API key, and hardened MySQL restore
+  against client-side commands and oversized decompressed dumps.
 - Added structured redacted logging, OTel trace correlation and a network-restricted Prometheus endpoint.
 - Added governance, support, maintainer, issue and release templates plus runtime/OpenAPI drift and
   supply-chain evidence gates.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from urllib.error import HTTPError
 
@@ -77,6 +78,79 @@ def test_real_qdrant_accepts_api_key_in_release():
     )
 
     assert configured.qdrant_api_key == "Q" * 48
+
+
+def test_runtime_qdrant_factory_forwards_file_resolved_key(monkeypatch):
+    from app.core import config
+    from app.services import adapters
+
+    captured: dict[str, object] = {}
+
+    class StubClient:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(
+        config,
+        "get_settings",
+        lambda: SimpleNamespace(
+            qdrant_url="http://qdrant:6333",
+            qdrant_api_key="file-resolved-qdrant-secret",
+            embedding_dimension=1024,
+        ),
+    )
+    monkeypatch.setattr(adapters, "RealQdrantIndexClient", StubClient)
+
+    client = adapters.configured_real_qdrant_client()
+
+    assert isinstance(client, StubClient)
+    assert captured == {
+        "api_key": "file-resolved-qdrant-secret",
+        "base_url": "http://qdrant:6333",
+        "vector_size": 1024,
+    }
+
+
+def test_default_real_qdrant_client_uses_configured_factory(monkeypatch):
+    from app.services import adapters
+
+    sentinel = object()
+    monkeypatch.setenv("AURIS_QDRANT_ADAPTER", "real")
+    monkeypatch.setattr(adapters, "configured_real_qdrant_client", lambda: sentinel)
+
+    assert adapters._default_qdrant_client() is sentinel
+
+
+def test_recall_real_qdrant_uses_configured_client(monkeypatch):
+    from app.services import knowledge_recall_service
+
+    calls: list[tuple[dict[str, object], str, int]] = []
+
+    class StubClient:
+        def search_index_payload(
+            self,
+            payload: dict[str, object],
+            *,
+            query: str,
+            top_k: int,
+        ) -> dict[str, object]:
+            calls.append((payload, query, top_k))
+            return {"mode": "real", "collection": "knowledge", "points": []}
+
+    monkeypatch.setattr(
+        knowledge_recall_service,
+        "configured_real_qdrant_client",
+        lambda: StubClient(),
+    )
+
+    result = knowledge_recall_service.recall_from_real_qdrant(
+        {"collection": "knowledge"},
+        query="hello",
+        top_k=3,
+    )
+
+    assert result["mode"] == "real"
+    assert calls == [({"collection": "knowledge"}, "hello", 3)]
 
 
 def test_readyz_sends_qdrant_api_key(client, monkeypatch):

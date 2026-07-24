@@ -37,11 +37,13 @@
 - Dagster 使用独立锁图、MySQL storage、领域 job、fencing context 和受签名 completion callback；
   生产 embedding 与音频推理使用可替换的 HTTPS 语义接口并严格校验 provider、模型、向量/结果
   manifest、精确输入版本和 SHA-256；所有携带凭据或签名的 HTTP 客户端拒绝重定向。
-- MySQL 是权威业务事实；MinIO 保存权威对象；Redis 是可丢弃辅助状态，Qdrant 是可重建派生索引。
+- MySQL 是权威业务事实；MinIO 保存权威对象；Redis 是可丢弃辅助状态；Qdrant 按架构是派生索引，
+  但当前仅证明固定合成夹具的 snapshot 跨存储恢复链路，通用治理化重建门禁尚未完成。
 - Outbox 实现 lease、fencing、指数退避、最大重试、dead-letter 和受治理重放。备份工具冻结写入后
   保存 MySQL、MinIO 版本/删除标记、Qdrant snapshot/alias，并通过规范 manifest、checksum 和
-  宿主机外置 Ed25519 信任锚验证一致性；`rebuild-required` 只进入 pending 状态，必须完成真实
-  Qdrant 语义重建与严格 readiness 后才能治理化 finalize。
+  宿主机外置 Ed25519 信任锚验证一致性；正式 snapshot drill 还会对签名源 proof 与恢复后独立读取
+  的 MySQL/MinIO/Qdrant proof 做精确比较。`rebuild-required` 只进入 pending 状态，全部 collection
+  的重建器、第二空目标演练与正式签名证据仍是 P2 阻断项。
 
 ### P3：可观测性与运维
 
@@ -119,7 +121,8 @@ python3 scripts/verify_production_compose.py
 2. 在托管 GitHub 仓库实际启用分支/标签保护、Private Vulnerability Reporting、secret scanning、
    push protection、CodeQL、Dependabot 和独立 Release 审批。
 3. 用正式签名 digest 在外部干净 Linux 主机完成 OIDC、核心业务、真实 Dagster/embedding/callback、
-   故障恢复、升级/回滚、告警通知和空环境备份恢复演练。
+   故障恢复、升级/回滚、告警通知、snapshot 空环境恢复，以及独立第二空目标的
+   `rebuild-required` 治理化重建演练。
 4. 先发布并验证 `v1.0.0-rc.1`，修复外部安装问题，然后从新的最终 commit 重复全部门禁再批准
    `v1.0.0`。
 

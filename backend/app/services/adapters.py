@@ -3693,9 +3693,27 @@ class RealExternalCallbackClient:
         return ""
 
 
+def configured_real_qdrant_client() -> RealQdrantIndexClient:
+    """Build the real client from the validated runtime settings.
+
+    Production Compose injects the API key through ``QDRANT_API_KEY_FILE``.
+    ``Settings`` resolves that file safely; bypassing it here would silently
+    create an unauthenticated Worker client while readiness remained green.
+    """
+
+    from app.core.config import get_settings
+
+    runtime_settings = get_settings()
+    return RealQdrantIndexClient(
+        base_url=runtime_settings.qdrant_url,
+        vector_size=runtime_settings.embedding_dimension,
+        api_key=runtime_settings.qdrant_api_key,
+    )
+
+
 def _default_qdrant_client() -> QdrantIndexClient:
     if os.environ.get("AURIS_QDRANT_ADAPTER", "").lower() == "real":
-        return RealQdrantIndexClient()
+        return configured_real_qdrant_client()
     return LocalQdrantIndexClient()
 
 

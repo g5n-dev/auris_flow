@@ -190,6 +190,14 @@ manifest；它不依赖 `.git`。恢复与演练见
 JSON。官方 release workflow 使用无客户内容的 synthetic fixture 和
 `ephemeral-ci-drill`（不保留）边界；生产备份仍使用上面的 `encrypted-external`：
 
+官方 tag workflow 会先创建一个同时绑定 MySQL 权威记录、MinIO 不可变对象和 Qdrant point 的固定
+合成夹具。`backup.sh --release-gate-drill` 从三个在线存储独立读取它，将只含固定夹具身份与
+SHA-256 的 `metadata/recovery-linkage.json` 纳入已签 manifest；`verify-backup.sh` 在 snapshot
+恢复后再次独立读取三个恢复目标，并要求规范 proof 与已签源 proof 逐字节一致后才允许发布
+evidence。该门禁只证明固定合成夹具的 snapshot 跨存储恢复链路，不证明真实业务全集一致、
+embedding/召回质量，也不证明 `rebuild-required` 已覆盖全部派生 collection；后者仍是独立的
+P2 未完成门禁。
+
 ```bash
 bash production/scripts/verify-backup.sh \
   --backup /absolute/ephemeral-release-drill/auris-flow-BACKUP_ID \

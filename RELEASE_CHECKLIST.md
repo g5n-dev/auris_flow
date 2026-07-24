@@ -111,17 +111,24 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Exercise database restart, Worker crash, duplicate dispatch, callback timeout,
   Redis/Qdrant transient outage, Outbox lease expiry, dead-letter, and governed replay;
   confirm there is no unexplained duplicate business result.
-- [ ] Run `production/scripts/backup.sh`, restore into a new random empty Compose
-  project with `production/scripts/restore.sh`, and pass `production/scripts/verify-backup.sh`
-  with `--drill`, `--cleanup-on-success`, and
-  `--evidence-output /absolute/release-evidence/backup-restore-gate.json`, plus
-  MySQL/object/Qdrant consistency checks. Retain the schema
-  `auris.backup-restore-gate.v1` evidence only after exact-project containers,
-  volumes, and networks are removed. The official release workflow must sign it with
-  the exact tag-bound GitHub OIDC identity; the evidence must bind source commit,
-  release tag, actual signed metadata/Compose/image-lock digests, non-empty authority
-  counts (including a real `json_resources` business row, not only migration/Dagster
-  metadata), tool hashes, measured durations, and the native-Linux host observation.
+- [ ] Run the signed-backup snapshot drill in a new random empty Compose project and
+  pass `production/scripts/verify-backup.sh` with `--drill`, `--cleanup-on-success`,
+  and `--evidence-output /absolute/release-evidence/backup-restore-gate.json`. The signed
+  manifest must bind a digest-only synthetic cross-store source proof; after restore,
+  independently read live MySQL, MinIO, and Qdrant and require the canonical restored
+  proof to match it exactly. Retain `auris.backup-restore-gate.v1` only after exact-project
+  containers, volumes, and networks are removed. The tag-bound workflow signature must
+  bind the source commit, release tag, signed metadata/Compose/image-lock digests,
+  non-empty authority counts, tool hashes, durations, and native-Linux observation
+  without raw paths, object bytes, payloads or credentials.
+- [ ] In a second independently named empty Compose project, restore the same signed
+  backup with `--qdrant-mode rebuild-required`; require the expected exit code 3 and
+  signed `pending-qdrant-rebuild` state, then rebuild every supported derived collection
+  solely from restored MySQL/MinIO through governed reconcilers and complete governed
+  finalize. Bind the snapshot and rebuild observations to the same backup/tag and a
+  fresh drill challenge in formal signed evidence. The fixed synthetic fixture proves
+  gate plumbing only; it does not certify semantic quality or any collection without a
+  governed rebuilder.
 
 ## P3 — Observability and Operations
 

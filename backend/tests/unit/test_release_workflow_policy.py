@@ -766,9 +766,12 @@ def test_release_assembly_requires_backup_restore_evidence_before_finalization()
     assert consumer in assemble
     assert "production/scripts/backup.sh" in assemble
     assert "production/scripts/verify-backup.sh" in assemble
-    assert "INSERT INTO json_resources" in assemble
-    assert "recovery-consistency-only" in assemble
-    assert "trace_release_recovery_gate_0001" in assemble
+    assert "production/scripts/recovery-linkage.sh seed" in assemble
+    assert "production/backup/recovery_linkage.py" in assemble
+    assert "validate-proof" in assemble
+    assert "backup_restore_gate_seed.py" not in assemble
+    assert 'find "${gate_root}" -xdev -depth -delete' in assemble
+    assert "backup gate root failed its cleanup boundary" in assemble
     assert "--drill" in assemble
     assert "--cleanup-on-success" in assemble
     assert "--evidence-output" in assemble

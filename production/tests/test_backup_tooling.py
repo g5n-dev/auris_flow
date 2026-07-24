@@ -1366,6 +1366,54 @@ def test_mysql_dump_structural_verifier(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "client_command",
+    [
+        "\\! touch /tmp/should-not-run",
+        "\\. /tmp/other.sql",
+        "source /tmp/other.sql",
+        "SYSTEM id",
+    ],
+)
+def test_mysql_dump_rejects_client_side_commands(
+    tmp_path: Path,
+    client_command: str,
+) -> None:
+    dump = tmp_path / "malicious.sql.gz"
+    with gzip.open(dump, "wt", encoding="utf-8") as handle:
+        handle.write("-- MySQL dump 10.13\n")
+        for database in ("auris_flow", "keycloak", "dagster"):
+            handle.write(f"CREATE DATABASE `{database}`;\nUSE `{database}`;\n")
+        handle.write(client_command + "\n")
+
+    rejected = run_tool(MYSQL_DUMP, "verify", "--input", dump, check=False)
+
+    assert rejected.returncode == 2
+    assert "client command" in rejected.stderr
+
+
+def test_mysql_dump_enforces_uncompressed_byte_budget(tmp_path: Path) -> None:
+    dump = tmp_path / "oversized.sql.gz"
+    with gzip.open(dump, "wt", encoding="utf-8") as handle:
+        handle.write("-- MySQL dump 10.13\n")
+        handle.write("A" * 4096)
+
+    rejected = run_tool(
+        MYSQL_DUMP,
+        "verify",
+        "--input",
+        dump,
+        check=False,
+        env={
+            **os.environ,
+            "AURIS_BACKUP_MAX_MYSQL_SQL_BYTES": "1024",
+        },
+    )
+
+    assert rejected.returncode == 2
+    assert "byte budget" in rejected.stderr
+
+
+@pytest.mark.parametrize(
     "script_name",
     ["backup.sh", "restore.sh", "verify-backup.sh", "finalize-restore.sh"],
 )
@@ -1622,6 +1670,7 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
     assert "--entrypoint python bff" not in backup
 
     restore = (SCRIPTS / "restore.sh").read_text(encoding="utf-8")
+    assert "--binary-mode=1" in restore
     assert (
         restore.index('RESTORE_STEP="mysql-authority"')
         < restore.index('RESTORE_STEP="minio-authority"')
@@ -2472,6 +2521,12 @@ def test_restore_drill_separates_one_shots_and_bounds_compose_commands() -> None
     assert 'compose_drill_with_deadline "${DRILL_CLEANUP_TIMEOUT}"' in source
     assert 'local status="$1" cleanup_failed=0' in source
     assert 'if [ "${status}" -eq 0 ] && [ "${cleanup_failed}" -ne 0 ]' in source
+    assert "metadata/recovery-linkage.json" in source
+    assert '"${RECOVERY_LINKAGE_SCRIPT}" capture' in source
+    assert 'cmp -s "${SOURCE_LINKAGE_PROOF}" "${restored_linkage_proof}"' in source
+    assert source.index('"${SCRIPT_DIR}/restore.sh"') < source.index(
+        '"${RECOVERY_LINKAGE_SCRIPT}" capture'
+    )
 
 
 @pytest.mark.parametrize(
@@ -2606,8 +2661,10 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
     assert manifested_paths == sorted(manifested_paths)
     assert len(manifested_paths) == len(set(manifested_paths))
     assert "production/scripts/restore.sh" in manifested_paths
+    assert "production/scripts/recovery-linkage.sh" in manifested_paths
     assert "production/scripts/finalize-restore.sh" in manifested_paths
     assert "production/backup/backup_restore_evidence.py" in manifested_paths
+    assert "production/backup/recovery_linkage.py" in manifested_paths
     assert "production/backup/restore_state.py" in manifested_paths
     assert "scripts/verify_backup_restore_gate.py" in manifested_paths
     assert "doc/runbooks/backup-restore.md" in manifested_paths

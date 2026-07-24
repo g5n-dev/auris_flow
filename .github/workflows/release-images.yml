@@ -956,7 +956,7 @@ jobs:
             exit 2
           fi
           deployment="${GITHUB_WORKSPACE}/build/release/deployment"
-          gate_root="$(mktemp -d "${RUNNER_TEMP}/auris-backup-restore-gate.XXXXXX")"
+          gate_root="$(mktemp -d "${RUNNER_TEMP%/}/auris-backup-restore-gate.XXXXXX")"
           env_file="${gate_root}/production.env"
           secrets_dir="${gate_root}/secrets"
           tls_dir="${gate_root}/tls"
@@ -998,7 +998,30 @@ jobs:
           cleanup_source() {
             "${compose[@]}" down --volumes --remove-orphans --timeout 20
           }
-          trap 'cleanup_source || true' EXIT
+          cleanup_gate() {
+            local status="$1"
+            if ! cleanup_source; then
+              status=1
+            fi
+            case "${gate_root}" in
+              "${RUNNER_TEMP%/}"/auris-backup-restore-gate.*)
+                if [ -d "${gate_root}" ] && [ ! -L "${gate_root}" ]; then
+                  if ! find "${gate_root}" -xdev -depth -delete; then
+                    status=1
+                  fi
+                else
+                  echo "backup gate root is missing or unsafe during cleanup" >&2
+                  status=1
+                fi
+                ;;
+              *)
+                echo "backup gate root failed its cleanup boundary" >&2
+                status=1
+                ;;
+            esac
+            return "${status}"
+          }
+          trap 'status=$?; trap - EXIT; cleanup_gate "${status}"; exit $?' EXIT
           "${compose[@]}" config --quiet
           "${compose[@]}" pull \
             mysql db-bootstrap dagster-storage-bootstrap redis minio \
@@ -1010,50 +1033,16 @@ jobs:
           "${compose[@]}" run --rm --no-deps minio-bootstrap
           "${compose[@]}" run --rm --no-deps migrate
           "${compose[@]}" run --rm --no-deps dagster-storage-bootstrap
-          "${compose[@]}" exec -T mysql sh -c '
-            export MYSQL_PWD="$(cat /run/secrets/mysql_root_password)"
-            exec mysql --protocol=tcp --host=127.0.0.1 --user=root auris_flow
-          ' <<'SQL'
-          INSERT INTO json_resources
-            (collection, resource_key, tenant_id, project_id, status, trace_id, data)
-          VALUES
-            (
-              'release_recovery_fixtures',
-              'signed_bundle_backup_restore_v1',
-              'auris_release',
-              'release_recovery_gate',
-              'verified',
-              'trace_release_recovery_gate_0001',
-              JSON_OBJECT(
-                'purpose', 'recovery-consistency-only',
-                'contains_customer_data', FALSE
-              )
-            );
-          SQL
-          mysql_fixture_count="$(
-            "${compose[@]}" exec -T mysql sh -c '
-              export MYSQL_PWD="$(cat /run/secrets/mysql_root_password)"
-              exec mysql --protocol=tcp --host=127.0.0.1 --user=root \
-                --batch --skip-column-names auris_flow \
-                -e "SELECT COUNT(*) FROM json_resources WHERE tenant_id = '\''auris_release'\'' AND project_id = '\''release_recovery_gate'\'' AND trace_id = '\''trace_release_recovery_gate_0001'\''"
-            '
-          )"
-          if [ "${mysql_fixture_count}" != "1" ]; then
-            echo "scoped MySQL recovery fixture was not committed exactly once" >&2
-            exit 2
-          fi
-          minio_fixture="${gate_root}/minio-recovery-fixture.txt"
-          printf '%s\n' 'Auris Flow release recovery consistency fixture.' \
-            > "${minio_fixture}"
-          "${compose[@]}" run --rm --no-deps \
-            --volume "${minio_fixture}:/gate-fixture.txt:ro" \
-            --entrypoint /opt/auris/minio-client.sh \
-            minio-bootstrap cp \
-            /gate-fixture.txt auris/auris-flow/release-gate/fixture.txt
-          "${compose[@]}" run --rm --no-deps \
-            --volume "${GITHUB_WORKSPACE}/production/tests/backup_restore_gate_seed.py:/opt/auris/backup-restore-gate-seed.py:ro" \
-            --entrypoint python \
-            qdrant-backup-tool /opt/auris/backup-restore-gate-seed.py
+          source_linkage_proof="${gate_root}/source-linkage-proof.json"
+          (
+            cd "${deployment}"
+            bash production/scripts/recovery-linkage.sh seed \
+              --project-name auris-flow \
+              --env-file "${env_file}" \
+              --proof-output "${source_linkage_proof}"
+          )
+          python3 "${deployment}/production/backup/recovery_linkage.py" \
+            validate-proof --input "${source_linkage_proof}"
           (
             cd "${deployment}"
             bash production/scripts/backup.sh \
@@ -1089,8 +1078,8 @@ jobs:
             --signature-bundle "${evidence_signature}" \
             --release-bundle-root "${deployment}" \
             --formal
-          cleanup_source
           trap - EXIT
+          cleanup_gate 0
 
       - name: Require native-Linux backup/restore release evidence
         env:

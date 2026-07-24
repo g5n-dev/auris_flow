@@ -14,6 +14,8 @@ DEADLINE_RUNNER="${REPOSITORY_ROOT}/scripts/run_with_deadline.py"
 BACKUP_EVIDENCE_TOOL="${BACKUP_TOOLS}/backup_restore_evidence.py"
 BACKUP_EVIDENCE_VALIDATOR="${REPOSITORY_ROOT}/scripts/verify_backup_restore_gate.py"
 RESTORE_NETWORK_ALLOCATOR="${BACKUP_TOOLS}/restore_network_allocator.py"
+RECOVERY_LINKAGE_TOOL="${BACKUP_TOOLS}/recovery_linkage.py"
+RECOVERY_LINKAGE_SCRIPT="${SCRIPT_DIR}/recovery-linkage.sh"
 PYTHON="${PYTHON:-python3}"
 ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
 SECRETS_DIR="${AURIS_SECRETS_DIR:-${PRODUCTION_ROOT}/secrets}"
@@ -37,6 +39,8 @@ RESTORE_STARTED_AT=""
 RESTORE_COMPLETED_AT=""
 DRILL_INTERNAL_SUBNET=""
 DRILL_EDGE_INTERNAL_IP=""
+LINKAGE_PRIVATE_ROOT=""
+SOURCE_LINKAGE_PROOF=""
 DRILL_PULL_TIMEOUT="${AURIS_RESTORE_DRILL_PULL_TIMEOUT:-900}"
 DRILL_WAIT_TIMEOUT="${AURIS_RESTORE_DRILL_WAIT_TIMEOUT:-240}"
 DRILL_RUN_TIMEOUT="${AURIS_RESTORE_DRILL_RUN_TIMEOUT:-120}"
@@ -108,6 +112,25 @@ cleanup() {
         "${VERIFY_SNAPSHOT_ROOT}" >&2
       cleanup_failed=1
     fi
+  fi
+  if [[ -n "${LINKAGE_PRIVATE_ROOT}" ]]; then
+    case "${LINKAGE_PRIVATE_ROOT}" in
+      "${TMPDIR:-/tmp}"/auris-flow-linkage-verification.*)
+        if [[ -d "${LINKAGE_PRIVATE_ROOT}" && \
+          ! -L "${LINKAGE_PRIVATE_ROOT}" ]]; then
+          if ! rm -f -- "${LINKAGE_PRIVATE_ROOT}/restored-proof.json" || \
+            ! rmdir -- "${LINKAGE_PRIVATE_ROOT}"; then
+            printf 'backup verification cleanup failed for cross-store proof inputs\n' >&2
+            cleanup_failed=1
+          fi
+        fi
+        ;;
+      *)
+        printf 'cross-store proof cleanup path failed its boundary\n' >&2
+        cleanup_failed=1
+        ;;
+    esac
+    LINKAGE_PRIVATE_ROOT=""
   fi
   if [[ "${status}" -eq 0 && "${CLEANUP_ON_SUCCESS}" == true && \
     -n "${DRILL_PROJECT}" ]]; then
@@ -272,6 +295,11 @@ fi
 
 command -v "${PYTHON}" >/dev/null 2>&1 || fail "Python is required"
 command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required"
+command -v cmp >/dev/null 2>&1 || fail "cmp is required"
+[[ -f "${RECOVERY_LINKAGE_TOOL}" && ! -L "${RECOVERY_LINKAGE_TOOL}" ]] || fail \
+  "cross-store recovery linkage tool is missing or unsafe"
+[[ -f "${RECOVERY_LINKAGE_SCRIPT}" && ! -L "${RECOVERY_LINKAGE_SCRIPT}" ]] || fail \
+  "cross-store recovery linkage script is missing or unsafe"
 has_control_character "${BACKUP_ROOT}" && fail "backup path contains a control character"
 has_control_character "${ENV_FILE}" && fail "Compose env path contains a control character"
 has_control_character "${MANIFEST_VERIFY_KEY_FILE}" && fail \
@@ -342,6 +370,16 @@ rm -f -- "${VALIDATION_SCRIPT}"
 VALIDATION_SCRIPT=""
 "${PYTHON}" "${BACKUP_TOOLS}/qdrant_snapshots.py" validate \
   --input "${BACKUP_ROOT}/qdrant"
+SOURCE_LINKAGE_PROOF="${BACKUP_ROOT}/metadata/recovery-linkage.json"
+if [[ -f "${SOURCE_LINKAGE_PROOF}" && ! -L "${SOURCE_LINKAGE_PROOF}" ]]; then
+  "${PYTHON}" "${RECOVERY_LINKAGE_TOOL}" validate-proof \
+    --input "${SOURCE_LINKAGE_PROOF}" || fail \
+    "signed cross-store source proof is invalid"
+elif [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  fail "formal release evidence requires a signed cross-store source proof"
+else
+  SOURCE_LINKAGE_PROOF=""
+fi
 if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
   BACKUP_VERIFICATION_COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 fi
@@ -547,6 +585,23 @@ fi
 AURIS_RESTORE_REPORT_ROOT="${TMPDIR:-/tmp}/auris-flow-restore-reports-${DRILL_PROJECT}" \
   "${SCRIPT_DIR}/restore.sh" "${restore_arguments[@]}" || fail \
   "isolated restore drill failed"
+if [[ -n "${SOURCE_LINKAGE_PROOF}" ]]; then
+  LINKAGE_PRIVATE_ROOT="$(
+    mktemp -d "${TMPDIR:-/tmp}/auris-flow-linkage-verification.XXXXXX"
+  )"
+  chmod 0700 "${LINKAGE_PRIVATE_ROOT}"
+  restored_linkage_proof="${LINKAGE_PRIVATE_ROOT}/restored-proof.json"
+  "${RECOVERY_LINKAGE_SCRIPT}" capture \
+    --project-name "${DRILL_PROJECT}" \
+    --env-file "${ENV_FILE}" \
+    --proof-output "${restored_linkage_proof}" || fail \
+    "restored MySQL, MinIO, and Qdrant do not form the signed business linkage"
+  "${PYTHON}" "${RECOVERY_LINKAGE_TOOL}" validate-proof \
+    --input "${restored_linkage_proof}" || fail \
+    "restored cross-store linkage proof is invalid"
+  cmp -s "${SOURCE_LINKAGE_PROOF}" "${restored_linkage_proof}" || fail \
+    "restored cross-store linkage differs from the signed source proof"
+fi
 if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
   RESTORE_COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   EVIDENCE_PREPARED_JSON="$(

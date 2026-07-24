@@ -10,6 +10,7 @@ COMPOSE_FILE="${PRODUCTION_ROOT}/compose.yaml"
 PRODUCTION_PROJECT_NAME="auris-flow"
 DOCKER_CONTEXT_NAME="default"
 BACKUP_TOOLS="${PRODUCTION_ROOT}/backup"
+RECOVERY_LINKAGE_SCRIPT="${SCRIPT_DIR}/recovery-linkage.sh"
 RELEASE_BUNDLE_TOOL="${REPOSITORY_ROOT}/scripts/release_bundle.py"
 RELEASE_METADATA_FILE="${PRODUCTION_ROOT}/release-metadata.json"
 RELEASE_METADATA_SIGNATURE="${PRODUCTION_ROOT}/release-metadata.sigstore.json"
@@ -124,6 +125,8 @@ for command_name in docker gzip df awk mktemp install cosign openssl "${PYTHON}"
   command -v "${command_name}" >/dev/null 2>&1 || fail "required command not found: ${command_name}"
 done
 [[ -f "${COMPOSE_FILE}" && ! -L "${COMPOSE_FILE}" ]] || fail "Compose file is missing or unsafe"
+[[ -f "${RECOVERY_LINKAGE_SCRIPT}" && ! -L "${RECOVERY_LINKAGE_SCRIPT}" ]] || fail \
+  "cross-store recovery linkage script is missing or unsafe"
 [[ -f "${RELEASE_BUNDLE_TOOL}" && ! -L "${RELEASE_BUNDLE_TOOL}" ]] || fail \
   "release bundle verifier is missing or unsafe"
 [[ -f "${RELEASE_METADATA_FILE}" && ! -L "${RELEASE_METADATA_FILE}" ]] || fail \
@@ -356,6 +359,15 @@ compose run --rm --no-deps \
   -v "${BACKUP_TOOLS}/qdrant_snapshots.py:/opt/auris/qdrant-snapshots.py:ro" \
   --entrypoint python qdrant-backup-tool \
   /opt/auris/qdrant-snapshots.py backup --output /backup/qdrant
+
+if [[ "${RELEASE_GATE_DRILL}" == true ]]; then
+  printf 'Capturing the synthetic cross-store authority linkage proof...\n'
+  "${RECOVERY_LINKAGE_SCRIPT}" capture \
+    --project-name "${PRODUCTION_PROJECT_NAME}" \
+    --env-file "${ENV_FILE}" \
+    --proof-output "${STAGING_DIR}/metadata/recovery-linkage.json" || fail \
+    "cross-store recovery linkage proof did not match live authorities"
+fi
 
 if [[ "${INCLUDE_REDIS}" == true ]]; then
   printf 'Capturing optional, non-authoritative Redis RDB...\n'

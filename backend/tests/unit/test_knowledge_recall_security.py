@@ -17,8 +17,8 @@ def test_real_qdrant_recall_redacts_downstream_exception_details(monkeypatch) ->
 
     monkeypatch.setattr(
         knowledge_recall_service,
-        "RealQdrantIndexClient",
-        FailingQdrantClient,
+        "configured_real_qdrant_client",
+        lambda: FailingQdrantClient(),
     )
 
     with pytest.raises(ApiError) as raised:
