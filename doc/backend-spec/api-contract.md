@@ -34,6 +34,7 @@ bearer。Keycloak 只作为参考 IdP，认证契约只依赖标准 OIDC discove
 | --- | --- | --- |
 | `GET /api/v1/auth/oidc/login?return_path=/insights` | 生成 state、nonce、PKCE S256 challenge 并 303 到 IdP | `return_path` 仅接受站内绝对路径；state/nonce/verifier 短期、一次性 |
 | `GET /api/v1/auth/oidc/callback` | 一次性消费 state、交换 code、校验 ID token 并 303 回站内页面 | 精确校验 issuer/audience、RS256 签名、exp/iat、nonce；未知 `kid` 只允许刷新 JWKS 后重试；IdP token 不返回浏览器 |
+| `POST /api/v1/auth/oidc/back-channel-logout` | IdP 通过标准 form POST 提交 Logout Token，撤销关联 BFF 会话 | 公开协议端点但不匿名信任：严格验证 RS256/JWKS、issuer、client audience、iat/exp/jti/events、sid/sub，禁止 nonce；hash-only jti 原子防重放；无匹配会话也返回空 200，不泄漏 scope；无效或处理失败统一 400 |
 | `GET /api/v1/auth/session` | 由 bearer 或 HttpOnly cookie 恢复内部用户、scope 与当前角色 | cookie 可省略 scope Header；响应 `Cache-Control: no-store`，浏览器会话轮换 `csrf_token` |
 | `POST /api/v1/auth/logout` | 幂等撤销本地 BFF 会话并清除 cookie | cookie 路径必须同时验证 `X-CSRF-Token` 与受信 `Origin`；开发 bearer 路径保留 scope Header 兼容；不宣称终止 IdP 全局 SSO 会话 |
 
@@ -42,7 +43,9 @@ SameSite=Lax; Path=/` 且不设置 Domain。cookie 是高熵不透明值，MySQL
 与 CSRF SHA-256；OIDC access token、ID token、refresh token 和 cookie/CSRF 原值不得写入数据库、
 浏览器持久存储或日志。本地 HTTP 可配置 `auris_session`，但不改变生产约束。
 当前 scope 禁止 `offline_access`，BFF 不保留 refresh token；会话过期后客户端必须重新发起 Code +
-PKCE。目标 IdP 如支持 RP-Initiated Logout，应作为独立可选集成验证，不能把本地撤销伪装为全局登出。
+PKCE。`POST /auth/logout` 仍只表示当前 RP 本地登出；IdP 主动终止 SSO 或管理员禁用会话时，
+通过标准 Back-Channel Logout URI 联动撤销。目标 IdP 如支持 RP-Initiated Logout，应作为独立可选
+集成验证，不能把本地撤销伪装为全局登出。
 
 浏览器 cookie 请求可省略 scope Header，由服务端使用会话冻结的 tenant/project；如果显式传入，
 必须精确匹配。bearer 和需要显式选择 scope 的兼容调用使用：

@@ -166,8 +166,17 @@ Compose、`auris_migration` 身份重新执行完整迁移循环并检查 `SHOW 
 - client ID：`auris-flow-web`（public client）
 - audience：`auris-flow-api`
 - redirect URI：`https://<AURIS_PUBLIC_HOST>/api/v1/auth/oidc/callback`
+- back-channel logout URI：`https://<AURIS_PUBLIC_HOST>/api/v1/auth/oidc/back-channel-logout`
 - scope：`openid profile email`
 - Authorization Code + PKCE S256；禁用 implicit、password grant 和 `offline_access`
+
+参考 Keycloak realm 已关闭 front-channel logout，并注册标准 back-channel URI 和
+`backchannel_logout_session_required=true`。Auris Flow 按 OpenID Connect Back-Channel Logout
+1.0（含 2023 errata）在 RP 端强制 `exp` 为必填，并拒绝有效期超过 300 秒的 Logout Token；
+当前参考 Keycloak `26.2.5` 配置实测兼容。替换外部 IdP 前必须验证其 Logout Token 包含
+`iss/aud/iat/exp/jti/events` 与 `sid` 或 `sub`，且使用 RS256/JWKS；缺失 `exp` 的旧 IdP
+不进入兼容降级路径。这里的 300 秒是 Auris Flow RP 的接收上限，不是由 realm 中
+`accessTokenLifespan` 推导出的 Keycloak Logout Token 配置。
 
 BFF 验证 issuer、audience、签名、过期时间和 JWKS，并把 `(issuer, subject)` 映射到已预置的
 内部用户、tenant、project 与角色。**未知身份不会自动成为管理员，也不会自动创建租户。** 参考

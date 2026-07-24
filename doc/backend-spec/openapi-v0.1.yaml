@@ -180,6 +180,40 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /auth/oidc/back-channel-logout:
+    post:
+      tags: [auth]
+      summary: 接收标准 OIDC Back-Channel Logout Token
+      description: >
+        供已注册的 OIDC Provider 以 application/x-www-form-urlencoded POST
+        `logout_token`。服务端使用与 ID Token 相同的 RS256/JWKS 信任边界，严格校验
+        issuer、client audience、iat、exp、jti、events 以及 sid/sub，禁止 nonce，
+        并在同一事务内持久化 hash-only jti replay tombstone、按 sid 或精确
+        (issuer, subject) 撤销浏览器会话。合法但无匹配会话仍返回 200；响应不包含
+        tenant、project、subject、sid、会话数量或 token。请求无效或处理失败统一返回
+        400，避免协议差异和内部状态泄漏。
+      operationId: postAuthOidcBackChannelLogout
+      security: []
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/OIDCBackChannelLogoutRequest"
+      responses:
+        "200":
+          description: Logout Token 已处理；响应体为空
+          headers:
+            Cache-Control:
+              description: 固定为 no-store。
+              schema:
+                type: string
+                enum: [no-store]
+        "400":
+          $ref: "#/components/responses/Error"
+
   /auth/session:
     get:
       tags: [auth]
@@ -7271,6 +7305,18 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    OIDCBackChannelLogoutRequest:
+      type: object
+      additionalProperties: true
+      required: [logout_token]
+      properties:
+        logout_token:
+          type: string
+          minLength: 1
+          maxLength: 16384
+          writeOnly: true
+          description: >
+            OIDC Provider 签名的短期 Logout Token；不得写入日志、错误响应或持久化原值。
     AuthSessionUser:
       type: object
       additionalProperties: false

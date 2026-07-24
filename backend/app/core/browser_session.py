@@ -182,6 +182,7 @@ def create_browser_session(
     *,
     identity_id: str,
     ttl_seconds: int,
+    oidc_session_id: str | None = None,
     now: datetime | None = None,
 ) -> IssuedBrowserSession:
     if not 300 <= ttl_seconds <= 2_592_000:
@@ -191,6 +192,10 @@ def create_browser_session(
     ).scalar_one_or_none()
     if identity is None or identity.status != "active":
         raise ApiError("OIDC_IDENTITY_NOT_PROVISIONED", "OIDC 身份尚未获准访问", 403)
+    if oidc_session_id is not None and (
+        not oidc_session_id or len(oidc_session_id.encode("utf-8")) > 512
+    ):
+        raise ApiError("OIDC_TOKEN_INVALID", "OIDC token 无效", 400)
 
     issued_at = _as_utc(now or _utc_now())
     provisional = BrowserAuthSession(
@@ -201,6 +206,9 @@ def create_browser_session(
         user_id=identity.user_id,
         tenant_id=identity.tenant_id,
         project_id=identity.project_id,
+        oidc_session_id_sha256=(
+            _secret_sha256(oidc_session_id) if oidc_session_id is not None else None
+        ),
         provider="oidc_session",
         issued_at=issued_at,
         expires_at=issued_at + timedelta(seconds=ttl_seconds),

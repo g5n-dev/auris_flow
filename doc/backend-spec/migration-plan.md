@@ -56,7 +56,8 @@
 | 0040 | `label_recomputation_fact_sets` | 全量重算 candidate FactSet/namespace | 0039 |
 | 0041 | `oidc_browser_sessions` | OIDC identity/state 与 hash-only browser session | 0040 |
 | 0042 | `task_run_control_plane` | RunRecord 运行时间、deadline、引擎观察、状态版本和取消终态控制字段 | 0041 |
-| 0043 | `oidc_transaction_binding` | OIDC state 绑定短期浏览器 transaction hash；当前 head | 0042 |
+| 0043 | `oidc_transaction_binding` | OIDC state 绑定短期浏览器 transaction hash | 0042 |
+| 0044 | `oidc_backchannel_logout` | 浏览器会话 sid hash 与持久化 Logout Token replay tombstone；当前 head | 0043 |
 
 ## 3. 0001 Platform Foundation
 
@@ -370,6 +371,15 @@ runtime 不认识浏览器绑定而把 pending state 降级成仅凭公开 state
 短 TTL 登录窗口，切换后监控
 `OIDC_STATE_INVALID`，不得把 transaction cookie 原值写入数据库、日志或运维证据。
 
+`0044_oidc_backchannel_logout.py` 以 expand 方式为 `browser_auth_sessions` 增加可空
+`oidc_session_id_sha256` 和 active lookup 索引；既有会话保持可读，但不能由 sid-only Logout Token
+命中，必须自然过期、本地撤销或由精确 `(issuer, subject)` 事件撤销。迁移同时新增
+`oidc_logout_token_replays`，仅保存 issuer/jti SHA-256 与有界保留时间，并以
+`(issuer_sha256,jti_sha256)` 唯一约束作为多进程原子 replay 边界。应用必须在同一数据库事务内先
+登记 tombstone，再按 sid 或 issuer+subject 交集锁定并撤销会话；冲突完整回滚并返回稳定 400。
+downgrade 删除 replay 表和 sid hash 扩展，不修改 authority user/identity 或既有浏览器会话的
+其余字段；回退前应先停止 IdP back-channel 投递并等待旧运行时切换完成。
+
 ## 18. 迁移验收
 
 - 空库可完整执行到最新版本。
@@ -377,5 +387,5 @@ runtime 不认识浏览器绑定而把 pending state 降级成仅凭公开 state
 - 回滚最近一版在本地可执行；生产回滚使用 forward migration。
 - `tenant_id + project_id` 索引覆盖所有项目级大表。
 - 幂等、审计、outbox 表先于任何业务写接口上线。
-- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表、0041 OIDC/browser session hash-only 强表、0042 task-run control 字段/索引，以及 0043 OIDC transaction hash 绑定在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
+- 迁移图必须线性到当前最新 revision，并能在空库本地完整 downgrade/upgrade；0026 的 Observation、0027 的 Eval、0029 的 Calibration/MetricSnapshot、0034 的 Mapping、0038 activation interval write-once closure、0039 append-only Fact Contract、0040 full recompute 强表、0041 OIDC/browser session hash-only 强表、0042 task-run control 字段/索引、0043 OIDC transaction hash 绑定，以及 0044 Back-Channel Logout sid/replay 边界在两种方言都可验证。已有 Contract 数据的破坏性 downgrade 应 fail closed。
 - 0028 后每个 environment 只有一个 `release_bundle_heads` 行、每个 deployment 只有一个 active ReleaseCommand；0039 后每个 scope/namespace/logical key 只有一个 `label_fact_heads` current 指针，Fact 行本身不再承担可变 current 状态。

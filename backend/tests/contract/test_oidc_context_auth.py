@@ -77,7 +77,12 @@ class StubAuthorizationFlow:
             audiences=("auris-flow-api",),
             expires_at=2_000_000_000,
             issued_at=1_900_000_000,
-            claims=MappingProxyType({"nonce": OIDC_NONCE}),
+            claims=MappingProxyType(
+                {
+                    "nonce": OIDC_NONCE,
+                    "sid": "provider-browser-session-sensitive",
+                }
+            ),
         )
         return OIDCTokenSet(
             access_token="redacted-access-token",
@@ -365,7 +370,10 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert "redacted-access-token" not in persisted_values
     assert "redacted-id-token" not in persisted_values
     assert "redacted-refresh-token" not in persisted_values
+    assert "provider-browser-session-sensitive" not in persisted_values
+    assert persisted.oidc_session_id_sha256 is not None
     assert {"access_token", "id_token", "refresh_token"}.isdisjoint(persisted_columns)
+    assert {"oidc_session_id", "sid"}.isdisjoint(persisted_columns)
 
     restored = client.get("/api/v1/auth/session")
     assert restored.status_code == 200, restored.text

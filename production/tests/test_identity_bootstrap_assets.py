@@ -33,6 +33,23 @@ def test_keycloak_reference_user_has_fixed_subject_and_temporary_secret_placehol
     ]
 
 
+def test_keycloak_reference_client_registers_standard_backchannel_logout() -> None:
+    realm = json.loads(
+        (PRODUCTION / "keycloak" / "auris-flow-realm.template.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    client = next(
+        item for item in realm["clients"] if item["clientId"] == "auris-flow-web"
+    )
+    assert client["frontchannelLogout"] is False
+    assert client["attributes"]["backchannel.logout.url"] == (
+        "https://__AURIS_PUBLIC_HOST__/api/v1/auth/oidc/back-channel-logout"
+    )
+    assert client["attributes"]["backchannel.logout.session.required"] == "true"
+
+
 def test_keycloak_entrypoint_reads_operator_password_from_secret_without_exporting_it() -> (
     None
 ):

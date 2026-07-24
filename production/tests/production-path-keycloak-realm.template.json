@@ -25,7 +25,7 @@
       "implicitFlowEnabled": false,
       "directAccessGrantsEnabled": false,
       "serviceAccountsEnabled": false,
-      "frontchannelLogout": true,
+      "frontchannelLogout": false,
       "redirectUris": [
         "https://__AURIS_PUBLIC_HOST__/api/v1/auth/oidc/callback"
       ],
@@ -38,6 +38,7 @@
       "attributes": {
         "pkce.code.challenge.method": "S256",
         "oauth2.device.authorization.grant.enabled": "false",
+        "backchannel.logout.url": "https://__AURIS_PUBLIC_HOST__/api/v1/auth/oidc/back-channel-logout",
         "backchannel.logout.session.required": "true",
         "backchannel.logout.revoke.offline.tokens": "true"
       },

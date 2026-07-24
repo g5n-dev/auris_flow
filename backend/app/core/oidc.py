@@ -22,6 +22,9 @@ _MAX_TOKEN_BYTES = 16 * 1024
 _MAX_DISCOVERY_RESPONSE_BYTES = 128 * 1024
 _MAX_JWKS_RESPONSE_BYTES = 512 * 1024
 _PRIVATE_RSA_PARAMETERS = frozenset({"d", "p", "q", "dp", "dq", "qi", "oth"})
+_BACKCHANNEL_LOGOUT_EVENT = "http://schemas.openid.net/event/backchannel-logout"
+_MAX_OIDC_IDENTIFIER_LENGTH = 512
+_MAX_BACKCHANNEL_LOGOUT_LIFETIME_SECONDS = 300
 
 
 class OIDCError(RuntimeError):
@@ -95,6 +98,32 @@ class OIDCValidatedClaims:
     issued_at: int | float | None
     claims: Mapping[str, Any]
 
+    @property
+    def session_id(self) -> str | None:
+        value = self.claims.get("sid")
+        return value if isinstance(value, str) else None
+
+
+@dataclass(frozen=True, repr=False)
+class OIDCBackChannelLogoutClaims:
+    """Validated selectors only; repr intentionally never exposes IdP identifiers."""
+
+    issuer: str
+    audiences: tuple[str, ...]
+    issued_at: int | float
+    expires_at: int | float
+    token_id: str
+    subject: str | None
+    session_id: str | None
+
+    def __repr__(self) -> str:
+        return (
+            "OIDCBackChannelLogoutClaims("
+            f"issuer=<redacted>, audiences={self.audiences!r}, "
+            f"issued_at={self.issued_at!r}, expires_at={self.expires_at!r}, "
+            "token_id=<redacted>, subject=<redacted>, session_id=<redacted>)"
+        )
+
 
 class OIDCHttpTransport(Protocol):
     def get_json(
@@ -147,8 +176,8 @@ class _JwksCache:
     expires_at: float
 
 
-class OIDCTokenValidator:
-    """Validate OIDC JWTs against exact discovery metadata and a cached JWKS."""
+class _OIDCSignedTokenValidator:
+    """Shared exact-discovery and cached-JWKS validation machinery."""
 
     def __init__(
         self,
@@ -165,10 +194,15 @@ class OIDCTokenValidator:
         self._discovery: _DiscoveryCache | None = None
         self._jwks: _JwksCache | None = None
 
-    def validate(self, token: str, *, now: float | None = None) -> OIDCValidatedClaims:
+    def _decode_signed_claims(
+        self,
+        token: str,
+        *,
+        current_time: float,
+        claims_options: Mapping[str, Mapping[str, Any]],
+    ) -> Mapping[str, Any]:
         if not isinstance(token, str) or not token or len(token.encode("utf-8")) > _MAX_TOKEN_BYTES:
             raise OIDCTokenValidationError
-        current_time = self._current_time(now)
 
         def load_signing_key(header: Mapping[str, Any], _payload: Mapping[str, Any]) -> Any:
             if header.get("alg") != _ALGORITHM:
@@ -178,12 +212,6 @@ class OIDCTokenValidator:
                 raise OIDCTokenValidationError
             return self._key_for_kid(kid, current_time)
 
-        claims_options = {
-            "iss": {"essential": True, "value": self.config.issuer},
-            "sub": {"essential": True},
-            "aud": {"essential": True, "value": self.config.audience},
-            "exp": {"essential": True},
-        }
         try:
             claims = self._jwt.decode(
                 token,
@@ -194,7 +222,7 @@ class OIDCTokenValidator:
                 now=int(current_time),
                 leeway=self.config.clock_skew_seconds,
             )
-            return self._build_validated_claims(claims)
+            return cast(Mapping[str, Any], claims)
         except OIDCError:
             raise
         except Exception:
@@ -208,35 +236,6 @@ class OIDCTokenValidator:
         if not math.isfinite(value) or value < 0:
             raise OIDCConfigurationError
         return value
-
-    def _build_validated_claims(self, claims: Mapping[str, Any]) -> OIDCValidatedClaims:
-        issuer = claims.get("iss")
-        subject = claims.get("sub")
-        audience = claims.get("aud")
-        expires_at = claims.get("exp")
-        issued_at = claims.get("iat")
-        if issuer != self.config.issuer or not isinstance(issuer, str):
-            raise OIDCTokenValidationError
-        if not isinstance(subject, str) or not subject or len(subject) > 512:
-            raise OIDCTokenValidationError
-        audiences = _audiences(audience)
-        if self.config.audience not in audiences:
-            raise OIDCTokenValidationError
-        if not _is_numeric_date(expires_at):
-            raise OIDCTokenValidationError
-        if issued_at is not None and not _is_numeric_date(issued_at):
-            raise OIDCTokenValidationError
-        numeric_expires_at = cast(int | float, expires_at)
-        numeric_issued_at = cast(int | float | None, issued_at)
-        raw_claims = MappingProxyType(dict(claims))
-        return OIDCValidatedClaims(
-            subject=subject,
-            issuer=issuer,
-            audiences=audiences,
-            expires_at=numeric_expires_at,
-            issued_at=numeric_issued_at,
-            claims=raw_claims,
-        )
 
     def _key_for_kid(self, kid: str, now: float) -> Any:
         with self._lock:
@@ -305,6 +304,53 @@ class OIDCTokenValidator:
         return document
 
 
+class OIDCTokenValidator(_OIDCSignedTokenValidator):
+    """Validate an OIDC bearer token against exact provider metadata."""
+
+    def validate(self, token: str, *, now: float | None = None) -> OIDCValidatedClaims:
+        current_time = self._current_time(now)
+        claims = self._decode_signed_claims(
+            token,
+            current_time=current_time,
+            claims_options={
+                "iss": {"essential": True, "value": self.config.issuer},
+                "sub": {"essential": True},
+                "aud": {"essential": True, "value": self.config.audience},
+                "exp": {"essential": True},
+            },
+        )
+        return self._build_validated_claims(claims)
+
+    def _build_validated_claims(self, claims: Mapping[str, Any]) -> OIDCValidatedClaims:
+        issuer = claims.get("iss")
+        subject = claims.get("sub")
+        audience = claims.get("aud")
+        expires_at = claims.get("exp")
+        issued_at = claims.get("iat")
+        if issuer != self.config.issuer or not isinstance(issuer, str):
+            raise OIDCTokenValidationError
+        if not isinstance(subject, str) or not subject or len(subject) > 512:
+            raise OIDCTokenValidationError
+        audiences = _audiences(audience)
+        if self.config.audience not in audiences:
+            raise OIDCTokenValidationError
+        if not _is_numeric_date(expires_at):
+            raise OIDCTokenValidationError
+        if issued_at is not None and not _is_numeric_date(issued_at):
+            raise OIDCTokenValidationError
+        numeric_expires_at = cast(int | float, expires_at)
+        numeric_issued_at = cast(int | float | None, issued_at)
+        raw_claims = MappingProxyType(dict(claims))
+        return OIDCValidatedClaims(
+            subject=subject,
+            issuer=issuer,
+            audiences=audiences,
+            expires_at=numeric_expires_at,
+            issued_at=numeric_issued_at,
+            claims=raw_claims,
+        )
+
+
 class OIDCIDTokenValidator(OIDCTokenValidator):
     """Validate browser ID tokens against the OAuth client, including ``azp``."""
 
@@ -329,6 +375,9 @@ class OIDCIDTokenValidator(OIDCTokenValidator):
 
     def _build_validated_claims(self, claims: Mapping[str, Any]) -> OIDCValidatedClaims:
         validated = super()._build_validated_claims(claims)
+        session_id = claims.get("sid")
+        if session_id is not None and not _is_bounded_identifier(session_id):
+            raise OIDCTokenValidationError
         authorized_party = claims.get("azp")
         if len(validated.audiences) > 1:
             if not isinstance(authorized_party, str) or not hmac.compare_digest(
@@ -343,6 +392,78 @@ class OIDCIDTokenValidator(OIDCTokenValidator):
         ):
             raise OIDCTokenValidationError
         return validated
+
+
+class OIDCBackChannelLogoutTokenValidator(_OIDCSignedTokenValidator):
+    """Validate a standards-based Logout Token without accepting an ID/access token."""
+
+    def validate(
+        self,
+        token: str,
+        *,
+        now: float | None = None,
+    ) -> OIDCBackChannelLogoutClaims:
+        current_time = self._current_time(now)
+        claims = self._decode_signed_claims(
+            token,
+            current_time=current_time,
+            claims_options={
+                "iss": {"essential": True, "value": self.config.issuer},
+                "aud": {"essential": True, "value": self.config.audience},
+                "iat": {"essential": True},
+                "exp": {"essential": True},
+                "jti": {"essential": True},
+                "events": {"essential": True},
+            },
+        )
+        issuer = claims.get("iss")
+        audiences = _audiences(claims.get("aud"))
+        issued_at = claims.get("iat")
+        expires_at = claims.get("exp")
+        token_id = claims.get("jti")
+        subject = claims.get("sub")
+        session_id = claims.get("sid")
+        events = claims.get("events")
+        if issuer != self.config.issuer or not isinstance(issuer, str):
+            raise OIDCTokenValidationError
+        if self.config.audience not in audiences:
+            raise OIDCTokenValidationError
+        if not _is_numeric_date(issued_at) or not _is_numeric_date(expires_at):
+            raise OIDCTokenValidationError
+        numeric_issued_at = cast(int | float, issued_at)
+        numeric_expires_at = cast(int | float, expires_at)
+        if (
+            numeric_issued_at < 0
+            or numeric_expires_at <= numeric_issued_at
+            or numeric_expires_at - numeric_issued_at
+            > _MAX_BACKCHANNEL_LOGOUT_LIFETIME_SECONDS
+            or numeric_issued_at > current_time + self.config.clock_skew_seconds
+        ):
+            raise OIDCTokenValidationError
+        if not _is_bounded_identifier(token_id):
+            raise OIDCTokenValidationError
+        if subject is not None and not _is_bounded_identifier(subject):
+            raise OIDCTokenValidationError
+        if session_id is not None and not _is_bounded_identifier(session_id):
+            raise OIDCTokenValidationError
+        if subject is None and session_id is None:
+            raise OIDCTokenValidationError
+        if (
+            not isinstance(events, Mapping)
+            or _BACKCHANNEL_LOGOUT_EVENT not in events
+            or not isinstance(events[_BACKCHANNEL_LOGOUT_EVENT], Mapping)
+            or "nonce" in claims
+        ):
+            raise OIDCTokenValidationError
+        return OIDCBackChannelLogoutClaims(
+            issuer=issuer,
+            audiences=audiences,
+            issued_at=numeric_issued_at,
+            expires_at=numeric_expires_at,
+            token_id=cast(str, token_id),
+            subject=cast(str | None, subject),
+            session_id=cast(str | None, session_id),
+        )
 
 
 def _import_jwks(document: Mapping[str, Any]) -> dict[str, Any]:
@@ -396,6 +517,14 @@ def _audiences(value: Any) -> tuple[str, ...]:
 
 def _is_numeric_date(value: Any) -> bool:
     return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value)
+
+
+def _is_bounded_identifier(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value.encode("utf-8")) <= _MAX_OIDC_IDENTIFIER_LENGTH
+    )
 
 
 def _validate_absolute_http_url(value: str) -> None:

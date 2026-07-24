@@ -254,8 +254,13 @@ async def request_logging_middleware(
                 error_type=exc.__class__.__name__,
             )
             raise
-    if request.url.path == f"{settings.api_prefix}/auth/oidc/callback":
+    oidc_callback_path = f"{settings.api_prefix}/auth/oidc/callback"
+    oidc_backchannel_logout_path = (
+        f"{settings.api_prefix}/auth/oidc/back-channel-logout"
+    )
+    if request.url.path == oidc_callback_path:
         clear_authorization_transaction_cookie(response, app_env=settings.app_env)
+    if request.url.path in {oidc_callback_path, oidc_backchannel_logout_path}:
         response.headers["Cache-Control"] = "no-store"
         response.headers["Pragma"] = "no-cache"
     duration_ms = round((time.perf_counter() - started) * 1000, 2)

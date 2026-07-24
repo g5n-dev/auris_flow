@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import re
 from datetime import UTC, datetime
 from functools import lru_cache
 from urllib.parse import parse_qsl
@@ -9,6 +10,7 @@ from fastapi import APIRouter, Header, Request, Response
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 
 from app.api.deps import ContextDep, SessionDep
 from app.core.auth import (
@@ -29,6 +31,7 @@ from app.core.browser_session import (
 from app.core.config import _csv_items, get_settings, is_production_environment
 from app.core.errors import ApiError
 from app.core.oidc import (
+    OIDCBackChannelLogoutTokenValidator,
     OIDCConfigurationError,
     OIDCError,
     OIDCIDTokenValidator,
@@ -40,6 +43,7 @@ from app.core.oidc_flow import (
     OIDCAuthorizationFlow,
     OIDCClientConfig,
 )
+from app.core.oidc_logout import process_backchannel_logout
 from app.core.oidc_state import (
     consume_authorization_state,
     delete_consumed_authorization_state,
@@ -54,11 +58,22 @@ from app.core.response import envelope
 from app.models import AuthSession, User
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+_MAX_BACKCHANNEL_LOGOUT_TOKEN_BYTES = 16 * 1024
+_MAX_BACKCHANNEL_LOGOUT_FORM_BYTES = _MAX_BACKCHANNEL_LOGOUT_TOKEN_BYTES + 1024
+_INVALID_PERCENT_ESCAPE = re.compile(r"%(?![0-9A-Fa-f]{2})")
 
 
 class DevLoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=254)
     password: str = Field(min_length=1, max_length=256)
+
+
+class OIDCBackChannelLogoutRequest(BaseModel):
+    logout_token: str = Field(
+        min_length=1,
+        max_length=_MAX_BACKCHANNEL_LOGOUT_TOKEN_BYTES,
+        json_schema_extra={"writeOnly": True},
+    )
 
 
 def _profile_payload(profile: DevAuthProfile) -> dict[str, object]:
@@ -122,6 +137,21 @@ def get_oidc_authorization_flow() -> OIDCAuthorizationFlow:
     )
 
 
+@lru_cache
+def get_oidc_backchannel_logout_validator() -> OIDCBackChannelLogoutTokenValidator:
+    settings = get_settings()
+    return OIDCBackChannelLogoutTokenValidator(
+        OIDCProviderConfig(
+            issuer=settings.oidc_issuer,
+            audience=settings.oidc_client_id,
+            discovery_url=settings.oidc_discovery_url or None,
+            jwks_cache_ttl_seconds=settings.oidc_jwks_cache_ttl_seconds,
+            clock_skew_seconds=settings.oidc_clock_skew_seconds,
+            http_timeout_seconds=settings.oidc_http_timeout_seconds,
+        )
+    )
+
+
 def _translate_oidc_error(error: OIDCError) -> ApiError:
     if isinstance(error, OIDCProviderUnavailableError):
         return ApiError(
@@ -146,6 +176,61 @@ def _callback_state(raw_query: str) -> str:
     if len(states) != 1 or len(states[0]) < 32:
         raise ApiError("OIDC_STATE_INVALID", "OIDC 登录状态无效", 400)
     return states[0]
+
+
+def _invalid_logout_token() -> ApiError:
+    return ApiError("OIDC_LOGOUT_TOKEN_INVALID", "OIDC logout token 无效", 400)
+
+
+async def _backchannel_logout_token(request: Request) -> str:
+    media_type = request.headers.get("Content-Type", "").partition(";")[0].strip().lower()
+    if media_type != "application/x-www-form-urlencoded":
+        raise _invalid_logout_token()
+    content_lengths = [
+        value.strip()
+        for key, value in request.headers.raw
+        if key.lower() == b"content-length"
+    ]
+    if len(content_lengths) > 1:
+        raise _invalid_logout_token()
+    if content_lengths:
+        try:
+            declared_length = int(content_lengths[0])
+        except (TypeError, ValueError):
+            raise _invalid_logout_token() from None
+        if declared_length < 0 or declared_length > _MAX_BACKCHANNEL_LOGOUT_FORM_BYTES:
+            raise _invalid_logout_token()
+
+    body = bytearray()
+    async for chunk in request.stream():
+        body.extend(chunk)
+        if len(body) > _MAX_BACKCHANNEL_LOGOUT_FORM_BYTES:
+            raise _invalid_logout_token()
+    try:
+        encoded_form = bytes(body).decode("ascii")
+    except UnicodeDecodeError:
+        raise _invalid_logout_token() from None
+    if _INVALID_PERCENT_ESCAPE.search(encoded_form):
+        raise _invalid_logout_token()
+    try:
+        pairs = parse_qsl(
+            encoded_form,
+            keep_blank_values=True,
+            strict_parsing=True,
+            max_num_fields=32,
+            encoding="utf-8",
+            errors="strict",
+        )
+    except (UnicodeError, ValueError):
+        raise _invalid_logout_token() from None
+    tokens = [value for key, value in pairs if key == "logout_token"]
+    if (
+        len(tokens) != 1
+        or not tokens[0]
+        or len(tokens[0].encode("utf-8")) > _MAX_BACKCHANNEL_LOGOUT_TOKEN_BYTES
+    ):
+        raise _invalid_logout_token()
+    return tokens[0]
 
 
 def _set_session_cookie(response: Response, value: str, *, max_age: int) -> None:
@@ -278,12 +363,57 @@ def oidc_callback(request: Request, session: SessionDep) -> RedirectResponse:
         session,
         identity_id=identity.identity_id,
         ttl_seconds=settings.oidc_session_ttl_seconds,
+        oidc_session_id=token_set.claims.session_id,
     )
     delete_consumed_authorization_state(session, state_sha256=consumed.state_sha256)
     session.commit()
     response = RedirectResponse(consumed.return_path, status_code=303)
     _set_session_cookie(response, issued.raw_token, max_age=settings.oidc_session_ttl_seconds)
     return response
+
+
+@router.post(
+    "/oidc/back-channel-logout",
+    status_code=200,
+    response_class=Response,
+    responses={
+        200: {"description": "Logout Token 已安全处理；不返回会话或 scope 信息。"},
+        400: {"description": "请求或 Logout Token 无效。"},
+    },
+    openapi_extra={
+        "security": [],
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/x-www-form-urlencoded": {
+                    "schema": OIDCBackChannelLogoutRequest.model_json_schema()
+                }
+            },
+        },
+    },
+)
+async def oidc_backchannel_logout(
+    request: Request,
+    session: SessionDep,
+) -> Response:
+    settings = get_settings()
+    if settings.auth_provider.strip().lower() != "oidc":
+        raise ApiError("OIDC_LOGOUT_DISABLED", "当前环境未启用 OIDC logout", 404)
+    raw_token = await _backchannel_logout_token(request)
+    try:
+        claims = get_oidc_backchannel_logout_validator().validate(raw_token)
+        process_backchannel_logout(session, claims)
+        session.commit()
+    except SQLAlchemyError:
+        session.rollback()
+        raise _invalid_logout_token() from None
+    except OIDCError:
+        session.rollback()
+        raise _invalid_logout_token() from None
+    return Response(
+        status_code=200,
+        headers={"Cache-Control": "no-store", "Pragma": "no-cache"},
+    )
 
 
 @router.get("/session")

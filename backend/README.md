@@ -52,7 +52,13 @@ CORS_ALLOWED_ORIGINS=https://flow.example.com
 当前 BFF 不申请 `offline_access`，也不保存 IdP refresh token；浏览器会话过期后重新执行 Code + PKCE。
 默认 OIDC HTTP transport 禁止重定向并以流式方式读取不可信 IdP 响应；discovery、JWKS、token response
 在进入 JSON 缓冲区前分别限制为 128 KiB、512 KiB、128 KiB，超限或读取异常只返回稳定脱敏错误。
-`POST /api/v1/auth/logout` 只撤销本地 BFF 会话并清除 cookie，不宣称终止 IdP 的全局 SSO 会话；如需
+`POST /api/v1/auth/logout` 只撤销本地 BFF 会话并清除 cookie，不宣称终止 IdP 的全局 SSO 会话。
+IdP 侧终止 SSO 通过标准
+`POST /api/v1/auth/oidc/back-channel-logout` 联动：端点仅接受有界
+`application/x-www-form-urlencoded`，严格验证 RS256/JWKS、issuer、client audience、
+iat/exp/jti/events 与 sid/sub，拒绝 nonce、普通 ID/access token 和重复 jti。浏览器会话只保存
+`sid` SHA-256；replay tombstone 只保存 issuer/jti SHA-256，并在同一事务内完成防重放与撤销。
+合法但无匹配会话仍返回空 200，无效或处理失败统一 400，不回显 token、主体、scope 或撤销数量。如需
 RP-Initiated Logout，必须按目标 IdP 能力另行配置并完成真实集成演练。
 
 标签自动优化 scheduler 默认关闭。项目管理员先通过

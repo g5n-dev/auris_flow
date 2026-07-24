@@ -1283,6 +1283,13 @@ def _authorize_oidc(
             discovery.get("token_endpoint"), "OIDC token endpoint"
         )
         jwks_uri = _nonempty_text(discovery.get("jwks_uri"), "OIDC JWKS URI")
+        if (
+            discovery.get("backchannel_logout_supported") is not True
+            or discovery.get("backchannel_logout_session_supported") is not True
+        ):
+            raise VerifierFailure(
+                "OIDC provider does not advertise session-bound back-channel logout"
+            )
         if issuer != f"{public_origin}/realms/auris-flow" or any(
             _origin(item) != public_origin
             for item in (issuer, authorization_endpoint, token_endpoint, jwks_uri)
@@ -1467,7 +1474,9 @@ def _authorize_oidc(
         )
         session_row = config.database.one(
             "SELECT COUNT(*) AS count, MIN(provider) AS provider, "
-            "MIN(token_sha256) AS token_sha256 FROM browser_auth_sessions "
+            "MIN(token_sha256) AS token_sha256, "
+            "MIN(oidc_session_id_sha256) AS oidc_session_id_sha256 "
+            "FROM browser_auth_sessions "
             "WHERE token_sha256=:token_sha256 AND revoked_at IS NULL "
             "AND expires_at > CURRENT_TIMESTAMP",
             {"token_sha256": session_sha256},
@@ -1479,6 +1488,8 @@ def _authorize_oidc(
         if (
             session_row.get("provider") != "oidc_session"
             or session_row.get("token_sha256") != session_sha256
+            or not isinstance(session_row.get("oidc_session_id_sha256"), str)
+            or not SHA256_PATTERN.fullmatch(session_row["oidc_session_id_sha256"])
         ):
             raise VerifierFailure("persisted browser session binding is invalid")
 

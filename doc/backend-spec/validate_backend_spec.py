@@ -28,6 +28,7 @@ HTTP_METHODS = {"get", "head", "post", "patch", "put", "delete"}
 WRITING_METHODS = {"post", "patch", "put", "delete"}
 IDEMPOTENCY_EXEMPT_OPERATIONS = {
     ("post", "/auth/dev-login"),
+    ("post", "/auth/oidc/back-channel-logout"),
     ("post", "/auth/logout"),
 }
 PAGING_EXEMPT_PATHS = {"/hotword-statistics", "/insights/metric-comparisons"}

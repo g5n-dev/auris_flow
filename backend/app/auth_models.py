@@ -148,6 +148,30 @@ class OidcAuthorizationState(Base, TimestampMixin):
     consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class OidcLogoutTokenReplay(Base, TimestampMixin):
+    """Hash-only, durable replay tombstone for a validated OIDC Logout Token."""
+
+    __tablename__ = "oidc_logout_token_replays"
+    __table_args__ = (
+        UniqueConstraint(
+            "issuer_sha256",
+            "jti_sha256",
+            name="uq_oidc_logout_token_replays_issuer_jti",
+        ),
+        CheckConstraint(
+            "expires_at > issued_at",
+            name="ck_oidc_logout_token_replays_expiry",
+        ),
+        Index("ix_oidc_logout_token_replays_expiry", "expires_at"),
+    )
+
+    logout_event_sha256: Mapped[str] = mapped_column(String(64), primary_key=True)
+    issuer_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    jti_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class BrowserAuthSession(Base, TimestampMixin):
     __tablename__ = "browser_auth_sessions"
     __table_args__ = (
@@ -168,6 +192,12 @@ class BrowserAuthSession(Base, TimestampMixin):
             "expires_at",
         ),
         Index("ix_browser_auth_sessions_identity", "oidc_identity_id", "expires_at"),
+        Index(
+            "ix_browser_auth_sessions_oidc_sid_active",
+            "oidc_session_id_sha256",
+            "revoked_at",
+            "expires_at",
+        ),
     )
 
     browser_session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
@@ -196,6 +226,11 @@ class BrowserAuthSession(Base, TimestampMixin):
         String(64),
         ForeignKey("projects.project_id", ondelete="RESTRICT", onupdate="RESTRICT"),
         nullable=False,
+    )
+    oidc_session_id_sha256: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+        default=None,
     )
     provider: Mapped[str] = mapped_column(String(32), nullable=False, default="oidc_session")
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
