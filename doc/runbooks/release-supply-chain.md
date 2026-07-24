@@ -6,9 +6,13 @@ alone is not a production release.
 
 ## Maintainer prerequisites
 
-- Protect the GitHub `release`, `release-publish`, `visual-baseline-build`, and
-  `visual-baseline-production` environments with required reviewers. The latter
-  three guard permanent publication and the two-stage visual baseline process.
+- Protect the GitHub `release`, `release-publish`, `visual-baseline-build`,
+  `visual-baseline-production`, `frontend-bundle-build`, and
+  `frontend-bundle-production` environments with required reviewers. Enable
+  prevent self-review. Restrict the four visual/frontend environments to the
+  default branch only; restrict the release environments to the governed release-tag
+  policy. Merely naming an environment in workflow YAML is not protection: verify
+  these hosted settings before dispatching any candidate.
 - Require the normal `Verify` and CodeQL checks before creating the tag.
 - Enable private vulnerability reporting, secret scanning, and push protection.
 - Allow the release workflow to write packages and request an OIDC identity.

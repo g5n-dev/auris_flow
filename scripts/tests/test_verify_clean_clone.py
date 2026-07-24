@@ -16,6 +16,9 @@ RELEASE_SCRIPT_UNDER_TEST = Path(__file__).resolve().parents[1] / "verify_releas
 WORKFLOW_UNDER_TEST = (
     Path(__file__).resolve().parents[2] / ".github/workflows/verify.yml"
 )
+CODEQL_WORKFLOW_UNDER_TEST = (
+    Path(__file__).resolve().parents[2] / ".github/workflows/codeql.yml"
+)
 
 
 def _write_executable(path: Path, body: str) -> None:
@@ -293,6 +296,15 @@ class CleanCloneGateTests(unittest.TestCase):
 
 
 class CleanCloneWorkflowTests(unittest.TestCase):
+    def test_push_verification_covers_the_current_default_release_branch(self) -> None:
+        workflows = (
+            WORKFLOW_UNDER_TEST.read_text(encoding="utf-8"),
+            CODEQL_WORKFLOW_UNDER_TEST.read_text(encoding="utf-8"),
+        )
+
+        for workflow in workflows:
+            self.assertIn('      - "codex/open-source-v1-candidate"', workflow)
+
     def test_ci_runs_the_clean_clone_gate_with_the_pinned_toolchain(self) -> None:
         workflow = WORKFLOW_UNDER_TEST.read_text(encoding="utf-8")
 

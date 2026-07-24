@@ -31,10 +31,11 @@ external repository controls, clean-host installation, or recovery drill below.
   write `build/release-evidence/visual-regression.json` with `status=ok` and
   `scenario_count=passed=76`. `PENDING`, Darwin diagnostics, goal/seed overrides, host
   runtime, and update mode are not release evidence.
-- [ ] Protect both `visual-baseline-build` and `visual-baseline-production` environments
-  with required reviewers. Build the candidate from an exact clean commit, retain the
-  workflow-produced GHCR digest and signer metadata, and reject manually written digest,
-  identity, issuer, or approval fields.
+- [ ] Protect `visual-baseline-build`, `visual-baseline-production`,
+  `frontend-bundle-build`, and `frontend-bundle-production` with required reviewers,
+  prevent self-review, and allow the default branch only. Build candidates from one
+  exact clean commit, retain the workflow-produced GHCR digests and signer metadata,
+  and reject manually written digest, identity, issuer, or approval fields.
 - [ ] Confirm `production/frontend/frontend-bundle.lock.json` is `APPROVED` only after
   the protected candidate workflow built the exact default-branch tip in an unprivileged
   job, uploaded the complete dist inventory as an immutable GHCR digest, and Cosign

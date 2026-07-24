@@ -535,6 +535,22 @@ def test_release_checklist_separates_pull_request_and_tag_only_controls() -> Non
     assert "must not be configured as default-branch required checks" in normalized
 
 
+def test_release_runbook_requires_every_protected_publication_environment() -> None:
+    runbook = (ROOT / "doc/runbooks/release-supply-chain.md").read_text(encoding="utf-8")
+
+    for environment in (
+        "release",
+        "release-publish",
+        "visual-baseline-build",
+        "visual-baseline-production",
+        "frontend-bundle-build",
+        "frontend-bundle-production",
+    ):
+        assert f"`{environment}`" in runbook
+    assert "prevent self-review" in runbook
+    assert "default branch only" in runbook
+
+
 def test_release_bundle_contains_governance_migrations_and_signed_checksums() -> None:
     text = _workflow_text()
     assembler = (ROOT / "scripts" / "release_bundle.py").read_text(encoding="utf-8")

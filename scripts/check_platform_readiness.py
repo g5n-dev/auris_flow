@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import ast
 import fnmatch
+import hashlib
 import json
 import re
 import subprocess
@@ -11,7 +12,7 @@ import sys
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -37,6 +38,9 @@ OFFICIAL_GITHUB_REPOSITORY = "g5n-dev/auris_flow"
 OFFICIAL_GITHUB_REPOSITORY_PARTS = ("g5n-dev", "auris_flow")
 OFFICIAL_GITHUB_URL = f"https://github.com/{OFFICIAL_GITHUB_REPOSITORY}"
 OFFICIAL_GHCR_REPOSITORY = f"ghcr.io/{OFFICIAL_GITHUB_REPOSITORY}"
+APACHE_2_LICENSE_SHA256 = (
+    "44a4f8b565b014603e91bd5b2e1b50ae77cc9a7e50215d76b986e9992baba898"
+)
 PRODUCT_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 RELEASE_TAG_PATTERN = re.compile(
     rf"v(?P<version>{PRODUCT_VERSION_PATTERN.pattern})(?:-rc\.[1-9]\d*)?"
@@ -182,6 +186,7 @@ CHECKS: tuple[Check, ...] = (
                 "Rights holder legal name:",
                 "Authorized license: Apache-2.0",
                 "Approval evidence reference:",
+                "Approval evidence SHA-256:",
                 "Final NOTICE confirmed:",
             ),
             "SUPPORT.md": ("SECURITY.md", "trace_id"),
@@ -864,6 +869,19 @@ def validate_frontend_bundle_release_lock(lock: object) -> list[str]:
     return []
 
 
+def validate_apache_2_license(root: Path = ROOT) -> list[str]:
+    license_path = root / "LICENSE"
+    if not license_path.is_file():
+        return ["missing canonical Apache License 2.0 file: LICENSE"]
+    try:
+        digest = hashlib.sha256(license_path.read_bytes()).hexdigest()
+    except OSError as error:
+        return [f"LICENSE is unreadable: {error}"]
+    if digest != APACHE_2_LICENSE_SHA256:
+        return ["LICENSE must be the unmodified canonical Apache License 2.0 text"]
+    return []
+
+
 def validate_release_authorization(root: Path = ROOT) -> list[str]:
     authorization_path = root / "open-source-rights-authorization.md"
     notice_path = root / "NOTICE"
@@ -875,12 +893,12 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
 
     authorization = authorization_path.read_text(encoding="utf-8")
     notice = notice_path.read_text(encoding="utf-8")
-    fields: dict[str, str] = {}
+    field_values: dict[str, list[str]] = {}
     for line in authorization.splitlines():
         if not line.startswith("- ") or ":" not in line:
             continue
         key, value = line[2:].split(":", 1)
-        fields[key.strip()] = value.strip()
+        field_values.setdefault(key.strip(), []).append(value.strip())
 
     expected_fields = {
         "Authorization status",
@@ -889,14 +907,23 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
         "Authorized license",
         "Approval date (UTC)",
         "Approval evidence reference",
+        "Approval evidence SHA-256",
         "Final NOTICE confirmed",
     }
-    missing_fields = sorted(expected_fields - fields.keys())
+    missing_fields = sorted(expected_fields - field_values.keys())
     failures.extend(
         f"rights authorization missing field: {field}" for field in missing_fields
     )
     if missing_fields:
         return failures
+    duplicate_fields = sorted(
+        field for field in expected_fields if len(field_values[field]) != 1
+    )
+    failures.extend(
+        f"rights authorization field must appear exactly once: {field}"
+        for field in duplicate_fields
+    )
+    fields = {field: field_values[field][0] for field in expected_fields}
 
     placeholder_values = {
         "",
@@ -907,6 +934,13 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
         "YYYY-MM-DD",
         "PROJECT OWNER TO COMPLETE",
     }
+    placeholder_pattern = re.compile(
+        r"(?:^|[^a-z0-9])"
+        r"(?:example|sample|test|unknown|placeholder|replace[-_ ]?me|"
+        r"project[-_ ]?owner[-_ ]?to[-_ ]?complete)"
+        r"(?:$|[^a-z0-9])",
+        re.IGNORECASE,
+    )
     if fields["Authorization status"] != "APPROVED":
         failures.append("rights authorization status is not APPROVED")
     if fields["Authorized license"] != "Apache-2.0":
@@ -917,11 +951,37 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
         "Rights holder legal name",
         "Copyright notice",
         "Approval evidence reference",
+        "Approval evidence SHA-256",
     ):
-        if fields[field_name].upper() in placeholder_values:
+        field_value = fields[field_name]
+        if (
+            field_value.upper() in placeholder_values
+            or placeholder_pattern.search(field_value) is not None
+        ):
             failures.append(
                 f"rights authorization field is still a placeholder: {field_name}"
             )
+    evidence_reference = fields["Approval evidence reference"]
+    if (
+        re.fullmatch(
+            r"urn:auris-flow:rights-approval:"
+            r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}",
+            evidence_reference,
+        )
+        is None
+    ):
+        failures.append(
+            "rights authorization approval evidence reference must use the "
+            "urn:auris-flow:rights-approval:<opaque-id> format"
+        )
+    if (
+        re.fullmatch(
+            r"sha256:[0-9a-f]{64}",
+            fields["Approval evidence SHA-256"],
+        )
+        is None
+    ):
+        failures.append("rights authorization approval evidence SHA-256 is invalid")
     approval_date_raw = fields["Approval date (UTC)"]
     if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", approval_date_raw):
         failures.append("rights authorization approval date must be YYYY-MM-DD")
@@ -931,7 +991,7 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
         except ValueError:
             failures.append("rights authorization approval date is not a real UTC date")
         else:
-            if approval_date > date.today():
+            if approval_date > datetime.now(timezone.utc).date():
                 failures.append(
                     "rights authorization approval date cannot be in the future"
                 )
@@ -944,10 +1004,17 @@ def validate_release_authorization(root: Path = ROOT) -> list[str]:
     lowered_notice = notice.lower()
     if any(marker in lowered_notice for marker in placeholder_markers):
         failures.append("NOTICE still contains an unapproved rights-holder placeholder")
+    if fields["Rights holder legal name"] not in fields["Copyright notice"]:
+        failures.append(
+            "approved copyright notice does not identify the approved rights holder"
+        )
     if fields["Rights holder legal name"] not in notice:
         failures.append("NOTICE does not identify the approved rights holder")
-    if fields["Copyright notice"] not in notice:
-        failures.append("NOTICE does not contain the approved copyright notice")
+    notice_lines = {line.strip() for line in notice.splitlines() if line.strip()}
+    if fields["Copyright notice"] not in notice_lines:
+        failures.append(
+            "NOTICE does not contain the exact approved copyright notice line"
+        )
     return failures
 
 
@@ -1684,6 +1751,8 @@ def run_release_checks() -> list[ReadinessResult]:
             "missing committed open-source license: expected one of "
             + ", ".join(LICENSE_FILES)
         )
+    else:
+        license_failures.extend(validate_apache_2_license())
     readme_path = ROOT / "README.md"
     if readme_path.exists() and "Apache License 2.0" not in readme_path.read_text(
         encoding="utf-8"

@@ -13,7 +13,8 @@ The only machine-checked authorization record is
 Complete that file together with `NOTICE`; do not maintain a second set of names,
 dates or approval references in this report. The canonical record requires a legal
 rights-holder name, approved copyright notice, UTC approval date, immutable evidence
-reference, Apache-2.0 authorization and explicit final-NOTICE confirmation.
+reference and SHA-256 digest, Apache-2.0 authorization and explicit final-NOTICE
+confirmation.
 
 ## Acceptance rule
 

@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - master
+      - "codex/open-source-v1-candidate"
   schedule:
     - cron: "24 2 * * 1"
 
