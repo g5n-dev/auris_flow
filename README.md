@@ -44,7 +44,7 @@
 ---
 
 > [!IMPORTANT]
-> 当前仓库是 Auris Flow `v1.0.0` 的 **Release Candidate 实现**，适合产品评审、前后端联调和工程
+> 当前仓库是 Auris Flow `v1.0.0` 的**候选实现**（Release Candidate），适合产品评审、前后端联调和工程
 > 验证；它尚未完成正式 Release 审批，也尚未获得生产支持承诺。项目状态和剩余门禁见
 > [发行状态](#release-status)。
 
@@ -296,7 +296,7 @@ sequenceDiagram
 
 写操作从一开始就按多租户生产系统约束建模：
 
-- **身份**：OIDC Authorization Code + PKCE；浏览器只持有 Secure、HttpOnly、不透明会话。
+- **身份**：OIDC Authorization Code + PKCE；浏览器只持有 Secure Cookie 中的不透明 HttpOnly 浏览器会话。
 - **授权**：资源级 default-deny，租户、项目、角色与对象范围同时校验。
 - **浏览器防护**：Cookie 写请求校验 CSRF token 与可信 Origin。
 - **幂等与审计**：写入口、任务提交和回写都记录主体、作用域、结果、request ID 与 `trace_id`。
