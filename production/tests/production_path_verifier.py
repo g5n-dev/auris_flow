@@ -4362,6 +4362,29 @@ def _server_span(kind: object) -> bool:
     return kind in {2, "2", "SERVER", "SPAN_KIND_SERVER"}
 
 
+def _internal_span(kind: object) -> bool:
+    return kind in {1, "1", "INTERNAL", "SPAN_KIND_INTERNAL"}
+
+
+def _http_span_method(attributes: Mapping[str, object]) -> str:
+    return str(
+        attributes.get("http.request.method", attributes.get("http.method", ""))
+    ).upper()
+
+
+def _http_response_status_code(attributes: Mapping[str, object]) -> int | None:
+    raw_value = attributes.get(
+        "http.response.status_code", attributes.get("http.status_code")
+    )
+    if isinstance(raw_value, bool):
+        return None
+    try:
+        status_code = int(str(raw_value))
+    except (TypeError, ValueError):
+        return None
+    return status_code if 100 <= status_code <= 599 else None
+
+
 def _safe_span_hosts(attributes: Mapping[str, object]) -> set[str]:
     hosts: set[str] = set()
     for key in (
@@ -4638,11 +4661,14 @@ def _tempo_retry_lineage_facts(
                     }
                 )
 
+    if len({entry["span_id"] for entry in entries}) != len(entries):
+        raise VerifierFailure("Tempo retry trace contains duplicate span identities")
     outbox_spans = [
         entry
         for entry in entries
         if entry["service"] == "auris-flow-worker"
         and entry["name"] == "outbox.process"
+        and _internal_span(entry["kind"])
         and entry["attributes"].get("auris.business_trace_id") == expected_trace_id
     ]
     adapter_spans = [
@@ -4650,6 +4676,7 @@ def _tempo_retry_lineage_facts(
         for entry in entries
         if entry["service"] == "auris-flow-worker"
         and entry["name"] == "outbox.adapter.dispatch"
+        and _internal_span(entry["kind"])
         and entry["attributes"].get("auris.business_trace_id") == expected_trace_id
     ]
     qdrant_spans = [
@@ -4659,20 +4686,67 @@ def _tempo_retry_lineage_facts(
         and _client_span(entry["kind"])
         and "qdrant" in _safe_span_hosts(entry["attributes"])
     ]
-    qdrant_write_spans = [
+    qdrant_request_spans = [
         entry
-        for entry in qdrant_spans
-        if str(
-            entry["attributes"].get(
-                "http.request.method", entry["attributes"].get("http.method", "")
-            )
-        ).upper()
-        == "PUT"
-        and any(
-            path.endswith("/points") for path in _safe_span_paths(entry["attributes"])
-        )
+        for entry in entries
+        if entry["service"] == "auris-flow-worker"
+        and entry["name"] == "qdrant.request"
+        and _internal_span(entry["kind"])
     ]
-    if len(outbox_spans) != 1 or len(adapter_spans) != 1 or not qdrant_spans:
+    allowed_qdrant_operations = {
+        "collection.get": "GET",
+        "collection.create": "PUT",
+        "points.upsert": "PUT",
+    }
+    qdrant_clients_by_request = {
+        request["span_id"]: [
+            client
+            for client in qdrant_spans
+            if client["parent_span_id"] == request["span_id"]
+        ]
+        for request in qdrant_request_spans
+    }
+    invalid_qdrant_request_spans = [
+        request
+        for request in qdrant_request_spans
+        if allowed_qdrant_operations.get(
+            str(request["attributes"].get("auris.qdrant.operation", ""))
+        )
+        != _http_span_method(request["attributes"])
+        or len(qdrant_clients_by_request[request["span_id"]]) != 1
+    ]
+    if not invalid_qdrant_request_spans:
+        for request in qdrant_request_spans:
+            operation = str(request["attributes"]["auris.qdrant.operation"])
+            expected_method = allowed_qdrant_operations[operation]
+            client = qdrant_clients_by_request[request["span_id"]][0]
+            response_status = _http_response_status_code(client["attributes"])
+            if (
+                _http_span_method(client["attributes"]) != expected_method
+                or response_status is None
+                or (
+                    not 200 <= response_status < 300
+                    and not (operation == "collection.get" and response_status == 404)
+                )
+            ):
+                invalid_qdrant_request_spans.append(request)
+    qdrant_write_spans = [
+        request
+        for request in qdrant_request_spans
+        if request["attributes"].get("auris.qdrant.operation") == "points.upsert"
+    ]
+    if (
+        len(outbox_spans) != 1
+        or len(adapter_spans) != 1
+        or not qdrant_spans
+        or not qdrant_request_spans
+        or invalid_qdrant_request_spans
+        or len(qdrant_spans) != len(qdrant_request_spans)
+        or any(
+            client["parent_span_id"] not in qdrant_clients_by_request
+            for client in qdrant_spans
+        )
+    ):
         raise VerifierFailure("Tempo retry trace cardinality is invalid")
     if len(qdrant_write_spans) != 1:
         raise VerifierFailure("Tempo retry trace lacks one Qdrant point write")
@@ -4688,7 +4762,10 @@ def _tempo_retry_lineage_facts(
         len(bff_retry_spans) != 1
         or bff_retry_spans[0]["span_id"] != outbox["parent_span_id"]
         or adapter["parent_span_id"] != outbox["span_id"]
-        or any(entry["parent_span_id"] != adapter["span_id"] for entry in qdrant_spans)
+        or any(
+            entry["parent_span_id"] != adapter["span_id"]
+            for entry in qdrant_request_spans
+        )
     ):
         raise VerifierFailure("Tempo retry trace parent chain is invalid")
     bff = bff_retry_spans[0]

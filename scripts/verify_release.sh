@@ -8,19 +8,6 @@ EVIDENCE_REL="build/release-evidence"
 EVIDENCE_DIR="${ROOT}/${EVIDENCE_REL}"
 PRE_IMAGE_ONLY=false
 
-if [ "$#" -gt 1 ]; then
-  echo "Usage: bash scripts/verify_release.sh [--pre-image]" >&2
-  exit 2
-fi
-if [ "$#" -eq 1 ]; then
-  if [ "$1" != "--pre-image" ]; then
-    echo "Unknown release-gate option: $1" >&2
-    echo "Usage: bash scripts/verify_release.sh [--pre-image]" >&2
-    exit 2
-  fi
-  PRE_IMAGE_ONLY=true
-fi
-
 if [ "${AURIS_SKIP_REAL_STACK_E2E:-0}" = "1" ]; then
   echo "AURIS_SKIP_REAL_STACK_E2E=1 is not allowed by scripts/verify_release.sh." >&2
   echo "Use bash scripts/verify_fast.sh or AURIS_RUN_E2E=1 bash scripts/verify_all.sh for constrained local development." >&2
@@ -45,6 +32,19 @@ if [ "${AURIS_SKIP_BACKUP_RESTORE_GATE:-0}" = "1" ]; then
   echo "AURIS_SKIP_BACKUP_RESTORE_GATE=1 is not allowed by scripts/verify_release.sh." >&2
   echo "A native-Linux, commit-bound backup/restore drill is mandatory final release evidence." >&2
   exit 2
+fi
+
+if [ "$#" -gt 1 ]; then
+  echo "Usage: bash scripts/verify_release.sh [--pre-image]" >&2
+  exit 2
+fi
+if [ "$#" -eq 1 ]; then
+  if [ "$1" != "--pre-image" ]; then
+    echo "Unknown release-gate option: $1" >&2
+    echo "Usage: bash scripts/verify_release.sh [--pre-image]" >&2
+    exit 2
+  fi
+  PRE_IMAGE_ONLY=true
 fi
 
 if [ -L "${ROOT}/build" ]; then

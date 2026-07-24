@@ -64,6 +64,7 @@ def _run_isolated_release_gate(repository: Path) -> subprocess.CompletedProcess[
         "AURIS_SKIP_REAL_DAGSTER",
         "AURIS_SKIP_PRODUCT_DAGSTER_GATE",
         "AURIS_SKIP_PRODUCTION_PATH_GATE",
+        "AURIS_SKIP_BACKUP_RESTORE_GATE",
     ):
         env.pop(variable, None)
     return subprocess.run(
@@ -136,6 +137,50 @@ def test_release_gate_rejects_production_path_skip_before_work() -> None:
     assert result.returncode == 2
     assert "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed" in result.stderr
     assert "verify_all ok" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "variable",
+    (
+        "AURIS_SKIP_REAL_DAGSTER",
+        "AURIS_SKIP_BACKUP_RESTORE_GATE",
+    ),
+)
+def test_release_gate_rejects_remaining_skip_guards_before_work(variable: str) -> None:
+    result = subprocess.run(
+        ["bash", "scripts/verify_release.sh"],
+        cwd=ROOT,
+        env={**os.environ, variable: "1"},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert result.returncode == 2
+    assert f"{variable}=1 is not allowed" in result.stderr
+    assert "verify_all ok" not in result.stdout
+
+
+def test_release_readiness_does_not_treat_pre_image_success_as_skip_success() -> None:
+    result = subprocess.run(
+        [sys.executable, "scripts/check_platform_readiness.py", "--release"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    combined = f"{result.stdout}\n{result.stderr}"
+    for variable in (
+        "AURIS_SKIP_REAL_STACK_E2E",
+        "AURIS_SKIP_REAL_DAGSTER",
+        "AURIS_SKIP_PRODUCT_DAGSTER_GATE",
+        "AURIS_SKIP_PRODUCTION_PATH_GATE",
+        "AURIS_SKIP_BACKUP_RESTORE_GATE",
+    ):
+        assert f"must not allow {variable} to exit 0" not in combined
 
 
 def test_release_gate_rejects_symlinked_evidence_directories_before_writing() -> None:

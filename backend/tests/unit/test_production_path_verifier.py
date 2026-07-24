@@ -1413,29 +1413,45 @@ def test_dead_letter_tempo_trace_proves_the_parent_chain_and_one_point_write() -
                         attributes=[attribute("auris.business_trace_id", business_trace_id)],
                     ),
                     span(
-                        "4" * 16,
+                        "a" * 16,
                         adapter_span_id,
-                        "HTTP GET",
-                        kind="SPAN_KIND_CLIENT",
+                        "qdrant.request",
+                        kind="SPAN_KIND_INTERNAL",
                         attributes=[
-                            attribute(
-                                "url.full",
-                                "http://qdrant:6333/collections/knowledge_chunks_v1",
-                            ),
+                            attribute("auris.qdrant.operation", "collection.get"),
                             attribute("http.request.method", "GET"),
                         ],
                     ),
                     span(
-                        "5" * 16,
+                        "4" * 16,
+                        "a" * 16,
+                        "HTTP GET",
+                        kind="SPAN_KIND_CLIENT",
+                        attributes=[
+                            attribute("url.full", "http://qdrant:6333"),
+                            attribute("http.request.method", "GET"),
+                            attribute("http.response.status_code", "200"),
+                        ],
+                    ),
+                    span(
+                        "b" * 16,
                         adapter_span_id,
+                        "qdrant.request",
+                        kind="SPAN_KIND_INTERNAL",
+                        attributes=[
+                            attribute("auris.qdrant.operation", "points.upsert"),
+                            attribute("http.request.method", "PUT"),
+                        ],
+                    ),
+                    span(
+                        "5" * 16,
+                        "b" * 16,
                         "HTTP PUT",
                         kind="SPAN_KIND_CLIENT",
                         attributes=[
-                            attribute(
-                                "url.full",
-                                "http://qdrant:6333/collections/knowledge_chunks_v1/points",
-                            ),
+                            attribute("url.full", "http://qdrant:6333"),
                             attribute("http.request.method", "PUT"),
+                            attribute("http.response.status_code", "200"),
                         ],
                     ),
                 ],
@@ -1463,6 +1479,43 @@ def test_dead_letter_tempo_trace_proves_the_parent_chain_and_one_point_write() -
     assert lineage["bff_server_span_count"] == 1
     assert lineage["bff_server_http_method"] == "POST"
     assert lineage["bff_server_route"] == "/api/v1/runs/{id}/retries"
+    assert "/points" not in json.dumps(payload)
+
+    collection_create = json.loads(json.dumps(payload))
+    create_worker_spans = collection_create["batches"][1]["scopeSpans"][0]["spans"]
+    for item in create_worker_spans[3]["attributes"]:
+        if item["key"] == "http.response.status_code":
+            item["value"]["stringValue"] = "404"
+    create_worker_spans.insert(
+        4,
+        span(
+            "c" * 16,
+            adapter_span_id,
+            "qdrant.request",
+            kind="SPAN_KIND_INTERNAL",
+            attributes=[
+                attribute("auris.qdrant.operation", "collection.create"),
+                attribute("http.request.method", "PUT"),
+            ],
+        ),
+    )
+    create_worker_spans.insert(
+        5,
+        span(
+            "d" * 16,
+            "c" * 16,
+            "HTTP PUT",
+            kind="SPAN_KIND_CLIENT",
+            attributes=[
+                attribute("url.full", "http://qdrant:6333"),
+                attribute("http.request.method", "PUT"),
+                attribute("http.response.status_code", "200"),
+            ],
+        ),
+    )
+    create_lineage = verifier._tempo_retry_lineage_facts(collection_create, business_trace_id)
+    assert create_lineage["qdrant_client_span_count"] == 3
+    assert create_lineage["qdrant_write_span_count"] == 1
 
     forged = json.loads(json.dumps(payload))
     forged["batches"][1]["scopeSpans"][0]["spans"][3]["parentSpanId"] = "9" * 16
@@ -1491,6 +1544,39 @@ def test_dead_letter_tempo_trace_proves_the_parent_chain_and_one_point_write() -
     duplicate_server["batches"][0]["scopeSpans"][0]["spans"].append(duplicate)
     with pytest.raises(verifier.VerifierFailure):
         verifier._tempo_retry_lineage_facts(duplicate_server, business_trace_id)
+
+    for operation, method in (("other", "GET"), ("collection.get", "PUT")):
+        forged_operation = json.loads(json.dumps(payload))
+        qdrant_request = forged_operation["batches"][1]["scopeSpans"][0]["spans"][2]
+        for item in qdrant_request["attributes"]:
+            if item["key"] == "auris.qdrant.operation":
+                item["value"]["stringValue"] = operation
+            elif item["key"] == "http.request.method":
+                item["value"]["stringValue"] = method
+        with pytest.raises(verifier.VerifierFailure):
+            verifier._tempo_retry_lineage_facts(forged_operation, business_trace_id)
+
+    for client_method, response_status in (("GET", "200"), ("PUT", "500")):
+        forged_client = json.loads(json.dumps(payload))
+        qdrant_client = forged_client["batches"][1]["scopeSpans"][0]["spans"][5]
+        for item in qdrant_client["attributes"]:
+            if item["key"] == "http.request.method":
+                item["value"]["stringValue"] = client_method
+            elif item["key"] == "http.response.status_code":
+                item["value"]["stringValue"] = response_status
+        with pytest.raises(verifier.VerifierFailure):
+            verifier._tempo_retry_lineage_facts(forged_client, business_trace_id)
+
+    duplicate_span_id = json.loads(json.dumps(payload))
+    worker_spans = duplicate_span_id["batches"][1]["scopeSpans"][0]["spans"]
+    worker_spans[4]["spanId"] = worker_spans[2]["spanId"]
+    with pytest.raises(verifier.VerifierFailure):
+        verifier._tempo_retry_lineage_facts(duplicate_span_id, business_trace_id)
+
+    wrong_outbox_kind = json.loads(json.dumps(payload))
+    wrong_outbox_kind["batches"][1]["scopeSpans"][0]["spans"][0]["kind"] = "SPAN_KIND_CLIENT"
+    with pytest.raises(verifier.VerifierFailure):
+        verifier._tempo_retry_lineage_facts(wrong_outbox_kind, business_trace_id)
 
     concrete_path = "/api/v1/runs/knowledge-build-source-001/retries"
     path_fallback = json.loads(json.dumps(payload))

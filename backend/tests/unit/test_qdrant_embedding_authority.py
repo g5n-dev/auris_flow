@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import contextmanager
 from typing import Literal
 
 import pytest
 
 from app.core import embeddings as embedding_module
+from app.services import adapters as adapter_module
 from app.services.adapters import RealQdrantIndexClient
 
 
@@ -198,6 +200,60 @@ def test_real_qdrant_upsert_records_the_same_embedding_fingerprint_remotely_and_
     assert receipt_payload["embedding_space_fingerprint"] == expected_fingerprint
     assert dispatch.details["embedding_space_fingerprint"] == expected_fingerprint
     assert remote_payload == receipt_payload
+
+
+def test_real_qdrant_request_emits_only_a_low_cardinality_operation_marker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_spans: list[tuple[str, dict[str, object]]] = []
+
+    @contextmanager
+    def recording_span(
+        name: str,
+        *,
+        attributes: dict[str, object] | None = None,
+        parent_context: object | None = None,
+    ):
+        del parent_context
+        observed_spans.append((name, dict(attributes or {})))
+        yield object()
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+        @staticmethod
+        def read(_size: int = -1) -> bytes:
+            return b'{"status":"ok","result":{"status":"completed"}}'
+
+    monkeypatch.setattr(adapter_module, "internal_span", recording_span, raising=False)
+    monkeypatch.setattr(adapter_module, "urlopen", lambda _request, timeout: Response())
+    provider = RecordingEmbeddingProvider()
+    client = RealQdrantIndexClient(
+        base_url="http://qdrant:6333",
+        vector_size=provider.dimension,
+        embedding_provider=provider,
+    )
+
+    client._request(  # noqa: SLF001
+        "PUT",
+        "/collections/private-tenant-collection/points?wait=true",
+        {"points": []},
+    )
+
+    assert observed_spans == [
+        (
+            "qdrant.request",
+            {
+                "auris.qdrant.operation": "points.upsert",
+                "http.request.method": "PUT",
+            },
+        )
+    ]
+    assert "private-tenant-collection" not in json.dumps(observed_spans)
 
 
 def test_real_qdrant_search_requires_explicit_authorized_point_ids() -> None:

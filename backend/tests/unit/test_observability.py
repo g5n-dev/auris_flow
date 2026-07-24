@@ -399,6 +399,7 @@ def test_span_export_redaction_drops_sql_query_auth_cookie_and_secret_values() -
             "client.port": 49152,
             "enduser.id": "user-sensitive-001",
             "user_agent.original": "AurisClient token=canary-user-agent",
+            "auris.qdrant.operation": "points.upsert",
         }
     )
 
@@ -409,6 +410,7 @@ def test_span_export_redaction_drops_sql_query_auth_cookie_and_secret_values() -
     assert attributes["url.full"] == "https://example.test"
     assert attributes["http.request.method"] == "POST"
     assert attributes["http.route"] == "/api/v1/data-assets/{data_asset_id}"
+    assert attributes["auris.qdrant.operation"] == "points.upsert"
 
 
 def test_final_exporter_removes_exception_description_and_raw_request_identity() -> None:

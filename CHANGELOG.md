@@ -29,6 +29,11 @@ All notable changes to Auris Flow are tracked here.
   wildcard origins/hosts, fake/local adapters, non-strict readiness and missing real dependency settings.
 - Fixed real Qdrant clients to consume the validated secret-file-backed API key, and hardened MySQL restore
   against client-side commands and oversized decompressed dumps.
+- Fixed the strict readiness policy to pin every forbidden release skip guard to a canonical top-level shell
+  section with an unconditional `exit 2`, so unrelated `--pre-image` success and unreachable nested guards
+  cannot weaken the gate; backup/restore skipping is covered by the same contract.
+- Replaced the production Qdrant trace gate's dependence on redacted private URL paths with an exported
+  low-cardinality operation marker, while preserving one-to-one adapter, request and HTTP-client parentage.
 - Added structured redacted logging, OTel trace correlation and a network-restricted Prometheus endpoint.
 - Added governance, support, maintainer, issue and release templates plus runtime/OpenAPI drift and
   supply-chain evidence gates.

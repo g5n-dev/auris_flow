@@ -41,6 +41,25 @@ PRODUCT_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9
 RELEASE_TAG_PATTERN = re.compile(
     rf"v(?P<version>{PRODUCT_VERSION_PATTERN.pattern})(?:-rc\.[1-9]\d*)?"
 )
+RELEASE_SKIP_VARIABLES = (
+    "AURIS_SKIP_REAL_STACK_E2E",
+    "AURIS_SKIP_REAL_DAGSTER",
+    "AURIS_SKIP_PRODUCT_DAGSTER_GATE",
+    "AURIS_SKIP_PRODUCTION_PATH_GATE",
+    "AURIS_SKIP_BACKUP_RESTORE_GATE",
+)
+RELEASE_SKIP_GUARD_PREAMBLE = (
+    "#!/usr/bin/env bash",
+    "set -euo pipefail",
+    "",
+    'ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"',
+    'cd "${ROOT}"',
+    'BUILD_DIR="${ROOT}/build"',
+    'EVIDENCE_REL="build/release-evidence"',
+    'EVIDENCE_DIR="${ROOT}/${EVIDENCE_REL}"',
+    "PRE_IMAGE_ONLY=false",
+    "",
+)
 LEGACY_REPOSITORY_MARKERS = (
     "auris-flow/auris-flow",
     r"auris-flow\/auris-flow",
@@ -1599,6 +1618,62 @@ def validate_repository_trust_contract(root: Path = ROOT) -> list[str]:
     return failures
 
 
+def validate_release_skip_guards(source: str) -> list[str]:
+    """Validate each release-only skip guard without conflating unrelated exits."""
+
+    failures: list[str] = []
+    lines = source.splitlines()
+    preamble_size = len(RELEASE_SKIP_GUARD_PREAMBLE)
+    canonical_preamble = tuple(lines[:preamble_size]) == RELEASE_SKIP_GUARD_PREAMBLE
+    if not canonical_preamble:
+        failures.append(
+            "scripts/verify_release.sh release skip guards must follow the "
+            "canonical top-level preamble"
+        )
+    expected_guard_index = preamble_size
+    guard_indexes: list[int] = []
+    for variable in RELEASE_SKIP_VARIABLES:
+        guard = f'if [ "${{{variable}:-0}}" = "1" ]; then'
+        indexes = [index for index, line in enumerate(lines) if line == guard]
+        if len(indexes) != 1:
+            failures.append(
+                f"scripts/verify_release.sh is missing the {variable} fail-closed guard"
+            )
+            continue
+        guard_index = indexes[0]
+        guard_indexes.append(guard_index)
+        if not canonical_preamble or guard_index != expected_guard_index:
+            failures.append(
+                f"scripts/verify_release.sh must keep {variable} in the "
+                "canonical top-level guard section"
+            )
+        try:
+            closing_index = lines.index("fi", guard_index + 1)
+        except ValueError:
+            failures.append(
+                f"scripts/verify_release.sh has an invalid {variable} fail-closed guard"
+            )
+            continue
+        body = lines[guard_index + 1 : closing_index]
+        literal_error = re.compile(r'  echo "[^"\\`$]*" >&2')
+        if (
+            not body
+            or body[-1] != "  exit 2"
+            or any(literal_error.fullmatch(line) is None for line in body[:-1])
+            or not body[:-1]
+        ):
+            failures.append(
+                f"scripts/verify_release.sh must reject {variable} "
+                "with an unconditional exit 2"
+            )
+        expected_guard_index = closing_index + 1
+    if guard_indexes != sorted(guard_indexes):
+        failures.append(
+            "scripts/verify_release.sh release skip guards are not in canonical order"
+        )
+    return failures
+
+
 def run_release_checks() -> list[ReadinessResult]:
     results = run_checks()
     release_results: list[ReadinessResult] = []
@@ -1871,40 +1946,14 @@ def run_release_checks() -> list[ReadinessResult]:
         "AURIS_SKIP_REAL_DAGSTER=1 is not allowed",
         "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
         "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
+        "AURIS_SKIP_BACKUP_RESTORE_GATE=1 is not allowed",
     ):
         if pattern not in release_verify_text:
             verification_failures.append(
                 f"scripts/verify_release.sh missing release gate: {pattern}"
             )
     verification_failures.extend(validate_release_gate_wiring())
-    if (
-        "exit 0" in release_verify_text
-        and "AURIS_SKIP_REAL_STACK_E2E" in release_verify_text
-    ):
-        verification_failures.append(
-            "scripts/verify_release.sh must not allow AURIS_SKIP_REAL_STACK_E2E to exit 0"
-        )
-    if (
-        "exit 0" in release_verify_text
-        and "AURIS_SKIP_REAL_DAGSTER" in release_verify_text
-    ):
-        verification_failures.append(
-            "scripts/verify_release.sh must not allow AURIS_SKIP_REAL_DAGSTER to exit 0"
-        )
-    if (
-        "exit 0" in release_verify_text
-        and "AURIS_SKIP_PRODUCT_DAGSTER_GATE" in release_verify_text
-    ):
-        verification_failures.append(
-            "scripts/verify_release.sh must not allow AURIS_SKIP_PRODUCT_DAGSTER_GATE to exit 0"
-        )
-    if (
-        "exit 0" in release_verify_text
-        and "AURIS_SKIP_PRODUCTION_PATH_GATE" in release_verify_text
-    ):
-        verification_failures.append(
-            "scripts/verify_release.sh must not allow AURIS_SKIP_PRODUCTION_PATH_GATE to exit 0"
-        )
+    verification_failures.extend(validate_release_skip_guards(release_verify_text))
     workflow_path = ROOT / ".github/workflows/verify.yml"
     workflow_text = (
         workflow_path.read_text(encoding="utf-8") if workflow_path.exists() else ""

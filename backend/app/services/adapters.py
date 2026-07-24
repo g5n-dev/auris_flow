@@ -41,6 +41,7 @@ from app.core.embeddings import (
 from app.core.http_transport import open_url_no_redirect as urlopen
 from app.core.observability import (
     current_trace_context,
+    internal_span,
     record_safe_http_status,
     safe_http_client_span,
 )
@@ -2391,6 +2392,32 @@ class LocalQdrantIndexClient:
 MAX_QDRANT_RESPONSE_BYTES = 4 * 1024 * 1024
 
 
+def _qdrant_request_operation(method: str, path: str) -> str:
+    """Map a private Qdrant path to a stable operation without exporting identifiers."""
+
+    path_only = path.partition("?")[0]
+    segments = path_only.strip("/").split("/")
+    normalized_method = method.upper()
+    if len(segments) == 2 and segments[0] == "collections":
+        if normalized_method == "GET":
+            return "collection.get"
+        if normalized_method == "PUT":
+            return "collection.create"
+    if (
+        len(segments) == 3
+        and segments[0] == "collections"
+        and segments[2] == "points"
+        and normalized_method == "PUT"
+    ):
+        return "points.upsert"
+    if len(segments) == 4 and segments[0] == "collections" and segments[2] == "points":
+        if segments[3] == "search" and normalized_method == "POST":
+            return "points.search"
+        if normalized_method == "GET":
+            return "point.get"
+    return "other"
+
+
 class RealQdrantIndexClient:
     def __init__(
         self,
@@ -2684,8 +2711,15 @@ class RealQdrantIndexClient:
             method=method,
             headers=headers,
         )
-        with urlopen(request, timeout=5) as response:
-            raw_bytes = response.read(MAX_QDRANT_RESPONSE_BYTES + 1)
+        with internal_span(
+            "qdrant.request",
+            attributes={
+                "auris.qdrant.operation": _qdrant_request_operation(method, path),
+                "http.request.method": method.upper(),
+            },
+        ):
+            with urlopen(request, timeout=5) as response:
+                raw_bytes = response.read(MAX_QDRANT_RESPONSE_BYTES + 1)
         if len(raw_bytes) > MAX_QDRANT_RESPONSE_BYTES:
             raise ValueError("qdrant response is too large")
         raw = raw_bytes.decode("utf-8")
