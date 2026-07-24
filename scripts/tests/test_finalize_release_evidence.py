@@ -87,6 +87,12 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         self.production_path_validation_calls: list[
             tuple[dict[str, object], Path, str]
         ] = []
+        self.original_backup_restore_validator = (
+            self.module.validate_backup_restore_evidence
+        )
+        self.backup_restore_validation_calls: list[
+            tuple[dict[str, object], Path, str]
+        ] = []
 
         def accept_production_path_fixture(
             evidence: object, *, root: Path, expected_commit: str
@@ -98,6 +104,17 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             return []
 
         self.module.validate_production_path_evidence = accept_production_path_fixture
+
+        def accept_backup_restore_fixture(
+            evidence: object, *, root: Path, expected_commit: str
+        ) -> list[str]:
+            assert isinstance(evidence, dict)
+            self.backup_restore_validation_calls.append(
+                (evidence, root, expected_commit)
+            )
+            return []
+
+        self.module.validate_backup_restore_evidence = accept_backup_restore_fixture
         self.temp = tempfile.TemporaryDirectory(prefix="auris_release_evidence_")
         self.root = Path(self.temp.name)
         self.repository = self.root / "repository"
@@ -588,6 +605,20 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "status": "ok",
             },
         )
+        _write_json(
+            self.evidence / "backup-restore-gate.json",
+            {
+                "execution_environment": "native-linux-compose",
+                "producer": "production/scripts/verify-backup.sh",
+                "schema_version": "auris.backup-restore-gate.v1",
+                "source_commit": SOURCE_COMMIT,
+                "status": "ok",
+            },
+        )
+        _write_json(
+            self.evidence / "backup-restore-gate.sigstore.json",
+            {"mediaType": "application/vnd.dev.sigstore.bundle.v0.3+json"},
+        )
 
     def _finalize(self, **kwargs: object) -> dict[str, object]:
         return self.module.finalize_release_evidence(
@@ -1070,6 +1101,106 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(self.module.EvidenceError, "production path"):
             self._finalize()
+
+    def test_backup_restore_is_mandatory_hashed_and_strictly_delegated(self) -> None:
+        result = self._finalize()
+
+        artifacts = result["artifacts"]
+        assert isinstance(artifacts, list)
+        self.assertIn(
+            "backup-restore-gate.json",
+            [item["path"] for item in artifacts],
+        )
+        self.assertEqual(1, len(self.backup_restore_validation_calls))
+        payload, root, expected_commit = self.backup_restore_validation_calls[0]
+        self.assertEqual("auris.backup-restore-gate.v1", payload["schema_version"])
+        self.assertEqual(self.repository, root)
+        self.assertEqual(SOURCE_COMMIT, expected_commit)
+
+    def test_rejects_missing_or_forged_backup_restore_evidence(self) -> None:
+        (self.evidence / "backup-restore-gate.json").unlink()
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "backup-restore-gate.json"
+        ):
+            self._finalize()
+
+        self._write_valid_fixture()
+        self.module.validate_backup_restore_evidence = (
+            lambda evidence, *, root, expected_commit: [
+                "cleanup proof is invalid"
+            ]
+        )
+        with self.assertRaisesRegex(
+            self.module.EvidenceError, "cleanup proof is invalid"
+        ):
+            self._finalize()
+
+    def test_backup_restore_sigstore_bundle_is_mandatory_and_hashed(self) -> None:
+        result = self._finalize()
+        artifacts = result["artifacts"]
+        assert isinstance(artifacts, list)
+        self.assertIn(
+            "backup-restore-gate.sigstore.json",
+            [item["path"] for item in artifacts],
+        )
+
+        (self.evidence / "backup-restore-gate.sigstore.json").unlink()
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "backup-restore-gate.sigstore.json",
+        ):
+            self._finalize()
+
+    def test_formal_finalizer_revalidates_tag_bundle_and_sigstore(self) -> None:
+        bundle = self.root / "signed-deployment"
+        bundle.mkdir()
+        calls: list[tuple[str, object]] = []
+
+        def accept_bindings(
+            evidence: object,
+            *,
+            release_bundle_root: Path,
+            expected_commit: str,
+            expected_release_tag: str,
+        ) -> list[str]:
+            calls.append(("bindings", release_bundle_root))
+            self.assertEqual(SOURCE_COMMIT, expected_commit)
+            self.assertEqual("v1.0.0-rc.1", expected_release_tag)
+            return []
+
+        self.module.validate_backup_restore_release_bindings = accept_bindings
+        self.module.verify_signed_release_bundle = (
+            lambda root: calls.append(("bundle", root))
+        )
+        self.module.verify_backup_restore_sigstore_attestation = (
+            lambda **kwargs: calls.append(("sigstore", kwargs["release_tag"]))
+        )
+
+        self._finalize(
+            expected_release_tag="v1.0.0-rc.1",
+            release_bundle_root=bundle,
+        )
+
+        self.assertEqual(
+            [
+                ("bindings", bundle),
+                ("bundle", bundle),
+                ("sigstore", "v1.0.0-rc.1"),
+            ],
+            calls,
+        )
+
+        self.module.validate_backup_restore_release_bindings = (
+            lambda evidence, **kwargs: ["release Compose digest mismatch"]
+        )
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "release Compose digest mismatch",
+        ):
+            self._finalize(
+                expected_release_tag="v1.0.0-rc.1",
+                release_bundle_root=bundle,
+            )
 
     def test_rejects_source_drift_local_dagster_and_supply_tampering(self) -> None:
         cases = (

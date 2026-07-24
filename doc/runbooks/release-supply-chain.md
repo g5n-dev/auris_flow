@@ -87,15 +87,28 @@ not an independent trust anchor. Release authenticity comes from the signed fina
 checksum set that covers the deterministic evidence archive, together with the original
 Sigstore verification and governed workflow identity.
 
-`scripts/verify_release.sh` is the single producer of dependency release evidence.
-After the runtime gates and SBOM/license inventory, it exports both locked Python
-runtime graphs, writes the backend and Dagster `pip-audit` JSON reports, writes the
-frontend `npm audit` JSON report, and invokes the finalizer exactly once with
-`--require-audits`. Any audit failure prevents `release-gate-manifest.json` from being
-created. The release workflow does not delete, regenerate, or post-process a
-pre-audit success manifest; it only uploads the gate directory. On failure it uses
-the separate `dependency-evidence-failed-<commit>` artifact so maintainers retain
-the available diagnostic reports without mistaking them for successful evidence.
+Release evidence is deliberately two-phase. `scripts/verify_release.sh --pre-image`
+produces the clean-clone/runtime/SBOM/license/audit inputs but never creates
+`release-gate-manifest.json`, because a signed digest-pinned deployment does not exist
+yet. After image assembly, the release job requires a real native-Linux
+`backup-restore-gate.json` plus a tag-bound Sigstore sidecar, validates its exact
+commit/tag, official workflow identity, actual signed metadata/Compose/image-lock digests,
+non-empty MySQL/MinIO/Qdrant observations, tool hashes, timings and successful random
+project/volume cleanup, and only then invokes `finalize_release_evidence.py
+--require-audits`. Running `scripts/verify_release.sh` without `--pre-image` follows
+the same fail-closed rule and requires `AURIS_BACKUP_RESTORE_EVIDENCE`,
+`AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE`, `AURIS_RELEASE_BUNDLE_ROOT`, and
+`AURIS_RELEASE_TAG` from the same official tag run. Docker Desktop diagnostics,
+unsigned/mistagged evidence and operator-authored placeholders cannot produce the
+final manifest. The workflow's synthetic recovery backup is truthfully marked
+`ephemeral-ci-drill` and `off_host_retained=false`; it does not claim production
+encrypted/off-host retention.
+
+Any dependency audit or restore gate failure prevents `release-gate-manifest.json`
+from being created. The release workflow never deletes or synthesizes a success
+manifest; on pre-image failure it uses the separate
+`dependency-evidence-failed-<commit>` artifact so maintainers retain diagnostics
+without mistaking them for successful release evidence.
 
 ## Signed visual baseline
 

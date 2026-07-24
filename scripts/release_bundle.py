@@ -68,9 +68,12 @@ REQUIRED_BUNDLE_FILES = (
     "production/scripts/restore.sh",
     "production/scripts/finalize-restore.sh",
     "production/scripts/verify-backup.sh",
+    "production/backup/backup_restore_evidence.py",
+    "production/backup/restore_network_allocator.py",
     "production/backup/restore_state.py",
     "scripts/release_bundle.py",
     "scripts/run_with_deadline.py",
+    "scripts/verify_backup_restore_gate.py",
     "scripts/verify_production_compose.py",
     "doc/backend-spec/migration-plan.md",
     "doc/release/versioning-and-compatibility.md",
@@ -886,6 +889,7 @@ def assemble_bundle(
     for relative in (
         "scripts/release_bundle.py",
         "scripts/run_with_deadline.py",
+        "scripts/verify_backup_restore_gate.py",
         "scripts/verify_production_compose.py",
     ):
         _copy_regular_file(

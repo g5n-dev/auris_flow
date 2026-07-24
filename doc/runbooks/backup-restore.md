@@ -27,7 +27,7 @@ MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的�
    `AURIS_BACKUP_MANIFEST_VERIFY_KEY_FILE`、
    `AURIS_RESTORE_ATTESTATION_SIGNING_PRIVATE_KEY_FILE` 与
    `AURIS_RESTORE_ATTESTATION_VERIFY_KEY_FILE` 指向部署方提供的绝对 secret-file。每次备份签名的
-   v3 manifest 会委托恢复证明公钥的 key ID；只有外部 manifest 公钥复验成功、且委托 key ID 与
+   v4 manifest 会委托恢复证明公钥的 key ID；只有外部 manifest 公钥复验成功、且委托 key ID 与
    外部恢复证明公钥一致，恢复才可继续。仅重算 `manifest.sha256` 和 artifact 自哈希不能伪造该
    信任链。
 6. 备份目录不得放入 Git、制品镜像或普通日志。任何失败的 staging 目录也按敏感数据处理。
@@ -40,7 +40,7 @@ MySQL 和 MinIO 是权威来源。Qdrant 是可从 MySQL/对象数据重建的�
 - `qdrant/snapshots.json` 与 `qdrant/snapshots/**`：单节点 collection snapshots、aliases，以及停写点逐 collection 全量 scroll 得到的 v2 语义证据。证据只保存顺序无关的逐点强 SHA-256 聚合指纹，以及一个确定性 probe 的 point ID、payload/vector hash 和 tenant/project scope；不保存原始 payload 或向量。Qdrant 官方要求源/目标使用相同 major/minor 版本，脚本会 fail closed。
 - 可选 `redis/cache.rdb`：只用于故障诊断，不参与自动恢复，也不计入业务一致性。
 - `metadata/release-metadata.json`、`metadata/release-metadata.sigstore.json`、`metadata/running-images.json`：签名部署包的 tag/commit、Compose、image-lock 与恢复兼容策略哈希，以及备份时全部正在运行的 release service 实际容器/RepoDigest 校验证据；MySQL、MinIO、Qdrant、Redis 始终为必选。
-- `manifest.json`、`manifest.sha256`、`manifest.signature.json`：v3 manifest 强绑定上述 release
+- `manifest.json`、`manifest.sha256`、`manifest.signature.json`：v4 manifest 强绑定上述 release
   metadata/运行镜像证据、UTC、每个文件的 SHA-256/大小、工具版本、deployment-wide counts、
   权威边界、固定恢复顺序及 `auris-flow.restore-attestation-delegation/v1` 恢复证明 key ID；独立 v1
   签名 envelope 绑定规范 manifest digest、manifest Ed25519 key identity、`backup_id`、UTC 与
@@ -269,6 +269,37 @@ production/scripts/verify-backup.sh \
 ```
 
 失败时演练环境会保留，便于检查容器和卷；成功时只有显式 `--cleanup-on-success` 才会对脚本刚创建且名称通过校验的 project 执行 `down --volumes`。把实测数据量、备份耗时、恢复耗时和瓶颈记录到变更单，用它更新 RPO/RTO，不用“脚本返回 0”代替恢复能力证明。
+
+正式发行还必须让同一次命令输出 `backup-restore-gate.json`（具体
+`--evidence-output` 参数见脚本帮助）。该文件只能在签名 manifest 离线复验、空目标检查、
+MySQL 行数、MinIO 全版本与内容 SHA-256、Qdrant 全量指纹、随机 project 恢复以及
+`down --volumes` 以及容器、卷、网络残留检查全部成功后原子发布。正式 release workflow
+使用仅含 synthetic fixture、明确不保留的 `ephemeral-ci-drill` 边界；这证明恢复机制，不冒充
+生产备份已经加密并复制到外部故障域。生产运营备份仍必须使用 `encrypted-external`。
+
+JSON 本身只是结构化观测，不是不可伪造证明。官方 tag workflow 会用精确
+`release-images.yml@refs/tags/<tag>` GitHub OIDC 身份生成
+`backup-restore-gate.sigstore.json`。验证下载的正式证据时必须同时提供 sidecar 和对应签名
+deployment：
+
+```bash
+python3 scripts/verify_backup_restore_gate.py \
+  --artifact /absolute/release-evidence/backup-restore-gate.json \
+  --expected-commit FULL_SOURCE_COMMIT \
+  --expected-release-tag v1.0.0-rc.1 \
+  --signature-bundle /absolute/release-evidence/backup-restore-gate.sigstore.json \
+  --release-bundle-root /absolute/verified-deployment \
+  --formal
+```
+
+正式证据只接受原生 Linux、`default` Docker context、rootful Linux Engine；Docker Desktop、
+OrbStack、Colima、Rancher Desktop、macOS/Windows、缺失/错误 tag 的 Sigstore sidecar 和
+占位 JSON 全部 fail closed。证据不得包含备份路径、操作者 home 路径、secret/token 或原始业务数据，只记录严格
+schema、不可逆哈希、聚合数量、时间和清理结果。
+其中 MySQL 的正式门禁会单独要求 `auris_flow.json_resources` 至少存在一条无客户内容、带
+tenant/project/trace 边界的 recovery fixture；Alembic 版本行、Dagster 元数据或空业务表不能
+满足 `business_rows_total`。MinIO/Qdrant fixture 同样只用于恢复一致性，不构成 embedding
+质量或语义召回认证。
 
 ## 已知限制
 

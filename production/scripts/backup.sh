@@ -23,13 +23,14 @@ MANIFEST_SIGNING_PRIVATE_KEY_FILE="${AURIS_BACKUP_MANIFEST_SIGNING_PRIVATE_KEY_F
 MANIFEST_VERIFY_KEY_FILE="${AURIS_BACKUP_MANIFEST_VERIFY_KEY_FILE:-${SECRETS_DIR}/backup_manifest_signing_public_key.pem}"
 RESTORE_ATTESTATION_VERIFY_KEY_FILE="${AURIS_RESTORE_ATTESTATION_VERIFY_KEY_FILE:-${SECRETS_DIR}/restore_attestation_signing_public_key.pem}"
 STORAGE_BOUNDARY=""
+RELEASE_GATE_DRILL=false
 INCLUDE_REDIS=false
 STAGING_DIR=""
 
 usage() {
   cat <<'USAGE'
 Usage: production/scripts/backup.sh --output-root ABSOLUTE_DIR \
-       --storage-boundary encrypted-external [options]
+       --storage-boundary MODE [options]
 
 Options:
   --env-file FILE             Compose environment file (default: production/.env)
@@ -38,11 +39,14 @@ Options:
   --manifest-public-key FILE  Deployment-owned Ed25519 trust-anchor public key
   --restore-attestation-public-key FILE
                               Deployment-owned restore-attestation public key
+  --release-gate-drill        Permit the non-retained ephemeral-ci-drill mode
+                              for synthetic release recovery verification only
   --include-redis             Include a non-authoritative Redis RDB for diagnostics
   -h, --help                  Show this help
 
-The application writer services must already be stopped. The output root must
-be encrypted at rest and copied to an independent host/object store.
+The application writer services must already be stopped. Production backups
+use encrypted-external storage. ephemeral-ci-drill is a non-retained synthetic
+release recovery test and additionally requires --release-gate-drill.
 USAGE
 }
 
@@ -102,6 +106,10 @@ while (($#)); do
       ;;
     --include-redis)
       INCLUDE_REDIS=true
+      shift
+      ;;
+    --release-gate-drill)
+      RELEASE_GATE_DRILL=true
       shift
       ;;
     -h|--help)
@@ -169,8 +177,19 @@ restore_attestation_key_id="$(printf '%s' "${restore_attestation_key_json}" | "$
   'import json,sys; print(json.load(sys.stdin)["key_id"])')"
 [[ "${manifest_signing_key_id}" != "${restore_attestation_key_id}" ]] || fail \
   "backup manifest and restore attestation must use distinct Ed25519 keys"
-[[ "${STORAGE_BOUNDARY}" == "encrypted-external" ]] || fail \
-  "--storage-boundary must explicitly be encrypted-external"
+case "${STORAGE_BOUNDARY}" in
+  encrypted-external)
+    [[ "${RELEASE_GATE_DRILL}" == false ]] || fail \
+      "--release-gate-drill requires --storage-boundary ephemeral-ci-drill"
+    ;;
+  ephemeral-ci-drill)
+    [[ "${RELEASE_GATE_DRILL}" == true ]] || fail \
+      "ephemeral-ci-drill requires the explicit --release-gate-drill flag"
+    ;;
+  *)
+    fail "--storage-boundary must be encrypted-external or ephemeral-ci-drill"
+    ;;
+esac
 release_identity="$("${PYTHON}" "${RELEASE_BUNDLE_TOOL}" identity \
   --bundle-root "${REPOSITORY_ROOT}" \
   --verify-signature)" || fail "signed release metadata verification failed"
@@ -385,6 +404,7 @@ fi
   --tool-versions "${STAGING_DIR}/metadata/tool-versions.json" \
   --release-metadata "${STAGING_DIR}/metadata/release-metadata.json" \
   --running-images "${STAGING_DIR}/metadata/running-images.json" \
+  --storage-boundary "${STORAGE_BOUNDARY}" \
   --restore-attestation-public-key "${RESTORE_ATTESTATION_VERIFY_KEY_FILE}"
 "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" sign \
   --root "${STAGING_DIR}" \
@@ -419,4 +439,8 @@ publish_success_metric() {
 
 publish_success_metric
 printf 'Backup complete: %s\n' "${final_dir}"
-printf 'Copy this directory to an independent encrypted store before leaving the maintenance window.\n'
+if [[ "${STORAGE_BOUNDARY}" == "encrypted-external" ]]; then
+  printf 'Copy this directory to an independent encrypted store before leaving the maintenance window.\n'
+else
+  printf 'Ephemeral release recovery drill only; this backup is not retained or production-qualified.\n'
+fi

@@ -161,10 +161,10 @@ jobs:
         working-directory: prototype/auris-flow-ui
         run: npx playwright install chromium --with-deps
 
-      - name: Verify strict release gate
+      - name: Verify strict pre-image release gates
         env:
           PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
-        run: bash scripts/verify_release.sh
+        run: bash scripts/verify_release.sh --pre-image
 
       - name: Upload release supply-chain evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -186,6 +186,33 @@ release service 实际镜像 digest（四个数据依赖为必选），再把 me
 manifest；它不依赖 `.git`。恢复与演练见
 [备份恢复 Runbook](doc/runbooks/backup-restore.md)。升级、回滚、告警和事件响应入口：
 
+发行验收必须在原生 Linux 上执行一次随机空 project 恢复，并在清理成功后输出 commit-bound
+JSON。官方 release workflow 使用无客户内容的 synthetic fixture 和
+`ephemeral-ci-drill`（不保留）边界；生产备份仍使用上面的 `encrypted-external`：
+
+```bash
+bash production/scripts/verify-backup.sh \
+  --backup /absolute/ephemeral-release-drill/auris-flow-BACKUP_ID \
+  --drill \
+  --cleanup-on-success \
+  --env-file /absolute/production.env \
+  --manifest-public-key /absolute/backup_manifest_signing_public_key.pem \
+  --evidence-output /absolute/release-evidence/backup-restore-gate.json
+
+python3 scripts/verify_backup_restore_gate.py \
+  --artifact /absolute/release-evidence/backup-restore-gate.json \
+  --expected-commit FULL_SOURCE_COMMIT \
+  --expected-release-tag v1.0.0-rc.1 \
+  --signature-bundle /absolute/release-evidence/backup-restore-gate.sigstore.json \
+  --release-bundle-root . \
+  --formal
+```
+
+`--evidence-output` 不允许跨版本 migration drill，也不接受 Docker Desktop/rootless/远程
+context；任何恢复或 exact project/container/volume/network 清理失败都不会留下 `status=ok`
+文件。只有官方 tag workflow 生成并通过精确 identity 校验的 Sigstore sidecar 才把该 JSON
+提升为正式发行证据。
+
 - [升级与回滚](doc/runbooks/upgrade-rollback.md)
 - [SLO、告警与故障排查](doc/runbooks/operations.md)
 - [安全事件响应](doc/runbooks/security-incident-response.md)

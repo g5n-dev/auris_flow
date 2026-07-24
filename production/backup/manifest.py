@@ -27,7 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 
-SCHEMA_VERSION = "auris-flow.backup-manifest/v3"
+SCHEMA_VERSION = "auris-flow.backup-manifest/v4"
 RELEASE_METADATA_SCHEMA = "auris.release-deployment-metadata.v3"
 IMAGE_LOCK_SCHEMA = "auris.release-image-lock.v1"
 REQUIRED_AUTHORITIES = ("mysql", "minio")
@@ -54,6 +54,10 @@ SNAPSHOT_MARKER_VALUE = "auris-flow.restore-snapshot.v1\n"
 RELEASE_MEMBER_MODES = frozenset({"0600", "0644", "0755"})
 ED25519_SPKI_PREFIX = bytes.fromhex("302a300506032b6570032100")
 CONTROL_NAMES = (MANIFEST_NAME, CHECKSUM_NAME, SIGNATURE_NAME)
+STORAGE_BOUNDARY_ASSERTIONS = {
+    "encrypted-external": "encrypted-at-rest-and-copied-off-host",
+    "ephemeral-ci-drill": "ephemeral-runner-recovery-drill-not-retained",
+}
 
 
 @dataclass(frozen=True)
@@ -857,11 +861,25 @@ def _validate_document(document: Any) -> dict[str, Any]:
     ):
         raise ManifestError("source.running_images_sha256 is invalid")
     boundary = document.get("storage_boundary")
-    if not isinstance(boundary, dict) or boundary.get("operator_assertion") != (
-        "encrypted-at-rest-and-copied-off-host"
+    if not isinstance(boundary, dict) or set(boundary) != {
+        "contains_sensitive_data",
+        "mode",
+        "operator_assertion",
+        "repository_never_contains_backup_payloads",
+    }:
+        raise ManifestError("backup storage boundary is invalid")
+    boundary_mode = boundary.get("mode")
+    if (
+        not isinstance(boundary_mode, str)
+        or boundary_mode not in STORAGE_BOUNDARY_ASSERTIONS
+        or boundary.get("operator_assertion")
+        != STORAGE_BOUNDARY_ASSERTIONS[boundary_mode]
     ):
-        raise ManifestError("backup requires the encrypted external storage assertion")
-    if boundary.get("contains_sensitive_data") is not True:
+        raise ManifestError("backup storage boundary assertion is invalid")
+    if (
+        boundary.get("contains_sensitive_data") is not True
+        or boundary.get("repository_never_contains_backup_payloads") is not True
+    ):
         raise ManifestError("backup must be classified as containing sensitive data")
     authority = document.get("data_authority")
     if not isinstance(authority, dict) or tuple(
@@ -977,7 +995,10 @@ def create_manifest(args: argparse.Namespace) -> int:
         },
         "storage_boundary": {
             "contains_sensitive_data": True,
-            "operator_assertion": "encrypted-at-rest-and-copied-off-host",
+            "mode": args.storage_boundary,
+            "operator_assertion": STORAGE_BOUNDARY_ASSERTIONS[
+                args.storage_boundary
+            ],
             "repository_never_contains_backup_payloads": True,
         },
         "data_authority": {
@@ -1598,6 +1619,11 @@ def parser() -> argparse.ArgumentParser:
     create.add_argument("--tool-versions", required=True)
     create.add_argument("--release-metadata", required=True)
     create.add_argument("--running-images", required=True)
+    create.add_argument(
+        "--storage-boundary",
+        choices=tuple(STORAGE_BOUNDARY_ASSERTIONS),
+        required=True,
+    )
     create.add_argument("--restore-attestation-public-key", required=True)
     create.set_defaults(handler=create_manifest)
 

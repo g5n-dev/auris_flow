@@ -566,7 +566,11 @@ def test_release_bundle_contains_governance_migrations_and_signed_checksums() ->
     assert "cosign verify-blob" in text
     assert "release-metadata.sigstore.json" in text
     assert "build/release/SHA256SUMS.sigstore.json" in text
-    assert text.count('--artifact "') == 6
+    manifest_step = text[
+        text.index("Produce commit-bound checksums and release manifest") :
+        text.index("Keyless sign and verify the release checksum set")
+    ]
+    assert manifest_step.count('--artifact "') == 8
     assert '--artifact "build/release/final-runtime/production-path-gate.json"' in text
     assert "include-hidden-files: true" in text
 
@@ -736,7 +740,7 @@ def test_dependency_evidence_never_uploads_a_stale_success_manifest() -> None:
     text = _workflow_text()
     dependency = _job_blocks(text)["dependency-evidence"]
 
-    assert dependency.count("bash scripts/verify_release.sh") == 1
+    assert dependency.count("bash scripts/verify_release.sh --pre-image") == 1
     assert "rm -f build/release-evidence/release-gate-manifest.json" not in dependency
     assert "scripts/generate_supply_chain_evidence.py" not in dependency
     assert "pip-audit" not in dependency
@@ -749,6 +753,43 @@ def test_dependency_evidence_never_uploads_a_stale_success_manifest() -> None:
     assert failed_artifact in text
     assert "if: success()" in text
     assert "if: failure()" in text
+
+
+def test_release_assembly_requires_backup_restore_evidence_before_finalization() -> None:
+    text = _workflow_text()
+    assemble = _job_blocks(text)["assemble-release"]
+
+    producer = "Run native-Linux signed-bundle backup and restore drill"
+    consumer = "Require native-Linux backup/restore release evidence"
+    assert producer in assemble
+    assert consumer in assemble
+    assert "production/scripts/backup.sh" in assemble
+    assert "production/scripts/verify-backup.sh" in assemble
+    assert "INSERT INTO json_resources" in assemble
+    assert "recovery-consistency-only" in assemble
+    assert "trace_release_recovery_gate_0001" in assemble
+    assert "--drill" in assemble
+    assert "--cleanup-on-success" in assemble
+    assert "--evidence-output" in assemble
+    assert "backup-restore-gate.json" in assemble
+    assert "backup-restore-gate.sigstore.json" in assemble
+    assert "cosign sign-blob" in assemble
+    assert "cosign verify-blob" in assemble
+    assert "--formal" in assemble
+    assert "--release-bundle-root" in assemble
+    assert "--storage-boundary ephemeral-ci-drill" in assemble
+    assert "--release-gate-drill" in assemble
+    assert "scripts/verify_backup_restore_gate.py" in assemble
+    assert "scripts/finalize_release_evidence.py" in assemble
+    assert "--require-audits" in assemble
+    assert "timeout-minutes: 360" in assemble
+    assert assemble.index("Assemble and sign the verified production release bundle") < (
+        assemble.index(producer)
+    )
+    assert assemble.index(producer) < assemble.index(consumer)
+    assert assemble.index(consumer) < assemble.index(
+        "Create deterministic source, deployment, and evidence archives"
+    )
 
 
 def test_strict_release_jobs_install_pinned_cosign_before_visual_gate() -> None:

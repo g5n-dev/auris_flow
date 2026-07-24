@@ -6,6 +6,20 @@ cd "${ROOT}"
 BUILD_DIR="${ROOT}/build"
 EVIDENCE_REL="build/release-evidence"
 EVIDENCE_DIR="${ROOT}/${EVIDENCE_REL}"
+PRE_IMAGE_ONLY=false
+
+if [ "$#" -gt 1 ]; then
+  echo "Usage: bash scripts/verify_release.sh [--pre-image]" >&2
+  exit 2
+fi
+if [ "$#" -eq 1 ]; then
+  if [ "$1" != "--pre-image" ]; then
+    echo "Unknown release-gate option: $1" >&2
+    echo "Usage: bash scripts/verify_release.sh [--pre-image]" >&2
+    exit 2
+  fi
+  PRE_IMAGE_ONLY=true
+fi
 
 if [ "${AURIS_SKIP_REAL_STACK_E2E:-0}" = "1" ]; then
   echo "AURIS_SKIP_REAL_STACK_E2E=1 is not allowed by scripts/verify_release.sh." >&2
@@ -25,6 +39,11 @@ fi
 if [ "${AURIS_SKIP_PRODUCTION_PATH_GATE:-0}" = "1" ]; then
   echo "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed by scripts/verify_release.sh." >&2
   echo "The single production Compose path is a mandatory fail-closed release gate." >&2
+  exit 2
+fi
+if [ "${AURIS_SKIP_BACKUP_RESTORE_GATE:-0}" = "1" ]; then
+  echo "AURIS_SKIP_BACKUP_RESTORE_GATE=1 is not allowed by scripts/verify_release.sh." >&2
+  echo "A native-Linux, commit-bound backup/restore drill is mandatory final release evidence." >&2
   exit 2
 fi
 
@@ -158,6 +177,81 @@ if [ "${audit_status}" -ne 0 ]; then
   exit "${audit_status}"
 fi
 
+if [ "${PRE_IMAGE_ONLY}" = true ]; then
+  echo "Pre-image release checks passed; no final release-gate manifest was created."
+  echo "The signed deployment must still pass the native-Linux backup/restore drill."
+  exit 0
+fi
+
+BACKUP_RESTORE_SOURCE="${AURIS_BACKUP_RESTORE_EVIDENCE:-}"
+BACKUP_RESTORE_SIGNATURE_SOURCE="${AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE:-}"
+RELEASE_BUNDLE_ROOT="${AURIS_RELEASE_BUNDLE_ROOT:-}"
+RELEASE_TAG="${AURIS_RELEASE_TAG:-}"
+if [ -z "${BACKUP_RESTORE_SOURCE}" ] || \
+  [ -z "${BACKUP_RESTORE_SIGNATURE_SOURCE}" ] || \
+  [ -z "${RELEASE_BUNDLE_ROOT}" ] || [ -z "${RELEASE_TAG}" ]; then
+  echo "Final release verification requires AURIS_BACKUP_RESTORE_EVIDENCE," >&2
+  echo "AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE, AURIS_RELEASE_BUNDLE_ROOT," >&2
+  echo "and AURIS_RELEASE_TAG from the exact signed tag workflow." >&2
+  echo "Use --pre-image only before signed images and the deployment bundle exist." >&2
+  exit 2
+fi
+if [[ ! "${RELEASE_TAG}" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.[1-9][0-9]*)?$ ]]; then
+  echo "AURIS_RELEASE_TAG must be a supported SemVer release tag." >&2
+  exit 2
+fi
+for external_file in \
+  "${BACKUP_RESTORE_SOURCE}" \
+  "${BACKUP_RESTORE_SIGNATURE_SOURCE}"; do
+  if [[ "${external_file}" != /* ]]; then
+    echo "Backup/restore evidence and Sigstore bundle paths must be absolute." >&2
+    exit 2
+  fi
+  if [ ! -f "${external_file}" ] || [ -L "${external_file}" ]; then
+    echo "Backup/restore evidence inputs must be non-symlink regular files." >&2
+    exit 2
+  fi
+  case "${external_file}" in
+    "${ROOT}"|"${ROOT}/"*)
+      echo "Backup/restore evidence inputs must be outside the release source tree." >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ "${RELEASE_BUNDLE_ROOT}" != /* ]] || \
+  [ ! -d "${RELEASE_BUNDLE_ROOT}" ] || [ -L "${RELEASE_BUNDLE_ROOT}" ]; then
+  echo "AURIS_RELEASE_BUNDLE_ROOT must be an absolute non-symlink directory." >&2
+  exit 2
+fi
+case "${RELEASE_BUNDLE_ROOT}" in
+  "${ROOT}"|"${ROOT}/"*)
+    echo "The signed deployment bundle must be supplied outside the source tree." >&2
+    exit 2
+    ;;
+esac
+"${PYTHON_BIN}" scripts/verify_backup_restore_gate.py \
+  --artifact "${BACKUP_RESTORE_SOURCE}" \
+  --expected-commit "${SOURCE_COMMIT}" \
+  --expected-release-tag "${RELEASE_TAG}" \
+  --signature-bundle "${BACKUP_RESTORE_SIGNATURE_SOURCE}" \
+  --release-bundle-root "${RELEASE_BUNDLE_ROOT}" \
+  --formal
+install -m 0644 -- \
+  "${BACKUP_RESTORE_SOURCE}" \
+  "${EVIDENCE_DIR}/backup-restore-gate.json"
+install -m 0644 -- \
+  "${BACKUP_RESTORE_SIGNATURE_SOURCE}" \
+  "${EVIDENCE_DIR}/backup-restore-gate.sigstore.json"
+"${PYTHON_BIN}" scripts/verify_backup_restore_gate.py \
+  --artifact "${EVIDENCE_DIR}/backup-restore-gate.json" \
+  --expected-commit "${SOURCE_COMMIT}" \
+  --expected-release-tag "${RELEASE_TAG}" \
+  --signature-bundle "${EVIDENCE_DIR}/backup-restore-gate.sigstore.json" \
+  --release-bundle-root "${RELEASE_BUNDLE_ROOT}" \
+  --formal
+
 "${PYTHON_BIN}" scripts/finalize_release_evidence.py \
   --source-commit "${SOURCE_COMMIT}" \
+  --expected-release-tag "${RELEASE_TAG}" \
+  --release-bundle-root "${RELEASE_BUNDLE_ROOT}" \
   --require-audits

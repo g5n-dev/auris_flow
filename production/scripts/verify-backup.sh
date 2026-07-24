@@ -11,6 +11,9 @@ DOCKER_CONTEXT_NAME="default"
 BACKUP_TOOLS="${PRODUCTION_ROOT}/backup"
 RELEASE_BUNDLE_TOOL="${REPOSITORY_ROOT}/scripts/release_bundle.py"
 DEADLINE_RUNNER="${REPOSITORY_ROOT}/scripts/run_with_deadline.py"
+BACKUP_EVIDENCE_TOOL="${BACKUP_TOOLS}/backup_restore_evidence.py"
+BACKUP_EVIDENCE_VALIDATOR="${REPOSITORY_ROOT}/scripts/verify_backup_restore_gate.py"
+RESTORE_NETWORK_ALLOCATOR="${BACKUP_TOOLS}/restore_network_allocator.py"
 PYTHON="${PYTHON:-python3}"
 ENV_FILE="${AURIS_COMPOSE_ENV_FILE:-${PRODUCTION_ROOT}/.env}"
 SECRETS_DIR="${AURIS_SECRETS_DIR:-${PRODUCTION_ROOT}/secrets}"
@@ -23,6 +26,17 @@ CLEANUP_ON_SUCCESS=false
 DRILL_PROJECT=""
 ALLOW_RELEASE_MIGRATION_FROM=""
 VALIDATION_SCRIPT=""
+EVIDENCE_OUTPUT=""
+EVIDENCE_PREPARED_JSON=""
+VERIFIED_MANIFEST_FILE=""
+DOCKER_CONTEXT_EVIDENCE_FILE=""
+DOCKER_INFO_EVIDENCE_FILE=""
+BACKUP_VERIFICATION_STARTED_AT=""
+BACKUP_VERIFICATION_COMPLETED_AT=""
+RESTORE_STARTED_AT=""
+RESTORE_COMPLETED_AT=""
+DRILL_INTERNAL_SUBNET=""
+DRILL_EDGE_INTERNAL_IP=""
 DRILL_PULL_TIMEOUT="${AURIS_RESTORE_DRILL_PULL_TIMEOUT:-900}"
 DRILL_WAIT_TIMEOUT="${AURIS_RESTORE_DRILL_WAIT_TIMEOUT:-240}"
 DRILL_RUN_TIMEOUT="${AURIS_RESTORE_DRILL_RUN_TIMEOUT:-120}"
@@ -35,6 +49,9 @@ Usage: production/scripts/verify-backup.sh --backup ABSOLUTE_DIR [options]
 Options:
   --drill                 Restore into a newly named Compose project and verify counts
   --cleanup-on-success    Destroy only the generated drill project/volumes after success
+  --evidence-output ABSOLUTE_FILE
+                          Atomically publish formal release evidence; requires
+                          --drill and --cleanup-on-success on native Linux
   --env-file FILE         Compose environment file required by --drill
   --manifest-public-key FILE
                           Deployment-owned Ed25519 trust-anchor public key
@@ -58,6 +75,9 @@ fail() {
 
 cleanup() {
   local status="$1" cleanup_failed=0
+  local cleanup_started_at="" cleanup_completed_at="" verified_at=""
+  local evidence_drill_project="" remaining_containers="" remaining_volumes=""
+  local remaining_networks=""
   trap - EXIT INT TERM
   set +e
   if [[ -n "${VALIDATION_SCRIPT}" && -e "${VALIDATION_SCRIPT}" ]]; then
@@ -67,6 +87,16 @@ cleanup() {
       cleanup_failed=1
     fi
   fi
+  for private_file in \
+    "${VERIFIED_MANIFEST_FILE}" \
+    "${DOCKER_CONTEXT_EVIDENCE_FILE}" \
+    "${DOCKER_INFO_EVIDENCE_FILE}"; do
+    if [[ -n "${private_file}" && -e "${private_file}" ]] && \
+      ! rm -f -- "${private_file}"; then
+      printf 'backup verification cleanup failed for a private evidence input\n' >&2
+      cleanup_failed=1
+    fi
+  done
   if [[ -n "${VERIFY_SNAPSHOT_ROOT}" && -d "${VERIFY_SNAPSHOT_ROOT}" ]]; then
     if "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" destroy-snapshot \
       --snapshot-root "${VERIFY_SNAPSHOT_ROOT}" >/dev/null 2>&1; then
@@ -81,17 +111,77 @@ cleanup() {
   fi
   if [[ "${status}" -eq 0 && "${CLEANUP_ON_SUCCESS}" == true && \
     -n "${DRILL_PROJECT}" ]]; then
+    cleanup_started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     if compose_drill_with_deadline "${DRILL_CLEANUP_TIMEOUT}" \
       "clean restore drill project" \
       down --volumes --remove-orphans --timeout 20 >/dev/null 2>&1; then
-      printf 'Removed isolated project and volumes: %s\n' "${DRILL_PROJECT}"
-      DRILL_PROJECT=""
+      if ! remaining_containers="$(
+        docker --context "${DOCKER_CONTEXT_NAME}" ps --all --quiet \
+          --filter "label=com.docker.compose.project=${DRILL_PROJECT}"
+      )"; then
+        printf 'could not verify exact-project container cleanup\n' >&2
+        cleanup_failed=1
+      fi
+      if ! remaining_volumes="$(
+        docker --context "${DOCKER_CONTEXT_NAME}" volume ls --quiet --filter \
+          "label=com.docker.compose.project=${DRILL_PROJECT}"
+      )"; then
+        printf 'could not verify exact-project volume cleanup\n' >&2
+        cleanup_failed=1
+      fi
+      if ! remaining_networks="$(
+        docker --context "${DOCKER_CONTEXT_NAME}" network ls --quiet --filter \
+          "label=com.docker.compose.project=${DRILL_PROJECT}"
+      )"; then
+        printf 'could not verify exact-project network cleanup\n' >&2
+        cleanup_failed=1
+      fi
+      if [[ -n "${remaining_containers}" || -n "${remaining_volumes}" || \
+        -n "${remaining_networks}" ]]; then
+        printf 'drill cleanup left project-labelled runtime objects: %s\n' \
+          "${DRILL_PROJECT}" >&2
+        cleanup_failed=1
+      fi
+      if [[ "${cleanup_failed}" -eq 0 ]]; then
+        cleanup_completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'Removed isolated project and volumes: %s\n' "${DRILL_PROJECT}"
+        evidence_drill_project="${DRILL_PROJECT}"
+        DRILL_PROJECT=""
+      fi
     else
       printf 'drill passed but exact-project cleanup failed: %s\n' \
         "${DRILL_PROJECT}" >&2
       cleanup_failed=1
     fi
   fi
+  if [[ "${status}" -eq 0 && "${cleanup_failed}" -eq 0 && \
+    -n "${EVIDENCE_OUTPUT}" ]]; then
+    if [[ -z "${EVIDENCE_PREPARED_JSON}" || -z "${evidence_drill_project}" || \
+      -z "${cleanup_started_at}" || -z "${cleanup_completed_at}" ]]; then
+      printf 'formal evidence inputs were not completed\n' >&2
+      cleanup_failed=1
+    else
+      verified_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      if ! printf '%s\n' "${EVIDENCE_PREPARED_JSON}" | \
+        "${PYTHON}" "${BACKUP_EVIDENCE_TOOL}" emit-gate \
+          --root "${REPOSITORY_ROOT}" \
+          --drill-project "${evidence_drill_project}" \
+          --restore-subnet "${DRILL_INTERNAL_SUBNET}" \
+          --edge-internal-ip "${DRILL_EDGE_INTERNAL_IP}" \
+          --backup-verification-started-at "${BACKUP_VERIFICATION_STARTED_AT}" \
+          --backup-verification-completed-at "${BACKUP_VERIFICATION_COMPLETED_AT}" \
+          --restore-started-at "${RESTORE_STARTED_AT}" \
+          --restore-completed-at "${RESTORE_COMPLETED_AT}" \
+          --cleanup-started-at "${cleanup_started_at}" \
+          --cleanup-completed-at "${cleanup_completed_at}" \
+          --verified-at "${verified_at}" \
+          --output "${EVIDENCE_OUTPUT}"; then
+        printf 'formal backup/restore evidence was not published\n' >&2
+        cleanup_failed=1
+      fi
+    fi
+  fi
+  EVIDENCE_PREPARED_JSON=""
   if [ "${status}" -eq 0 ] && [ "${cleanup_failed}" -ne 0 ]; then
     status=1
   fi
@@ -125,6 +215,11 @@ while (($#)); do
       CLEANUP_ON_SUCCESS=true
       shift
       ;;
+    --evidence-output)
+      (($# >= 2)) || fail "--evidence-output requires a value"
+      EVIDENCE_OUTPUT="$2"
+      shift 2
+      ;;
     --env-file)
       (($# >= 2)) || fail "--env-file requires a value"
       ENV_FILE="$2"
@@ -147,6 +242,33 @@ while (($#)); do
     *) fail "unknown option: $1" ;;
   esac
 done
+
+if [[ -n "${EVIDENCE_OUTPUT}" && \
+  ( "${RUN_DRILL}" != true || "${CLEANUP_ON_SUCCESS}" != true ) ]]; then
+  fail "--evidence-output requires --drill and --cleanup-on-success"
+fi
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  has_control_character "${EVIDENCE_OUTPUT}" && fail \
+    "evidence output path contains a control character"
+  [[ "${EVIDENCE_OUTPUT}" == /* ]] || fail \
+    "--evidence-output must be an absolute path"
+  [[ -z "${ALLOW_RELEASE_MIGRATION_FROM}" ]] || fail \
+    "formal evidence does not accept predecessor-migration drills"
+  [[ -d "$(dirname "${EVIDENCE_OUTPUT}")" && \
+    ! -L "$(dirname "${EVIDENCE_OUTPUT}")" ]] || fail \
+    "evidence output parent must be a real directory"
+  evidence_output_parent="$(
+    cd "$(dirname "${EVIDENCE_OUTPUT}")" && pwd -P
+  )"
+  EVIDENCE_OUTPUT="${evidence_output_parent}/$(basename "${EVIDENCE_OUTPUT}")"
+  [[ ! -e "${EVIDENCE_OUTPUT}" && ! -L "${EVIDENCE_OUTPUT}" ]] || fail \
+    "evidence output already exists"
+  [[ -f "${BACKUP_EVIDENCE_TOOL}" && ! -L "${BACKUP_EVIDENCE_TOOL}" ]] || fail \
+    "backup/restore evidence producer is missing or unsafe"
+  [[ -f "${BACKUP_EVIDENCE_VALIDATOR}" && \
+    ! -L "${BACKUP_EVIDENCE_VALIDATOR}" ]] || fail \
+    "backup/restore evidence validator is missing or unsafe"
+fi
 
 command -v "${PYTHON}" >/dev/null 2>&1 || fail "Python is required"
 command -v openssl >/dev/null 2>&1 || fail "OpenSSL is required"
@@ -178,6 +300,15 @@ paths_overlap "${BACKUP_ROOT}" "${REPOSITORY_ROOT}" && fail \
   "backup path must not be an ancestor or descendant of the release bundle"
 
 SOURCE_BACKUP_ROOT="${BACKUP_ROOT}"
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  paths_overlap "${EVIDENCE_OUTPUT}" "${SOURCE_BACKUP_ROOT}" && fail \
+    "evidence output must be external to the signed backup"
+  paths_overlap "${EVIDENCE_OUTPUT}" "${REPOSITORY_ROOT}" && fail \
+    "evidence output must be external to the signed deployment bundle"
+  paths_overlap "${EVIDENCE_OUTPUT}" "${MANIFEST_VERIFY_KEY_FILE}" && fail \
+    "evidence output must not overlap the manifest trust anchor"
+  BACKUP_VERIFICATION_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
 VERIFY_SNAPSHOT_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/auris-flow-verify-snapshot.XXXXXX")"
 "${PYTHON}" "${BACKUP_TOOLS}/manifest.py" snapshot \
   --source "${SOURCE_BACKUP_ROOT}" \
@@ -190,6 +321,12 @@ verified_manifest_json="$("${PYTHON}" "${BACKUP_TOOLS}/manifest.py" verify \
   --root "${BACKUP_ROOT}" \
   --public-key "${MANIFEST_VERIFY_KEY_FILE}")" || fail \
   "external manifest signature or artifact verification failed"
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  VERIFIED_MANIFEST_FILE="$(
+    mktemp "${TMPDIR:-/tmp}/auris-verified-manifest.XXXXXX"
+  )"
+  printf '%s\n' "${verified_manifest_json}" >"${VERIFIED_MANIFEST_FILE}"
+fi
 printf '%s\n' "${verified_manifest_json}"
 "${PYTHON}" "${BACKUP_TOOLS}/mysql_dump.py" verify \
   --input "${BACKUP_ROOT}/mysql/all-databases.sql.gz"
@@ -205,6 +342,9 @@ rm -f -- "${VALIDATION_SCRIPT}"
 VALIDATION_SCRIPT=""
 "${PYTHON}" "${BACKUP_TOOLS}/qdrant_snapshots.py" validate \
   --input "${BACKUP_ROOT}/qdrant"
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  BACKUP_VERIFICATION_COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
 printf 'Offline backup verification passed.\n'
 
 if [[ "${RUN_DRILL}" != true ]]; then
@@ -213,6 +353,11 @@ fi
 
 command -v docker >/dev/null 2>&1 || fail "Docker is required for --drill"
 command -v cosign >/dev/null 2>&1 || fail "Cosign is required for --drill"
+command -v ip >/dev/null 2>&1 || fail \
+  "iproute2 is required for isolated --drill networking"
+[[ -f "${RESTORE_NETWORK_ALLOCATOR}" && \
+  ! -L "${RESTORE_NETWORK_ALLOCATOR}" ]] || fail \
+  "restore network allocator is missing or unsafe"
 for timeout_value in \
   "${DRILL_PULL_TIMEOUT}" \
   "${DRILL_WAIT_TIMEOUT}" \
@@ -228,6 +373,24 @@ done
   "DOCKER_HOST, DOCKER_CONTEXT and COMPOSE_PROJECT_NAME overrides are forbidden"
 docker --context "${DOCKER_CONTEXT_NAME}" info >/dev/null 2>&1 || fail \
   "the bound Docker context is unavailable: ${DOCKER_CONTEXT_NAME}"
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  DOCKER_CONTEXT_EVIDENCE_FILE="$(
+    mktemp "${TMPDIR:-/tmp}/auris-docker-context.XXXXXX"
+  )"
+  DOCKER_INFO_EVIDENCE_FILE="$(
+    mktemp "${TMPDIR:-/tmp}/auris-docker-info.XXXXXX"
+  )"
+  docker --context "${DOCKER_CONTEXT_NAME}" context inspect \
+    "${DOCKER_CONTEXT_NAME}" >"${DOCKER_CONTEXT_EVIDENCE_FILE}" || fail \
+    "could not inspect the formal-evidence Docker context"
+  docker --context "${DOCKER_CONTEXT_NAME}" info --format '{{json .}}' \
+    >"${DOCKER_INFO_EVIDENCE_FILE}" || fail \
+    "could not inspect the formal-evidence Docker daemon"
+  "${PYTHON}" "${BACKUP_EVIDENCE_TOOL}" verify-host \
+    --docker-context-json "${DOCKER_CONTEXT_EVIDENCE_FILE}" \
+    --docker-info-json "${DOCKER_INFO_EVIDENCE_FILE}" >/dev/null || fail \
+    "formal backup/restore evidence requires native Linux and rootful Docker"
+fi
 [[ -f "${RELEASE_BUNDLE_TOOL}" && ! -L "${RELEASE_BUNDLE_TOOL}" ]] || fail \
   "release bundle verifier is missing or unsafe"
 "${PYTHON}" "${RELEASE_BUNDLE_TOOL}" verify \
@@ -243,6 +406,76 @@ DRILL_PROJECT="auris-flow-restore-drill-${drill_suffix}"
 [[ "${DRILL_PROJECT}" =~ ^auris-flow-restore-drill-[0-9a-f]{12}$ ]] || fail \
   "unsafe drill project name"
 
+network_ids_output="$(
+  docker --context "${DOCKER_CONTEXT_NAME}" network ls --quiet
+)" || fail "could not enumerate Docker networks for restore isolation"
+network_ids=()
+if [[ -n "${network_ids_output}" ]]; then
+  mapfile -t network_ids <<<"${network_ids_output}"
+fi
+if ((${#network_ids[@]})); then
+  docker_networks_json="$(
+    docker --context "${DOCKER_CONTEXT_NAME}" network inspect "${network_ids[@]}"
+  )" || fail "could not inspect Docker networks for restore isolation"
+else
+  docker_networks_json='[]'
+fi
+host_routes_json="$(ip -json -4 route show table all)" || fail \
+  "could not inspect host routes for restore isolation"
+host_route_cidrs="$(
+  printf '%s\n' "${host_routes_json}" | "${PYTHON}" -c '
+import ipaddress
+import json
+import sys
+
+try:
+    document = json.load(sys.stdin)
+    if not isinstance(document, list) or len(document) > 4096:
+        raise ValueError
+    routes = []
+    for item in document:
+        if not isinstance(item, dict):
+            raise ValueError
+        destination = item.get("dst")
+        if destination in (None, "default"):
+            continue
+        network = ipaddress.ip_network(destination, strict=True)
+        if isinstance(network, ipaddress.IPv4Network):
+            routes.append(str(network))
+except (TypeError, ValueError, json.JSONDecodeError):
+    raise SystemExit(2)
+print("\n".join(dict.fromkeys(routes)))
+'
+)" || fail "host routes are invalid for restore network allocation"
+network_allocator_arguments=()
+if [[ -n "${host_route_cidrs}" ]]; then
+  while IFS= read -r host_route_cidr; do
+    network_allocator_arguments+=(--host-route "${host_route_cidr}")
+  done <<<"${host_route_cidrs}"
+fi
+network_allocation_json="$(
+  printf '%s\n' "${docker_networks_json}" | \
+    "${PYTHON}" "${RESTORE_NETWORK_ALLOCATOR}" \
+      "${network_allocator_arguments[@]}"
+)" || fail "no collision-free restore network is available"
+network_allocation_tsv="$(
+  printf '%s\n' "${network_allocation_json}" | "${PYTHON}" -c '
+import json
+import sys
+
+document = json.load(sys.stdin)
+if not isinstance(document, dict) or set(document) != {"subnet", "edge_ip"}:
+    raise SystemExit(2)
+print("{}\t{}".format(document["subnet"], document["edge_ip"]))
+'
+)" || fail "restore network allocator returned invalid output"
+IFS=$'\t' read -r DRILL_INTERNAL_SUBNET DRILL_EDGE_INTERNAL_IP \
+  <<<"${network_allocation_tsv}"
+[[ -n "${DRILL_INTERNAL_SUBNET}" && -n "${DRILL_EDGE_INTERNAL_IP}" ]] || fail \
+  "restore network allocator returned an empty allocation"
+export AURIS_INTERNAL_SUBNET="${DRILL_INTERNAL_SUBNET}"
+export AURIS_EDGE_INTERNAL_IP="${DRILL_EDGE_INTERNAL_IP}"
+
 compose_drill_with_deadline() {
   local timeout_seconds="$1" label="$2"
   shift 2
@@ -257,6 +490,9 @@ compose_drill_with_deadline() {
     -f "${COMPOSE_FILE}" "$@"
 }
 
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  RESTORE_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+fi
 compose_drill_with_deadline "${DRILL_RUN_TIMEOUT}" \
   "validate restore drill Compose" config --quiet || fail \
   "Compose configuration is invalid"
@@ -311,6 +547,18 @@ fi
 AURIS_RESTORE_REPORT_ROOT="${TMPDIR:-/tmp}/auris-flow-restore-reports-${DRILL_PROJECT}" \
   "${SCRIPT_DIR}/restore.sh" "${restore_arguments[@]}" || fail \
   "isolated restore drill failed"
+if [[ -n "${EVIDENCE_OUTPUT}" ]]; then
+  RESTORE_COMPLETED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  EVIDENCE_PREPARED_JSON="$(
+    "${PYTHON}" "${BACKUP_EVIDENCE_TOOL}" prepare-input \
+      --backup-root "${BACKUP_ROOT}" \
+      --verified-manifest-json "${VERIFIED_MANIFEST_FILE}" \
+      --docker-context-json "${DOCKER_CONTEXT_EVIDENCE_FILE}" \
+      --docker-info-json "${DOCKER_INFO_EVIDENCE_FILE}"
+  )" || fail "could not prepare private backup/restore evidence inputs"
+  [[ -n "${EVIDENCE_PREPARED_JSON}" ]] || fail \
+    "private backup/restore evidence input is empty"
+fi
 
 printf 'Isolated restore drill passed for project %s.\n' "${DRILL_PROJECT}"
 if [[ "${CLEANUP_ON_SUCCESS}" == true ]]; then

@@ -141,7 +141,7 @@ jobs:
       - name: Verify the complete release candidate in a clean runner
         env:
           PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
-        run: bash scripts/verify_release.sh
+        run: bash scripts/verify_release.sh --pre-image
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: success()
@@ -451,7 +451,7 @@ jobs:
   assemble-release:
     needs: [release-context, dependency-evidence, build-images]
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
+    timeout-minutes: 360
     environment: release
     permissions:
       contents: read
@@ -946,6 +946,189 @@ jobs:
             --compose-file build/release/deployment/production/compose.yaml \
             --env-file build/release/deployment/production/.env.example
 
+      - name: Run native-Linux signed-bundle backup and restore drill
+        env:
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          if [ "$(uname -s)" != "Linux" ]; then
+            echo "formal backup/restore evidence requires native Linux" >&2
+            exit 2
+          fi
+          deployment="${GITHUB_WORKSPACE}/build/release/deployment"
+          gate_root="$(mktemp -d "${RUNNER_TEMP}/auris-backup-restore-gate.XXXXXX")"
+          env_file="${gate_root}/production.env"
+          secrets_dir="${gate_root}/secrets"
+          tls_dir="${gate_root}/tls"
+          metrics_dir="${gate_root}/runtime-metrics"
+          backup_root="${gate_root}/backups"
+          evidence="${GITHUB_WORKSPACE}/build/release/dependencies/backup-restore-gate.json"
+          evidence_signature="${GITHUB_WORKSPACE}/build/release/dependencies/backup-restore-gate.sigstore.json"
+          test ! -e "${evidence}"
+          test ! -e "${evidence_signature}"
+          install -m 0444 \
+            "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-release-metadata.sigstore.json" \
+            "${deployment}/production/release-metadata.sigstore.json"
+          install -m 0600 "${deployment}/production/.env.example" "${env_file}"
+          install -d -m 0700 "${secrets_dir}" "${tls_dir}" "${backup_root}"
+          install -d -m 0755 "${metrics_dir}"
+          export AURIS_SECRETS_DIR="${secrets_dir}"
+          export AURIS_TLS_DIR="${tls_dir}"
+          export AURIS_RUNTIME_METRICS_DIR="${metrics_dir}"
+          export AURIS_COMPOSE_ENV_FILE="${env_file}"
+          (
+            cd "${deployment}"
+            bash production/scripts/init-secrets.sh
+          )
+          printf '%s\n' 'https://alerts.invalid/auris-release-recovery-gate' \
+            > "${secrets_dir}/alertmanager_webhook_url"
+          chmod 0444 "${secrets_dir}/alertmanager_webhook_url"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
+            -subj '/CN=auris-release-recovery-gate.invalid' \
+            -keyout "${tls_dir}/privkey.pem" \
+            -out "${tls_dir}/fullchain.pem" >/dev/null 2>&1
+          chmod 0600 "${tls_dir}/privkey.pem" "${tls_dir}/fullchain.pem"
+          compose=(
+            docker --context default compose
+            --project-name auris-flow
+            --project-directory "${deployment}/production"
+            --env-file "${env_file}"
+            --file "${deployment}/production/compose.yaml"
+          )
+          cleanup_source() {
+            "${compose[@]}" down --volumes --remove-orphans --timeout 20
+          }
+          trap 'cleanup_source || true' EXIT
+          "${compose[@]}" config --quiet
+          "${compose[@]}" pull \
+            mysql db-bootstrap dagster-storage-bootstrap redis minio \
+            minio-volume-init minio-bootstrap qdrant bff
+          "${compose[@]}" run --rm --no-deps minio-volume-init
+          "${compose[@]}" up --detach --no-deps --wait --wait-timeout 240 \
+            mysql redis minio qdrant
+          "${compose[@]}" run --rm --no-deps db-bootstrap
+          "${compose[@]}" run --rm --no-deps minio-bootstrap
+          "${compose[@]}" run --rm --no-deps migrate
+          "${compose[@]}" run --rm --no-deps dagster-storage-bootstrap
+          "${compose[@]}" exec -T mysql sh -c '
+            export MYSQL_PWD="$(cat /run/secrets/mysql_root_password)"
+            exec mysql --protocol=tcp --host=127.0.0.1 --user=root auris_flow
+          ' <<'SQL'
+          INSERT INTO json_resources
+            (collection, resource_key, tenant_id, project_id, status, trace_id, data)
+          VALUES
+            (
+              'release_recovery_fixtures',
+              'signed_bundle_backup_restore_v1',
+              'auris_release',
+              'release_recovery_gate',
+              'verified',
+              'trace_release_recovery_gate_0001',
+              JSON_OBJECT(
+                'purpose', 'recovery-consistency-only',
+                'contains_customer_data', FALSE
+              )
+            );
+          SQL
+          mysql_fixture_count="$(
+            "${compose[@]}" exec -T mysql sh -c '
+              export MYSQL_PWD="$(cat /run/secrets/mysql_root_password)"
+              exec mysql --protocol=tcp --host=127.0.0.1 --user=root \
+                --batch --skip-column-names auris_flow \
+                -e "SELECT COUNT(*) FROM json_resources WHERE tenant_id = '\''auris_release'\'' AND project_id = '\''release_recovery_gate'\'' AND trace_id = '\''trace_release_recovery_gate_0001'\''"
+            '
+          )"
+          if [ "${mysql_fixture_count}" != "1" ]; then
+            echo "scoped MySQL recovery fixture was not committed exactly once" >&2
+            exit 2
+          fi
+          minio_fixture="${gate_root}/minio-recovery-fixture.txt"
+          printf '%s\n' 'Auris Flow release recovery consistency fixture.' \
+            > "${minio_fixture}"
+          "${compose[@]}" run --rm --no-deps \
+            --volume "${minio_fixture}:/gate-fixture.txt:ro" \
+            --entrypoint /opt/auris/minio-client.sh \
+            minio-bootstrap cp \
+            /gate-fixture.txt auris/auris-flow/release-gate/fixture.txt
+          "${compose[@]}" run --rm --no-deps \
+            --volume "${GITHUB_WORKSPACE}/production/tests/backup_restore_gate_seed.py:/opt/auris/backup-restore-gate-seed.py:ro" \
+            --entrypoint python \
+            qdrant-backup-tool /opt/auris/backup-restore-gate-seed.py
+          (
+            cd "${deployment}"
+            bash production/scripts/backup.sh \
+              --output-root "${backup_root}" \
+              --storage-boundary ephemeral-ci-drill \
+              --release-gate-drill \
+              --env-file "${env_file}"
+          )
+          mapfile -t backups < <(
+            find "${backup_root}" -mindepth 1 -maxdepth 1 -type d \
+              -name 'auris-flow-*' -print
+          )
+          if [ "${#backups[@]}" -ne 1 ]; then
+            echo "backup gate did not produce exactly one signed backup" >&2
+            exit 2
+          fi
+          (
+            cd "${deployment}"
+            bash production/scripts/verify-backup.sh \
+              --backup "${backups[0]}" \
+              --drill \
+              --cleanup-on-success \
+              --env-file "${env_file}" \
+              --evidence-output "${evidence}"
+          )
+          cosign sign-blob --yes \
+            --bundle "${evidence_signature}" \
+            "${evidence}"
+          python3 scripts/verify_backup_restore_gate.py \
+            --artifact "${evidence}" \
+            --expected-commit "${SOURCE_COMMIT}" \
+            --expected-release-tag "${{ needs.release-context.outputs.release_tag }}" \
+            --signature-bundle "${evidence_signature}" \
+            --release-bundle-root "${deployment}" \
+            --formal
+          cleanup_source
+          trap - EXIT
+
+      - name: Require native-Linux backup/restore release evidence
+        env:
+          SOURCE_COMMIT: ${{ needs.release-context.outputs.source_commit }}
+        run: |
+          evidence="build/release/dependencies/backup-restore-gate.json"
+          evidence_signature="build/release/dependencies/backup-restore-gate.sigstore.json"
+          if [ ! -f "${evidence}" ] || [ -L "${evidence}" ]; then
+            echo "native-Linux backup/restore evidence is missing; release remains blocked" >&2
+            echo "run the signed deployment restore drill on a native Linux host and attach its commit-bound artifact" >&2
+            exit 2
+          fi
+          if [ ! -f "${evidence_signature}" ] || [ -L "${evidence_signature}" ]; then
+            echo "tag-bound backup/restore Sigstore evidence is missing" >&2
+            exit 2
+          fi
+          python3 scripts/verify_backup_restore_gate.py \
+            --artifact "${evidence}" \
+            --expected-commit "${SOURCE_COMMIT}" \
+            --expected-release-tag "${{ needs.release-context.outputs.release_tag }}" \
+            --signature-bundle "${evidence_signature}" \
+            --release-bundle-root build/release/deployment \
+            --formal
+          test ! -e build/release/final-runtime/backup-restore-gate.json
+          test ! -e build/release/final-runtime/backup-restore-gate.sigstore.json
+          install -m 0644 -- \
+            "${evidence}" \
+            build/release/final-runtime/backup-restore-gate.json
+          install -m 0644 -- \
+            "${evidence_signature}" \
+            build/release/final-runtime/backup-restore-gate.sigstore.json
+          python3 scripts/finalize_release_evidence.py \
+            --evidence-dir build/release/dependencies \
+            --source-commit "${SOURCE_COMMIT}" \
+            --expected-release-tag "${{ needs.release-context.outputs.release_tag }}" \
+            --release-bundle-root build/release/deployment \
+            --require-audits
+
       - name: Reverify every image record immediately before evidence archival
         env:
           RELEASE_TAG: ${{ needs.release-context.outputs.release_tag }}
@@ -1027,6 +1210,8 @@ jobs:
             --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-evidence.tar.gz" \
             --artifact "build/release/auris-flow-${{ needs.release-context.outputs.release_tag }}-release-metadata.sigstore.json" \
             --artifact "build/release/final-runtime/production-path-gate.json" \
+            --artifact "build/release/final-runtime/backup-restore-gate.json" \
+            --artifact "build/release/final-runtime/backup-restore-gate.sigstore.json" \
             --artifact "build/release/gh-cli-toolchain.json"
 
       - name: Keyless sign and verify the release checksum set
@@ -1183,6 +1368,13 @@ jobs:
             --expected-release-tag "${RELEASE_TAG}" \
             --release-compose build/release/deployment/production/compose.yaml \
             --image-lock build/release/images.lock.json
+          python3 scripts/verify_backup_restore_gate.py \
+            --artifact build/release/final-runtime/backup-restore-gate.json \
+            --expected-commit "${SOURCE_COMMIT}" \
+            --expected-release-tag "${RELEASE_TAG}" \
+            --signature-bundle build/release/final-runtime/backup-restore-gate.sigstore.json \
+            --release-bundle-root build/release/deployment \
+            --formal
 
       - name: Publish immutable assets to the approved GitHub Release
         env:
@@ -1343,6 +1535,8 @@ jobs:
             "build/release/auris-flow-${RELEASE_TAG}-evidence.tar.gz"
             "build/release/auris-flow-${RELEASE_TAG}-release-metadata.sigstore.json"
             "build/release/final-runtime/production-path-gate.json"
+            "build/release/final-runtime/backup-restore-gate.json"
+            "build/release/final-runtime/backup-restore-gate.sigstore.json"
             "build/release/release-manifest.json"
             "build/release/SHA256SUMS"
             "build/release/SHA256SUMS.sigstore.json"

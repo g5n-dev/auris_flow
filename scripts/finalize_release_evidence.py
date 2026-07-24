@@ -25,6 +25,13 @@ if str(SCRIPTS_DIR) not in sys.path:
 from verify_production_path_gate import (  # noqa: E402
     validate_evidence as validate_production_path_evidence,
 )
+from verify_backup_restore_gate import (  # noqa: E402
+    FormalEvidenceError,
+    validate_evidence as validate_backup_restore_evidence,
+    validate_release_bindings as validate_backup_restore_release_bindings,
+    verify_signed_release_bundle,
+    verify_sigstore_attestation as verify_backup_restore_sigstore_attestation,
+)
 
 
 ROOT = SCRIPTS_DIR.parent
@@ -199,6 +206,8 @@ CORE_EVIDENCE = frozenset(
         "real-dagster-gate.json",
         "product-dagster-gate.json",
         "production-path-gate.json",
+        "backup-restore-gate.json",
+        "backup-restore-gate.sigstore.json",
         "evidence-manifest.json",
     }
 )
@@ -1040,6 +1049,20 @@ def _validate_production_path(
     )
     if errors:
         raise EvidenceError("production path evidence is invalid: " + "; ".join(errors))
+
+
+def _validate_backup_restore(
+    payload: dict[str, Any], *, source_commit: str, repository_root: Path
+) -> None:
+    errors = validate_backup_restore_evidence(
+        payload,
+        root=repository_root,
+        expected_commit=source_commit,
+    )
+    if errors:
+        raise EvidenceError(
+            "backup/restore evidence is invalid: " + "; ".join(errors)
+        )
 
 
 def _validate_visual(payload: dict[str, Any], *, source_commit: str) -> None:
@@ -2453,6 +2476,8 @@ def _validate_core_evidence(
     source_commit: str,
     repository_root: Path,
     check_repository_binding: bool,
+    expected_release_tag: str | None,
+    release_bundle_root: Path | None,
 ) -> tuple[dict[str, bytes], SupplyExpectations]:
     verified_bytes: dict[str, bytes] = {}
     clean_clone, raw = _load_json_object(evidence_dir / "clean-clone.json")
@@ -2491,6 +2516,47 @@ def _validate_core_evidence(
         source_commit=source_commit,
         repository_root=repository_root,
     )
+
+    backup_restore, raw = _load_json_object(
+        evidence_dir / "backup-restore-gate.json"
+    )
+    verified_bytes["backup-restore-gate.json"] = raw
+    _validate_backup_restore(
+        backup_restore,
+        source_commit=source_commit,
+        repository_root=repository_root,
+    )
+    _signature_bundle, raw = _load_json_object(
+        evidence_dir / "backup-restore-gate.sigstore.json"
+    )
+    verified_bytes["backup-restore-gate.sigstore.json"] = raw
+    if (expected_release_tag is None) != (release_bundle_root is None):
+        raise EvidenceError(
+            "formal backup/restore validation requires both release tag and bundle"
+        )
+    if expected_release_tag is not None and release_bundle_root is not None:
+        binding_errors = validate_backup_restore_release_bindings(
+            backup_restore,
+            release_bundle_root=release_bundle_root,
+            expected_commit=source_commit,
+            expected_release_tag=expected_release_tag,
+        )
+        if binding_errors:
+            raise EvidenceError(
+                "backup/restore release binding is invalid: "
+                + "; ".join(binding_errors)
+            )
+        try:
+            verify_signed_release_bundle(release_bundle_root)
+            verify_backup_restore_sigstore_attestation(
+                evidence_path=evidence_dir / "backup-restore-gate.json",
+                signature_bundle=(
+                    evidence_dir / "backup-restore-gate.sigstore.json"
+                ),
+                release_tag=expected_release_tag,
+            )
+        except FormalEvidenceError as exc:
+            raise EvidenceError(str(exc)) from exc
 
     supply_manifest, raw = _load_json_object(evidence_dir / "evidence-manifest.json")
     verified_bytes["evidence-manifest.json"] = raw
@@ -2760,10 +2826,14 @@ def finalize_release_evidence(
     check_repository_binding: bool = True,
     repository_root: Path = ROOT,
     require_audits: bool = False,
+    expected_release_tag: str | None = None,
+    release_bundle_root: Path | None = None,
 ) -> dict[str, Any]:
     normalized_commit = _normalize_commit(source_commit)
     repository_root = Path(os.path.abspath(repository_root))
     evidence_dir = Path(os.path.abspath(evidence_dir))
+    if release_bundle_root is not None:
+        release_bundle_root = Path(os.path.abspath(release_bundle_root))
     if not evidence_dir.is_dir() or evidence_dir.is_symlink():
         raise EvidenceError("release evidence directory must be a regular directory")
     if check_repository_binding:
@@ -2800,6 +2870,8 @@ def finalize_release_evidence(
         source_commit=normalized_commit,
         repository_root=repository_root,
         check_repository_binding=check_repository_binding,
+        expected_release_tag=expected_release_tag,
+        release_bundle_root=release_bundle_root,
     )
     audit_documents: dict[str, tuple[dict[str, Any], bytes]] = {}
     for filename in sorted(OPTIONAL_RELEASE_EVIDENCE & names):
@@ -2873,12 +2945,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="require and semantically validate official pip-audit and npm audit reports",
     )
+    parser.add_argument("--expected-release-tag")
+    parser.add_argument("--release-bundle-root", type=Path)
     return parser.parse_args(argv)
 
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     try:
+        if args.require_audits and (
+            args.expected_release_tag is None
+            or args.release_bundle_root is None
+        ):
+            raise EvidenceError(
+                "--require-audits requires --expected-release-tag and "
+                "--release-bundle-root for formal recovery attestation"
+            )
         source_commit = args.source_commit
         if source_commit is None:
             source_commit = subprocess.run(
@@ -2892,6 +2974,8 @@ def main(argv: list[str] | None = None) -> int:
             args.evidence_dir,
             source_commit=source_commit,
             require_audits=args.require_audits,
+            expected_release_tag=args.expected_release_tag,
+            release_bundle_root=args.release_bundle_root,
         )
     except (EvidenceError, OSError, subprocess.CalledProcessError) as exc:
         print(f"Release evidence failed closed: {exc}", file=sys.stderr)

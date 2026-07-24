@@ -9,12 +9,19 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Run `python3 scripts/check_platform_readiness.py --release` and confirm
   `open_source_release_readiness: 12/12 passed` against the exact clean, committed
   candidate HEAD; staged-only content is not release evidence.
-- [ ] Run `bash scripts/verify_release.sh`; do not use any skip flag for the real-stack,
-  real-Dagster, product-Dagster, browser, visual, migration, audit, or security gates.
+- [ ] Before signed images/deployment exist, run
+  `bash scripts/verify_release.sh --pre-image`; do not use any skip flag for the
+  real-stack, real-Dagster, product-Dagster, browser, visual, migration, audit, or
+  security gates. This phase intentionally does **not** create
+  `release-gate-manifest.json`.
 - [ ] Confirm `build/release-evidence/release-gate-manifest.json` is produced only after
   clean-clone, dual-signed frontend bundle, visual 76/76, real-stack, real-Dagster
-  Compose, product-path Dagster and supply-chain evidence all report `status=ok` for the
-  exact same clean HEAD. Recompute
+  Compose, product-path Dagster, supply-chain evidence, and
+  `backup-restore-gate.json` and its tag-bound Sigstore sidecar all report
+  `status=ok` for the exact same clean HEAD.
+  The backup/restore artifact must come from the signed deployment on native Linux;
+  Docker Desktop, a missing artifact, failed cleanup, or an empty-data drill fails
+  closed. Recompute
   every recorded SHA-256 and reject stale, extra, symlinked or local-path-bearing files.
 - [ ] Confirm `production/visual/visual-baseline.lock.json` is `APPROVED` and points to
   an immutable `ghcr.io/...@sha256:...` artifact. The gate must download it with ORAS,
@@ -104,9 +111,17 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Exercise database restart, Worker crash, duplicate dispatch, callback timeout,
   Redis/Qdrant transient outage, Outbox lease expiry, dead-letter, and governed replay;
   confirm there is no unexplained duplicate business result.
-- [ ] Run `production/scripts/backup.sh`, restore into a new empty Compose project with
-  `production/scripts/restore.sh`, and pass `production/scripts/verify-backup.sh` plus
-  MySQL/object/Qdrant consistency checks.
+- [ ] Run `production/scripts/backup.sh`, restore into a new random empty Compose
+  project with `production/scripts/restore.sh`, and pass `production/scripts/verify-backup.sh`
+  with `--drill`, `--cleanup-on-success`, and
+  `--evidence-output /absolute/release-evidence/backup-restore-gate.json`, plus
+  MySQL/object/Qdrant consistency checks. Retain the schema
+  `auris.backup-restore-gate.v1` evidence only after exact-project containers,
+  volumes, and networks are removed. The official release workflow must sign it with
+  the exact tag-bound GitHub OIDC identity; the evidence must bind source commit,
+  release tag, actual signed metadata/Compose/image-lock digests, non-empty authority
+  counts (including a real `json_resources` business row, not only migration/Dagster
+  metadata), tool hashes, measured durations, and the native-Linux host observation.
 
 ## P3 — Observability and Operations
 

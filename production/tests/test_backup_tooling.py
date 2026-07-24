@@ -281,7 +281,10 @@ def key_id(public_key: Path) -> str:
 
 
 def create_unsigned_manifest(
-    root: Path, *, restore_attestation_public_key: Path | None = None
+    root: Path,
+    *,
+    restore_attestation_public_key: Path | None = None,
+    storage_boundary: str = "encrypted-external",
 ) -> None:
     if restore_attestation_public_key is None:
         _private_key, restore_attestation_public_key = make_restore_attestation_keys(
@@ -308,6 +311,8 @@ def create_unsigned_manifest(
         root / "metadata" / "release-metadata.json",
         "--running-images",
         root / "metadata" / "running-images.json",
+        "--storage-boundary",
+        storage_boundary,
         "--restore-attestation-public-key",
         restore_attestation_public_key,
     )
@@ -327,6 +332,33 @@ def create_manifest(root: Path) -> tuple[Path, Path]:
         public_key,
     )
     return private_key, public_key
+
+
+def test_manifest_records_truthful_storage_boundary_mode(tmp_path: Path) -> None:
+    external_root = make_backup_root(tmp_path / "external")
+    create_unsigned_manifest(external_root)
+    external = json.loads(
+        (external_root / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert external["storage_boundary"] == {
+        "contains_sensitive_data": True,
+        "mode": "encrypted-external",
+        "operator_assertion": "encrypted-at-rest-and-copied-off-host",
+        "repository_never_contains_backup_payloads": True,
+    }
+
+    drill_root = make_backup_root(tmp_path / "drill")
+    create_unsigned_manifest(
+        drill_root,
+        storage_boundary="ephemeral-ci-drill",
+    )
+    drill = json.loads((drill_root / "manifest.json").read_text(encoding="utf-8"))
+    assert drill["storage_boundary"] == {
+        "contains_sensitive_data": True,
+        "mode": "ephemeral-ci-drill",
+        "operator_assertion": "ephemeral-runner-recovery-drill-not-retained",
+        "repository_never_contains_backup_payloads": True,
+    }
 
 
 def verify_manifest(
@@ -516,6 +548,8 @@ def test_manifest_refuses_embedded_restore_attestation_trust_key(
         root / "metadata" / "release-metadata.json",
         "--running-images",
         root / "metadata" / "running-images.json",
+        "--storage-boundary",
+        "encrypted-external",
         "--restore-attestation-public-key",
         embedded_public_key,
         check=False,
@@ -1546,7 +1580,10 @@ def test_backup_and_restore_encode_authority_and_fail_closed_invariants() -> Non
     backup = (SCRIPTS / "backup.sh").read_text(encoding="utf-8")
     assert "--single-transaction" in backup
     assert "--routines --triggers --events" in backup
-    assert "--storage-boundary must explicitly be encrypted-external" in backup
+    assert "encrypted-external" in backup
+    assert "ephemeral-ci-drill" in backup
+    assert "--release-gate-drill" in backup
+    assert '--storage-boundary "${STORAGE_BOUNDARY}"' in backup
     assert "writer service" in backup
     assert "dagster-storage-bootstrap" in backup
     assert "mc ls --recursive --versions" in backup
@@ -2475,7 +2512,7 @@ def test_backup_manifest_binds_release_metadata_and_rejects_tampering(
     create_manifest(root)
     document = json.loads((root / "manifest.json").read_text(encoding="utf-8"))
 
-    assert document["schema_version"] == "auris-flow.backup-manifest/v3"
+    assert document["schema_version"] == "auris-flow.backup-manifest/v4"
     assert document["source"]["git_commit"] == SOURCE_COMMIT
     assert document["source"]["release_version"] == RELEASE_TAG
     assert document["source"]["release_metadata"] == make_release_metadata()
@@ -2572,7 +2609,9 @@ def test_release_bundle_real_assembly_unpack_and_readme_contract(
     assert len(manifested_paths) == len(set(manifested_paths))
     assert "production/scripts/restore.sh" in manifested_paths
     assert "production/scripts/finalize-restore.sh" in manifested_paths
+    assert "production/backup/backup_restore_evidence.py" in manifested_paths
     assert "production/backup/restore_state.py" in manifested_paths
+    assert "scripts/verify_backup_restore_gate.py" in manifested_paths
     assert "doc/runbooks/backup-restore.md" in manifested_paths
     assert "VERSION" in manifested_paths
     assert "production/release-metadata.json" not in manifested_paths

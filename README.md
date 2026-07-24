@@ -329,7 +329,8 @@ PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
 | MySQL / Redis / MinIO / Qdrant | `bash scripts/verify_real_stack.sh` |
 | 真实 Dagster 引擎 | `bash scripts/verify_real_dagster.sh` |
 | BFF → Outbox → Dagster → 回写 | `bash scripts/verify_product_dagster_path.sh` |
-| 完整发行候选 | `bash scripts/verify_release.sh` |
+| 镜像前发行门禁 | `bash scripts/verify_release.sh --pre-image` |
+| 完整发行候选 | 使用官方 tag workflow 产出的 recovery JSON、Sigstore sidecar 与同一签名 deployment，设置 `AURIS_BACKUP_RESTORE_EVIDENCE`、`AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE`、`AURIS_RELEASE_BUNDLE_ROOT`、`AURIS_RELEASE_TAG` 后运行 `bash scripts/verify_release.sh` |
 
 <details>
 <summary><strong>为什么“真实栈通过”不等于“真实 Dagster 通过”</strong></summary>

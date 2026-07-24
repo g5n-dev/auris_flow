@@ -171,6 +171,26 @@ def test_release_gate_audits_every_locked_runtime_before_final_manifest() -> Non
     assert source.index(npm_audit) < source.index(finalizer)
 
 
+def test_release_gate_separates_pre_image_checks_from_commit_bound_restore_finalization() -> None:
+    source = (ROOT / "scripts" / "verify_release.sh").read_text(encoding="utf-8")
+
+    assert "--pre-image" in source
+    assert "AURIS_BACKUP_RESTORE_EVIDENCE" in source
+    assert "AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE" in source
+    assert "AURIS_RELEASE_BUNDLE_ROOT" in source
+    assert "AURIS_RELEASE_TAG" in source
+    assert "scripts/verify_backup_restore_gate.py" in source
+    assert "backup-restore-gate.json" in source
+    assert "backup-restore-gate.sigstore.json" in source
+    assert "--formal" in source
+    assert source.index("npm audit --prefix") < source.index(
+        "scripts/verify_backup_restore_gate.py"
+    )
+    assert source.index("scripts/verify_backup_restore_gate.py") < source.index(
+        "scripts/finalize_release_evidence.py"
+    )
+
+
 def test_failed_audit_runs_full_matrix_and_never_calls_finalizer(
     tmp_path: Path,
 ) -> None:
