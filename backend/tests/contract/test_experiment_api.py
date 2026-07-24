@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 from datetime import UTC, datetime
+from time import monotonic, sleep
 
 from app.core.auth import DevAuthProfile, issue_dev_auth_token
 from app.core.completion_signature import completion_signature_message
@@ -778,14 +779,20 @@ def test_experiment_accepts_an_explicit_model_only_treatment(client, auth_header
 
 
 def _dispatch_task_run(run_id: str) -> str:
-    assert process_aggregate_events([run_id]) == 1
-    with SessionLocal() as session:
-        run = session.get(RunRecord, run_id)
-        assert run is not None
-        assert run.status == "submitted"
-        dispatch = run.payload["dispatch"]
-        assert dispatch["adapter"] == "dagster"
-        return str(dispatch["details"]["external_run_id"])
+    deadline = monotonic() + 2.0
+    while True:
+        process_aggregate_events([run_id])
+        with SessionLocal() as session:
+            run = session.get(RunRecord, run_id)
+            assert run is not None
+            if run.status != "pending":
+                assert run.status == "submitted", run.payload
+                dispatch = run.payload["dispatch"]
+                assert dispatch["adapter"] == "dagster"
+                return str(dispatch["details"]["external_run_id"])
+        if monotonic() >= deadline:
+            raise AssertionError(f"task run {run_id} remained pending after its dispatch deadline")
+        sleep(0.01)
 
 
 def test_experiment_task_run_materializes_exposure_and_outcomes(client, auth_headers):

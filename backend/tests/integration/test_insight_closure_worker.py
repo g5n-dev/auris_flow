@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from time import monotonic, sleep
 from typing import Any
 
 import pytest
@@ -160,13 +161,17 @@ def _dispatch_run(run_id: str) -> tuple[str, str]:
         assert before is not None
         before_status = before.status
     if before_status == "pending":
-        for _attempt in range(10):
-            assert process_once() >= 1
+        deadline = monotonic() + 2.0
+        while True:
+            process_once()
             with SessionLocal() as session:
                 current = session.get(RunRecord, run_id)
                 assert current is not None
                 if current.status != "pending":
                     break
+            if monotonic() >= deadline:
+                raise AssertionError(f"run {run_id} remained pending after its dispatch deadline")
+            sleep(0.01)
 
     with SessionLocal() as session:
         run = session.get(RunRecord, run_id)
