@@ -83,6 +83,7 @@ UNTRUSTED_REFERENCE_FIELDS = {"object_key", "url", "uri"}
 SAFE_LONG_TEXT_FIELDS = {"description", "diff_summary", "reason", "summary"}
 
 MAX_TEXT_LENGTH = 300
+MAX_REGEX_SCAN_LENGTH = 4_096
 MAX_LIST_ITEMS = 50
 MAX_DICT_ITEMS = 100
 MAX_DEPTH = 12
@@ -191,8 +192,13 @@ def _is_sensitive_text_field(field_name: str) -> bool:
 
 
 def _contains_secret_value(value: str) -> bool:
+    # Keep every regex input bounded even if this private helper is reused
+    # independently of _redact. Some detection expressions intentionally
+    # accept variable-length tokens and must never scan an attacker-sized
+    # logging/audit value.
+    scan_value = value[:MAX_REGEX_SCAN_LENGTH]
     return any(
-        pattern.search(value)
+        pattern.search(scan_value)
         for pattern in (
             AUTHORIZATION_VALUE_PATTERN,
             JWT_PATTERN,
@@ -205,7 +211,11 @@ def _contains_secret_value(value: str) -> bool:
 
 
 def _redact_inline_pii(value: str) -> str:
-    redacted = EMAIL_PATTERN.sub("[REDACTED_EMAIL]", value)
+    # EMAIL_PATTERN contains adjacent variable-length character classes and
+    # may require super-linear work on a crafted non-match. Bound the input at
+    # the regex sink as defense in depth.
+    scan_value = value[:MAX_REGEX_SCAN_LENGTH]
+    redacted = EMAIL_PATTERN.sub("[REDACTED_EMAIL]", scan_value)
     redacted = PHONE_PATTERN.sub("[REDACTED_PHONE]", redacted)
     redacted = IDENTITY_PATTERN.sub("[REDACTED_IDENTITY]", redacted)
     redacted = LICENSE_PLATE_PATTERN.sub("[REDACTED_PLATE]", redacted)
@@ -271,6 +281,12 @@ def _redact(
     if isinstance(value, (bytes, bytearray)):
         return f"[REDACTED_BINARY length={len(value)}]"
     if isinstance(value, str):
+        # Do not emit a partially scanned prefix: a secret can straddle the
+        # scan boundary. Oversized untrusted text is safer as a length-only
+        # marker, while normal values retain their existing redaction
+        # semantics.
+        if len(value) > MAX_REGEX_SCAN_LENGTH:
+            return _redacted_text_marker(value)
         if _contains_secret_value(value):
             return "[REDACTED_SECRET]"
         if isinstance(value, TrustedSha256):

@@ -17,6 +17,8 @@ from authlib.jose import JsonWebKey, JsonWebToken  # type: ignore[import-untyped
 from app.core.oidc_http import OIDCHTTPResponseLimitError, read_bounded_httpx_body
 
 _ALGORITHM = "RS256"
+_ACCESS_TOKEN_HEADER_TYPES = frozenset({"at+jwt", "application/at+jwt"})
+_ACCESS_TOKEN_CLAIM_TYPES = frozenset({"access", "access_token", "bearer"})
 _MAX_JWKS_KEYS = 100
 _MAX_TOKEN_BYTES = 16 * 1024
 _MAX_DISCOVERY_RESPONSE_BYTES = 128 * 1024
@@ -204,12 +206,16 @@ class _OIDCSignedTokenValidator:
         if not isinstance(token, str) or not token or len(token.encode("utf-8")) > _MAX_TOKEN_BYTES:
             raise OIDCTokenValidationError
 
+        validated_header: dict[str, Any] = {}
+
         def load_signing_key(header: Mapping[str, Any], _payload: Mapping[str, Any]) -> Any:
             if header.get("alg") != _ALGORITHM:
                 raise OIDCTokenValidationError
             kid = header.get("kid")
             if not isinstance(kid, str) or not kid or len(kid) > 256:
                 raise OIDCTokenValidationError
+            validated_header.clear()
+            validated_header.update(header)
             return self._key_for_kid(kid, current_time)
 
         try:
@@ -222,11 +228,19 @@ class _OIDCSignedTokenValidator:
                 now=int(current_time),
                 leeway=self.config.clock_skew_seconds,
             )
+            self._validate_token_purpose(validated_header, claims)
             return cast(Mapping[str, Any], claims)
         except OIDCError:
             raise
         except Exception:
             raise OIDCTokenValidationError from None
+
+    def _validate_token_purpose(
+        self,
+        header: Mapping[str, Any],
+        claims: Mapping[str, Any],
+    ) -> None:
+        del header, claims
 
     def _current_time(self, override: float | None) -> float:
         try:
@@ -321,6 +335,40 @@ class OIDCTokenValidator(_OIDCSignedTokenValidator):
         )
         return self._build_validated_claims(claims)
 
+    def _validate_token_purpose(
+        self,
+        header: Mapping[str, Any],
+        claims: Mapping[str, Any],
+    ) -> None:
+        """Require positive evidence that a bearer JWT is an API access token."""
+
+        header_type = header.get("typ")
+        claim_type = claims.get("typ")
+        token_use = claims.get("token_use")
+        if header_type is not None and not isinstance(header_type, str):
+            raise OIDCTokenValidationError
+        if claim_type is not None and not isinstance(claim_type, str):
+            raise OIDCTokenValidationError
+        if token_use is not None and not isinstance(token_use, str):
+            raise OIDCTokenValidationError
+
+        normalized_header_type = header_type.casefold() if isinstance(header_type, str) else None
+        normalized_claim_type = claim_type.casefold() if isinstance(claim_type, str) else None
+        normalized_token_use = token_use.casefold() if isinstance(token_use, str) else None
+        if normalized_claim_type is not None and normalized_claim_type not in (
+            _ACCESS_TOKEN_CLAIM_TYPES
+        ):
+            raise OIDCTokenValidationError
+        if normalized_token_use is not None and normalized_token_use != "access":
+            raise OIDCTokenValidationError
+        if (
+            normalized_header_type in _ACCESS_TOKEN_HEADER_TYPES
+            or normalized_claim_type in _ACCESS_TOKEN_CLAIM_TYPES
+            or normalized_token_use == "access"
+        ):
+            return
+        raise OIDCTokenValidationError
+
     def _build_validated_claims(self, claims: Mapping[str, Any]) -> OIDCValidatedClaims:
         issuer = claims.get("iss")
         subject = claims.get("sub")
@@ -392,6 +440,15 @@ class OIDCIDTokenValidator(OIDCTokenValidator):
         ):
             raise OIDCTokenValidationError
         return validated
+
+    def _validate_token_purpose(
+        self,
+        header: Mapping[str, Any],
+        claims: Mapping[str, Any],
+    ) -> None:
+        # ID tokens are selected from the token endpoint's dedicated id_token
+        # member and are separately bound to client_id, azp and nonce.
+        del header, claims
 
 
 class OIDCBackChannelLogoutTokenValidator(_OIDCSignedTokenValidator):

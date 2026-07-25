@@ -98,7 +98,6 @@ def test_readyz_production_alias_is_strict_by_default(client, monkeypatch):
         "dagster",
         "database",
         "object_storage",
-        "observability",
         "qdrant",
         "redis",
     ]
@@ -120,9 +119,30 @@ def test_readyz_production_cannot_omit_dagster_from_explicit_dependencies(
         "auth",
         "dagster",
         "database",
-        "observability",
     ]
     assert response.json()["data"]["missing_required"]["dagster"] == "not_ready"
+
+
+def test_readyz_production_reports_observability_without_making_it_a_default_dependency(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "auth_provider", "test")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database")
+    monkeypatch.setattr(app.state.observability, "enabled", False)
+    monkeypatch.setattr(app.state.observability, "error_code", "collector_unavailable")
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["checks"]["observability"] == "not_ready"
+    assert body["required_checks"] == ["auth", "dagster", "database"]
+    assert body["missing_required"] == {}
 
 
 def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch):
@@ -1752,7 +1772,10 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
     assert arbitrated.status_code == 201
     assert arbitrated.json()["data"]["status"] == "enrolled"
     assert arbitrated.json()["data"]["quality_gate"]["reviewer_role_present"] is True
-    assert arbitrated.json()["data"]["embedding_ref"]["status"] == "pending_qdrant_upsert"
+    assert (
+        arbitrated.json()["data"]["embedding_ref"]["status"] == "dedicated_vector_provider_required"
+    )
+    assert arbitrated.json()["data"]["embedding_ref"]["indexing_enabled"] is False
     with SessionLocal() as session:
         arbitrated_projection = session.get(VoiceprintEnrollment, "vp_a1001_enrollment_arbitrated")
         assert arbitrated_projection is not None

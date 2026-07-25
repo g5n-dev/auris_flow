@@ -209,6 +209,15 @@ def test_external_completion_receipt_contract_uses_explicit_request_and_response
     document = _document()
     operation = document["paths"]["/runs/{id}/external-completion-receipts"]["post"]
     schemas = document["components"]["schemas"]
+    parameters = document["components"]["parameters"]
+
+    assert parameters["IdempotencyKey"]["schema"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+    }
+    assert parameters["XRequestId"]["schema"] == {"type": "string"}
 
     expected_security = [
         {
@@ -394,12 +403,25 @@ def test_runtime_external_completion_receipt_contract_declares_request_and_both_
     context_parameters = {parameter["name"]: parameter for parameter in operation["parameters"]}
     for header in {"X-Tenant-Id", "X-Project-Id", "Idempotency-Key"}:
         assert context_parameters[header]["required"] is True
+    assert context_parameters["Idempotency-Key"]["schema"] == {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        "description": (
+            "写操作幂等键；1–128 个 ASCII 字符，首字符为字母或数字，"
+            "其余可使用字母、数字、点、下划线、冒号或连字符。"
+        ),
+        "title": "Idempotency-Key",
+    }
 
     response_200 = operation["responses"]["200"]["content"]["application/json"]["schema"]
     response_202 = operation["responses"]["202"]["content"]["application/json"]["schema"]
+    response_413 = operation["responses"]["413"]["content"]["application/json"]["schema"]
     response_422 = operation["responses"]["422"]["content"]["application/json"]["schema"]
     assert response_200
     assert response_202
+    assert response_413["$ref"].endswith("/ApiErrorEnvelope")
     assert response_422["$ref"].endswith("/ApiErrorEnvelope")
 
     pending_reference = response_202["$ref"].rsplit("/", 1)[-1]

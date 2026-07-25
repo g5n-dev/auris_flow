@@ -8,7 +8,7 @@ from urllib.parse import parse_qsl
 
 from fastapi import APIRouter, Header, Request, Response
 from fastapi.responses import RedirectResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -27,8 +27,10 @@ from app.core.browser_session import (
     create_browser_session,
     find_oidc_identity,
     revoke_browser_session,
+    transition_browser_session_scope,
 )
 from app.core.config import _csv_items, get_settings, is_production_environment
+from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.oidc import (
     OIDCBackChannelLogoutTokenValidator,
@@ -54,8 +56,10 @@ from app.core.oidc_transaction import (
     authorization_transaction_secret,
     set_authorization_transaction_cookie,
 )
+from app.core.project_membership import project_member_role_binding
 from app.core.response import envelope
-from app.models import AuthSession, User
+from app.models import AuthSession, Project, Tenant, User
+from app.services.audit_service import record_audit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 _MAX_BACKCHANNEL_LOGOUT_TOKEN_BYTES = 16 * 1024
@@ -73,6 +77,16 @@ class OIDCBackChannelLogoutRequest(BaseModel):
         min_length=1,
         max_length=_MAX_BACKCHANNEL_LOGOUT_TOKEN_BYTES,
         json_schema_extra={"writeOnly": True},
+    )
+
+
+class SessionScopeTransitionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$",
     )
 
 
@@ -100,6 +114,103 @@ def _request_meta(request: Request) -> dict[str, str]:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+
+def _active_project_memberships(
+    session: SessionDep,
+    *,
+    user: User,
+    tenant_id: str,
+) -> list[dict[str, object]]:
+    user_roles = {role for role in (user.roles or []) if isinstance(role, str) and role}
+    memberships: list[dict[str, object]] = []
+    projects = session.scalars(
+        select(Project)
+        .where(
+            Project.tenant_id == tenant_id,
+            Project.status == "active",
+        )
+        .order_by(Project.project_id)
+    )
+    for project in projects:
+        binding = project_member_role_binding(project, user.user_id)
+        if binding.duplicate or not binding.configured:
+            continue
+        roles = sorted(user_roles.intersection(binding.roles))
+        if not roles:
+            continue
+        memberships.append(
+            {
+                "project_id": project.project_id,
+                "project_name": project.name,
+                "roles": roles,
+            }
+        )
+    return memberships
+
+
+def _session_user_data(
+    session: SessionDep,
+    *,
+    user: User,
+    tenant_id: str,
+    project_id: str,
+    roles: tuple[str, ...],
+    provider: str,
+    csrf_token: str | None = None,
+) -> dict[str, object]:
+    tenant = session.get(Tenant, tenant_id)
+    project = session.get(Project, project_id)
+    if (
+        tenant is None
+        or tenant.status != "active"
+        or project is None
+        or project.tenant_id != tenant_id
+        or project.status != "active"
+    ):
+        raise ApiError("AUTH_SCOPE_REJECTED", "请求资源不可用", 404)
+    profile = next(
+        (
+            item
+            for item in map(
+                get_dev_auth_profile,
+                (
+                    "demo.operator@auris.local",
+                    "admin@auris.local",
+                    "release.approver@auris.local",
+                    "annotator@auris.local",
+                    "annotator.b@auris.local",
+                    "model@auris.local",
+                ),
+            )
+            if item and item.user_id == user.user_id
+        ),
+        None,
+    )
+    role_label = (
+        profile.role_label if profile and set(profile.roles) == set(roles) else " / ".join(roles)
+    )
+    data: dict[str, object] = {
+        "user_id": user.user_id,
+        "name": str(user.name),
+        "email": str(user.email),
+        "role": role_label,
+        "roles": list(roles),
+        "initials": profile.initials if profile else str(user.name)[:2].upper(),
+        "tenant_id": tenant_id,
+        "tenant_name": tenant.name,
+        "project_id": project_id,
+        "project_name": project.name,
+        "project_memberships": _active_project_memberships(
+            session,
+            user=user,
+            tenant_id=tenant_id,
+        ),
+        "provider": provider,
+    }
+    if csrf_token:
+        data["csrf_token"] = csrf_token
+    return data
 
 
 @lru_cache
@@ -313,7 +424,7 @@ def oidc_login(
     set_authorization_transaction_cookie(
         response,
         app_env=settings.app_env,
-        transaction_secret=transaction_secret,
+        transaction_binding=transaction_secret,
         max_age=settings.oidc_authorization_state_ttl_seconds,
     )
     response.headers["Cache-Control"] = "no-store"
@@ -424,25 +535,6 @@ def get_session(
     user = session.get(User, ctx.user_id)
     if user is None:
         raise ApiError("AUTH_USER_NOT_FOUND", "当前认证用户不存在", 401)
-    profile = next(
-        (
-            item
-            for item in map(
-                get_dev_auth_profile,
-                (
-                    "demo.operator@auris.local",
-                    "admin@auris.local",
-                    "release.approver@auris.local",
-                    "annotator@auris.local",
-                    "annotator.b@auris.local",
-                    "model@auris.local",
-                ),
-            )
-            if item and item.user_id == ctx.user_id
-        ),
-        None,
-    )
-    role_label = profile.role_label if profile else " / ".join(ctx.roles)
     is_browser_session = bool(ctx.auth_session_id and ctx.auth_session_id.startswith("browser_"))
     csrf_token: str | None = None
     if is_browser_session:
@@ -455,25 +547,100 @@ def get_session(
             session_id=ctx.auth_session_id or "",
         )
         session.commit()
-    data = {
-        "user_id": ctx.user_id,
-        "name": str(user.name),
-        "email": str(user.email),
-        "role": role_label,
-        "roles": list(ctx.roles),
-        "initials": profile.initials if profile else str(user.name)[:2].upper(),
-        "tenant_id": ctx.tenant_id,
-        "tenant_name": profile.tenant_name if profile else ctx.tenant_id,
-        "project_id": ctx.project_id,
-        "project_name": profile.project_name if profile else ctx.project_id,
-        "provider": "oidc_session"
-        if is_browser_session
-        else "dev_session"
-        if dev_auth_enabled(get_settings())
-        else "configured",
-    }
-    if csrf_token:
-        data["csrf_token"] = csrf_token
+    data = _session_user_data(
+        session,
+        user=user,
+        tenant_id=ctx.tenant_id,
+        project_id=ctx.project_id,
+        roles=ctx.roles,
+        provider=(
+            "oidc_session"
+            if is_browser_session
+            else "dev_session"
+            if dev_auth_enabled(get_settings())
+            else "configured"
+        ),
+        csrf_token=csrf_token,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+    return envelope(data, ctx, meta=_request_meta(request))
+
+
+@router.post("/session/scope-transitions")
+def transition_session_scope(
+    body: SessionScopeTransitionRequest,
+    request: Request,
+    response: Response,
+    session: SessionDep,
+    x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
+) -> dict[str, object]:
+    settings = get_settings()
+    raw_token = request.cookies.get(settings.browser_session_cookie_name)
+    if not raw_token:
+        raise ApiError("AUTH_REQUIRED", "需要有效的登录会话", 401)
+    if raw_token.startswith("auris.v1."):
+        raise ApiError(
+            "AUTH_SCOPE_TRANSITION_UNAVAILABLE",
+            "当前开发会话不支持安全项目切换，请重新登录目标项目",
+            409,
+        )
+    transition = transition_browser_session_scope(
+        session,
+        raw_token=raw_token,
+        project_id=body.project_id,
+        csrf_token=x_csrf_token,
+        origin=request.headers.get("Origin"),
+        allowed_origins=_csv_items(settings.cors_allowed_origins),
+    )
+    user = session.get(User, transition.issued.user_id)
+    if user is None:
+        raise ApiError("AUTH_USER_NOT_FOUND", "当前认证用户不存在", 401)
+    ctx = RequestContext(
+        tenant_id=transition.issued.tenant_id,
+        project_id=transition.current_project_id,
+        user_id=transition.issued.user_id,
+        roles=transition.roles,
+        request_id=getattr(request.state, "request_id", "auth-scope-transition"),
+        trace_id=getattr(request.state, "trace_id", "trace_auth_scope_transition"),
+        auth_session_id=transition.issued.session_id,
+    )
+    if transition.rotated:
+        record_audit(
+            session,
+            ctx,
+            action="auth.session.scope_transition",
+            object_type="browser_auth_session",
+            object_id=transition.issued.session_id,
+            before={"project_id": transition.previous_project_id},
+            after={"project_id": transition.current_project_id},
+        )
+    data = _session_user_data(
+        session,
+        user=user,
+        tenant_id=transition.issued.tenant_id,
+        project_id=transition.current_project_id,
+        roles=transition.roles,
+        provider="oidc_session",
+        csrf_token=transition.issued.csrf_token,
+    )
+    data.update(
+        {
+            "previous_project_id": transition.previous_project_id,
+            "current_project_id": transition.current_project_id,
+        }
+    )
+    session.commit()
+    if transition.rotated:
+        remaining_seconds = max(
+            0,
+            int((_as_utc(transition.issued.expires_at) - datetime.now(UTC)).total_seconds()),
+        )
+        _set_session_cookie(
+            response,
+            transition.issued.raw_token,
+            max_age=remaining_seconds,
+        )
     response.headers["Cache-Control"] = "no-store"
     response.headers["Pragma"] = "no-cache"
     return envelope(data, ctx, meta=_request_meta(request))

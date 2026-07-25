@@ -2774,16 +2774,31 @@ async def post_voiceprint_enrollments(request: Request, session: SessionDep, ctx
     status = _voiceprint_enrollment_status(body, ctx)
     embedding_ref = body.get("embedding_ref")
     if not isinstance(embedding_ref, dict):
-        embedding_ref = {
-            "collection": "voiceprint_embeddings",
-            "vector_dim": 512,
-            "status": "reference_only",
-        }
+        embedding_ref = {}
+    requested_vector_dim = embedding_ref.get("vector_dim")
+    vector_dim = (
+        requested_vector_dim
+        if isinstance(requested_vector_dim, int)
+        and not isinstance(requested_vector_dim, bool)
+        and 1 <= requested_vector_dim <= 8192
+        else 512
+    )
+    requested_active_dims = embedding_ref.get("active_dims")
     embedding_ref = {
-        "collection": embedding_ref.get("collection") or "voiceprint_embeddings",
-        "vector_dim": embedding_ref.get("vector_dim") or 512,
-        **embedding_ref,
-        "status": "pending_qdrant_upsert" if status == "enrolled" else "reference_only",
+        "collection": "voiceprint_embeddings",
+        "vector_dim": vector_dim,
+        **(
+            {"active_dims": requested_active_dims}
+            if isinstance(requested_active_dims, int)
+            and not isinstance(requested_active_dims, bool)
+            and 0 <= requested_active_dims <= vector_dim
+            else {}
+        ),
+        "status": (
+            "dedicated_vector_provider_required" if status == "enrolled" else "reference_only"
+        ),
+        "indexing_enabled": False,
+        "blocked_reason": "dedicated_voiceprint_vector_provider_required",
     }
     extra_data = {
         "voiceprint_id": voiceprint_id.strip(),

@@ -46,6 +46,15 @@ class BrowserSessionScope:
     project_id: str
 
 
+@dataclass(frozen=True)
+class BrowserSessionScopeTransition:
+    previous_project_id: str
+    current_project_id: str
+    issued: IssuedBrowserSession
+    roles: tuple[str, ...]
+    rotated: bool
+
+
 def _utc_now() -> datetime:
     return datetime.now(UTC)
 
@@ -77,6 +86,7 @@ def _require_live_subject(
     *,
     tenant_id: str,
     project_id: str,
+    require_record_project: bool = True,
 ) -> tuple[User, tuple[str, ...]]:
     identity = session.get(OidcIdentity, record.oidc_identity_id)
     security = session.get(UserSecurityState, record.user_id)
@@ -96,8 +106,7 @@ def _require_live_subject(
         raise ApiError("AUTH_SUBJECT_DISABLED", "认证主体不可用", 401)
     if (
         tenant_id != record.tenant_id
-        or project_id != record.project_id
-        or identity.project_id != record.project_id
+        or (require_record_project and project_id != record.project_id)
         or tenant is None
         or tenant.status != "active"
         or project is None
@@ -106,7 +115,7 @@ def _require_live_subject(
     ):
         raise ApiError("AUTH_SCOPE_REJECTED", "请求资源不可用", 404)
     role_binding = project_member_role_binding(project, record.user_id)
-    if role_binding.duplicate or not role_binding.configured or not role_binding.roles:
+    if role_binding.duplicate or not role_binding.configured:
         raise ApiError("AUTH_SCOPE_REJECTED", "请求资源不可用", 404)
     user_roles = {role for role in (user.roles or []) if isinstance(role, str) and role}
     effective_roles = tuple(sorted(user_roles.intersection(role_binding.roles)))
@@ -239,14 +248,20 @@ def create_browser_session(
     )
 
 
-def _load_session_by_token(session: Session, raw_token: str) -> BrowserAuthSession:
+def _load_session_by_token(
+    session: Session,
+    raw_token: str,
+    *,
+    for_update: bool = False,
+) -> BrowserAuthSession:
     if not isinstance(raw_token, str) or len(raw_token) < MIN_OPAQUE_TOKEN_LENGTH:
         raise _reject_invalid_session()
-    record = session.scalar(
-        select(BrowserAuthSession).where(
-            BrowserAuthSession.token_sha256 == _secret_sha256(raw_token)
-        )
+    statement = select(BrowserAuthSession).where(
+        BrowserAuthSession.token_sha256 == _secret_sha256(raw_token)
     )
+    if for_update:
+        statement = statement.with_for_update()
+    record = session.scalar(statement)
     if record is None:
         raise _reject_invalid_session()
     return record
@@ -385,6 +400,105 @@ def authenticate_browser_session(
         session_id=record.browser_session_id,
         issued_at=int(_as_utc(record.issued_at).timestamp()),
         expires_at=int(_as_utc(record.expires_at).timestamp()),
+    )
+
+
+def transition_browser_session_scope(
+    session: Session,
+    *,
+    raw_token: str,
+    project_id: str,
+    csrf_token: str | None,
+    origin: str | None,
+    allowed_origins: tuple[str, ...],
+    now: datetime | None = None,
+) -> BrowserSessionScopeTransition:
+    """Atomically revoke an opaque session and issue one for another live project.
+
+    The tenant, subject, provider session binding, original issue time, and absolute
+    expiry are immutable. Only an active project membership with at least one
+    effective role can become the new browser scope.
+    """
+
+    record = _load_session_by_token(session, raw_token, for_update=True)
+    current = _as_utc(now or _utc_now())
+    if record.revoked_at is not None:
+        raise ApiError("AUTH_SESSION_REVOKED", "浏览器会话已撤销", 401)
+    if current >= _as_utc(record.expires_at):
+        raise ApiError("AUTH_SESSION_EXPIRED", "浏览器会话已过期", 401)
+    _require_csrf(
+        record,
+        method="POST",
+        csrf_token=csrf_token,
+        origin=origin,
+        allowed_origins=allowed_origins,
+    )
+    _user, roles = _require_live_subject(
+        session,
+        record,
+        tenant_id=record.tenant_id,
+        project_id=project_id,
+        require_record_project=False,
+    )
+    previous_project_id = record.project_id
+    if project_id == previous_project_id:
+        derived_csrf_token = _derived_csrf_token(raw_token, record.browser_session_id)
+        derived_csrf_sha256 = _secret_sha256(derived_csrf_token)
+        if record.csrf_sha256 != derived_csrf_sha256:
+            record.csrf_sha256 = derived_csrf_sha256
+            session.flush()
+        return BrowserSessionScopeTransition(
+            previous_project_id=previous_project_id,
+            current_project_id=project_id,
+            issued=IssuedBrowserSession(
+                session_id=record.browser_session_id,
+                raw_token=raw_token,
+                csrf_token=derived_csrf_token,
+                issued_at=_as_utc(record.issued_at),
+                expires_at=_as_utc(record.expires_at),
+                tenant_id=record.tenant_id,
+                project_id=record.project_id,
+                user_id=record.user_id,
+            ),
+            roles=roles,
+            rotated=False,
+        )
+
+    record.revoked_at = current
+    new_session_id = f"browser_{secrets.token_hex(24)}"
+    new_raw_token = secrets.token_urlsafe(48)
+    new_csrf_token = _derived_csrf_token(new_raw_token, new_session_id)
+    replacement = BrowserAuthSession(
+        browser_session_id=new_session_id,
+        token_sha256=_secret_sha256(new_raw_token),
+        csrf_sha256=_secret_sha256(new_csrf_token),
+        oidc_identity_id=record.oidc_identity_id,
+        user_id=record.user_id,
+        tenant_id=record.tenant_id,
+        project_id=project_id,
+        oidc_session_id_sha256=record.oidc_session_id_sha256,
+        provider=record.provider,
+        issued_at=_as_utc(record.issued_at),
+        expires_at=_as_utc(record.expires_at),
+        last_seen_at=current,
+    )
+    session.add(replacement)
+    session.flush()
+    return BrowserSessionScopeTransition(
+        previous_project_id=previous_project_id,
+        current_project_id=project_id,
+        issued=IssuedBrowserSession(
+            session_id=new_session_id,
+            raw_token=new_raw_token,
+            csrf_token=new_csrf_token,
+            issued_at=_as_utc(record.issued_at),
+            expires_at=_as_utc(record.expires_at),
+            tenant_id=record.tenant_id,
+            project_id=project_id,
+            user_id=record.user_id,
+        ),
+        roles=roles,
+        rotated=True,
     )
 
 

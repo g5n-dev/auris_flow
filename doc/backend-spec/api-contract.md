@@ -26,7 +26,9 @@
 所有非公开接口必须有认证用户和租户项目上下文。浏览器产品路径使用通用 OIDC
 Authorization Code + PKCE 和 BFF 不透明会话；服务到服务或兼容工具可使用经后端验证的
 bearer。Keycloak 只作为参考 IdP，认证契约只依赖标准 OIDC discovery、authorization、token
-与 JWKS 接口，不使用 Keycloak 私有角色或管理 API。
+与 JWKS 接口，不使用 Keycloak 私有角色或管理 API。API bearer 采用 JWT access token，并要求
+`typ=at+jwt`、payload `typ=Bearer/access` 或 `token_use=access` 至少一项明确用途；用途不明确
+的 JWT 与 ID token 均 fail closed。
 
 浏览器登录与会话接口：
 
@@ -35,8 +37,10 @@ bearer。Keycloak 只作为参考 IdP，认证契约只依赖标准 OIDC discove
 | `GET /api/v1/auth/oidc/login?return_path=/insights` | 生成 state、nonce、PKCE S256 challenge 并 303 到 IdP | `return_path` 仅接受站内绝对路径；state/nonce/verifier 短期、一次性 |
 | `GET /api/v1/auth/oidc/callback` | 一次性消费 state、交换 code、校验 ID token 并 303 回站内页面 | 精确校验 issuer/audience、RS256 签名、exp/iat、nonce；未知 `kid` 只允许刷新 JWKS 后重试；IdP token 不返回浏览器 |
 | `POST /api/v1/auth/oidc/back-channel-logout` | IdP 通过标准 form POST 提交 Logout Token，撤销关联 BFF 会话 | 公开协议端点但不匿名信任：严格验证 RS256/JWKS、issuer、client audience、iat/exp/jti/events、sid/sub，禁止 nonce；hash-only jti 原子防重放；无匹配会话也返回空 200，不泄漏 scope；无效或处理失败统一 400 |
-| `GET /api/v1/auth/session` | 由 bearer 或 HttpOnly cookie 恢复内部用户、scope 与当前角色 | cookie 可省略 scope Header；响应 `Cache-Control: no-store`，浏览器会话轮换 `csrf_token` |
+| `GET /api/v1/auth/session` | 由 bearer 或 HttpOnly cookie 恢复内部用户、scope、当前角色及同租户有效 `project_memberships` | cookie 可省略 scope Header；响应 `Cache-Control: no-store`，浏览器会话轮换 `csrf_token`；成员关系只来自实时授权数据 |
+| `POST /api/v1/auth/session/scope-transitions` | 将不透明浏览器会话切换到同租户内的有效项目成员范围 | 必须校验 `X-CSRF-Token` 与受信 `Origin`；目标变化时原子撤销旧会话并轮换 cookie/CSRF，保留绝对过期时间；不可见目标统一 404 |
 | `POST /api/v1/auth/logout` | 幂等撤销本地 BFF 会话并清除 cookie | cookie 路径必须同时验证 `X-CSRF-Token` 与受信 `Origin`；开发 bearer 路径保留 scope Header 兼容；不宣称终止 IdP 全局 SSO 会话 |
+| `GET /api/v1/workspace-context-options` | 返回当前 tenant/project 的门店、业务日期、模型/标签版本及生产场景绑定 | 只读取当前认证范围的权威数据；空范围返回空数组或 `null`，不得拼接前端 fixture |
 
 `prod/release` cookie 固定命名为 `__Host-auris_session`，并设置 `HttpOnly; Secure;
 SameSite=Lax; Path=/` 且不设置 Domain。cookie 是高熵不透明值，MySQL 仅保存 token SHA-256
@@ -89,8 +93,9 @@ BFF 解析后的 `auth_context` 至少包含：
 
 - `tenant_id` 是强隔离边界，任何查询、写入、运行、召回、导出都必须带租户过滤。
 - `project_id` 是工作空间边界，跨项目读取默认拒绝；需要共享时只返回脱敏引用。
-- OIDC `(issuer, subject)` 必须先映射到明确 provision 的 `oidc_identities`；未知主体 default-deny，响应不回显 subject。请求 tenant/project 必须同时与 identity 及已签发 browser session 的冻结 scope 精确一致；同租户内第二项目的成员资格不能扩张原会话。
+- OIDC `(issuer, subject)` 必须先映射到明确 provision 的 `oidc_identities`；未知主体 default-deny，响应不回显 subject。普通请求 tenant/project 必须与已签发 browser session 的冻结 scope 精确一致。进入同租户第二项目只能调用 scope transition；服务端重新校验实时成员资格并轮换不透明会话，不能靠 Header 或前端状态扩张原会话。
 - 每次认证都读取 `user_security_states`、identity、租户、项目与当前项目成员角色；ID token/session 中的旧角色不授权，用户禁用、identity 禁用和角色降权即时生效。
+- 会话响应中的 `project_memberships` 只包含同租户、active 项目、唯一有效成员绑定且至少保留一个有效角色的项目；租户边界不可在工作台内切换。
 - 浏览器写请求必须同时校验 CSRF token 和显式 allowlist Origin；缺失、错误或跨站请求返回稳定 403，且不执行写入。
 - `store_id`、`date`、`model_version`、`label_version` 是业务筛选上下文，不替代租户项目校验。
 - 权限失败返回 `403 forbidden`，不要返回空列表伪装成功。

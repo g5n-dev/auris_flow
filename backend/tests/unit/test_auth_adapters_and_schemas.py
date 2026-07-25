@@ -34,6 +34,8 @@ from app.services.adapters import (
     dispatch_event,
 )
 
+pytestmark = pytest.mark.usefixtures("allow_inline_production_settings_for_policy_tests")
+
 SECURE_PROD_SETTINGS = {
     "database_url": f"mysql+pymysql://auris:{'M' * 48}@mysql:3306/auris_flow",
     "redis_url": f"redis://:{'R' * 48}@redis:6379/0",

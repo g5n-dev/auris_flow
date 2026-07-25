@@ -14,6 +14,7 @@ security:
   - browserSession: []
 tags:
   - name: auth
+  - name: workspace-context
   - name: ops
   - name: tenants
   - name: projects
@@ -240,6 +241,42 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /auth/session/scope-transitions:
+    post:
+      tags: [auth]
+      summary: 在当前租户内切换到有效项目成员范围
+      description: >
+        仅接受不透明浏览器会话。服务端在事务内重新校验用户、身份、租户、目标项目和实时成员角色；
+        目标项目变化时撤销旧会话并签发新的高熵 cookie 与 CSRF token，同时保留原始绝对过期时间。
+        相同项目请求保持幂等且不轮换。目标不可见统一返回 404，角色失效返回 403。
+      operationId: postAuthSessionScopeTransitions
+      security:
+        - browserSession: []
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/XCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthSessionScopeTransitionRequest"
+      responses:
+        "200":
+          description: 已激活目标项目范围；响应禁止缓存
+          headers:
+            Set-Cookie:
+              description: >
+                项目变化时写入新的不透明会话 cookie；相同项目请求不重复轮换。
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionScopeTransitionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /auth/logout:
     post:
       tags: [auth]
@@ -268,6 +305,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthLogoutResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /workspace-context-options:
+    get:
+      tags: [workspace-context]
+      summary: 读取当前认证范围的工作区权威选项文档
+      description: >
+        仅从当前 tenant/project 范围内的权威项目、门店、业务日期、模型版本、标签版本和
+        production scene binding 构建选项；空范围返回空数组或 null，不回退到前端 fixture。
+      operationId: getWorkspaceContextOptions
+      security:
+        - bearerAuth: []
+        - browserSession: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalXTenantId"
+        - $ref: "#/components/parameters/OptionalXProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: 当前 tenant/project 的工作区权威上下文
+          headers:
+            Cache-Control:
+              description: 固定为 no-store，避免缓存旧项目范围的权威选项。
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceContextOptionsResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6803,7 +6871,9 @@ components:
       required: false
       schema:
         type: string
-      description: 可选客户端请求 ID；缺失时服务端生成新的 request_id。
+      description: >
+        可选客户端请求 ID；仅接受 1–128 个受限 ASCII 字符。
+        缺失或不合规时服务端生成新的 request_id，不回显原始值。
     XTraceId:
       name: X-Trace-Id
       in: header
@@ -6818,7 +6888,12 @@ components:
       required: true
       schema:
         type: string
-      description: 写操作和异步动作必填。
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      description: >
+        写操作和异步动作必填；1–128 个 ASCII 字符，首字符为字母或数字，
+        其余可使用字母、数字、点、下划线、冒号或连字符。
     XAurisKeyId:
       name: X-Auris-Key-Id
       in: header
@@ -7317,11 +7392,28 @@ components:
           writeOnly: true
           description: >
             OIDC Provider 签名的短期 Logout Token；不得写入日志、错误响应或持久化原值。
+    AuthProjectMembership:
+      type: object
+      additionalProperties: false
+      required: [project_id, project_name, roles]
+      properties:
+        project_id:
+          type: string
+        project_name:
+          type: string
+        roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+      description: >
+        当前用户在同一租户内仍然有效且至少保留一个实时角色的项目成员关系。
     AuthSessionUser:
       type: object
       additionalProperties: false
       required:
-        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name]
+        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name, project_memberships, provider]
       properties:
         user_id:
           type: string
@@ -7347,6 +7439,12 @@ components:
           type: string
         project_name:
           type: string
+        project_memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuthProjectMembership"
+          description: >
+            服务端从当前有效项目和成员角色实时计算；前端不得追加 fixture 项目。
         provider:
           type: string
           enum: [oidc_session, oidc_bearer, dev_session, configured]
@@ -7357,6 +7455,77 @@ components:
           description: >
             仅浏览器 cookie 会话返回的轮换 CSRF token；只保存在前端内存，写操作经
             X-CSRF-Token 回传。bearer/dev-login 响应可省略。
+    AuthSessionScopeTransitionRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id]
+      properties:
+        project_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    AuthSessionScopeTransitionData:
+      type: object
+      additionalProperties: false
+      required:
+        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name, project_memberships, provider, csrf_token, previous_project_id, current_project_id]
+      properties:
+        user_id: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        role: {type: string}
+        roles:
+          type: array
+          minItems: 1
+          items: {type: string}
+        initials: {type: string}
+        tenant_id: {type: string}
+        tenant_name: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
+        project_memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuthProjectMembership"
+        provider:
+          type: string
+          enum: [oidc_session]
+        csrf_token:
+          type: string
+          minLength: 32
+        previous_project_id:
+          type: string
+        current_project_id:
+          type: string
+    AuthSessionScopeTransitionResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/AuthSessionScopeTransitionData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    AuthDevLoginUser:
+      type: object
+      additionalProperties: false
+      required:
+        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name]
+      properties:
+        user_id: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        role: {type: string}
+        roles:
+          type: array
+          minItems: 1
+          items: {type: string}
+        initials: {type: string}
+        tenant_id: {type: string}
+        tenant_name: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
     AuthLoginResponse:
       type: object
       additionalProperties: false
@@ -7379,7 +7548,7 @@ components:
               type: string
               format: date-time
             user:
-              $ref: "#/components/schemas/AuthSessionUser"
+              $ref: "#/components/schemas/AuthDevLoginUser"
         meta:
           $ref: "#/components/schemas/ApiMeta"
     AuthSessionResponse:
@@ -7389,6 +7558,106 @@ components:
       properties:
         data:
           $ref: "#/components/schemas/AuthSessionUser"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    WorkspaceContextScope:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, tenant_name, project_id, project_name]
+      properties:
+        tenant_id: {type: string}
+        tenant_name: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
+    WorkspaceStoreOption:
+      type: object
+      additionalProperties: false
+      required: [store_id, name, status]
+      properties:
+        store_id: {type: string}
+        name: {type: string}
+        status: {type: string}
+    WorkspaceVersionOption:
+      type: object
+      additionalProperties: false
+      required: [id, label, status]
+      properties:
+        id: {type: string}
+        label: {type: string}
+        status: {type: string}
+        source_task_version_ids:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+    WorkspaceContextDefaults:
+      type: object
+      additionalProperties: false
+      required: [store_id, business_date, model_version, label_version]
+      properties:
+        store_id: {type: string, nullable: true}
+        business_date: {type: string, format: date, nullable: true}
+        model_version: {type: string, nullable: true}
+        label_version: {type: string, nullable: true}
+    WorkspaceSceneBinding:
+      type: object
+      additionalProperties: false
+      required:
+        [binding_id, environment, scene_profile_id, scene_profile_version_id, manifest_sha256, status, resource_version, trace_id]
+      properties:
+        binding_id: {type: string}
+        environment: {type: string, enum: [production]}
+        scene_profile_id: {type: string}
+        scene_profile_version_id: {type: string}
+        manifest_sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        status: {type: string, enum: [active]}
+        resource_version: {type: integer, minimum: 1}
+        trace_id: {type: string}
+    WorkspaceContextOptionsData:
+      type: object
+      additionalProperties: false
+      required:
+        [scope, stores, business_dates, model_versions, label_versions, defaults, active_scene_binding, as_of, trace_id]
+      properties:
+        scope:
+          $ref: "#/components/schemas/WorkspaceContextScope"
+        stores:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceStoreOption"
+        business_dates:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: date
+        model_versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceVersionOption"
+        label_versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceVersionOption"
+        defaults:
+          $ref: "#/components/schemas/WorkspaceContextDefaults"
+        active_scene_binding:
+          allOf:
+            - $ref: "#/components/schemas/WorkspaceSceneBinding"
+          nullable: true
+        as_of:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+    WorkspaceContextOptionsResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/WorkspaceContextOptionsData"
         meta:
           $ref: "#/components/schemas/ApiMeta"
     AuthLogoutResponse:

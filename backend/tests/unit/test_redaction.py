@@ -5,6 +5,7 @@ import logging
 
 import pytest
 
+from app.core import redaction as redaction_module
 from app.core.context import RequestContext
 from app.core.logging import LOGGER_NAME, get_logger, log_event
 from app.core.redaction import redact_structured_value, trusted_sha256
@@ -128,6 +129,83 @@ def test_redaction_scans_untrusted_reference_values() -> None:
         "asset_key": "customer/[REDACTED_PHONE]",
         "partition_key": "tenant/[REDACTED_PHONE]",
         "callback_ref": "[REDACTED_SECRET]",
+    }
+
+
+def test_redaction_bounds_every_content_regex_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    scanned_lengths: list[int] = []
+
+    class RegexProbe:
+        def search(self, value: str) -> None:
+            scanned_lengths.append(len(value))
+            return None
+
+        def sub(self, replacement: str, value: str) -> str:
+            del replacement
+            scanned_lengths.append(len(value))
+            return value
+
+    probe = RegexProbe()
+    for pattern_name in (
+        "AUTHORIZATION_VALUE_PATTERN",
+        "JWT_PATTERN",
+        "PEM_PATTERN",
+        "API_KEY_PATTERN",
+        "DANGEROUS_URL_PATTERN",
+        "COOKIE_VALUE_PATTERN",
+        "EMAIL_PATTERN",
+        "PHONE_PATTERN",
+        "IDENTITY_PATTERN",
+        "LICENSE_PLATE_PATTERN",
+        "VIN_PATTERN",
+    ):
+        monkeypatch.setattr(redaction_module, pattern_name, probe)
+
+    boundary_value = "a" * redaction_module.MAX_REGEX_SCAN_LENGTH
+    assert redact_structured_value({"description": boundary_value}) == {
+        "description": f"{boundary_value[:300]}...[TRUNCATED]"
+    }
+    assert scanned_lengths
+    assert max(scanned_lengths) <= redaction_module.MAX_REGEX_SCAN_LENGTH
+
+
+def test_redaction_rejects_oversized_adversarial_text_before_regex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedRegexCall:
+        def search(self, value: str) -> None:
+            raise AssertionError(f"unexpected regex search for {len(value)} bytes")
+
+        def sub(self, replacement: str, value: str) -> str:
+            raise AssertionError(
+                f"unexpected regex substitution for {len(value)} bytes using {replacement}"
+            )
+
+    probe = UnexpectedRegexCall()
+    for pattern_name in (
+        "AUTHORIZATION_VALUE_PATTERN",
+        "JWT_PATTERN",
+        "PEM_PATTERN",
+        "API_KEY_PATTERN",
+        "DANGEROUS_URL_PATTERN",
+        "COOKIE_VALUE_PATTERN",
+        "EMAIL_PATTERN",
+        "PHONE_PATTERN",
+        "IDENTITY_PATTERN",
+        "LICENSE_PLATE_PATTERN",
+        "VIN_PATTERN",
+    ):
+        monkeypatch.setattr(redaction_module, pattern_name, probe)
+
+    oversized = (
+        ("a" * redaction_module.MAX_REGEX_SCAN_LENGTH)
+        + "@"
+        + ("." * redaction_module.MAX_REGEX_SCAN_LENGTH)
+        + "!"
+    )
+
+    assert redact_structured_value({"description": oversized}) == {
+        "description": f"[REDACTED_TEXT length={len(oversized)}]"
     }
 
 
