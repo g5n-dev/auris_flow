@@ -1,11 +1,18 @@
-import { parseApiRequestError } from "./apiRequestError";
+import { ApiRequestError, parseApiRequestError } from "./apiRequestError";
 import {
   clearBrowserSessionSecurityContext,
   getBrowserSessionCsrfToken,
   setBrowserSessionCsrfToken
 } from "./authClient";
 import type { AuthSession } from "../shared/contracts/auth";
+import {
+  advanceScopeEpoch,
+  beginScopeRequest,
+  emitApiAuthEvent
+} from "./requestScope";
+import { composeIdempotencyKey, resolveWriteIdempotencyKey } from "./idempotencyKey";
 export { ApiRequestError, isApiRequestError } from "./apiRequestError";
+export { subscribeApiAuthEvents } from "./requestScope";
 
 export type BackendStatus = "checking" | "online" | "degraded" | "offline";
 
@@ -29,6 +36,7 @@ const EMPTY_API_CONTEXT: typeof DEMO_API_CONTEXT = {
 };
 const DEFAULT_API_CONTEXT = DEMO_MODE ? DEMO_API_CONTEXT : EMPTY_API_CONTEXT;
 let apiContext = { ...DEFAULT_API_CONTEXT };
+let apiAuthProvider = "";
 
 const requestId = () => `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 const safeHeaderValue = (value: string) => (/^[\x00-\xff]*$/.test(value) ? value : encodeURIComponent(value));
@@ -50,7 +58,7 @@ const stablePayloadHash = (value: unknown) => {
   }
   return hash.toString(36);
 };
-export const stableIdempotencyKey = (scope: string, payload: unknown) => safeHeaderValue(`${scope}:${stablePayloadHash(payload)}`);
+export const stableIdempotencyKey = (scope: string, payload: unknown) => composeIdempotencyKey(scope, stablePayloadHash(payload));
 export type WriteRequestOptions = {
   idempotencyKey?: string;
   /**
@@ -70,12 +78,10 @@ const userIntentId = () =>
   `intent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
 export const createUserIntentIdempotencyKey = (scope: string) =>
-  safeHeaderValue(`${scope}:intent:${userIntentId()}`);
+  composeIdempotencyKey(scope, "intent", userIntentId());
 
-const writeIdempotencyKey = (scope: string, options?: WriteRequestOptions) => {
-  const callerKey = options?.idempotencyKey?.trim();
-  return callerKey ? safeHeaderValue(callerKey) : createUserIntentIdempotencyKey(scope);
-};
+const writeIdempotencyKey = (scope: string, options?: WriteRequestOptions) =>
+  resolveWriteIdempotencyKey(scope, options?.idempotencyKey, userIntentId);
 
 export type ApiRuntimeContext = Partial<typeof DEFAULT_API_CONTEXT>;
 type ResolvedApiContext = typeof DEFAULT_API_CONTEXT;
@@ -90,25 +96,36 @@ function resolveApiContext(contextOverride?: ApiRuntimeContext): ResolvedApiCont
 }
 
 export function setApiContext(nextContext: ApiRuntimeContext) {
-  apiContext = {
+  const next = {
     ...apiContext,
     ...Object.fromEntries(
       Object.entries(nextContext).filter(([, value]) => typeof value === "string")
     )
   };
+  if (next.tenantId !== apiContext.tenantId || next.projectId !== apiContext.projectId) {
+    advanceScopeEpoch();
+  }
+  apiContext = next;
 }
 
 export function clearApiAuthContext() {
+  advanceScopeEpoch();
   apiContext = { ...DEFAULT_API_CONTEXT };
+  apiAuthProvider = "";
   clearBrowserSessionSecurityContext();
 }
 
 export function establishApiSession(session: AuthSession) {
-  apiContext = {
+  const next = {
     ...DEFAULT_API_CONTEXT,
     tenantId: session.user.tenant_id,
     projectId: session.user.project_id
   };
+  if (next.tenantId !== apiContext.tenantId || next.projectId !== apiContext.projectId) {
+    advanceScopeEpoch();
+  }
+  apiContext = next;
+  apiAuthProvider = session.provider ?? session.user.provider ?? "";
   setBrowserSessionCsrfToken(session.csrf_token ?? session.user.csrf_token);
 }
 
@@ -593,20 +610,39 @@ export async function apiRequest<T>(
   headers.delete("Authorization");
   const requestMethod = (options.method ?? "GET").toUpperCase();
   const csrfToken = getBrowserSessionCsrfToken();
-  if (!["GET", "HEAD", "OPTIONS"].includes(requestMethod) && csrfToken && !headers.has("X-CSRF-Token")) {
-    headers.set("X-CSRF-Token", safeHeaderValue(csrfToken));
+  if (!["GET", "HEAD", "OPTIONS"].includes(requestMethod) && !headers.has("X-CSRF-Token")) {
+    if (!csrfToken && apiAuthProvider === "oidc_session") {
+      throw new ApiRequestError("缺少浏览器会话 CSRF token", 403, {
+        code: "CSRF_TOKEN_REQUIRED"
+      });
+    }
+    if (csrfToken) headers.set("X-CSRF-Token", safeHeaderValue(csrfToken));
   }
   headers.set("X-Request-Id", requestId());
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers,
-    credentials: "include"
-  });
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw parseApiRequestError(body, response.status);
-  return body as ApiEnvelope<T>;
+  const scopedRequest = beginScopeRequest(options.signal);
+  try {
+    const response = await fetch(`${API_BASE_URL}${path}`, {
+      ...options,
+      headers,
+      signal: scopedRequest.signal,
+      credentials: "include"
+    });
+    const body = await response.json().catch(() => ({}));
+    scopedRequest.assertCurrent();
+    if (!response.ok) {
+      const error = parseApiRequestError(body, response.status);
+      if (error.status === 401) emitApiAuthEvent({ kind: "reauth-required" });
+      else if (error.status === 404 && error.code === "AUTH_SCOPE_REJECTED") {
+        emitApiAuthEvent({ kind: "scope-rejected" });
+      }
+      throw error;
+    }
+    return body as ApiEnvelope<T>;
+  } finally {
+    scopedRequest.release();
+  }
 }
 
 export type CalibrationSample = {

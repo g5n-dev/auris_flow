@@ -4,14 +4,23 @@ import { LABEL_DEMO_MODE } from "./demoMode";
 import { backendProjectIdByName, backendTenantIdByName } from "./backendEntityIds";
 import { defaultCurrentUser } from "../fixtures/currentUser";
 
-export const defaultTopbarContext: TopbarContextState = {
-  tenant: defaultCurrentUser.tenant,
-  project: defaultCurrentUser.project,
-  store: "极光中心店",
-  date: "2025-05-26",
-  model: "v2.3.1",
-  label: "v1.8.4"
-};
+export const defaultTopbarContext: TopbarContextState = LABEL_DEMO_MODE
+  ? {
+      tenant: defaultCurrentUser.tenant,
+      project: defaultCurrentUser.project,
+      store: "极光中心店",
+      date: "2025-05-26",
+      model: "v2.3.1",
+      label: "v1.8.4"
+    }
+  : {
+      tenant: "",
+      project: "",
+      store: "",
+      date: "",
+      model: "",
+      label: ""
+    };
 
 export const topbarContextToApiContext = (
   context: TopbarContextState,

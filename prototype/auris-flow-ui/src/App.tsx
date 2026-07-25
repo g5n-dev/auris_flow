@@ -13,7 +13,7 @@ import { getModuleTitle } from "./workspace/moduleWorkspaceCatalog";
 
 export default function App() {
   const auth = useAuthSession();
-  const context = useWorkspaceContext(auth.currentUser);
+  const context = useWorkspaceContext(auth.currentUser, auth.acceptSession);
   const navigation = useShellNavigation();
   const backendStatus = useBackendHealth();
 
@@ -68,10 +68,12 @@ export default function App() {
           lang={navigation.lang}
           setLang={navigation.setLang}
           activeModule={navigation.activeModule}
-          setActiveModule={navigation.navigateModuleRoot}
           currentUser={auth.currentUser}
           context={context.topbarContext}
-          setContext={context.setTopbarContext}
+          contextOptions={context.contextOptions}
+          contextState={context.contextState}
+          contextError={context.contextError}
+          onContextValueChange={context.selectContextValue}
           backendStatus={backendStatus}
           onOpenAccountSettings={() => navigation.setAccountSettingsOpen(true)}
           onLogout={handleLogout}

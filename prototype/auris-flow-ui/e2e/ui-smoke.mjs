@@ -1625,6 +1625,48 @@ const projectionFixtures = {
   "/api/v1/tenants": { data: { items: [{ id: "aurora_auto", name: "极光汽车" }] } },
   "/api/v1/projects": { data: { items: [{ id: "sales_qa", name: "销售话术质检" }] } },
   "/api/v1/task-versions": { data: { items: [{ id: "task_version_v3", status: "draft" }] } },
+  "/api/v1/workspace-context-options": {
+    data: {
+      scope: {
+        tenant_id: "aurora_auto",
+        tenant_name: "极光汽车",
+        project_id: "sales_qa",
+        project_name: "销售话术质检"
+      },
+      stores: [
+        {
+          store_id: "BJ-AURORA-001",
+          name: "北京极光旗舰店",
+          status: "active"
+        }
+      ],
+      business_dates: ["2026-07-25"],
+      model_versions: [
+        {
+          id: "asr_v2.3.1",
+          label: "ASR v2.3.1",
+          status: "published",
+          source_task_version_ids: ["task_version_v3"]
+        }
+      ],
+      label_versions: [
+        {
+          id: "label_v1_8_4",
+          label: "v1.8.4",
+          status: "published"
+        }
+      ],
+      defaults: {
+        store_id: "BJ-AURORA-001",
+        business_date: "2026-07-25",
+        model_version: "asr_v2.3.1",
+        label_version: "label_v1_8_4"
+      },
+      active_scene_binding: null,
+      as_of: "2026-07-25T00:00:00+00:00",
+      trace_id: "trace_ui_smoke_workspace"
+    }
+  },
   "/api/v1/audio-sessions/aggregations": {
     data: {
       items: [{

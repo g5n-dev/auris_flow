@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   clearApiAuthContext,
-  establishApiSession
+  establishApiSession,
+  subscribeApiAuthEvents
 } from "../api/client";
 import {
   beginOidcLogin,
@@ -27,6 +28,12 @@ export function useAuthSession() {
     request: Promise<AuthSession>;
   } | null>(null);
 
+  const applySession = useCallback((session: AuthSession) => {
+    establishApiSession(session);
+    setAuthRestoreError(null);
+    setCurrentUser(authSessionToUser(session));
+  }, []);
+
   useEffect(() => {
     let mounted = true;
     clearLegacyStoredAuthSession();
@@ -38,9 +45,7 @@ export function useAuthSession() {
     restoreRequest
       .then((session) => {
         if (!mounted) return;
-        establishApiSession(session);
-        setAuthRestoreError(null);
-        setCurrentUser(authSessionToUser(session));
+        applySession(session);
       })
       .catch((caught) => {
         if (!mounted) return;
@@ -57,7 +62,41 @@ export function useAuthSession() {
     return () => {
       mounted = false;
     };
-  }, [authRestoreAttempt]);
+  }, [applySession, authRestoreAttempt]);
+
+  useEffect(() => subscribeApiAuthEvents((event) => {
+    if (event.kind === "reauth-required") {
+      clearApiAuthContext();
+      setCurrentUser(null);
+      setAuthRestoreError(null);
+      return;
+    }
+    void restoreBrowserAuthSession()
+      .then(applySession)
+      .catch((caught) => {
+        if (isDefinitiveAuthFailure(caught)) {
+          clearApiAuthContext();
+          setCurrentUser(null);
+        }
+      });
+  }), [applySession]);
+
+  useEffect(() => {
+    if (typeof BroadcastChannel === "undefined") return undefined;
+    const channel = new BroadcastChannel("auris-flow.session-scope.v1");
+    channel.onmessage = (event) => {
+      if (event.data?.type !== "scope-changed") return;
+      void restoreBrowserAuthSession()
+        .then(applySession)
+        .catch((caught) => {
+          if (isDefinitiveAuthFailure(caught)) {
+            clearApiAuthContext();
+            setCurrentUser(null);
+          }
+        });
+    };
+    return () => channel.close();
+  }, [applySession]);
 
   const retryRestore = () => {
     setAuthRestoreError(null);
@@ -67,11 +106,7 @@ export function useAuthSession() {
 
   const authenticate = async (email: string, password: string) => createDevAuthSession(email, password);
 
-  const acceptSession = (session: AuthSession) => {
-    establishApiSession(session);
-    setAuthRestoreError(null);
-    setCurrentUser(authSessionToUser(session));
-  };
+  const acceptSession = applySession;
 
   const logout = async () => {
     if (logoutPending) return;

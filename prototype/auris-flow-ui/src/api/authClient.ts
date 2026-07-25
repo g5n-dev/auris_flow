@@ -1,6 +1,7 @@
 import type {
   AuthLogoutReceipt,
   AuthSession,
+  AuthSessionScopeTransition,
   AuthSessionUser
 } from "../shared/contracts/auth";
 
@@ -38,7 +39,7 @@ export class AuthRequestError extends Error {
 }
 
 export const isDefinitiveAuthFailure = (error: unknown) =>
-  error instanceof AuthRequestError && (error.status === 401 || error.status === 403);
+  error instanceof AuthRequestError && error.status === 401;
 
 async function authRequest<T>(path: string, options: RequestInit = {}): Promise<ApiEnvelope<T>> {
   const response = await fetch(`${API_BASE_URL}${path}`, {
@@ -98,6 +99,35 @@ export async function restoreBrowserAuthSession(): Promise<AuthSession> {
   return {
     provider,
     csrf_token: csrfToken,
+    user
+  };
+}
+
+export async function transitionBrowserAuthSession(projectId: string): Promise<AuthSession> {
+  const csrfToken = getBrowserSessionCsrfToken();
+  if (!csrfToken) {
+    throw new AuthRequestError("缺少浏览器会话 CSRF token", 403, "CSRF_TOKEN_REQUIRED");
+  }
+  const response = await authRequest<AuthSessionScopeTransition>(
+    "/v1/auth/session/scope-transitions",
+    {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+      body: JSON.stringify({ project_id: projectId })
+    }
+  );
+  const {
+    csrf_token: nextCsrfToken,
+    provider,
+    previous_project_id: _previousProjectId,
+    current_project_id: _currentProjectId,
+    ...user
+  } = response.data;
+  void _previousProjectId;
+  void _currentProjectId;
+  return {
+    provider,
+    csrf_token: nextCsrfToken,
     user
   };
 }
