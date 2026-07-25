@@ -6,9 +6,10 @@ Auris Flow 尚未发布正式版本。当前树是 `v1.0.0` 候选实现；在�
 无标签 staging 演练、外部干净安装和所有 release gate 前，不存在受支持的 `v1.0.0`，也不存在
 从旧正式版本升级的既成承诺。
 
-仓库根目录的 `VERSION` 是稳定版本的唯一真相源。当前首发流程不创建公开 RC tag；完成无标签
-staging 后才创建最终 `vX.Y.Z` annotated tag。公共业务 API 前缀固定为 `/api/v{MAJOR}`，其
-major 必须与 `VERSION` 的 MAJOR 一致。
+仓库根目录的 `VERSION` 是稳定基础版本的唯一真相源。当前首发流程不创建公开 RC tag；完成
+无标签 staging 后才创建最终 `vX.Y.Z` annotated tag。若内部工具解析 RC 形式，
+`vX.Y.Z-rc.N` 必须映射到同一 `X.Y.Z`，但公开发行 workflow 仍会拒绝 RC tag。公共业务 API
+前缀固定为 `/api/v{MAJOR}`，其 major 必须与 `VERSION` 的 MAJOR 一致。
 
 ## SemVer 与发行通道
 
