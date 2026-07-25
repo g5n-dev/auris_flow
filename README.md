@@ -33,7 +33,7 @@
   · <a href="#tour">能力导览</a>
   · <a href="#architecture">系统架构</a>
   · <a href="#quality">验证门禁</a>
-  · <a href="#release-status">发行状态</a>
+  · <a href="#release-status">生产边界</a>
   · <a href="production/README.md">生产候选部署</a>
 </p>
 
@@ -42,11 +42,6 @@
 </div>
 
 ---
-
-> [!IMPORTANT]
-> 当前仓库是 Auris Flow `v1.0.0` 的**候选实现**（Release Candidate），适合产品评审、前后端联调和工程
-> 验证；它尚未完成正式 Release 审批，也尚未获得生产支持承诺。项目状态和剩余门禁见
-> [发行状态](#release-status)。
 
 <a id="tour"></a>
 
@@ -206,39 +201,17 @@ npm run dev
 
 ## 系统架构
 
-```mermaid
-flowchart TB
-    USER["浏览器"] --> EDGE["Edge / TLS / security headers"]
-    EDGE --> UI["React 工作台"]
-    EDGE --> BFF["FastAPI BFF<br/>/api/v1/*"]
-    IDP["通用 OIDC IdP<br/>Keycloak 仅作参考"] --> BFF
+<a href="doc/architecture/README.md">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="doc/assets/architecture-dark.svg">
+    <img src="doc/assets/architecture-light.svg" alt="Auris Flow 横向三层系统架构：产品体验、领域控制、数据与基础设施" width="100%">
+  </picture>
+</a>
 
-    subgraph truth["权威事实"]
-        MYSQL[("MySQL<br/>业务状态 / 审计 / Outbox")]
-        OBJECTS[("MinIO / S3 / OBS / OSS<br/>音频与证据对象")]
-    end
-
-    subgraph derived["派生索引与运行辅助"]
-        REDIS[("Redis<br/>限流 / 锁 / 运行辅助")]
-        QDRANT[("Qdrant<br/>派生语义索引")]
-    end
-
-    BFF --> MYSQL
-    BFF --> OBJECTS
-    BFF --> REDIS
-    BFF --> QDRANT
-
-    MYSQL --> OUTBOX["Transactional Outbox"]
-    OUTBOX --> WORKER["异步 Worker"]
-    WORKER --> DAGSTER["Dagster<br/>底层执行引擎"]
-    DAGSTER --> CALLBACK["签名 completion / 状态同步"]
-    CALLBACK --> BFF
-
-    BFF -. traces / metrics .-> OTEL["OpenTelemetry Collector"]
-    WORKER -. traces / metrics .-> OTEL
-    DAGSTER -. traces / metrics .-> OTEL
-    OTEL --> OBS["Prometheus · Tempo · Grafana · Alertmanager"]
-```
+<p align="center">
+  <sub>蓝色：产品体验　·　青色：领域控制　·　琥珀：权威数据　·　紫色：可重建能力</sub><br>
+  <a href="doc/architecture/README.md"><strong>打开完整架构说明与关键链路</strong></a>
+</p>
 
 ### 不可跨越的边界
 
@@ -330,7 +303,7 @@ PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
 | 真实 Dagster 引擎 | `bash scripts/verify_real_dagster.sh` |
 | BFF → Outbox → Dagster → 回写 | `bash scripts/verify_product_dagster_path.sh` |
 | 镜像前发行门禁 | `bash scripts/verify_release.sh --pre-image` |
-| 签名候选证据聚合 | 使用官方 tag workflow 产出的 recovery JSON、Sigstore sidecar 与同一签名 deployment，设置 `AURIS_BACKUP_RESTORE_EVIDENCE`、`AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE`、`AURIS_RELEASE_BUNDLE_ROOT`、`AURIS_RELEASE_TAG` 后运行 `bash scripts/verify_release.sh`；仍须满足 `RELEASE_CHECKLIST.md` 中独立的 `rebuild-required`、外部 RC 与人工门禁 |
+| 签名发行证据聚合 | 使用最终 tag workflow 产出的 recovery JSON、Sigstore sidecar 与同一签名 deployment，设置 `AURIS_BACKUP_RESTORE_EVIDENCE`、`AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE`、`AURIS_RELEASE_BUNDLE_ROOT`、`AURIS_RELEASE_TAG` 后运行 `bash scripts/verify_release.sh`；仍须满足 `RELEASE_CHECKLIST.md` 中独立的 `rebuild-required`、外部无标签 staging 安装与私有发行审批 |
 
 <details>
 <summary><strong>为什么“真实栈通过”不等于“真实 Dagster 通过”</strong></summary>
@@ -352,10 +325,10 @@ PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
 - 不可变且独立审批的前端 bundle 与 Linux 视觉基线；
 - 真实依赖 E2E、备份恢复演练与告警演练；
 - 固定镜像 digest、SBOM、漏洞扫描、签名与 checksum；
-- 权利人授权、最终 `NOTICE` 和第三方依赖许可结论；
+- 第三方依赖许可结论与完整发行物清单；
 - 外部维护者在干净主机上的安装、升级、回滚与恢复验证。
 
-因此发布门禁刻意 fail closed，不接受“把 `PENDING` 手工改成 `APPROVED`”。
+因此发布门禁严格绑定真实制品和外部证据，不能由本地状态字段代替。
 
 </details>
 
@@ -386,33 +359,14 @@ PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
 
 <a id="release-status"></a>
 
-## 发行状态
+## 生产边界
 
-当前定位：**Open-source Release Candidate，尚无正式 `v1.0.0` Release。**
+当前仓库是 `v1.0.0` 的候选实现，面向产品评审、联调和工程验证。首个生产支持目标是 Linux
+单机 Docker Compose；不承诺节点级高可用或宿主机故障自动容灾。
 
-严格就绪度检查当前为 `10/12`。自动化工程项已通过，剩余门禁必须由真实授权或受保护环境产生，
-不能由代码侧伪造：
-
-| 门禁 | 当前状态 | 完成条件 |
-| --- | --- | --- |
-| 工程与发布树 | 通过 | OpenAPI、迁移、secret scan、运行源码、Compose 与发布工具受 Git 约束 |
-| 权利人 / `NOTICE` | `PENDING` | 权利人确认 Apache-2.0 授权、真实版权主体、最终 `NOTICE` 与审批证据 |
-| 前端 bundle / 视觉基线 | `PENDING` | Linux 不可变制品生成、密码学验证、独立审核与受保护环境 promotion |
-| 第三方依赖许可 | 部分待法律结论 | 对 `mysql-connector-python` 的 GPLv2 + FOSS exception 作授权结论，或更换依赖 |
-| 正式发行演练 | 未完成 | 外部干净安装、升级/回滚、备份恢复、签名 RC 与正式审批 |
-
-可在本地复核前两项聚合门禁：
-
-```bash
-backend/.venv/bin/python scripts/check_platform_readiness.py --release
-```
-
-> [!WARNING]
-> 仓库包含 Apache License 2.0 标准文本和候选 `NOTICE`，但在权利主体授权完成前，不应把当前
-> candidate 描述为“正式开源发布完成”或“已通过生产部署验收”。
-
-进度以 [Release Checklist](RELEASE_CHECKLIST.md) 和
-[Open-source Release Readiness](doc/reports/open-source-release-readiness.md) 为准。
+正式版本只从同一受保护提交生成源码、固定镜像 digest、SBOM、签名、迁移说明和校验和，并在外部
+干净环境完成安装、升级、回滚及恢复演练。当前进度以
+[Release Checklist](RELEASE_CHECKLIST.md) 为准。
 
 ## 参与贡献
 
@@ -439,6 +393,11 @@ Start with [the local quickstart](#quickstart), [the API specification](doc/back
 or [the production candidate guide](production/README.md).
 
 </details>
+
+## License
+
+Auris Flow 源码使用 [Apache License 2.0](LICENSE)；第三方软件与按需下载的数据集遵循各自许可，
+详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 ---
 

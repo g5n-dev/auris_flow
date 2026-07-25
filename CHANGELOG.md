@@ -45,6 +45,5 @@ All notable changes to Auris Flow are tracked here.
 ### Release status
 
 - This is still a `v1.0.0` candidate, not a published or supported production release.
-- The project owner rights-holder authorization/signature, final NOTICE identity, real `v1.0.0-rc.1`
-  release drill, external clean installation, notification routing and formal release approval remain open
-  human/external gates.
+- Private approval of the exact release commit, an untagged staging drill, external clean installation,
+  notification routing and formal `v1.0.0` approval remain open human/external gates.

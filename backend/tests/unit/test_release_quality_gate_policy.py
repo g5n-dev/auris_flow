@@ -24,29 +24,38 @@ def _load_readiness() -> ModuleType:
 
 
 def _release_block(script: str) -> str:
-    start = script.index('if [ "${AURIS_RELEASE_CHECK:-0}" = "1" ]; then')
-    end = script.index(
-        'else\n  "${PYTHON_BIN}" scripts/scan_secrets.py',
-        start,
-    )
+    start = script.rindex('if [ "${AURIS_RELEASE_CHECK:-0}" = "1" ]; then')
+    end = script.index('\nfi\n\necho "verify_all ok"', start)
     return script[start:end]
 
 
-def test_release_mode_runs_production_compose_and_dagster_quality_gates() -> None:
+def test_one_command_gate_runs_each_modular_quality_gate_once() -> None:
     script = VERIFY_ALL.read_text(encoding="utf-8")
-    release_block = _release_block(script)
 
     for command in (
-        '"${PYTHON_BIN}" scripts/verify_production_compose.py',
-        '"${PYTHON_BIN}" -m pytest production/tests',
-        "uv run --frozen --all-extras --project production/dagster pytest production/dagster/tests",
-        "uv run --frozen --all-extras --project production/dagster ruff format --check "
-        "production/dagster/src production/dagster/tests",
-        "uv run --frozen --all-extras --project production/dagster ruff check "
-        "production/dagster/src production/dagster/tests",
-        "uv run --frozen --all-extras --project production/dagster mypy production/dagster/src",
+        "bash scripts/verify_static.sh",
+        "bash scripts/verify_backend.sh",
+        "bash scripts/verify_production_tests.sh",
+        "bash scripts/verify_dagster_tests.sh",
+        "bash scripts/verify_frontend.sh",
     ):
-        assert command in release_block
+        assert script.count(command) == 1
+
+
+def test_modular_gates_cover_production_compose_and_dagster_quality() -> None:
+    static = (ROOT / "scripts" / "verify_static.sh").read_text(encoding="utf-8")
+    production = (ROOT / "scripts" / "verify_production_tests.sh").read_text(encoding="utf-8")
+    dagster = (ROOT / "scripts" / "verify_dagster_tests.sh").read_text(encoding="utf-8")
+
+    assert '"${PYTHON_BIN}" scripts/verify_production_compose.py' in static
+    assert '"${PYTHON_BIN}" -m pytest production/tests' in production
+    for command in (
+        "pytest production/dagster/tests",
+        "ruff format --check production/dagster/src production/dagster/tests",
+        "ruff check production/dagster/src production/dagster/tests",
+        "mypy production/dagster/src",
+    ):
+        assert command in dagster
 
 
 def test_release_mode_audits_hashed_locked_runtime_graphs() -> None:
@@ -77,7 +86,7 @@ def test_release_mode_audits_hashed_locked_runtime_graphs() -> None:
 
 
 def test_regular_python_quality_gate_covers_production_policy_tests() -> None:
-    script = VERIFY_ALL.read_text(encoding="utf-8")
+    script = (ROOT / "scripts" / "verify_static.sh").read_text(encoding="utf-8")
 
     assert "ruff format --check backend scripts production/tests" in script
     assert "ruff check backend scripts production/tests" in script
@@ -95,7 +104,9 @@ def test_readiness_contract_requires_every_production_release_gate() -> None:
     quality_check = next(
         check for check in readiness.CHECKS if check.key == "one_command_quality_gate"
     )
-    required_patterns = quality_check.contains["scripts/verify_all.sh"]
+    required_patterns = {
+        pattern for patterns in quality_check.contains.values() for pattern in patterns
+    }
 
     for pattern in (
         "scripts/verify_production_compose.py",
@@ -112,13 +123,7 @@ def test_readiness_contract_requires_every_production_release_gate() -> None:
         "bash scripts/verify_production_path.sh",
         "bash scripts/verify_production_mysql_migrations.sh",
     ):
-        if pattern in {
-            "bash scripts/verify_production_path.sh",
-            "bash scripts/verify_production_mysql_migrations.sh",
-        }:
-            assert pattern in quality_check.contains["scripts/verify_release.sh"]
-        else:
-            assert pattern in required_patterns
+        assert pattern in required_patterns
 
     for path in (
         "backend/pyproject.toml",

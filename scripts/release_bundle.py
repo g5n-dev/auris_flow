@@ -65,10 +65,14 @@ REQUIRED_BUNDLE_FILES = (
     "production/restore-compatibility.json",
     "production/scripts/init-secrets.sh",
     "production/scripts/backup.sh",
+    "production/scripts/scheduled-backup.sh",
     "production/scripts/recovery-linkage.sh",
     "production/scripts/restore.sh",
     "production/scripts/finalize-restore.sh",
     "production/scripts/verify-backup.sh",
+    "production/systemd/auris-flow-backup.service",
+    "production/systemd/auris-flow-backup.timer",
+    "production/systemd/backup.env.example",
     "production/backup/backup_restore_evidence.py",
     "production/backup/recovery_linkage.py",
     "production/backup/restore_network_allocator.py",
@@ -95,6 +99,7 @@ PRODUCTION_DIRECTORIES = (
     "observability",
     "qdrant",
     "scripts",
+    "systemd",
 )
 ROOT_GOVERNANCE_FILES = (
     "VERSION",

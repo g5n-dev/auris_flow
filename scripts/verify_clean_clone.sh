@@ -151,7 +151,13 @@ required_files=(
   "scripts/scan_secrets.py"
   "scripts/validate_public_audio_datasets.py"
   "scripts/verify_production_compose.py"
+  "scripts/verify_github_actions_pins.py"
   "scripts/verify_clean_clone.sh"
+  "scripts/verify_static.sh"
+  "scripts/verify_backend.sh"
+  "scripts/verify_production_tests.sh"
+  "scripts/verify_dagster_tests.sh"
+  "scripts/verify_frontend.sh"
 )
 for relative_path in "${required_files[@]}"; do
   if ! git -C "${clone_root}" ls-files --error-unmatch -- "${relative_path}" >/dev/null 2>&1; then
@@ -213,6 +219,7 @@ echo "Running release-tree quick gates from the clone..."
 "${backend_python}" doc/backend-spec/validate_backend_spec.py
 "${backend_python}" scripts/validate_public_audio_datasets.py
 "${backend_python}" scripts/verify_production_compose.py
+"${backend_python}" scripts/verify_github_actions_pins.py
 "${backend_python}" scripts/scan_secrets.py --history
 if [ "${readiness_scope}" = "release" ]; then
   "${backend_python}" scripts/check_platform_readiness.py --release
@@ -221,37 +228,24 @@ else
   echo "Clean-clone functional gate checked base readiness; strict release authority remains a separate fail-closed gate."
 fi
 
-echo "Running repository static analysis and script policy tests..."
-"${backend_python}" -m ruff format --check backend scripts production/tests
-"${backend_python}" -m ruff check backend scripts production/tests
-"${backend_python}" -m mypy \
-  backend/app \
-  backend/scripts/verify_migrations.py \
-  scripts/check_platform_readiness.py \
-  scripts/finalize_release_evidence.py \
-  scripts/generate_supply_chain_evidence.py \
-  scripts/verify_real_dagster.py
-MYPYPATH=backend "${backend_python}" -m mypy \
-  scripts/verify_product_dagster_path.py \
-  scripts/verify_release_authorization.py \
-  scripts/verify_visual_baseline.py
-"${backend_python}" -m unittest discover -s scripts/tests -p 'test_*.py'
-
-echo "Verifying migrations, backend compilation, tests and application smoke..."
+echo "Verifying source entrypoints and the installed application smoke..."
+for verification_script in \
+  scripts/verify_static.sh \
+  scripts/verify_backend.sh \
+  scripts/verify_production_tests.sh \
+  scripts/verify_dagster_tests.sh \
+  scripts/verify_frontend.sh; do
+  bash -n "${verification_script}"
+done
 "${backend_python}" backend/scripts/verify_migrations.py
 "${backend_python}" -m compileall -q backend/app
-"${backend_python}" -m pytest \
-  backend/tests/unit backend/tests/contract backend/tests/integration
 "${backend_python}" backend/scripts/smoke_backend.py
-"${backend_python}" -m pytest production/tests
 
-echo "Verifying the locked Dagster package and tests..."
-uv run --frozen --all-extras --project production/dagster \
-  pytest production/dagster/tests
+echo "Verifying the locked Dagster package can load its production definitions..."
+APP_ENV=test OTEL_ENABLED=false uv run --frozen --all-extras --project production/dagster \
+  python -c "from auris_flow_dagster.definitions import defs; assert defs is not None"
 
 echo "Building the frontend production bundle from npm lock data..."
-npm run architecture:test --prefix prototype/auris-flow-ui
-npm run architecture:final --prefix prototype/auris-flow-ui
 npm run build --prefix prototype/auris-flow-ui
 npm run bundle:check --prefix prototype/auris-flow-ui
 
@@ -304,7 +298,7 @@ payload = {
     "completed_at": datetime.now(UTC).isoformat(),
     "git_object_isolation": "clone-no-local-without-alternates",
     "readiness_scope": readiness_scope,
-    "reproducibility_scope": "functional-locked-source",
+    "reproducibility_scope": "locked-source-build",
     "schema_version": "auris.clean-clone-evidence.v1",
     "source_commit": source_commit,
     "status": "ok",
@@ -316,11 +310,10 @@ payload = {
     },
     "verified_steps": [
         "locked-dependency-install",
-        "static-analysis-and-script-policy-tests",
+        "contract-and-policy-smoke",
         "database-migrations",
-        "backend-tests-and-smoke",
-        "dagster-tests",
-        "frontend-architecture-tests",
+        "backend-import-and-smoke",
+        "dagster-definition-load",
         "frontend-build-and-bundle-policy",
         f"{readiness_scope}-readiness",
         "secret-history-scan",

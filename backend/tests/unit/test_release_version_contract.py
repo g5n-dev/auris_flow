@@ -228,17 +228,18 @@ def test_version_policy_documents_single_source_tag_and_api_major_mapping() -> N
 
 
 @pytest.mark.parametrize(
-    ("tag", "expected_returncode"),
+    ("tag", "expected_returncode", "expected_error"),
     [
-        ("v1.0.0", 0),
-        ("v1.0.0-rc.2", 0),
-        ("v1.0.1", 1),
+        ("v1.0.0", 0, ""),
+        ("v1.0.0-rc.2", 1, "final SemVer tags only"),
+        ("v1.0.1", 1, "does not match VERSION"),
     ],
 )
 def test_release_workflow_binds_tag_to_version(
     tmp_path: Path,
     tag: str,
     expected_returncode: int,
+    expected_error: str,
 ) -> None:
     workflow = yaml.safe_load(
         (ROOT / ".github/workflows/release-images.yml").read_text(encoding="utf-8")
@@ -264,4 +265,4 @@ def test_release_workflow_binds_tag_to_version(
 
     assert completed.returncode == expected_returncode, completed.stderr
     if expected_returncode:
-        assert "does not match VERSION" in completed.stderr
+        assert expected_error in completed.stderr

@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "SemVer release candidate (for example v1.0.0-rc.1)"
+        description: "Final SemVer release tag (for example v1.0.0)"
         required: true
         type: string
 
@@ -68,20 +68,28 @@ jobs:
             echo "release workflow ref does not match the requested tag commit" >&2
             exit 2
           fi
+          git fetch --no-tags --force \
+            "https://github.com/${GITHUB_REPOSITORY}.git" \
+            "+refs/heads/main:refs/remotes/release-policy/main"
+          if ! git merge-base --is-ancestor \
+            "${RESOLVED_COMMIT}" refs/remotes/release-policy/main; then
+            echo "release tag commit must already be reachable from protected main" >&2
+            exit 2
+          fi
           python3 - "${REQUESTED_TAG}" "${RESOLVED_COMMIT}" <<'PY'
           import os
           import re
           import sys
 
           tag, commit = sys.argv[1:]
-          if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-rc\.[1-9]\d*)?", tag) is None:
-              raise SystemExit("release tag must be SemVer or an rc.N prerelease")
+          if re.fullmatch(r"v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", tag) is None:
+              raise SystemExit("release workflow accepts final SemVer tags only")
           with open("VERSION", encoding="utf-8") as version_file:
               version_source = version_file.read()
           if re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\n?", version_source) is None:
               raise SystemExit("VERSION must contain one stable SemVer value")
           product_version = version_source.removesuffix("\n")
-          tag_version = tag[1:].split("-rc.", 1)[0]
+          tag_version = tag[1:]
           if tag_version != product_version:
               raise SystemExit("release tag does not match VERSION")
           if re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", commit) is None:

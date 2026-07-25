@@ -106,7 +106,7 @@ if [ ! -x "${PYTHON_BIN}" ]; then
   exit 2
 fi
 
-"${PYTHON_BIN}" scripts/verify_release_authorization.py
+"${PYTHON_BIN}" scripts/verify_license_materials.py
 AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh
 AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1 bash scripts/verify_all.sh
 node scripts/verify_frontend_bundle.mjs verify-release \

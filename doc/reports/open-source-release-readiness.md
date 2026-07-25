@@ -1,5 +1,7 @@
 # Open-Source Release Readiness
 
+> 历史工程快照，已由当前 `RELEASE_CHECKLIST.md` 和机器门禁取代；本文不再作为发行授权记录。
+
 本文把“仓库已有生产候选实现”“自动门禁通过”和“已经获得正式开源/生产发布授权”明确分开。
 当前目标是 Auris Flow `v1.0.0`，首个支持形态为单台 Linux 主机上的 Docker Compose；不承诺
 节点级高可用或宿主机故障自动容灾。
@@ -37,13 +39,16 @@
 - Dagster 使用独立锁图、MySQL storage、领域 job、fencing context 和受签名 completion callback；
   生产 embedding 与音频推理使用可替换的 HTTPS 语义接口并严格校验 provider、模型、向量/结果
   manifest、精确输入版本和 SHA-256；所有携带凭据或签名的 HTTP 客户端拒绝重定向。
-- MySQL 是权威业务事实；MinIO 保存权威对象；Redis 是可丢弃辅助状态；Qdrant 按架构是派生索引，
-  但当前仅证明固定合成夹具的 snapshot 跨存储恢复链路，通用治理化重建门禁尚未完成。
+- MySQL 是权威业务事实；MinIO 保存权威对象；Redis 是可丢弃辅助状态；Qdrant 按架构是派生索引。
+  候选已提供从 MySQL confirmed Outbox 生成 scope-bound 计划、摘要确认入队和成功回执校验的
+  治理化重建机制；v1 只覆盖已注册的 `knowledge_chunks`。`voiceprint_embeddings` 尚无经过验证的
+  专用声纹向量 provider，明确禁止退化为文本 embedding，其写入和重建均 fail closed；未知
+  collection 或缺失可信回执同样拒绝执行。
 - Outbox 实现 lease、fencing、指数退避、最大重试、dead-letter 和受治理重放。备份工具冻结写入后
   保存 MySQL、MinIO 版本/删除标记、Qdrant snapshot/alias，并通过规范 manifest、checksum 和
   宿主机外置 Ed25519 信任锚验证一致性；正式 snapshot drill 还会对签名源 proof 与恢复后独立读取
-  的 MySQL/MinIO/Qdrant proof 做精确比较。`rebuild-required` 只进入 pending 状态，全部 collection
-  的重建器、第二空目标演练与正式签名证据仍是 P2 阻断项。
+  的 MySQL/MinIO/Qdrant proof 做精确比较。`rebuild-required` 仍先进入 pending 状态；第二空目标
+  的真实重建演练、`finalize-restore.sh` 全量指纹验证与正式签名证据仍是 P2 阻断项。
 
 ### P3：可观测性与运维
 
@@ -54,13 +59,13 @@
 - Prometheus 告警、Grafana 生产概览、备份 freshness textfile metric、SLO 和安装/升级/回滚/
   恢复/轮换/故障/安全事件 Runbook 已进入候选树。
 - Compose 内置使用 Docker secret 注入通用 HTTPS webhook 的 Alertmanager，但不内置任何企业通知
-  目标；真实收件、resolved 关闭、私密通知和值班确认必须在 RC 环境提供外部证据。
+  目标；真实收件、resolved 关闭、私密通知和值班确认必须在无标签 staging 环境提供外部证据。
 - `observability-health` 访问 Collector、Tempo、Prometheus、Alertmanager 和 node-exporter 的真实
   HTTP 端点，并在内部后台强制导出标记、等待 Collector batch、从 Tempo 按 trace ID 读回；BFF
   `/readyz` 以 singleflight/短 TTL 导出自身 marker，并经内部精确查询证明同一 trace 已写入 Tempo。
   查询同时匹配 service name、span name 与 trace ID，而不是仅接受任意 200/JSON。它作为 BFF/Worker/
-  Dagster 启动依赖，但 Prometheus/Alertmanager 自身完全离线仍需宿主机外 watchdog，联合探针不能
-  冒充外部通知证据。
+  Dagster 遥测证据；Prometheus/Alertmanager 自身完全离线仍需宿主机外 watchdog，联合探针不能
+  冒充外部通知证据，也不应成为业务 API 的强 readiness 依赖。
 
 ### P4：不可变供应链
 
@@ -69,8 +74,10 @@
   签名与验证。
 - 后端、生产 Dagster、npm 三个锁图分别生成依赖/许可证据并执行漏洞审计；自动许可门禁仅接受
   明确白名单中的 SPDX 表达式，未知、模糊、`WITH` 或白名单外结论只允许精确生态、包名、版本、
-  具名审阅者、引用和到期日的受控记录，漏洞不以许可证例外豁免。当前 Dagster 锁图仍有三项待
-  人工审阅，详见 `THIRD_PARTY_NOTICES.md`，因此供应链正式发行证据会按设计 fail closed。
+  具名审阅者、引用和到期日的受控记录，漏洞不以许可证例外豁免。当前 Dagster 锁图中的
+  `antlr4-python3-runtime` 与 `python-dateutil` 已由精确制品结论闭合；
+  `mysql-connector-python` 仍是一个明确的许可证审阅阻断项，详见 `THIRD_PARTY_NOTICES.md`，
+  因此供应链正式发行证据会按设计 fail closed。
 - release renderer 把每个 Compose service image 固定到 `tag@sha256:digest`，删除所有 `build`，
   并产出 image lock、manifest 与 `SHA256SUMS`；源码、镜像和元数据必须绑定同一 tag/commit。
 - hosted workflow 还会从 GHCR 验证 SLSA/CycloneDX attestation 的 repository、workflow、signer、
@@ -88,7 +95,7 @@ provider、企业 IdP、外部 callback、遥测、故障恢复和备份恢复 E
 
 `audio_intelligence` 的早到回执竞争已使用 tenant/project/run 绑定的 pending StorageObject 与净化
 receipt 闭合；可信 dispatch 建立后会复核 external ID、fence、执行 envelope、manifest 和精确对象
-版本，错 scope、错绑定、跨运行复用与重放均拒绝。正式 RC 仍须用真实 provider 做强制竞争 E2E，
+版本，错 scope、错绑定、跨运行复用与重放均拒绝。无标签 staging 仍须用真实 provider 做强制竞争 E2E，
 但不得通过重新公开 bucket/key/version 或把对象 locator 写入公共 receipt 来规避。
 
 ## 自动检查
@@ -116,14 +123,14 @@ python3 scripts/verify_production_compose.py
 
 以下任一项未完成时，不得 tag/publish 或宣称 `v1.0.0` 已正式开源、已获生产支持：
 
-1. 项目所有者填写并签署 `open-source-rights-authorization.md`，给出真实个人版权/许可主体，并在
-   同一候选 commit 中替换 `NOTICE` 占位内容。
+1. 对精确候选提交完成私有发行审批；公共仓库只保留标准 `LICENSE`、简洁 `NOTICE`、第三方清单
+   与制品级许可证结论，不保存个人身份、签名、URN 或审批摘要。
 2. 在托管 GitHub 仓库实际启用分支/标签保护、Private Vulnerability Reporting、secret scanning、
    push protection、CodeQL、Dependabot 和独立 Release 审批。
 3. 用正式签名 digest 在外部干净 Linux 主机完成 OIDC、核心业务、真实 Dagster/embedding/callback、
    故障恢复、升级/回滚、告警通知、snapshot 空环境恢复，以及独立第二空目标的
    `rebuild-required` 治理化重建演练。
-4. 先发布并验证 `v1.0.0-rc.1`，修复外部安装问题，然后从新的最终 commit 重复全部门禁再批准
+4. 使用无公开标签的 staging 候选完成外部安装、升级、回滚和恢复演练，再把同一组 digest 提升为
    `v1.0.0`。
 
 权威逐项清单见根目录 `RELEASE_CHECKLIST.md`；已知外部安全缺口见 `SECURITY.md`。

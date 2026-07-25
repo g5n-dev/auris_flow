@@ -12,7 +12,6 @@ import sys
 import tomllib
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
 from functools import partial
 from pathlib import Path
 from typing import Literal, TypedDict
@@ -40,6 +39,11 @@ OFFICIAL_GITHUB_URL = f"https://github.com/{OFFICIAL_GITHUB_REPOSITORY}"
 OFFICIAL_GHCR_REPOSITORY = f"ghcr.io/{OFFICIAL_GITHUB_REPOSITORY}"
 APACHE_2_LICENSE_SHA256 = (
     "44a4f8b565b014603e91bd5b2e1b50ae77cc9a7e50215d76b986e9992baba898"
+)
+EXPECTED_NOTICE = (
+    "Auris Flow\n\n"
+    "This distribution includes third-party software subject to its own license terms.\n"
+    "See THIRD_PARTY_NOTICES.md.\n"
 )
 PRODUCT_VERSION_PATTERN = re.compile(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)")
 RELEASE_TAG_PATTERN = re.compile(
@@ -154,7 +158,6 @@ CHECKS: tuple[Check, ...] = (
             "doc/reports/repository-layout-review.md",
             "doc/reports/change-submission-plan.md",
             "NOTICE",
-            "open-source-rights-authorization.md",
             "THIRD_PARTY_NOTICES.md",
             "production/compose.yaml",
             "production/README.md",
@@ -165,7 +168,7 @@ CHECKS: tuple[Check, ...] = (
         contains={
             "README.md": (
                 "Auris Flow",
-                "`v1.0.0` 的**候选实现**",
+                "`v1.0.0` 的候选实现",
                 "Apache License 2.0",
                 "production/README.md",
                 "Authorization Code + PKCE",
@@ -180,14 +183,6 @@ CHECKS: tuple[Check, ...] = (
                 "NOTICE",
                 "secret scan ok",
                 "protocol fake or deterministic test vector is not production evidence",
-            ),
-            "open-source-rights-authorization.md": (
-                "Authorization status:",
-                "Rights holder legal name:",
-                "Authorized license: Apache-2.0",
-                "Approval evidence reference:",
-                "Approval evidence SHA-256:",
-                "Final NOTICE confirmed:",
             ),
             "SUPPORT.md": ("SECURITY.md", "trace_id"),
             "MAINTAINERS.md": ("Release Authority",),
@@ -271,7 +266,12 @@ CHECKS: tuple[Check, ...] = (
             "backend/scripts/verify_mysql_migration_security.py",
             "production/tests/test_mysql_migration_security.py",
             "scripts/verify_clean_clone.sh",
-            "scripts/verify_release_authorization.py",
+            "scripts/verify_license_materials.py",
+            "scripts/verify_static.sh",
+            "scripts/verify_backend.sh",
+            "scripts/verify_production_tests.sh",
+            "scripts/verify_dagster_tests.sh",
+            "scripts/verify_frontend.sh",
             "scripts/finalize_release_evidence.py",
             "production/tests/dagster-gate.compose.yaml",
             "production/tests/dagster-gate-callback.Dockerfile",
@@ -285,30 +285,44 @@ CHECKS: tuple[Check, ...] = (
         ),
         contains={
             "scripts/verify_all.sh": (
-                "validate_backend_spec.py",
-                "scripts/scan_secrets.py",
-                "uv sync --check --locked --all-extras --project backend",
-                "uv sync --check --locked --all-extras --project production/dagster",
+                "bash scripts/verify_static.sh",
+                "bash scripts/verify_backend.sh",
+                "bash scripts/verify_production_tests.sh",
+                "bash scripts/verify_dagster_tests.sh",
+                "bash scripts/verify_frontend.sh",
                 "backend-runtime-requirements.txt",
                 "dagster-runtime-requirements.txt",
                 "--strict --require-hashes --disable-pip",
                 "npm audit --prefix prototype/auris-flow-ui",
                 "npm audit signatures --prefix prototype/auris-flow-ui",
+                "AURIS_RUN_E2E",
+            ),
+            "scripts/verify_static.sh": (
+                "validate_backend_spec.py",
+                "scripts/scan_secrets.py",
+                "uv sync --check --locked --all-extras --project backend",
+                "uv sync --check --locked --all-extras --project production/dagster",
                 "scripts/verify_production_compose.py",
-                "pytest production/tests",
+                "scripts/verify_github_actions_pins.py",
+                "ruff format --check backend scripts production/tests",
+                "ruff check backend scripts production/tests",
+                "mypy",
+            ),
+            "scripts/verify_backend.sh": (
+                "verify_migrations.py",
+                "backend/tests/unit backend/tests/contract backend/tests/integration",
+                "smoke_backend.py",
+            ),
+            "scripts/verify_production_tests.sh": ("pytest production/tests",),
+            "scripts/verify_dagster_tests.sh": (
                 "pytest production/dagster/tests",
                 "ruff format --check production/dagster/src production/dagster/tests",
                 "ruff check production/dagster/src production/dagster/tests",
                 "mypy production/dagster/src",
-                "ruff format --check backend scripts production/tests",
-                "ruff check backend scripts production/tests",
-                "mypy backend/app",
-                "verify_migrations.py",
-                "pytest backend/tests/unit backend/tests/contract backend/tests/integration",
-                "smoke_backend.py",
+            ),
+            "scripts/verify_frontend.sh": (
                 "npm --prefix prototype/auris-flow-ui run build",
                 "npm --prefix prototype/auris-flow-ui run e2e:ui",
-                "AURIS_RUN_E2E",
             ),
             "scripts/verify_release.sh": (
                 "AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1 bash scripts/verify_all.sh",
@@ -321,7 +335,7 @@ CHECKS: tuple[Check, ...] = (
                 "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
                 "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
                 "AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh",
-                "scripts/verify_release_authorization.py",
+                "scripts/verify_license_materials.py",
                 "scripts/finalize_release_evidence.py",
             ),
             "scripts/verify_production_path.sh": (
@@ -702,7 +716,6 @@ RELEASE_REQUIRED_TRACKED_PATHS = (
     "backend/app/services/task_run_monitor_service.py",
     "backend/tests/integration/test_task_run_controls.py",
     "backend/tests/integration/test_task_run_monitor.py",
-    "open-source-rights-authorization.md",
     "production/tests/dagster-gate-callback.Dockerfile",
     "production/tests/dagster-gate.compose.yaml",
     "production/tests/dagster-product-gate.compose.yaml",
@@ -729,10 +742,13 @@ RELEASE_REQUIRED_TRACKED_PATHS = (
     "scripts/tests/test_frontend_bundle_readiness.py",
     "scripts/tests/test_verify_clean_clone.py",
     "scripts/tests/test_finalize_release_evidence.py",
-    "scripts/tests/test_release_authorization.py",
+    "scripts/tests/test_license_materials.py",
     "scripts/tests/test_verify_visual_baseline.py",
     "scripts/verify_clean_clone.sh",
-    "scripts/verify_release_authorization.py",
+    "scripts/verify_license_materials.py",
+    "scripts/verify_github_actions_pins.py",
+    "security/github-actions-lock.json",
+    "security/codeql-exceptions.json",
     "scripts/finalize_release_evidence.py",
     "scripts/verify_real_dagster.py",
     "scripts/verify_real_dagster.sh",
@@ -765,8 +781,12 @@ RELEASE_REQUIRED_TRACKED_PATHS = (
     "production/observability/otel-collector.yaml",
     "production/observability/prometheus.yaml",
     "production/scripts/backup.sh",
+    "production/scripts/scheduled-backup.sh",
     "production/scripts/restore.sh",
     "production/scripts/verify-backup.sh",
+    "production/systemd/auris-flow-backup.service",
+    "production/systemd/auris-flow-backup.timer",
+    "production/systemd/backup.env.example",
     "doc/release/versioning-and-compatibility.md",
     "doc/runbooks/backup-restore.md",
     "doc/runbooks/operations.md",
@@ -882,139 +902,39 @@ def validate_apache_2_license(root: Path = ROOT) -> list[str]:
     return []
 
 
-def validate_release_authorization(root: Path = ROOT) -> list[str]:
-    authorization_path = root / "open-source-rights-authorization.md"
+def validate_license_materials(root: Path = ROOT) -> list[str]:
     notice_path = root / "NOTICE"
+    third_party_path = root / "THIRD_PARTY_NOTICES.md"
     failures: list[str] = []
-    if not authorization_path.is_file():
-        return ["missing open-source-rights-authorization.md"]
+    failures.extend(validate_apache_2_license(root))
     if not notice_path.is_file():
-        return ["missing NOTICE"]
-
-    authorization = authorization_path.read_text(encoding="utf-8")
-    notice = notice_path.read_text(encoding="utf-8")
-    field_values: dict[str, list[str]] = {}
-    for line in authorization.splitlines():
-        if not line.startswith("- ") or ":" not in line:
-            continue
-        key, value = line[2:].split(":", 1)
-        field_values.setdefault(key.strip(), []).append(value.strip())
-
-    expected_fields = {
-        "Authorization status",
-        "Rights holder legal name",
-        "Copyright notice",
-        "Authorized license",
-        "Approval date (UTC)",
-        "Approval evidence reference",
-        "Approval evidence SHA-256",
-        "Final NOTICE confirmed",
-    }
-    missing_fields = sorted(expected_fields - field_values.keys())
-    failures.extend(
-        f"rights authorization missing field: {field}" for field in missing_fields
-    )
-    if missing_fields:
-        return failures
-    duplicate_fields = sorted(
-        field for field in expected_fields if len(field_values[field]) != 1
-    )
-    failures.extend(
-        f"rights authorization field must appear exactly once: {field}"
-        for field in duplicate_fields
-    )
-    fields = {field: field_values[field][0] for field in expected_fields}
-
-    placeholder_values = {
-        "",
-        "PENDING",
-        "NO",
-        "TBD",
-        "TODO",
-        "YYYY-MM-DD",
-        "PROJECT OWNER TO COMPLETE",
-    }
-    placeholder_pattern = re.compile(
-        r"(?:^|[^a-z0-9])"
-        r"(?:example|sample|test|unknown|placeholder|replace[-_ ]?me|"
-        r"project[-_ ]?owner[-_ ]?to[-_ ]?complete)"
-        r"(?:$|[^a-z0-9])",
-        re.IGNORECASE,
-    )
-    if fields["Authorization status"] != "APPROVED":
-        failures.append("rights authorization status is not APPROVED")
-    if fields["Authorized license"] != "Apache-2.0":
-        failures.append("rights authorization does not approve Apache-2.0")
-    if fields["Final NOTICE confirmed"] != "YES":
-        failures.append("rights holder has not confirmed the final NOTICE")
-    for field_name in (
-        "Rights holder legal name",
-        "Copyright notice",
-        "Approval evidence reference",
-        "Approval evidence SHA-256",
-    ):
-        field_value = fields[field_name]
-        if (
-            field_value.upper() in placeholder_values
-            or placeholder_pattern.search(field_value) is not None
-        ):
-            failures.append(
-                f"rights authorization field is still a placeholder: {field_name}"
-            )
-    evidence_reference = fields["Approval evidence reference"]
-    if (
-        re.fullmatch(
-            r"urn:auris-flow:rights-approval:"
-            r"[A-Za-z0-9][A-Za-z0-9._-]{7,127}",
-            evidence_reference,
-        )
-        is None
-    ):
-        failures.append(
-            "rights authorization approval evidence reference must use the "
-            "urn:auris-flow:rights-approval:<opaque-id> format"
-        )
-    if (
-        re.fullmatch(
-            r"sha256:[0-9a-f]{64}",
-            fields["Approval evidence SHA-256"],
-        )
-        is None
-    ):
-        failures.append("rights authorization approval evidence SHA-256 is invalid")
-    approval_date_raw = fields["Approval date (UTC)"]
-    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", approval_date_raw):
-        failures.append("rights authorization approval date must be YYYY-MM-DD")
+        failures.append("missing NOTICE")
     else:
         try:
-            approval_date = date.fromisoformat(approval_date_raw)
-        except ValueError:
-            failures.append("rights authorization approval date is not a real UTC date")
+            notice = notice_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            failures.append(f"NOTICE is unreadable: {error}")
         else:
-            if approval_date > datetime.now(timezone.utc).date():
-                failures.append(
-                    "rights authorization approval date cannot be in the future"
-                )
-
-    placeholder_markers = (
-        "confirmation required",
-        "project owner to complete",
-        "unidentified person",
-    )
-    lowered_notice = notice.lower()
-    if any(marker in lowered_notice for marker in placeholder_markers):
-        failures.append("NOTICE still contains an unapproved rights-holder placeholder")
-    if fields["Rights holder legal name"] not in fields["Copyright notice"]:
-        failures.append(
-            "approved copyright notice does not identify the approved rights holder"
-        )
-    if fields["Rights holder legal name"] not in notice:
-        failures.append("NOTICE does not identify the approved rights holder")
-    notice_lines = {line.strip() for line in notice.splitlines() if line.strip()}
-    if fields["Copyright notice"] not in notice_lines:
-        failures.append(
-            "NOTICE does not contain the exact approved copyright notice line"
-        )
+            if notice != EXPECTED_NOTICE:
+                failures.append("NOTICE must use the concise canonical project notice")
+    if not third_party_path.is_file():
+        failures.append("missing THIRD_PARTY_NOTICES.md")
+    else:
+        try:
+            third_party = third_party_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            failures.append(f"THIRD_PARTY_NOTICES.md is unreadable: {error}")
+        else:
+            for marker in (
+                "# Third-Party Notices",
+                "Runtime and build dependencies",
+                "Public datasets",
+                "exact-artifact",
+            ):
+                if marker not in third_party:
+                    failures.append(
+                        f"THIRD_PARTY_NOTICES.md is missing inventory marker: {marker}"
+                    )
     return failures
 
 
@@ -1758,14 +1678,14 @@ def run_release_checks() -> list[ReadinessResult]:
         encoding="utf-8"
     ):
         license_failures.append("README.md does not declare Apache License 2.0")
-    license_failures.extend(validate_release_authorization())
+    license_failures.extend(validate_license_materials())
     release_results.append(
         {
             "key": "release_license",
-            "title": "正式开源许可证",
+            "title": "许可证与第三方材料",
             "status": "pass" if not license_failures else "fail",
             "failures": license_failures,
-            "rationale": "公开开源发布必须有明确许可证；没有 LICENSE 只能视为内部开发基线。",
+            "rationale": "发行树只公开标准许可证、简洁 NOTICE、第三方清单与制品级许可证证据。",
         }
     )
 
@@ -1855,23 +1775,6 @@ def run_release_checks() -> list[ReadinessResult]:
     tree_failures.extend(validate_repository_trust_contract())
     tree_failures.extend(validate_release_version_contract())
 
-    visual_lock_failures = validate_visual_baseline_lock(
-        ROOT / "production/visual/visual-baseline.lock.json",
-        require_approved=True,
-    )
-    tree_failures.extend(
-        f"visual baseline lock: {failure}" for failure in visual_lock_failures
-    )
-    frontend_lock_path = ROOT / "production/frontend/frontend-bundle.lock.json"
-    try:
-        frontend_lock = json.loads(frontend_lock_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        tree_failures.append(f"frontend bundle lock: unable to read lock: {error}")
-    else:
-        tree_failures.extend(
-            f"frontend bundle lock: {failure}"
-            for failure in validate_frontend_bundle_release_lock(frontend_lock)
-        )
     verify_release_text = (ROOT / "scripts/verify_release.sh").read_text(
         encoding="utf-8"
     )
@@ -1898,6 +1801,33 @@ def run_release_checks() -> list[ReadinessResult]:
             "status": "pass" if not tree_failures else "fail",
             "failures": tree_failures,
             "rationale": "严格发布门禁必须验证干净 HEAD 中的候选源码，不能依赖未跟踪、未暂存或仅暂存的本地实现。",
+        }
+    )
+
+    promotion_failures = [
+        f"visual baseline lock: {failure}"
+        for failure in validate_visual_baseline_lock(
+            ROOT / "production/visual/visual-baseline.lock.json",
+            require_approved=True,
+        )
+    ]
+    frontend_lock_path = ROOT / "production/frontend/frontend-bundle.lock.json"
+    try:
+        frontend_lock = json.loads(frontend_lock_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        promotion_failures.append(f"frontend bundle lock: unable to read lock: {error}")
+    else:
+        promotion_failures.extend(
+            f"frontend bundle lock: {failure}"
+            for failure in validate_frontend_bundle_release_lock(frontend_lock)
+        )
+    release_results.append(
+        {
+            "key": "release_promotion_evidence",
+            "title": "前端与视觉提升证据",
+            "status": "pass" if not promotion_failures else "fail",
+            "failures": promotion_failures,
+            "rationale": "源码树完整性与不可变前端/视觉制品审批分别报告，避免工作区状态掩盖真实 promotion 缺口。",
         }
     )
 
@@ -1961,9 +1891,18 @@ def run_release_checks() -> list[ReadinessResult]:
     )
 
     verification_failures: list[str] = []
-    verify_path = ROOT / "scripts/verify_all.sh"
-    verify_text = (
-        verify_path.read_text(encoding="utf-8") if verify_path.exists() else ""
+    verification_paths = (
+        "scripts/verify_all.sh",
+        "scripts/verify_static.sh",
+        "scripts/verify_backend.sh",
+        "scripts/verify_production_tests.sh",
+        "scripts/verify_dagster_tests.sh",
+        "scripts/verify_frontend.sh",
+    )
+    verify_text = "\n".join(
+        (ROOT / relative_path).read_text(encoding="utf-8")
+        for relative_path in verification_paths
+        if (ROOT / relative_path).is_file()
     )
     for pattern in (
         "scripts/check_platform_readiness.py",
@@ -2003,7 +1942,7 @@ def run_release_checks() -> list[ReadinessResult]:
     )
     for pattern in (
         "AURIS_RELEASE_CHECK=1 AURIS_RUN_E2E=1",
-        "scripts/verify_release_authorization.py",
+        "scripts/verify_license_materials.py",
         "AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh",
         "bash scripts/verify_real_stack.sh",
         "bash scripts/verify_real_dagster.sh",

@@ -63,6 +63,12 @@ class CleanCloneGateTests(unittest.TestCase):
             "scripts/check_platform_readiness.py": "# fixture\n",
             "scripts/scan_secrets.py": "# fixture\n",
             "scripts/verify_production_compose.py": "# fixture\n",
+            "scripts/verify_github_actions_pins.py": "# fixture\n",
+            "scripts/verify_static.sh": "#!/usr/bin/env bash\n",
+            "scripts/verify_backend.sh": "#!/usr/bin/env bash\n",
+            "scripts/verify_production_tests.sh": "#!/usr/bin/env bash\n",
+            "scripts/verify_dagster_tests.sh": "#!/usr/bin/env bash\n",
+            "scripts/verify_frontend.sh": "#!/usr/bin/env bash\n",
         }
         for relative_path, body in required_files.items():
             target = self.source / relative_path
@@ -191,11 +197,9 @@ class CleanCloneGateTests(unittest.TestCase):
         self.assertEqual("auris.clean-clone-evidence.v1", evidence["schema_version"])
         self.assertEqual("ok", evidence["status"])
         self.assertEqual(self.commit, evidence["source_commit"])
-        self.assertEqual("functional-locked-source", evidence["reproducibility_scope"])
-        self.assertIn(
-            "static-analysis-and-script-policy-tests", evidence["verified_steps"]
-        )
-        self.assertIn("frontend-architecture-tests", evidence["verified_steps"])
+        self.assertEqual("locked-source-build", evidence["reproducibility_scope"])
+        self.assertIn("contract-and-policy-smoke", evidence["verified_steps"])
+        self.assertIn("dagster-definition-load", evidence["verified_steps"])
 
         command_log = self.command_log.read_text(encoding="utf-8")
         for required_invocation in (
@@ -203,16 +207,9 @@ class CleanCloneGateTests(unittest.TestCase):
             "uv:sync --frozen --all-extras --project backend --python 3.12",
             "uv:lock --check --project production/dagster",
             "uv:sync --frozen --all-extras --project production/dagster --python 3.12",
-            "python:-m ruff format --check backend scripts production/tests",
-            "python:-m ruff check backend scripts production/tests",
-            "python:-m mypy backend/app backend/scripts/verify_migrations.py",
-            "python:-m unittest discover -s scripts/tests -p test_*.py",
             "python:backend/scripts/verify_migrations.py",
-            "python:-m pytest backend/tests/unit backend/tests/contract backend/tests/integration",
             "python:backend/scripts/smoke_backend.py",
             "npm:ci --ignore-scripts --prefix prototype/auris-flow-ui",
-            "npm:run architecture:test --prefix prototype/auris-flow-ui",
-            "npm:run architecture:final --prefix prototype/auris-flow-ui",
             "npm:run build --prefix prototype/auris-flow-ui",
             "npm:run bundle:check --prefix prototype/auris-flow-ui",
         ):
@@ -265,7 +262,7 @@ class CleanCloneGateTests(unittest.TestCase):
             "python:scripts/check_platform_readiness.py --release", command_log
         )
 
-    def test_release_entrypoint_enables_strict_clean_clone_readiness(self) -> None:
+    def test_release_entrypoint_keeps_clean_source_proof_fail_closed(self) -> None:
         release_source = RELEASE_SCRIPT_UNDER_TEST.read_text(encoding="utf-8")
 
         self.assertIn(
@@ -294,22 +291,36 @@ class CleanCloneGateTests(unittest.TestCase):
         ):
             self.assertNotIn(forbidden, source)
 
+    def test_dagster_definition_import_does_not_require_a_live_otel_collector(
+        self,
+    ) -> None:
+        source = SCRIPT_UNDER_TEST.read_text(encoding="utf-8")
+
+        self.assertIn(
+            "APP_ENV=test OTEL_ENABLED=false uv run --frozen --all-extras "
+            "--project production/dagster",
+            source,
+        )
+
 
 class CleanCloneWorkflowTests(unittest.TestCase):
-    def test_push_verification_covers_the_current_default_release_branch(self) -> None:
+    def test_push_verification_covers_main(self) -> None:
         workflows = (
             WORKFLOW_UNDER_TEST.read_text(encoding="utf-8"),
             CODEQL_WORKFLOW_UNDER_TEST.read_text(encoding="utf-8"),
         )
 
         for workflow in workflows:
-            self.assertIn('      - "codex/open-source-v1-candidate"', workflow)
+            self.assertIn("      - main", workflow)
+            self.assertNotIn('      - "codex/open-source-v1-candidate"', workflow)
 
     def test_ci_runs_the_clean_clone_gate_with_the_pinned_toolchain(self) -> None:
         workflow = WORKFLOW_UNDER_TEST.read_text(encoding="utf-8")
 
         self.assertIn("clean-clone-reproducibility:", workflow)
-        self.assertIn("    needs: clean-clone-reproducibility", workflow)
+        self.assertIn("      - clean-clone-reproducibility", workflow)
+        self.assertIn("    if: always()", workflow)
+        self.assertIn("    name: Verify", workflow)
         self.assertIn('node-version: "22"', workflow)
         self.assertIn('python-version: "3.12"', workflow)
         self.assertIn('python -m pip install "uv==0.10.0"', workflow)

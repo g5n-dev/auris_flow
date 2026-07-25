@@ -19,19 +19,36 @@ updates:
       day: "monday"
       time: "09:30"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
-      frontend-runtime:
+      react-runtime:
         patterns:
           - "react"
           - "react-dom"
+      vite-toolchain:
+        patterns:
           - "vite"
           - "@vitejs/*"
-      frontend-tooling:
+      playwright-tooling:
         patterns:
-          - "typescript"
           - "playwright"
+          - "@playwright/*"
+      type-definitions:
+        patterns:
           - "@types/*"
+    ignore:
+      - dependency-name: "react"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "react-dom"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "typescript"
+        update-types:
+          - "version-update:semver-major"
+      - dependency-name: "lucide-react"
+        update-types:
+          - "version-update:semver-major"
     labels:
       - "dependencies"
       - "frontend"
@@ -43,20 +60,30 @@ updates:
       day: "monday"
       time: "10:00"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
-      backend-runtime:
+      backend-api-runtime:
         patterns:
           - "fastapi"
-          - "sqlalchemy"
-          - "pydantic*"
           - "uvicorn*"
+      backend-database-runtime:
+        patterns:
+          - "sqlalchemy"
           - "alembic"
-      backend-quality:
+      backend-pydantic-runtime:
+        patterns:
+          - "pydantic*"
+      backend-pytest:
         patterns:
           - "pytest*"
+      backend-ruff:
+        patterns:
           - "ruff"
+      backend-mypy:
+        patterns:
           - "mypy"
+      backend-audit:
+        patterns:
           - "pip-audit"
     labels:
       - "dependencies"
@@ -69,17 +96,25 @@ updates:
       day: "monday"
       time: "10:30"
       timezone: "Asia/Shanghai"
-    open-pull-requests-limit: 5
+    open-pull-requests-limit: 10
     groups:
-      dagster-runtime:
+      dagster-family:
         patterns:
           - "dagster*"
+      dagster-click:
+        patterns:
           - "click"
+      dagster-database-driver:
+        patterns:
           - "pymysql"
-      dagster-quality:
+      dagster-pytest:
         patterns:
           - "pytest"
+      dagster-ruff:
+        patterns:
           - "ruff"
+      dagster-mypy:
+        patterns:
           - "mypy"
     labels:
       - "dependencies"
