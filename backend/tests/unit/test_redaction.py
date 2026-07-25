@@ -132,6 +132,52 @@ def test_redaction_scans_untrusted_reference_values() -> None:
     }
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (
+            "联系 owner+alerts@example.co.uk 或 用户@example.cn",
+            "联系 [REDACTED_EMAIL] 或 [REDACTED_EMAIL]",
+        ),
+        ("边界 <owner@example.com> 正常", "边界 <[REDACTED_EMAIL]> 正常"),
+        ("一级域名过短 a@b.c 不脱敏", "一级域名过短 a@b.c 不脱敏"),
+        ("缺少域名 not-an-email@ 不脱敏", "缺少域名 not-an-email@ 不脱敏"),
+        ("非法后缀 owner@example.com_foo 不脱敏", "非法后缀 owner@example.com_foo 不脱敏"),
+    ),
+)
+def test_redaction_scans_email_addresses_without_a_backtracking_regex(
+    value: str,
+    expected: str,
+) -> None:
+    assert redact_structured_value({"description": value}) == {"description": expected}
+
+
+def test_email_scanner_has_a_linear_character_classification_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_checks = 0
+    domain_checks = 0
+    original_local_check = redaction_module._is_email_local_character
+    original_domain_check = redaction_module._is_email_domain_character
+
+    def count_local(character: str) -> bool:
+        nonlocal local_checks
+        local_checks += 1
+        return original_local_check(character)
+
+    def count_domain(character: str) -> bool:
+        nonlocal domain_checks
+        domain_checks += 1
+        return original_domain_check(character)
+
+    monkeypatch.setattr(redaction_module, "_is_email_local_character", count_local)
+    monkeypatch.setattr(redaction_module, "_is_email_domain_character", count_domain)
+    adversarial = ("+" * 31 + "@segment") * 80
+
+    assert redaction_module._redact_email_addresses(adversarial) == adversarial
+    assert local_checks + domain_checks <= 2 * len(adversarial)
+
+
 def test_redaction_bounds_every_content_regex_input(monkeypatch: pytest.MonkeyPatch) -> None:
     scanned_lengths: list[int] = []
 
@@ -153,7 +199,6 @@ def test_redaction_bounds_every_content_regex_input(monkeypatch: pytest.MonkeyPa
         "API_KEY_PATTERN",
         "DANGEROUS_URL_PATTERN",
         "COOKIE_VALUE_PATTERN",
-        "EMAIL_PATTERN",
         "PHONE_PATTERN",
         "IDENTITY_PATTERN",
         "LICENSE_PLATE_PATTERN",
@@ -189,7 +234,6 @@ def test_redaction_rejects_oversized_adversarial_text_before_regex(
         "API_KEY_PATTERN",
         "DANGEROUS_URL_PATTERN",
         "COOKIE_VALUE_PATTERN",
-        "EMAIL_PATTERN",
         "PHONE_PATTERN",
         "IDENTITY_PATTERN",
         "LICENSE_PLATE_PATTERN",

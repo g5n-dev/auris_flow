@@ -90,7 +90,6 @@ MAX_DEPTH = 12
 MAX_NODES = 1_000
 MAX_SERIALIZED_BYTES = 65_536
 
-EMAIL_PATTERN = re.compile(r"(?<![\w.+-])[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}(?![\w.-])")
 PHONE_PATTERN = re.compile(r"(?<!\d)(?:(?:\+?86)[ -]?)?1[3-9](?:[ -]?\d){9}(?!\d)")
 IDENTITY_PATTERN = re.compile(r"(?<![0-9A-Za-z])\d{17}[0-9Xx](?![0-9A-Za-z])")
 LICENSE_PLATE_PATTERN = re.compile(
@@ -210,12 +209,67 @@ def _contains_secret_value(value: str) -> bool:
     )
 
 
+def _is_email_local_character(character: str) -> bool:
+    return character.isalnum() or character in "_.+-"
+
+
+def _is_email_domain_character(character: str) -> bool:
+    return character.isalnum() or character in "_.-"
+
+
+def _is_ascii_alpha(value: str) -> bool:
+    return bool(value) and all(
+        "A" <= character <= "Z" or "a" <= character <= "z" for character in value
+    )
+
+
+def _redact_email_addresses(value: str) -> str:
+    """Redact email-like values with an amortized linear-time scanner."""
+
+    pieces: list[str] = []
+    emitted_until = 0
+    search_from = 0
+    while True:
+        at_index = value.find("@", search_from)
+        if at_index < 0:
+            break
+
+        local_start = at_index
+        while local_start > emitted_until and _is_email_local_character(value[local_start - 1]):
+            local_start -= 1
+
+        domain_end = at_index + 1
+        while domain_end < len(value) and _is_email_domain_character(value[domain_end]):
+            domain_end += 1
+
+        local_part = value[local_start:at_index]
+        domain_part = value[at_index + 1 : domain_end]
+        last_dot = domain_part.rfind(".")
+        top_level_domain = domain_part[last_dot + 1 :] if last_dot > 0 else ""
+        if (
+            local_part
+            and last_dot > 0
+            and len(top_level_domain) >= 2
+            and _is_ascii_alpha(top_level_domain)
+        ):
+            pieces.append(value[emitted_until:local_start])
+            pieces.append("[REDACTED_EMAIL]")
+            emitted_until = domain_end
+            search_from = domain_end
+            continue
+        search_from = at_index + 1
+
+    if not pieces:
+        return value
+    pieces.append(value[emitted_until:])
+    return "".join(pieces)
+
+
 def _redact_inline_pii(value: str) -> str:
-    # EMAIL_PATTERN contains adjacent variable-length character classes and
-    # may require super-linear work on a crafted non-match. Bound the input at
-    # the regex sink as defense in depth.
+    # Keep both the deterministic email scanner and the remaining regex
+    # substitutions bounded if this private helper is reused independently.
     scan_value = value[:MAX_REGEX_SCAN_LENGTH]
-    redacted = EMAIL_PATTERN.sub("[REDACTED_EMAIL]", scan_value)
+    redacted = _redact_email_addresses(scan_value)
     redacted = PHONE_PATTERN.sub("[REDACTED_PHONE]", redacted)
     redacted = IDENTITY_PATTERN.sub("[REDACTED_IDENTITY]", redacted)
     redacted = LICENSE_PLATE_PATTERN.sub("[REDACTED_PLATE]", redacted)

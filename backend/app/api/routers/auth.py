@@ -53,7 +53,7 @@ from app.core.oidc_state import (
 )
 from app.core.oidc_transaction import (
     authorization_transaction_cookie_name,
-    authorization_transaction_secret,
+    new_authorization_transaction_binding,
     set_authorization_transaction_cookie,
 )
 from app.core.project_membership import project_member_role_binding
@@ -406,16 +406,13 @@ def oidc_login(
         authorization = get_oidc_authorization_flow().create_authorization_request()
     except OIDCError as error:
         raise _translate_oidc_error(error) from None
-    transaction_cookie_name = authorization_transaction_cookie_name(settings.app_env)
-    transaction_secret = authorization_transaction_secret(
-        request.cookies.get(transaction_cookie_name)
-    )
+    transaction_binding = new_authorization_transaction_binding()
     store_authorization_state(
         session,
         state=authorization.state,
         nonce=authorization.nonce,
         code_verifier=authorization.code_verifier,
-        transaction_secret=transaction_secret,
+        transaction_secret=transaction_binding,
         ttl_seconds=settings.oidc_authorization_state_ttl_seconds,
         return_path=return_path,
     )
@@ -424,7 +421,7 @@ def oidc_login(
     set_authorization_transaction_cookie(
         response,
         app_env=settings.app_env,
-        transaction_binding=transaction_secret,
+        transaction_binding=transaction_binding,
         max_age=settings.oidc_authorization_state_ttl_seconds,
     )
     response.headers["Cache-Control"] = "no-store"
