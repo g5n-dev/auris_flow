@@ -191,6 +191,34 @@ def test_fake_receiver_returns_409_for_same_idempotency_key_with_different_body(
     assert receipt["request_sha256"] == accepted.details["request_sha256"]
 
 
+def test_callback_recovers_remote_execution_after_transport_response_is_lost() -> None:
+    module = _load_fake_server_module()
+    with _running_server(module) as (state, base_url):
+        state.drop_next_response_after_persist = True
+        client = _client(
+            base_url,
+            nonces=iter(("fake-callback-response-loss-01",)),
+        )
+        payload = _payload()
+
+        sent = client.send_signed_callback(payload)
+
+        assert sent.status == "failed"
+        assert sent.retryable is True
+        assert len(state.receipts) == 1
+        remote_receipt = next(iter(state.receipts.values()))
+        assert sent.details["delivery_id"].startswith("callback_delivery_")
+        assert remote_receipt["delivery_id"] == sent.details["delivery_id"]
+        assert remote_receipt["callback_receipt_id"] != sent.details["delivery_id"]
+
+        reconciled = client.reconcile_callback(payload)
+
+    assert reconciled.status == "success"
+    assert reconciled.details["reconciled"] is True
+    assert reconciled.details["delivery_id"] == sent.details["delivery_id"]
+    assert reconciled.details["callback_receipt_id"] == remote_receipt["callback_receipt_id"]
+
+
 def test_fake_receiver_accepts_overlap_key_and_rejects_it_after_retirement() -> None:
     module = _load_fake_server_module()
     with _running_server(module) as (_state, base_url):

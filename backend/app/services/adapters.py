@@ -227,6 +227,32 @@ def _qdrant_payload(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+VOICEPRINT_QDRANT_COLLECTION = "voiceprint_embeddings"
+
+
+def _unsupported_voiceprint_vector_result() -> DispatchResult:
+    return DispatchResult(
+        adapter="qdrant_policy",
+        operation="reject_voiceprint_vector_write",
+        status="failed",
+        details={
+            "collection": VOICEPRINT_QDRANT_COLLECTION,
+            "indexed": False,
+            "policy": "dedicated-voiceprint-vector-provider-required",
+            "text_embedding_forbidden": True,
+        },
+        error_code="VOICEPRINT_VECTOR_PROVIDER_UNSUPPORTED",
+        error_message=(
+            "voiceprint vector indexing requires a verified dedicated voiceprint vector provider"
+        ),
+        retryable=False,
+    )
+
+
+def _voiceprint_vector_payload_requested(payload: dict[str, Any]) -> bool:
+    return str(_qdrant_payload(payload).get("collection") or "") == VOICEPRINT_QDRANT_COLLECTION
+
+
 QDRANT_AUTHORIZED_POINT_IDS_FIELD = "_authorized_point_ids"
 QDRANT_AUTHORIZED_POINT_IDS_LIMIT = 1024
 QDRANT_DISTANCE = "Cosine"
@@ -2325,6 +2351,8 @@ def object_storage_client_for_provider(provider: str) -> RealObjectStorageClient
 
 class LocalQdrantIndexClient:
     def upsert_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
+        if _voiceprint_vector_payload_requested(payload):
+            return _unsupported_voiceprint_vector_result()
         failure = _maybe_failure("qdrant", "upsert_payload", payload)
         if failure:
             return failure
@@ -2444,6 +2472,8 @@ class RealQdrantIndexClient:
         self.api_key = api_key or os.environ.get("QDRANT_API_KEY")
 
     def upsert_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
+        if _voiceprint_vector_payload_requested(payload):
+            return _unsupported_voiceprint_vector_result()
         failure = _maybe_failure("qdrant", "upsert_payload", payload)
         if failure:
             return failure
@@ -2614,6 +2644,8 @@ class RealQdrantIndexClient:
         }
 
     def reconcile_index_payload(self, payload: dict[str, Any]) -> DispatchResult:
+        if _voiceprint_vector_payload_requested(payload):
+            return _unsupported_voiceprint_vector_result()
         qdrant_payload = _qdrant_payload(payload)
         missing_fields = _validate_qdrant_payload(qdrant_payload)
         if missing_fields:
@@ -2726,11 +2758,21 @@ class RealQdrantIndexClient:
         return json.loads(raw) if raw else {}
 
 
+def _callback_delivery_id(idempotency_key: str) -> str:
+    digest = hashlib.sha256(f"auris-callback-delivery-v1\x00{idempotency_key}".encode()).hexdigest()
+    return f"callback_delivery_{digest[:32]}"
+
+
 class LocalExternalCallbackClient:
     def send_signed_callback(self, payload: dict[str, Any]) -> DispatchResult:
         failure = _maybe_failure("external_callback", "send_signed_callback", payload)
         if failure:
             return failure
+        idempotency_key = str(
+            payload.get("dispatch_idempotency_key")
+            or payload.get("idempotency_key")
+            or _stable_receipt_id("cb_key", payload, "run_id", "target")
+        )
         callback_receipt_id = _stable_receipt_id(
             "callback_receipt",
             payload,
@@ -2742,10 +2784,10 @@ class LocalExternalCallbackClient:
             adapter="external_callback",
             operation="send_signed_callback",
             details={
+                "delivery_id": _callback_delivery_id(idempotency_key),
                 "callback_receipt_id": callback_receipt_id,
                 "target": payload.get("target"),
-                "idempotency_key": payload.get("dispatch_idempotency_key")
-                or payload.get("idempotency_key"),
+                "idempotency_key": idempotency_key,
                 "fencing_token": payload.get("outbox_fencing_token"),
                 "signature_mode": "mock-hmac-sha256",
                 "signature_id": _stable_receipt_id("sig", payload, "run_id", "target"),
@@ -2768,6 +2810,7 @@ class LocalExternalCallbackClient:
 
 _CALLBACK_PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production", "release"})
 _CALLBACK_RECEIPT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_CALLBACK_DELIVERY_ID_PATTERN = re.compile(r"^callback_delivery_[a-f0-9]{32}$")
 _MAX_CALLBACK_RESPONSE_BYTES = 1_048_576
 
 
@@ -2919,6 +2962,7 @@ class RealExternalCallbackClient:
         body_bytes = self._callback_body_bytes(payload)
         request_sha256 = hashlib.sha256(body_bytes).hexdigest()
         idempotency_key = self._idempotency_key(payload)
+        delivery_id = self._delivery_id(payload)
         signature_id = (
             self.keyring.active_key.key_id if self.keyring is not None else "unconfigured"
         )
@@ -2940,6 +2984,7 @@ class RealExternalCallbackClient:
                 "X-Auris-Signature": signature,
                 "X-Auris-Signature-Mode": "hmac-sha256-v2",
                 "X-Auris-Idempotency-Key": idempotency_key,
+                "X-Auris-Delivery-Id": delivery_id,
                 "X-Auris-Tenant-Id": str(payload.get("tenant_id") or ""),
                 "X-Auris-Project-Id": str(payload.get("project_id") or ""),
                 "X-Auris-Trace-Id": str(payload.get("trace_id") or ""),
@@ -2958,6 +3003,7 @@ class RealExternalCallbackClient:
                         self.callback_url.encode("utf-8")
                     ).hexdigest(),
                     "target": payload.get("target"),
+                    "delivery_id": delivery_id,
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "signature_key_id": signature_id,
@@ -2987,6 +3033,7 @@ class RealExternalCallbackClient:
                     "mode": "real",
                     "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
+                    "delivery_id": delivery_id,
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "signature_key_id": signature_id,
@@ -3011,6 +3058,7 @@ class RealExternalCallbackClient:
                     "mode": "real",
                     "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
+                    "delivery_id": delivery_id,
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "status_code": status_code,
@@ -3044,6 +3092,7 @@ class RealExternalCallbackClient:
                     "mode": "real",
                     "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
+                    "delivery_id": delivery_id,
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "response_sha256": response_sha256,
@@ -3061,6 +3110,17 @@ class RealExternalCallbackClient:
         response_data = response_json.get("data") if isinstance(response_json, dict) else {}
         if not isinstance(response_data, dict):
             response_data = {}
+        response_delivery_id = str(response_data.get("delivery_id") or "")
+        if response_delivery_id and response_delivery_id != delivery_id:
+            return self._invalid_receipt_result(
+                payload,
+                idempotency_key,
+                request_sha256,
+                response_sha256,
+                status_code,
+                signature_id,
+                "callback delivery identifiers disagree",
+            )
         body_receipt_id = str(response_data.get("callback_receipt_id") or "")
         header_receipt_id = self._response_header(
             response.get("headers"), "X-Auris-Callback-Receipt-Id"
@@ -3085,6 +3145,7 @@ class RealExternalCallbackClient:
                     "mode": "real",
                     "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
+                    "delivery_id": delivery_id,
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "response_sha256": response_sha256,
@@ -3113,6 +3174,7 @@ class RealExternalCallbackClient:
                     "mode": "real",
                     "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
+                    "delivery_id": delivery_id,
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "response_sha256": response_sha256,
@@ -3142,6 +3204,7 @@ class RealExternalCallbackClient:
                 "callback_url": self._callback_url_for_audit(),
                 "http_method": "POST",
                 "status_code": status_code,
+                "delivery_id": delivery_id,
                 "callback_receipt_id": callback_receipt_id,
                 "remote_trace_id": protocol_receipt.get("remote_trace_id"),
                 "receipt_url": receipt_target.url,
@@ -3164,16 +3227,16 @@ class RealExternalCallbackClient:
 
     def reconcile_callback(self, payload: dict[str, Any]) -> DispatchResult:
         idempotency_key = self._idempotency_key(payload)
-        receipt_id = f"callback_receipt_{hashlib.sha256(idempotency_key.encode()).hexdigest()[:16]}"
+        delivery_id = self._delivery_id(payload)
         try:
-            receipt_url = self._expected_receipt_url(receipt_id)
-            response = self._request_url(receipt_url, method="GET")
+            delivery_lookup_url = self._expected_delivery_lookup_url(delivery_id)
+            response = self._request_url(delivery_lookup_url, method="GET")
         except _ExternalCallbackSecurityError as exc:
             return DispatchResult(
                 adapter="external_callback",
                 operation="reconcile_callback",
                 status="failed",
-                details={"callback_receipt_id": receipt_id},
+                details={"delivery_id": delivery_id},
                 error_code="EXTERNAL_CALLBACK_SECURITY_REJECTED",
                 error_message=str(exc),
                 retryable=False,
@@ -3183,14 +3246,20 @@ class RealExternalCallbackClient:
                 return _reconciliation_not_found(
                     "external_callback",
                     "reconcile_callback",
-                    details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                    details={
+                        "delivery_id": delivery_id,
+                        "delivery_lookup_url": delivery_lookup_url,
+                    },
                 )
             if 300 <= exc.code < 400:
                 return DispatchResult(
                     adapter="external_callback",
                     operation="reconcile_callback",
                     status="failed",
-                    details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                    details={
+                        "delivery_id": delivery_id,
+                        "delivery_lookup_url": delivery_lookup_url,
+                    },
                     error_code="EXTERNAL_CALLBACK_REDIRECT_REJECTED",
                     error_message="external callback receipt redirects are forbidden",
                     retryable=False,
@@ -3201,7 +3270,10 @@ class RealExternalCallbackClient:
                 "EXTERNAL_CALLBACK_RECONCILIATION_FAILED",
                 str(exc),
                 retryable=True,
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
             )
         except (OSError, URLError, TimeoutError, ValueError) as exc:
             return _reconciliation_failure(
@@ -3210,7 +3282,10 @@ class RealExternalCallbackClient:
                 "EXTERNAL_CALLBACK_RECONCILIATION_FAILED",
                 str(exc),
                 retryable=True,
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
             )
 
         status_code = self._status_code(response)
@@ -3219,7 +3294,10 @@ class RealExternalCallbackClient:
                 adapter="external_callback",
                 operation="reconcile_callback",
                 status="failed",
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
                 error_code="EXTERNAL_CALLBACK_REDIRECT_REJECTED",
                 error_message="external callback receipt redirects are forbidden",
                 retryable=False,
@@ -3228,7 +3306,10 @@ class RealExternalCallbackClient:
             return _reconciliation_not_found(
                 "external_callback",
                 "reconcile_callback",
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
             )
         if not 200 <= status_code < 300:
             return _reconciliation_failure(
@@ -3237,7 +3318,10 @@ class RealExternalCallbackClient:
                 "EXTERNAL_CALLBACK_RECONCILIATION_FAILED",
                 f"callback receipt endpoint returned HTTP {status_code}",
                 retryable=status_code >= 500 or status_code in {408, 425, 429},
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
             )
         raw_value = response.get("body") if isinstance(response, dict) else b""
         raw = raw_value if isinstance(raw_value, bytes) else b""
@@ -3250,18 +3334,60 @@ class RealExternalCallbackClient:
                 "EXTERNAL_CALLBACK_RECONCILIATION_RESPONSE_INVALID",
                 str(exc),
                 retryable=True,
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
             )
         receipt = response_json.get("data") if isinstance(response_json, dict) else None
-        if not isinstance(receipt, dict) or receipt.get("callback_receipt_id") != receipt_id:
-            return _reconciliation_not_found(
+        if not isinstance(receipt, dict):
+            return _reconciliation_failure(
                 "external_callback",
                 "reconcile_callback",
-                details={"callback_receipt_id": receipt_id, "receipt_url": receipt_url},
+                "EXTERNAL_CALLBACK_RECONCILIATION_RESPONSE_INVALID",
+                "callback delivery lookup returned an invalid receipt",
+                retryable=False,
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
+            )
+        callback_receipt_id = str(receipt.get("callback_receipt_id") or "")
+        if not _CALLBACK_RECEIPT_ID_PATTERN.fullmatch(callback_receipt_id):
+            return _reconciliation_failure(
+                "external_callback",
+                "reconcile_callback",
+                "EXTERNAL_CALLBACK_RECEIPT_INVALID",
+                "callback delivery lookup returned an invalid remote receipt identifier",
+                retryable=False,
+                details={
+                    "delivery_id": delivery_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
+            )
+        try:
+            receipt_target = self._validate_receipt_url(
+                receipt.get("receipt_url"),
+                callback_receipt_id,
+                resolve=self.production_mode,
+            )
+        except _ExternalCallbackSecurityError as exc:
+            return _reconciliation_failure(
+                "external_callback",
+                "reconcile_callback",
+                "EXTERNAL_CALLBACK_RECEIPT_URL_INVALID",
+                str(exc),
+                retryable=False,
+                details={
+                    "delivery_id": delivery_id,
+                    "callback_receipt_id": callback_receipt_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                },
             )
 
         expected_request_sha256 = hashlib.sha256(self._callback_body_bytes(payload)).hexdigest()
         expected_fields = {
+            "delivery_id": delivery_id,
             "tenant_id": payload.get("tenant_id"),
             "project_id": payload.get("project_id"),
             "trace_id": payload.get("trace_id"),
@@ -3281,8 +3407,10 @@ class RealExternalCallbackClient:
                 operation="reconcile_callback",
                 status="failed",
                 details={
-                    "callback_receipt_id": receipt_id,
-                    "receipt_url": receipt_url,
+                    "delivery_id": delivery_id,
+                    "callback_receipt_id": callback_receipt_id,
+                    "delivery_lookup_url": delivery_lookup_url,
+                    "receipt_url": receipt_target.url,
                     "mismatched_fields": mismatched_fields,
                 },
                 error_code="EXTERNAL_CALLBACK_RECEIPT_INVALID",
@@ -3298,8 +3426,10 @@ class RealExternalCallbackClient:
             details={
                 "mode": "real",
                 "reconciled": True,
-                "callback_receipt_id": receipt_id,
-                "receipt_url": receipt_url,
+                "delivery_id": delivery_id,
+                "callback_receipt_id": callback_receipt_id,
+                "delivery_lookup_url": delivery_lookup_url,
+                "receipt_url": receipt_target.url,
                 "remote_trace_id": remote_trace_id,
                 "request_sha256": expected_request_sha256,
                 "tenant_id": payload.get("tenant_id"),
@@ -3316,6 +3446,9 @@ class RealExternalCallbackClient:
             or payload.get("idempotency_key")
             or _stable_receipt_id("cb_key", payload, "run_id", "target")
         )
+
+    def _delivery_id(self, payload: dict[str, Any]) -> str:
+        return _callback_delivery_id(self._idempotency_key(payload))
 
     def _callback_url_for_audit(self) -> str:
         parsed = urlparse(self.callback_url)
@@ -3586,6 +3719,19 @@ class RealExternalCallbackClient:
             f"/receipts/{quote(receipt_id, safe='')}"
         )
 
+    def _expected_delivery_lookup_url(self, delivery_id: str) -> str:
+        if not _CALLBACK_DELIVERY_ID_PATTERN.fullmatch(delivery_id):
+            raise _ExternalCallbackSecurityError("callback delivery identifier is invalid")
+        callback_target = self._validate_outbound_url(
+            self.callback_url,
+            purpose="callback",
+            resolve=False,
+        )
+        return (
+            f"{callback_target.scheme}://{callback_target.authority}"
+            f"/receipts/by-delivery/{quote(delivery_id, safe='')}"
+        )
+
     def _validate_receipt_url(
         self,
         receipt_url: object,
@@ -3641,6 +3787,7 @@ class RealExternalCallbackClient:
                     "mode": "real",
                     "callback_url": self._callback_url_for_audit(),
                     "target": payload.get("target"),
+                    "delivery_id": self._delivery_id(payload),
                     "idempotency_key": idempotency_key,
                     "request_sha256": request_sha256,
                     "status_code": status_code,
@@ -3662,6 +3809,7 @@ class RealExternalCallbackClient:
                 "mode": "real",
                 "callback_url": self._callback_url_for_audit(),
                 "target": payload.get("target"),
+                "delivery_id": self._delivery_id(payload),
                 "idempotency_key": idempotency_key,
                 "request_sha256": request_sha256,
                 "response_sha256": response_sha256,
@@ -3694,6 +3842,7 @@ class RealExternalCallbackClient:
                 "mode": "real",
                 "callback_url": self._callback_url_for_audit(),
                 "target": payload.get("target"),
+                "delivery_id": self._delivery_id(payload),
                 "idempotency_key": idempotency_key,
                 "request_sha256": request_sha256,
                 "response_sha256": response_sha256,
@@ -3851,9 +4000,11 @@ def dispatch_event(
         return adapters.dagster.get_run_status(external_run_id)
     if event_type in DAGSTER_RUN_REQUEST_EVENT_TYPES:
         return adapters.dagster.submit_run_request(payload)
+    if _voiceprint_vector_payload_requested(payload) or (
+        event_type == "voiceprint_enrollments.upserted" and payload.get("status") == "enrolled"
+    ):
+        return _unsupported_voiceprint_vector_result()
     if event_type in {"knowledge_source.sync_requested", "knowledge_index.build_requested"}:
-        return adapters.qdrant.upsert_index_payload(payload)
-    if event_type == "voiceprint_enrollments.upserted" and payload.get("status") == "enrolled":
         return adapters.qdrant.upsert_index_payload(payload)
     if event_type in {"audio_ingest.requested", "export.requested"}:
         return adapters.object_storage.reserve_object(payload)
@@ -3940,9 +4091,11 @@ def reconcile_event(
         return adapters.dagster.get_run_status(external_run_id)
     if event_type in DAGSTER_RUN_REQUEST_EVENT_TYPES:
         return adapters.dagster.reconcile_run_request(payload)
+    if _voiceprint_vector_payload_requested(payload) or (
+        event_type == "voiceprint_enrollments.upserted" and payload.get("status") == "enrolled"
+    ):
+        return _unsupported_voiceprint_vector_result()
     if event_type in {"knowledge_source.sync_requested", "knowledge_index.build_requested"}:
-        return adapters.qdrant.reconcile_index_payload(payload)
-    if event_type == "voiceprint_enrollments.upserted" and payload.get("status") == "enrolled":
         return adapters.qdrant.reconcile_index_payload(payload)
     if event_type in {"audio_ingest.requested", "export.requested"}:
         return adapters.object_storage.reconcile_object(payload)

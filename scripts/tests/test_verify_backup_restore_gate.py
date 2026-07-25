@@ -110,8 +110,10 @@ def _valid_evidence() -> dict[str, object]:
             for relative in (
                 "production/backup/backup_restore_evidence.py",
                 "production/backup/manifest.py",
+                "production/backup/recovery_linkage.py",
                 "production/backup/restore_network_allocator.py",
                 "production/scripts/backup.sh",
+                "production/scripts/recovery-linkage.sh",
                 "production/scripts/restore.sh",
                 "production/scripts/verify-backup.sh",
                 "scripts/release_bundle.py",
@@ -360,7 +362,11 @@ def test_sigstore_attestation_uses_exact_tag_bound_workflow_identity(
         "https://github.com/g5n-dev/auris_flow/.github/workflows/"
         "release-images.yml@refs/tags/v1.0.0-rc.1"
     ) in command
-    assert "https://token.actions.githubusercontent.com" in command
+    issuer_index = command.index("--certificate-oidc-issuer")
+    expected_issuer = "https://" + ".".join(
+        ("token", "actions", "githubusercontent", "com")
+    )
+    assert command[issuer_index + 1] == expected_issuer
 
     def reject(command: tuple[str, ...]) -> subprocess.CompletedProcess[str]:
         return subprocess.CompletedProcess(command, 1, "", "invalid signature")

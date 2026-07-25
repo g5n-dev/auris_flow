@@ -67,6 +67,214 @@ def test_rendered_production_compose_satisfies_candidate_policy() -> None:
     assert "identity-bootstrap" in document["services"]
 
 
+def test_every_service_has_bounded_runtime_and_log_rotation_guardrails() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+
+    for name, service in document["services"].items():
+        assert service["cpus"] == 2
+        assert service["mem_limit"] == "2147483648"
+        assert service["pids_limit"] == 512
+        assert service["init"] is True
+        assert service["ulimits"]["nofile"] == {"soft": 65536, "hard": 65536}
+        assert service["logging"] == {
+            "driver": "json-file",
+            "options": {"max-file": "5", "max-size": "10m"},
+        }, name
+
+    missing_memory = policy._render_compose()
+    missing_memory["services"]["qdrant"].pop("mem_limit")
+    unlimited_pids = policy._render_compose()
+    unlimited_pids["services"]["worker"]["pids_limit"] = -1
+    unbounded_logs = policy._render_compose()
+    unbounded_logs["services"]["mysql"]["logging"]["options"].pop("max-file")
+
+    assert "qdrant: memory limit must be between 128 MiB and 64 GiB" in (
+        policy.validate_compose(missing_memory)
+    )
+    assert "worker: PID limit must be between 64 and 4096" in (
+        policy.validate_compose(unlimited_pids)
+    )
+    assert "mysql: json-file logs must rotate at 10m with five retained files" in (
+        policy.validate_compose(unbounded_logs)
+    )
+
+
+def test_telemetry_outage_does_not_gate_business_process_startup_or_readiness() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    services = document["services"]
+    expected_business_checks = {
+        "auth",
+        "database",
+        "redis",
+        "object_storage",
+        "qdrant",
+        "dagster",
+    }
+    telemetry_services = {
+        "alertmanager",
+        "grafana",
+        "node-exporter",
+        "observability-health",
+        "otel-collector",
+        "prometheus",
+        "tempo",
+    }
+
+    for name in ("bff", "worker"):
+        assert set(services[name]["environment"]["REQUIRED_DEPENDENCY_CHECKS"].split(",")) == (
+            expected_business_checks
+        )
+    for name in ("bff", "worker", "dagster-code"):
+        assert not (set(services[name].get("depends_on") or {}) & telemetry_services)
+
+    hard_readiness = policy._render_compose()
+    hard_readiness["services"]["bff"]["environment"]["REQUIRED_DEPENDENCY_CHECKS"] += (
+        ",observability"
+    )
+    startup_cycle = policy._render_compose()
+    startup_cycle["services"]["worker"]["depends_on"]["observability-health"] = {
+        "condition": "service_healthy"
+    }
+
+    assert "bff: strict readiness must contain exactly the business dependencies" in (
+        policy.validate_compose(hard_readiness)
+    )
+    assert "worker: telemetry services must not gate business process startup" in (
+        policy.validate_compose(startup_cycle)
+    )
+
+
+def test_capacity_and_backup_freshness_metrics_are_wired_fail_closed() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    node_exporter = document["services"]["node-exporter"]
+
+    assert "--path.rootfs=/host" in node_exporter["command"]
+    assert (
+        "--collector.textfile.directory=/var/lib/node_exporter/textfile_collector"
+        in node_exporter["command"]
+    )
+
+    detached_host = policy._render_compose()
+    detached_host["services"]["node-exporter"]["volumes"][0]["read_only"] = False
+    writable_metrics = policy._render_compose()
+    writable_metrics["services"]["node-exporter"]["volumes"][1]["read_only"] = False
+    missing_collector = policy._render_compose()
+    missing_collector["services"]["node-exporter"]["command"].remove(
+        "--collector.textfile.directory=/var/lib/node_exporter/textfile_collector"
+    )
+
+    assert (
+        "node-exporter: host root must be mounted read-only with rslave propagation"
+        in policy.validate_compose(detached_host)
+    )
+    assert (
+        "node-exporter: runtime textfile metrics require one read-only absolute bind"
+        in policy.validate_compose(writable_metrics)
+    )
+    assert (
+        "node-exporter: host capacity and textfile collectors must be enabled"
+        in policy.validate_compose(missing_collector)
+    )
+
+
+def test_daily_backup_scheduler_is_locked_quiesced_and_recovers_writers() -> None:
+    policy = _load_policy()
+    wrapper = (ROOT / "production" / "scripts" / "scheduled-backup.sh").read_text(encoding="utf-8")
+    service = (ROOT / "production" / "systemd" / "auris-flow-backup.service").read_text(
+        encoding="utf-8"
+    )
+    timer = (ROOT / "production" / "systemd" / "auris-flow-backup.timer").read_text(
+        encoding="utf-8"
+    )
+    environment = (ROOT / "production" / "systemd" / "backup.env.example").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        policy.validate_backup_scheduler_assets(
+            wrapper_source=wrapper,
+            service_source=service,
+            timer_source=timer,
+            env_source=environment,
+        )
+        == []
+    )
+
+    unlocked = wrapper.replace("flock -n 9", "true", 1)
+    destructive = wrapper + "\ncompose down\n"
+    ungoverned = service.replace(
+        "ExecStart=/opt/auris-flow/production/scripts/scheduled-backup.sh",
+        "ExecStart=/bin/true",
+        1,
+    )
+    nonpersistent = timer.replace("Persistent=true", "Persistent=false", 1)
+    relative_output = environment.replace(
+        "AURIS_BACKUP_OUTPUT_ROOT=/mnt/encrypted-backups/auris-flow",
+        "AURIS_BACKUP_OUTPUT_ROOT=./backups",
+        1,
+    )
+
+    assert any(
+        "lock, quiesce" in error
+        for error in policy.validate_backup_scheduler_assets(
+            wrapper_source=unlocked,
+            service_source=service,
+            timer_source=timer,
+            env_source=environment,
+        )
+    )
+    assert any(
+        "destructive Compose down" in error
+        for error in policy.validate_backup_scheduler_assets(
+            wrapper_source=destructive,
+            service_source=service,
+            timer_source=timer,
+            env_source=environment,
+        )
+    )
+    assert any(
+        "hardened governed wrapper" in error
+        for error in policy.validate_backup_scheduler_assets(
+            wrapper_source=wrapper,
+            service_source=ungoverned,
+            timer_source=timer,
+            env_source=environment,
+        )
+    )
+    assert any(
+        "persistent daily timer" in error
+        for error in policy.validate_backup_scheduler_assets(
+            wrapper_source=wrapper,
+            service_source=service,
+            timer_source=nonpersistent,
+            env_source=environment,
+        )
+    )
+    assert any(
+        "absolute and traversal-free" in error
+        for error in policy.validate_backup_scheduler_assets(
+            wrapper_source=wrapper,
+            service_source=service,
+            timer_source=timer,
+            env_source=relative_output,
+        )
+    )
+
+
+def test_scheduled_backup_docker_bind_inputs_remain_visible_with_private_tmp() -> None:
+    service = (ROOT / "production" / "systemd" / "auris-flow-backup.service").read_text(
+        encoding="utf-8"
+    )
+    backup = (ROOT / "production" / "scripts" / "backup.sh").read_text(encoding="utf-8")
+
+    assert "PrivateTmp=true" in service
+    assert 'mktemp "${STAGING_DIR}/.auris-flow-minio-backup.XXXXXX"' in backup
+    assert 'mktemp "${TMPDIR:-/tmp}/auris-flow-minio-backup.XXXXXX"' not in backup
+
+
 def test_rendered_networks_confine_egress_to_authorized_services() -> None:
     policy = _load_policy()
     document = policy._render_compose()
@@ -767,6 +975,41 @@ def test_nginx_policy_rejects_forwarded_chain_append_and_playback_access_logging
     )
     assert "edge nginx: audio playback grant location must disable access logging" in (
         policy.validate_edge_nginx(logged_playback)
+    )
+
+
+def test_nginx_policy_requires_unbuffered_audio_range_forwarding() -> None:
+    policy = _load_policy()
+    nginx = (ROOT / "production" / "edge" / "nginx.conf").read_text(encoding="utf-8")
+    missing_proxy_buffering = nginx.replace("        proxy_buffering off;\n", "", 1)
+    missing_request_buffering = nginx.replace(
+        "        proxy_request_buffering off;\n",
+        "",
+        1,
+    )
+    missing_range = nginx.replace(
+        "        proxy_set_header Range $http_range;\n",
+        "",
+        1,
+    )
+    missing_if_range = nginx.replace(
+        "        proxy_set_header If-Range $http_if_range;\n",
+        "",
+        1,
+    )
+
+    assert policy.validate_edge_nginx(nginx) == []
+    assert "edge nginx: audio playback location must disable proxy buffering" in (
+        policy.validate_edge_nginx(missing_proxy_buffering)
+    )
+    assert "edge nginx: audio playback location must disable request buffering" in (
+        policy.validate_edge_nginx(missing_request_buffering)
+    )
+    assert "edge nginx: audio playback location must explicitly forward Range" in (
+        policy.validate_edge_nginx(missing_range)
+    )
+    assert "edge nginx: audio playback location must explicitly forward If-Range" in (
+        policy.validate_edge_nginx(missing_if_range)
     )
 
 

@@ -1,0 +1,12 @@
+[Unit]
+Description=Run the Auris Flow backup in the daily maintenance window
+
+[Timer]
+OnCalendar=*-*-* 02:17:00
+RandomizedDelaySec=10m
+AccuracySec=1m
+Persistent=true
+Unit=auris-flow-backup.service
+
+[Install]
+WantedBy=timers.target

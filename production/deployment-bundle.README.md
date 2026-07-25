@@ -210,7 +210,7 @@ bash production/scripts/verify-backup.sh \
 python3 scripts/verify_backup_restore_gate.py \
   --artifact /absolute/release-evidence/backup-restore-gate.json \
   --expected-commit FULL_SOURCE_COMMIT \
-  --expected-release-tag v1.0.0-rc.1 \
+  --expected-release-tag v1.0.0 \
   --signature-bundle /absolute/release-evidence/backup-restore-gate.sigstore.json \
   --release-bundle-root . \
   --formal

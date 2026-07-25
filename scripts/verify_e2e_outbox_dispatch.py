@@ -1586,7 +1586,9 @@ def bff_json_request(
             for key, value in DEFAULT_E2E_HEADERS.items()
             if include_default_auth or key != "Authorization"
         },
-        "X-Request-Id": f"e2e-completion-{hashlib.sha1(path.encode()).hexdigest()[:12]}",
+        "X-Request-Id": (
+            f"e2e-completion-{hashlib.sha256(path.encode()).hexdigest()[:12]}"
+        ),
     }
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"

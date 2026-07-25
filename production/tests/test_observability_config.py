@@ -447,7 +447,8 @@ def test_compose_wires_application_and_dagster_traces_to_the_internal_collector(
 
         dependencies = service.get("depends_on")
         assert isinstance(dependencies, dict)
-        assert dependencies.get("otel-collector") == {"condition": "service_started"}
+        assert "otel-collector" not in dependencies
+        assert "observability-health" not in dependencies
 
     collector = services.get("otel-collector")
     assert isinstance(collector, dict)
@@ -507,9 +508,8 @@ def test_observability_health_uses_live_endpoints_instead_of_version_commands() 
     )
 
     for service_name in ("bff", "worker", "dagster-code"):
-        assert services[service_name]["depends_on"]["observability-health"] == {
-            "condition": "service_healthy"
-        }
+        assert "observability-health" not in services[service_name]["depends_on"]
+        assert "otel-collector" not in services[service_name]["depends_on"]
     assert "healthcheck" not in services["otel-collector"]
     assert "healthcheck" not in services["tempo"]
     prometheus_health = services["prometheus"]["healthcheck"]["test"]
