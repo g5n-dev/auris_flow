@@ -42,7 +42,7 @@ jobs:
           python-version: "3.12"
 
       # oras-project/setup-oras v1.2.3
-      - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
+      - uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d
         with:
           version: "1.2.3"
 
