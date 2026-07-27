@@ -2,14 +2,14 @@
   "schemaVersion": 2,
   "source": "src/styles.css",
   "cascade": "strict-eager-source-order",
-  "sourceSha256": "4d35885bf4e11cebae81db8cacced23bca317b96066a1a2116d6bd67be70498d",
-  "sourceBytes": 1036065,
-  "sourceLines": 51225,
-  "topLevelNodes": 6747,
-  "orderedNodeTextSha256": "eceb18f86368b0305aa68a2b5eea23b87e93e344409fb494647e5d0cce25e612",
-  "orderedAstDescriptorSha256": "199e7d00319284ff900391e5d9fa9e59c173c7a02d8af00510466cb0bb51c48f",
-  "duplicateSelectorGroups": 424,
-  "duplicateSelectorSignature": "b3532501f9ae565e1f993e138a76494825c6e5da7b8a12020ea970842f5dd5d8",
+  "sourceSha256": "bef06d486697e6e85ea50bc16ea61f85a2a82cfe2d3ffa5b8bf816baf77af6d0",
+  "sourceBytes": 1044919,
+  "sourceLines": 51712,
+  "topLevelNodes": 6818,
+  "orderedNodeTextSha256": "96e8ca4948a77d16686c15e3f9750b97fe9f99ea77e23cd72bf81febd0d84dd7",
+  "orderedAstDescriptorSha256": "6f40e61891baf21e98a9bfc93fda00b15995b487327551da84628a9ead07f5a9",
+  "duplicateSelectorGroups": 427,
+  "duplicateSelectorSignature": "cd12cfe7909120d023f2896e4b20daa32d5b43d790e5362acc0e386f6daa22e1",
   "fragments": [
     {
       "file": "foundation/reset.css",
@@ -582,6 +582,19 @@
       "lines": 332,
       "bytes": 6257,
       "sha256": "e218616e0ba89e5498e338715f8081f20713b33b809628e4cc5f5eda6721102c"
+    },
+    {
+      "file": "features/data/audio-import.css",
+      "owner": "features",
+      "eager": true,
+      "sourceFile": "features/data/audio-import.css",
+      "sourceStartLine": 1,
+      "sourceEndLine": 487,
+      "startLine": 51226,
+      "endLine": 51712,
+      "lines": 487,
+      "bytes": 8854,
+      "sha256": "5668e534ca935b287f4e70180c9dcc3b7582c2002ab978f075ecfdd0f1854130"
     }
   ]
 }

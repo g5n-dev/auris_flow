@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import io
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError
@@ -35,6 +36,11 @@ class FakeResponse:
 
     def read(self, _limit: int) -> bytes:
         return self.payload
+
+
+def progress_conflict(request: Request, code: str) -> HTTPError:
+    body = json.dumps({"error": {"code": code}}).encode("utf-8")
+    return HTTPError(request.full_url, 409, "conflict", {}, io.BytesIO(body))
 
 
 def test_callback_matches_bff_hmac_contract_and_never_sends_keyring(
@@ -125,6 +131,229 @@ def test_callback_retry_keeps_business_idempotency_but_rotates_nonce(
     assert captured[0].get_header("Idempotency-key") == captured[1].get_header("Idempotency-key")
     assert captured[0].get_header("X-auris-nonce") != captured[1].get_header("X-auris-nonce")
     assert sleeps == [0.25]
+
+
+def test_progress_callback_reuses_hmac_contract_with_stage_idempotency(
+    scope: AurisRunContext,
+    keyring_file: Path,
+) -> None:
+    captured: list[Request] = []
+
+    def open_request(request: Request, *, timeout: float) -> FakeResponse:
+        assert timeout == 2
+        captured.append(request)
+        return FakeResponse({"data": {"current_stage": "downloading"}})
+
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        timeout_seconds=2,
+        opener=open_request,
+        clock=lambda: datetime(2026, 7, 18, 10, 31, tzinfo=UTC),
+        nonce_factory=lambda: "nonce-progress-downloading",
+    )
+
+    response = client.post_progress(
+        scope,
+        dagster_run_id="dg-import-001",
+        import_batch_id="import_batch_001",
+        stage="downloading",
+    )
+
+    assert response["data"]["current_stage"] == "downloading"
+    request = captured[0]
+    body = request.data or b""
+    assert request.full_url.endswith(f"/api/v1/runs/{scope.run_id}/external-progress-receipts")
+    assert json.loads(body) == {
+        "adapter": "dagster",
+        "source": "dagster",
+        "progress_receipt_id": "dagster:dg-import-001:downloading",
+        "external_id": "dg-import-001",
+        "tenant_id": scope.tenant_id,
+        "project_id": scope.project_id,
+        "task_run_id": scope.run_id,
+        "import_batch_id": "import_batch_001",
+        "stage": "downloading",
+    }
+    idempotency_key = "dagster-progress:dg-import-001:downloading"
+    assert request.get_header("Idempotency-key") == idempotency_key
+    expected_message = canonical_signature_message(
+        method="POST",
+        path=f"/api/v1/runs/{scope.run_id}/external-progress-receipts",
+        query="",
+        scope=scope,
+        idempotency_key=idempotency_key,
+        timestamp="2026-07-18T10:31:00+00:00",
+        nonce="nonce-progress-downloading",
+        key_id="dagster-2026-01",
+        body_sha256=hashlib.sha256(body).hexdigest(),
+    )
+    expected_signature = hmac.new(
+        SIGNING_VALUE.encode(),
+        expected_message.encode(),
+        hashlib.sha256,
+    ).hexdigest()
+    assert request.get_header("X-auris-signature") == f"sha256={expected_signature}"
+
+
+def test_progress_callback_waits_through_dispatch_listing_race(
+    scope: AurisRunContext,
+    keyring_file: Path,
+) -> None:
+    captured: list[Request] = []
+    sleeps: list[float] = []
+    nonces = iter(f"nonce-progress-race-{attempt}" for attempt in range(1, 6))
+
+    def open_request(request: Request, *, timeout: float) -> FakeResponse:
+        del timeout
+        captured.append(request)
+        if len(captured) < 5:
+            raise progress_conflict(
+                request,
+                "AUDIO_IMPORT_PROGRESS_DISPATCH_BINDING_MISSING",
+            )
+        return FakeResponse({"data": {"current_stage": "downloading"}})
+
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        opener=open_request,
+        nonce_factory=lambda: next(nonces),
+        sleeper=sleeps.append,
+    )
+
+    client.post_progress(
+        scope,
+        dagster_run_id="dg-import-dispatch-race",
+        import_batch_id="import_batch_001",
+        stage="downloading",
+    )
+
+    assert len(captured) == 5
+    assert sleeps == [0.5, 1.0, 2.0, 4.0]
+    assert {request.data for request in captured} == {captured[0].data}
+    assert {request.get_header("Idempotency-key") for request in captured} == {
+        "dagster-progress:dg-import-dispatch-race:downloading"
+    }
+    assert len({request.get_header("X-auris-nonce") for request in captured}) == 5
+
+
+def test_downloading_progress_uses_frozen_deadline_as_registration_barrier(
+    scope: AurisRunContext,
+    keyring_file: Path,
+) -> None:
+    captured: list[Request] = []
+    sleeps: list[float] = []
+    now = [datetime(2026, 7, 18, 10, 31, tzinfo=UTC)]
+
+    def sleep_and_advance(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += timedelta(seconds=seconds)
+
+    def open_request(request: Request, *, timeout: float) -> FakeResponse:
+        del timeout
+        captured.append(request)
+        if len(captured) < 7:
+            raise progress_conflict(
+                request,
+                "AUDIO_IMPORT_PROGRESS_DISPATCH_BINDING_MISSING",
+            )
+        return FakeResponse({"data": {"current_stage": "downloading"}})
+
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        opener=open_request,
+        clock=lambda: now[0],
+        nonce_factory=lambda: f"nonce-progress-barrier-{len(captured) + 1}",
+        sleeper=sleep_and_advance,
+    )
+
+    client.post_progress(
+        scope,
+        dagster_run_id="dg-import-registration-barrier",
+        import_batch_id="import_batch_001",
+        stage="downloading",
+        deadline_at=datetime(2026, 7, 18, 10, 32, tzinfo=UTC),
+    )
+
+    assert len(captured) == 7
+    assert sleeps == [0.5, 1.0, 2.0, 4.0, 4.0, 4.0]
+    assert {request.data for request in captured} == {captured[0].data}
+    assert len({request.get_header("X-auris-nonce") for request in captured}) == 7
+
+
+def test_progress_callback_fails_immediately_for_non_registration_conflict(
+    scope: AurisRunContext,
+    keyring_file: Path,
+) -> None:
+    captured: list[Request] = []
+    sleeps: list[float] = []
+
+    def open_request(request: Request, *, timeout: float) -> FakeResponse:
+        del timeout
+        captured.append(request)
+        raise progress_conflict(request, "AUDIO_IMPORT_PROGRESS_OUT_OF_ORDER")
+
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        opener=open_request,
+        clock=lambda: datetime(2026, 7, 18, 10, 31, tzinfo=UTC),
+        sleeper=sleeps.append,
+    )
+
+    with pytest.raises(CompletionCallbackError, match=r"progress callback failed \(HTTP 409\)"):
+        client.post_progress(
+            scope,
+            dagster_run_id="dg-import-out-of-order",
+            import_batch_id="import_batch_001",
+            stage="downloading",
+            deadline_at=datetime(2026, 7, 18, 10, 32, tzinfo=UTC),
+        )
+
+    assert len(captured) == 1
+    assert sleeps == []
+
+
+def test_progress_callback_requires_exact_persisted_stage_acknowledgement(
+    scope: AurisRunContext,
+    keyring_file: Path,
+) -> None:
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        opener=lambda *_args, **_kwargs: FakeResponse({"data": {"current_stage": "listing"}}),
+    )
+
+    with pytest.raises(CompletionCallbackError, match="acknowledgement"):
+        client.post_progress(
+            scope,
+            dagster_run_id="dg-import-unpersisted-stage",
+            import_batch_id="import_batch_001",
+            stage="downloading",
+        )
+
+
+@pytest.mark.parametrize("stage", ["queued", "listing", "materializing", "completed", "failed"])
+def test_progress_callback_only_allows_executor_owned_stages(
+    scope: AurisRunContext,
+    keyring_file: Path,
+    stage: str,
+) -> None:
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        opener=lambda *_args, **_kwargs: pytest.fail("invalid stage must not be sent"),
+    )
+
+    with pytest.raises(CompletionCallbackError, match="progress stage"):
+        client.post_progress(
+            scope,
+            dagster_run_id="dg-import-invalid-stage",
+            import_batch_id="import_batch_001",
+            stage=stage,
+        )
 
 
 def test_key_rotation_requires_explicit_active_id_for_overlapping_keys(

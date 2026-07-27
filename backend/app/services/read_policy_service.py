@@ -117,6 +117,7 @@ TRACE_REFERENCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyTy
             "sensitive",
             ("project_admin",),
         ),
+        "import_batches": ResourceReadPolicy("standard"),
         "label_recompute_runs": ResourceReadPolicy(
             "sensitive",
             ("project_admin", "model_engineer"),
@@ -233,6 +234,8 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "insight_metric_aggregation": "insight_reports",
         "insight_report": "insight_reports",
         "insight_report_metric_binding": "insight_reports",
+        "import_batch": "import_batches",
+        "import_batch_item": "import_batches",
         "knowledge_build": "knowledge_indexes",
         "knowledge_effect": "knowledge_effects",
         "knowledge_index": "knowledge_indexes",

@@ -13,7 +13,12 @@ const bundleCheckerSource = await readFile(
   new URL("./check-bundle-budget.mjs", import.meta.url),
   "utf8"
 );
-const { auditedBaseline, limits, referenceAudit } = frontendBundleBudgetPolicy;
+const {
+  auditedBaseline,
+  limits,
+  referenceAudit,
+  workingAcceptance
+} = frontendBundleBudgetPolicy;
 const approvedCandidate = frontendBundleBudgetPolicy.comparisonSnapshot;
 
 function marginRatio(limit, actual) {
@@ -42,6 +47,28 @@ test("预算基线与比较参照都绑定可审计总量，生产锁允许受�
   assert.equal(candidate.allBrotliBytes - baseline.allBrotliBytes, 5_260);
 });
 
+test("P0 音频导入增量有独立本地验收记录，且不能冒充正式发行基线", () => {
+  const previous = approvedCandidate.totals;
+  const accepted = workingAcceptance.totals;
+  assert.equal(workingAcceptance.status, "LOCAL_ACCEPTANCE");
+  assert.equal(workingAcceptance.releaseEligible, false);
+  assert.equal(
+    workingAcceptance.comparedToSourceCommit,
+    approvedCandidate.sourceCommit
+  );
+  assert.deepEqual({
+    jsRawBytes: accepted.jsRawBytes - previous.jsRawBytes,
+    jsBrotliBytes: accepted.jsBrotliBytes - previous.jsBrotliBytes,
+    allRawBytes: accepted.allRawBytes - previous.allRawBytes,
+    allBrotliBytes: accepted.allBrotliBytes - previous.allBrotliBytes
+  }, {
+    jsRawBytes: 15_711,
+    jsBrotliBytes: 13_852,
+    allRawBytes: 23_238,
+    allBrotliBytes: 14_703
+  });
+});
+
 test("严格 bundle 检查按 APPROVED 状态解析前端 Git tree，不依赖已废弃锁版本", () => {
   assert.match(
     bundleCheckerSource,
@@ -54,7 +81,7 @@ test("严格 bundle 检查按 APPROVED 状态解析前端 Git tree，不依赖�
 });
 
 test("全量预算只保留约 1% 小缓冲，防止用宽松阈值掩盖后续回归", () => {
-  const current = approvedCandidate.totals;
+  const current = workingAcceptance.totals;
   const guardedTotals = [
     ["js raw", limits.totalJsRawBytes, current.jsRawBytes],
     ["js brotli", limits.totalJsBrotliBytes, current.jsBrotliBytes],

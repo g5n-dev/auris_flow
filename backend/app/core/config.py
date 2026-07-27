@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     external_callback_url: str = "http://127.0.0.1:8089/callbacks/platform"
     external_callback_secret: str = "auris-dev-callback-secret"
     external_callback_key_bindings: str = ""
+    platform_credential_bindings: str = "{}"
     external_callback_active_key_id: str = ""
     external_callback_legacy_hmac_enabled: bool = False
     external_callback_signature_tolerance_seconds: int = 300

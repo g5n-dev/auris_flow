@@ -752,7 +752,43 @@ def test_confidential_oidc_override_adds_only_a_bff_secret_file() -> None:
         "redis_url",
         "runtime_database_url",
     }
-    assert bff_secret_sources == worker_secret_sources | {"oidc_client_secret"}
+    assert bff_secret_sources == worker_secret_sources | {
+        "oidc_client_secret",
+        "platform_credential_bindings",
+    }
+
+
+def test_platform_audio_credentials_are_file_mounted_only_where_required() -> None:
+    policy = _load_policy()
+    document = policy._render_compose()
+    services = document["services"]
+
+    assert services["bff"]["environment"]["PLATFORM_CREDENTIAL_BINDINGS_FILE"] == (
+        "/run/secrets/platform_credential_bindings"
+    )
+    assert (
+        services["dagster-code"]["environment"]["AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE"]
+        == "/run/secrets/platform_credential_bindings"
+    )
+    assert (
+        services["dagster-code"]["environment"]["AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS"]
+        == "media.example.com"
+    )
+
+    for name, service in services.items():
+        mounted = {
+            str(item.get("source") or "") if isinstance(item, dict) else str(item)
+            for item in service.get("secrets", [])
+        }
+        if name in {"bff", "dagster-code"}:
+            assert "platform_credential_bindings" in mounted
+        else:
+            assert "platform_credential_bindings" not in mounted
+
+    wildcard = policy._render_compose()
+    wildcard["services"]["dagster-code"]["environment"]["AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS"] = "*"
+    errors = policy.validate_compose(wildcard)
+    assert any("platform audio host allowlist" in error for error in errors)
 
 
 def test_backup_manifest_trust_keys_are_declared_but_never_mounted_into_services() -> None:

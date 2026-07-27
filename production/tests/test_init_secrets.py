@@ -34,6 +34,7 @@ EXPECTED_SECRET_FILES = {
     "mysql_runtime_password",
     "object_storage_access_key",
     "object_storage_secret_key",
+    "platform_credential_bindings",
     "qdrant_api_key",
     "redis_url",
     "redis_users.acl",

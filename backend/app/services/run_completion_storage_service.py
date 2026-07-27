@@ -22,6 +22,7 @@ STORAGE_OBJECT_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 PROVIDER_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,31}$")
 BUCKET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 MAX_COMPLETION_OBJECTS = 32
+MAX_AUDIO_IMPORT_OBJECTS = 256
 MAX_STORAGE_OBJECT_SIZE_BYTES = 5 * 1024 * 1024 * 1024
 AUDIO_PENDING_COMPLETION_STATUS = "pending_completion_binding"
 AUDIO_REJECTED_COMPLETION_STATUS = "rejected"
@@ -69,6 +70,7 @@ _ROLE_CONTENT_TYPES: dict[str, frozenset[str]] = {
             "application/vnd.apache.parquet",
         }
     ),
+    "raw_audio": frozenset({"audio/wav", "audio/x-wav"}),
 }
 
 
@@ -76,6 +78,7 @@ _ROLE_CONTENT_TYPES: dict[str, frozenset[str]] = {
 class _ExpectedObject:
     role: str
     content_sha256: str | None
+    version_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +141,90 @@ def _expected_objects(
     record: RunRecord,
     result_ref: dict[str, Any],
 ) -> dict[str, _ExpectedObject]:
+    if (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    ):
+        import_batch_id = result_ref.get("import_batch_id")
+        if not isinstance(import_batch_id, str) or import_batch_id != record.payload.get(
+            "import_batch_id"
+        ):
+            raise ApiError(
+                "AUDIO_IMPORT_COMPLETION_BINDING_MISMATCH",
+                "音频导入回执未绑定当前导入批次",
+                409,
+            )
+        manifest_id = result_ref.get("manifest_storage_object_id")
+        manifest_sha256 = result_ref.get("manifest_sha256")
+        if (
+            not isinstance(manifest_id, str)
+            or not STORAGE_OBJECT_ID_PATTERN.fullmatch(manifest_id)
+            or not isinstance(manifest_sha256, str)
+            or not SHA256_PATTERN.fullmatch(manifest_sha256)
+        ):
+            raise ApiError(
+                "RUN_COMPLETION_STORAGE_REFERENCES_INVALID",
+                "音频导入回执必须绑定 manifest 对象 ID 和 SHA-256",
+                422,
+            )
+        raw_items = result_ref.get("items")
+        if not isinstance(raw_items, list) or len(raw_items) >= MAX_AUDIO_IMPORT_OBJECTS:
+            raise ApiError(
+                "AUDIO_IMPORT_COMPLETION_ITEMS_INVALID",
+                "音频导入回执的导入项数量超出允许范围",
+                422,
+            )
+        audio_expected = {manifest_id: _ExpectedObject("manifest", manifest_sha256)}
+        external_ids: set[str] = set()
+        for raw_item in raw_items:
+            if not isinstance(raw_item, dict):
+                raise ApiError(
+                    "AUDIO_IMPORT_COMPLETION_ITEMS_INVALID",
+                    "音频导入项必须是对象",
+                    422,
+                )
+            external_id = raw_item.get("external_record_id")
+            status = raw_item.get("status")
+            if (
+                not isinstance(external_id, str)
+                or not external_id.strip()
+                or len(external_id.strip()) > 512
+                or external_id.strip() in external_ids
+                or status not in {"succeeded", "failed"}
+            ):
+                raise ApiError(
+                    "AUDIO_IMPORT_COMPLETION_ITEMS_INVALID",
+                    "音频导入项的外部 ID 或状态无效",
+                    422,
+                )
+            external_ids.add(external_id.strip())
+            if status != "succeeded":
+                continue
+            storage_object_id = raw_item.get("storage_object_id")
+            content_sha256 = raw_item.get("content_sha256")
+            object_version = raw_item.get("object_version")
+            if (
+                not isinstance(storage_object_id, str)
+                or not STORAGE_OBJECT_ID_PATTERN.fullmatch(storage_object_id)
+                or not isinstance(content_sha256, str)
+                or not SHA256_PATTERN.fullmatch(content_sha256)
+                or not isinstance(object_version, str)
+                or not object_version.strip()
+                or object_version.casefold() == "null"
+                or storage_object_id in audio_expected
+            ):
+                raise ApiError(
+                    "AUDIO_IMPORT_COMPLETION_ITEMS_INVALID",
+                    "成功导入项必须绑定唯一对象、SHA-256 和精确版本",
+                    422,
+                )
+            audio_expected[storage_object_id] = _ExpectedObject(
+                "raw_audio",
+                content_sha256,
+                object_version.strip(),
+            )
+        return audio_expected
+
     if record.run_type == "audio_intelligence":
         storage_object_id = result_ref.get("result_manifest_storage_object_id")
         manifest_sha256 = result_ref.get("result_manifest_sha256")
@@ -496,19 +583,43 @@ def _descriptor(
 
     raw_etag = raw.get("etag")
     etag = None if raw_etag is None else _text(raw_etag, field="etag", max_length=255)
+    if role == "raw_audio" and (etag is None or etag.casefold() == "null"):
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_ETAG_REQUIRED",
+            "导入音频对象必须绑定可用于播放校验的 ETag",
+            422,
+        )
     raw_version_id = raw.get("version_id")
     version_id = (
         None
         if raw_version_id is None
         else _text(raw_version_id, field="version_id", max_length=1024)
     )
-    if record.run_type == "audio_intelligence" and (
-        version_id is None or version_id.casefold() == "null"
-    ):
+    is_audio_import_manifest = (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+        and role == "manifest"
+    )
+    if (
+        record.run_type == "audio_intelligence" or role == "raw_audio" or is_audio_import_manifest
+    ) and (version_id is None or version_id.casefold() == "null"):
         raise ApiError(
             "RUN_COMPLETION_STORAGE_VERSION_REQUIRED",
-            "音频结果 manifest 必须绑定精确对象版本",
+            "音频导入对象与音频结果 manifest 必须绑定精确对象版本",
             422,
+        )
+    if expected_object.version_id is not None and version_id != expected_object.version_id:
+        raise ApiError(
+            "RUN_COMPLETION_STORAGE_VERSION_MISMATCH",
+            "对象精确版本与导入项回执不一致",
+            409,
+            details=[
+                {
+                    "storage_object_id": storage_object_id,
+                    "expected": expected_object.version_id,
+                    "actual": version_id,
+                }
+            ],
         )
     return _Descriptor(
         storage_object_id=storage_object_id,
@@ -821,14 +932,20 @@ def _validated_completion_descriptors(
             )
         return []
     raw_descriptors = raw_result_ref.get("storage_objects")
+    maximum_objects = (
+        MAX_AUDIO_IMPORT_OBJECTS
+        if record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+        else MAX_COMPLETION_OBJECTS
+    )
     if (
         not isinstance(raw_descriptors, list)
         or not raw_descriptors
-        or len(raw_descriptors) > MAX_COMPLETION_OBJECTS
+        or len(raw_descriptors) > maximum_objects
     ):
         raise ApiError(
             "RUN_COMPLETION_STORAGE_DESCRIPTORS_INVALID",
-            f"storage_objects 必须包含 1 到 {MAX_COMPLETION_OBJECTS} 个描述符",
+            f"storage_objects 必须包含 1 到 {maximum_objects} 个描述符",
             422,
         )
 
@@ -1126,22 +1243,30 @@ def register_hotword_completion_storage_objects(
         return []
 
     registered = [
-        _register_descriptor(
-            session,
-            ctx,
-            record,
+        (
             descriptor,
-            staged_completion_receipt_id=staged_completion_receipt_id,
+            _register_descriptor(
+                session,
+                ctx,
+                record,
+                descriptor,
+                staged_completion_receipt_id=staged_completion_receipt_id,
+            ),
         )
         for descriptor in descriptors
     ]
+    expose_registered_role = (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    )
     return [
         {
             "storage_object_id": item.storage_object_id,
+            **({"role": descriptor.role} if expose_registered_role else {}),
             "source_type": item.source_type,
             "source_id": item.source_id,
             "status": item.status,
             "trace_id": item.trace_id,
         }
-        for item in registered
+        for descriptor, item in registered
     ]

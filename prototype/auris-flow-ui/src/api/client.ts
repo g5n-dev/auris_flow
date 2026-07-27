@@ -11,6 +11,8 @@ import {
   emitApiAuthEvent
 } from "./requestScope";
 import { composeIdempotencyKey, resolveWriteIdempotencyKey } from "./idempotencyKey";
+import { buildApiScopeKey, readApiRuntimeScope } from "./apiRuntimeScope";
+import { listAllTaskVersions } from "./taskVersionPagination";
 export { ApiRequestError, isApiRequestError } from "./apiRequestError";
 export { subscribeApiAuthEvents } from "./requestScope";
 
@@ -107,6 +109,9 @@ export function setApiContext(nextContext: ApiRuntimeContext) {
   }
   apiContext = next;
 }
+
+export const getApiScopeKey = () => buildApiScopeKey(apiContext);
+export const getApiRuntimeScope = () => readApiRuntimeScope(apiContext);
 
 export function clearApiAuthContext() {
   advanceScopeEpoch();
@@ -1644,9 +1649,8 @@ export async function getTaskVersion(
   );
 }
 
-export async function listTaskVersions(): Promise<ApiEnvelope<{ items: Array<Record<string, unknown>> }>> {
-  return apiRequest<{ items: Array<Record<string, unknown>> }>("/v1/task-versions?limit=100");
-}
+export const listTaskVersions = (): Promise<ApiEnvelope<{ items: Array<Record<string, unknown>> }>> =>
+  listAllTaskVersions((path) => apiRequest<{ items: Array<Record<string, unknown>> }>(path));
 
 export async function publishTaskVersionDraft(
   taskVersionId: string,

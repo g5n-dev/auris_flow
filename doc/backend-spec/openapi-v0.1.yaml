@@ -865,6 +865,20 @@ paths:
           $ref: "#/components/responses/Error"
 
   /connectors/{id}:
+    get:
+      tags: [connectors]
+      summary: 读取连接器配置详情
+      operationId: getConnectorsById
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObject"
+        default:
+          $ref: "#/components/responses/Error"
     patch:
       tags: [connectors]
       summary: 更新连接器配置
@@ -880,6 +894,92 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObject"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /connectors/{connector_id}/connection-tests:
+    post:
+      tags: [connectors]
+      summary: 测试平台音频连接器的真实连通性
+      description: >
+        使用服务端 credential_ref 绑定访问外部平台；不接收或返回明文凭证。
+        探测期间若连接器版本或语义配置发生变化，以
+        CONNECTOR_CHANGED_DURING_PROBE 拒绝旧结果，不覆盖新配置。
+      operationId: postConnectorsByConnectorIdConnectionTests
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: connector_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectorProbeRequest"
+      responses:
+        "200":
+          description: 连通性测试成功并记录安全观察结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorConnectionTestResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /connectors/{connector_id}/record-previews:
+    post:
+      tags: [connectors]
+      summary: 预览平台音频源记录并校验字段映射
+      description: >
+        最多返回三条脱敏源记录；签名 URL、Authorization 与其他敏感字段不会持久化或回传。
+        探测期间连接器发生变化时拒绝旧预览结果。
+      operationId: postConnectorsByConnectorIdRecordPreviews
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: connector_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectorProbeRequest"
+      responses:
+        "200":
+          description: 脱敏预览与映射校验结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorRecordPreviewResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /platform-connections:
+    get:
+      tags: [connectors]
+      summary: 平台连接列表
+      operationId: getPlatformConnections
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericList"
         default:
           $ref: "#/components/responses/Error"
 
@@ -980,6 +1080,60 @@ paths:
       responses:
         "202":
           $ref: "#/components/responses/AcceptedRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /import-batches/{import_batch_id}:
+    get:
+      tags: [connectors, task-runs]
+      summary: 读取音频导入批次
+      description: >
+        从 BFF 强表回读批次阶段、统计、游标和 root_trace_id；只有业务对象完成物化后
+        批次才可进入 succeeded。
+      operationId: getImportBatchesByImportBatchId
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: import_batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 导入批次详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportBatchResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /import-batches/{import_batch_id}/items:
+    get:
+      tags: [connectors, task-runs]
+      summary: 读取音频导入批次明细
+      description: >
+        返回该批次受执行回执上限约束的全部导入项，包括外部记录 ID、结果、错误码、
+        精确对象版本、audio_session_id 与 root_trace_id。
+      operationId: getImportBatchesByImportBatchIdItems
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: import_batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 批次导入项
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportBatchItemListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1713,6 +1867,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RunCompletionReceiptPendingResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /runs/{id}/external-progress-receipts:
+    post:
+      tags: [task-runs]
+      summary: 接收音频导入执行阶段的签名进度回执
+      description: >
+        仅接受白名单 Dagster 音频导入运行的 downloading / verifying 阶段。
+        回执必须绑定租户、项目、TaskRun、ImportBatch 和可信 external_id；
+        重放由签名 nonce 与 Idempotency-Key 双重约束。
+      operationId: postRunsByIdExternalProgressReceipts
+      security:
+        - aurisCompletionSignature: []
+          aurisCompletionKeyId: []
+        - aurisCompletionSignature: []
+          aurisCompletionLegacyKeyId: []
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/XAurisKeyId"
+        - $ref: "#/components/parameters/XAurisSignatureId"
+        - $ref: "#/components/parameters/XAurisTimestamp"
+        - $ref: "#/components/parameters/XAurisNonce"
+        - $ref: "#/components/parameters/XAurisSource"
+        - $ref: "#/components/parameters/XAurisSignatureMode"
+        - $ref: "#/components/parameters/XAurisSignature"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalRunProgressReceiptRequest"
+      responses:
+        "202":
+          description: 进度回执已应用或作为同一阶段的幂等重放返回
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudioImportProgressResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -7380,6 +7577,243 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    ConnectorProbeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 3
+    ConnectorConnectionTestData:
+      type: object
+      additionalProperties: false
+      required: [connector_id, status, response_status, tested_at]
+      properties:
+        connector_id:
+          type: string
+        status:
+          type: string
+          enum: [success]
+        response_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        tested_at:
+          type: string
+          format: date-time
+    ConnectorConnectionTestResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConnectorConnectionTestData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ConnectorRecordPreviewData:
+      type: object
+      additionalProperties: false
+      required:
+        [connector_id, status, record_count, records, fields, mapping_valid, mapping_errors, previewed_at]
+      properties:
+        connector_id:
+          type: string
+        status:
+          type: string
+          enum: [success]
+        record_count:
+          type: integer
+          minimum: 0
+          maximum: 3
+        records:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: true
+          description: 脱敏源记录；凭据、授权头和签名 URL 参数不得出现。
+        fields:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        mapping_valid:
+          type: boolean
+        mapping_errors:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        previewed_at:
+          type: string
+          format: date-time
+    ConnectorRecordPreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConnectorRecordPreviewData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ImportBatchStatus:
+      type: string
+      enum: [queued, running, partial, succeeded, failed, cancelled]
+    ImportBatchData:
+      type: object
+      additionalProperties: false
+      required:
+        - import_batch_id
+        - task_run_id
+        - task_version_id
+        - connector_id
+        - status
+        - current_stage
+        - total_items
+        - succeeded_items
+        - skipped_items
+        - failed_items
+        - root_trace_id
+        - trace_id
+      properties:
+        import_batch_id: {type: string}
+        task_run_id: {type: string}
+        task_version_id: {type: string}
+        connector_id: {type: string}
+        status:
+          $ref: "#/components/schemas/ImportBatchStatus"
+        current_stage:
+          type: string
+          enum: [queued, listing, downloading, verifying, materializing, completed]
+        total_items: {type: integer, minimum: 0}
+        succeeded_items: {type: integer, minimum: 0}
+        skipped_items: {type: integer, minimum: 0}
+        failed_items: {type: integer, minimum: 0}
+        cursor_before: {type: string, nullable: true}
+        cursor_after: {type: string, nullable: true}
+        root_trace_id: {type: string}
+        trace_id: {type: string}
+        started_at: {type: string, format: date-time, nullable: true}
+        finished_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        error_code:
+          type: string
+          nullable: true
+          pattern: '^[A-Z][A-Z0-9_]{2,127}$'
+        reason: {type: string, nullable: true}
+    ImportBatchResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ImportBatchData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ImportBatchItem:
+      type: object
+      additionalProperties: false
+      required:
+        [import_item_id, import_batch_id, external_record_id, status, root_trace_id, trace_id]
+      properties:
+        import_item_id: {type: string}
+        import_batch_id: {type: string}
+        external_record_id: {type: string}
+        status:
+          type: string
+          enum: [succeeded, skipped, failed]
+        error_code:
+          type: string
+          nullable: true
+          pattern: '^[A-Z][A-Z0-9_]{2,127}$'
+        object_version: {type: string, nullable: true}
+        audio_session_id: {type: string, nullable: true}
+        root_trace_id: {type: string}
+        trace_id: {type: string}
+    ImportBatchItemListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportBatchItem"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ExternalRunProgressReceiptRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [adapter, source, progress_receipt_id, tenant_id, project_id, task_run_id, external_id, import_batch_id, stage]
+      properties:
+        adapter:
+          type: string
+          enum: [dagster]
+        source:
+          type: string
+          enum: [dagster]
+        progress_receipt_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_:-]{0,255}$'
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
+        project_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
+        task_run_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$'
+        import_batch_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+        stage:
+          type: string
+          enum: [downloading, verifying]
+    AudioImportProgressData:
+      type: object
+      additionalProperties: false
+      required: [run_id, import_batch_id, status, current_stage, applied, root_trace_id]
+      properties:
+        run_id: {type: string}
+        import_batch_id: {type: string}
+        status:
+          $ref: "#/components/schemas/ImportBatchStatus"
+        current_stage:
+          type: string
+          enum: [downloading, verifying]
+        applied:
+          type: boolean
+        root_trace_id:
+          type: string
+    AudioImportProgressResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/AudioImportProgressData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
     OIDCBackChannelLogoutRequest:
       type: object
       additionalProperties: true

@@ -14,7 +14,15 @@ import {
 import { aggregateMeta } from "../fixtures";
 import type { DataWorkspace } from "../useDataWorkspace";
 
-export function DataHeader({ workspace }: { workspace: DataWorkspace }) {
+export function DataHeader({
+  workspace,
+  openConnectorImport,
+  connectorImportOpen
+}: {
+  workspace: DataWorkspace;
+  openConnectorImport: () => void;
+  connectorImportOpen: boolean;
+}) {
   const {
     activeDataTabLabel,
     aggregationOrder,
@@ -30,7 +38,6 @@ export function DataHeader({ workspace }: { workspace: DataWorkspace }) {
     isContractCollapsed,
     isPivotCollapsed,
     isRelationView,
-    openConnectorImport,
     pendingDataAssetCount,
     setDataNotice,
     setIsContractCollapsed,
@@ -59,12 +66,12 @@ export function DataHeader({ workspace }: { workspace: DataWorkspace }) {
             type="button"
             className="data-connect-button"
             data-testid="data-connector-import"
-            disabled={dataAction === "connector-import" || !canImportConnector}
+            disabled={!canImportConnector}
             title={!canImportConnector ? connectorImportBlockedReason : undefined}
             onClick={openConnectorImport}
           >
             <Plus size={15} />
-            {dataAction === "connector-import" ? "创建中" : "连接器导入"}
+            {connectorImportOpen ? "配置中" : "连接器导入"}
           </button>
           {!canImportConnector && (
             <span data-testid="data-connector-blocked-reason">{connectorImportBlockedReason}</span>

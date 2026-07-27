@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.models import ImportBatch, JsonResource
 from app.repositories.json_resources import JsonResourceRepository
 from app.schemas.scene_profiles import SceneProfileManifest
 from app.services.task_version_bundle import build_task_version_bundle
@@ -36,6 +41,16 @@ HOTWORD_PUBLISH_LINEAGE_FIELDS = frozenset(
         "trace_id",
     }
 )
+AUDIO_PLATFORM_IMPORT_TASK_TYPE_ID = "audio-platform-import"
+AUDIO_PLATFORM_IMPORT_EXECUTION_CONTRACT = "auris-flow-audio-import-v1"
+IMPORT_TASK_SERVER_FIELDS = frozenset(
+    {
+        "connector_snapshot",
+        "connector_snapshot_sha256",
+        "execution_contract",
+        "import_target",
+    }
+)
 
 
 def _assert_task_type_in_scene_profile(
@@ -52,6 +67,12 @@ def _assert_task_type_in_scene_profile(
             "TaskVersion 必须声明 task_type_id",
             409,
         )
+    # Platform ingestion is foundational project infrastructure shared by all
+    # scene profiles. It is still bound to the active scene snapshot for audit,
+    # but does not require every business-scene manifest to duplicate this
+    # server-owned task type.
+    if task_type_id == AUDIO_PLATFORM_IMPORT_TASK_TYPE_ID:
+        return
     from app.services.scene_profile_service import get_scene_profile_version
 
     version = get_scene_profile_version(session, ctx, scene_profile_version_id)
@@ -176,6 +197,18 @@ def prepare_task_version_write(
     current: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     reject_legacy_hotword_writes(payload)
+    task_type_id = str(
+        payload.get("task_type_id") or (current or {}).get("task_type_id") or ""
+    ).strip()
+    if task_type_id == AUDIO_PLATFORM_IMPORT_TASK_TYPE_ID:
+        forged_fields = sorted(IMPORT_TASK_SERVER_FIELDS.intersection(payload))
+        if forged_fields:
+            raise ApiError(
+                "TASK_IMPORT_SERVER_FIELDS_FORBIDDEN",
+                "导入任务的连接器快照与执行契约只能由服务端冻结",
+                422,
+                details=[{"fields": forged_fields}],
+            )
     if current and str(current.get("status") or "") in {
         "published",
         "validated",
@@ -215,6 +248,26 @@ def prepare_task_version_write(
                 details=[{"fields": sorted(set(attempted_changes))}],
             )
     merged = {**(current or {}), **payload}
+    if task_type_id == AUDIO_PLATFORM_IMPORT_TASK_TYPE_ID:
+        connector_id = str(merged.get("connector_id") or "").strip()
+        if not connector_id:
+            raise ApiError(
+                "TASK_IMPORT_CONNECTOR_REQUIRED",
+                "平台音频导入 TaskVersion 必须绑定 connector_id",
+                422,
+            )
+        from app.services.connector_import_service import (
+            validate_platform_audio_connector,
+        )
+        from app.services.resource_service import get_resource
+
+        connector = get_resource(session, ctx, "connectors", connector_id)
+        validate_platform_audio_connector(session, ctx, connector.data)
+        merged = {
+            **merged,
+            "connector_id": connector_id,
+            "execution_contract": AUDIO_PLATFORM_IMPORT_EXECUTION_CONTRACT,
+        }
     from app.services.scene_profile_service import get_project_scene_binding
 
     scene_binding = get_project_scene_binding(session, ctx, "production")
@@ -393,8 +446,41 @@ def validate_task_version_publish_binding(
     return binding
 
 
+def freeze_import_task_version_connector(
+    session: Session,
+    ctx: RequestContext,
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    if str(data.get("task_type_id") or "") != AUDIO_PLATFORM_IMPORT_TASK_TYPE_ID:
+        return data
+    connector_id = str(data.get("connector_id") or "").strip()
+    if not connector_id:
+        raise ApiError(
+            "TASK_IMPORT_CONNECTOR_REQUIRED",
+            "平台音频导入 TaskVersion 必须绑定 connector_id",
+            422,
+        )
+    from app.services.connector_import_service import freeze_connector_snapshot
+
+    snapshot, snapshot_sha256, dedupe_policy, target_asset_key = freeze_connector_snapshot(
+        session, ctx, connector_id
+    )
+    return {
+        **data,
+        "connector_id": connector_id,
+        "connector_snapshot": snapshot,
+        "connector_snapshot_sha256": snapshot_sha256,
+        "execution_contract": AUDIO_PLATFORM_IMPORT_EXECUTION_CONTRACT,
+        "import_target": {
+            "target_asset_key": target_asset_key,
+            "dedupe_policy": dedupe_policy,
+        },
+    }
+
+
 def _version_snapshot(resource_key: str, data: dict[str, Any], status: str) -> dict[str, Any]:
     binding = _audio_binding(data)
+    execution_contract = data.get("execution_contract")
     version_document = {
         "task_version_id": resource_key,
         "task_type_id": data.get("task_type_id"),
@@ -409,6 +495,8 @@ def _version_snapshot(resource_key: str, data: dict[str, Any], status: str) -> d
         "scene_profile_id": data.get("scene_profile_id"),
         "scene_profile_version_id": data.get("scene_profile_version_id"),
         "scene_profile_snapshot_sha256": data.get("scene_profile_snapshot_sha256"),
+        **({"execution_contract": execution_contract} if execution_contract is not None else {}),
+        "connector_snapshot_sha256": data.get("connector_snapshot_sha256"),
         "status": status,
     }
     canonical = json.dumps(
@@ -425,6 +513,209 @@ def _version_snapshot(resource_key: str, data: dict[str, Any], status: str) -> d
         "behavior_sha256": bundle["behavior_sha256"],
         "binding_sha256": bundle["binding_sha256"],
         "component_fingerprints": bundle["component_fingerprints"],
+    }
+
+
+def _connector_version(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str) and value.isdigit():
+        normalized = int(value)
+        return normalized if normalized > 0 else None
+    return None
+
+
+def _prepare_audio_import_run(
+    session: Session,
+    ctx: RequestContext,
+    payload: dict[str, Any],
+    task_version: dict[str, Any],
+) -> dict[str, Any]:
+    if str(payload.get("execution_mode") or "") != "production":
+        raise ApiError(
+            "TASK_IMPORT_PRODUCTION_MODE_REQUIRED",
+            "平台音频拉取必须使用 production 执行模式",
+            409,
+        )
+    snapshot = task_version.get("connector_snapshot")
+    snapshot_sha256 = str(task_version.get("connector_snapshot_sha256") or "").strip()
+    import_target = task_version.get("import_target")
+    if (
+        not isinstance(snapshot, dict)
+        or len(snapshot_sha256) != 64
+        or not isinstance(import_target, dict)
+    ):
+        raise ApiError(
+            "TASK_IMPORT_CONNECTOR_SNAPSHOT_REQUIRED",
+            "导入任务必须先发布并冻结连接器快照",
+            409,
+        )
+    canonical_snapshot = json.dumps(
+        snapshot,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    if hashlib.sha256(canonical_snapshot).hexdigest() != snapshot_sha256:
+        raise ApiError(
+            "TASK_IMPORT_CONNECTOR_SNAPSHOT_INVALID",
+            "导入任务的连接器快照校验失败",
+            409,
+        )
+    target_asset_key = str(import_target.get("target_asset_key") or "").strip()
+    dedupe_policy = str(import_target.get("dedupe_policy") or "").strip()
+    if not target_asset_key or dedupe_policy != "external_id_checksum":
+        raise ApiError(
+            "TASK_IMPORT_TARGET_INVALID",
+            "导入任务的目标资产或去重策略不合法",
+            409,
+        )
+    connector_id = str(snapshot.get("connector_id") or "").strip()
+    connector = session.scalar(
+        select(JsonResource)
+        .where(
+            JsonResource.tenant_id == ctx.tenant_id,
+            JsonResource.project_id == ctx.project_id,
+            JsonResource.collection == "connectors",
+            JsonResource.resource_key == connector_id,
+        )
+        .with_for_update()
+    )
+    if connector is None:
+        raise ApiError(
+            "TASK_IMPORT_CONNECTOR_NOT_FOUND",
+            "已发布导入任务绑定的连接器不存在",
+            409,
+        )
+    if str(connector.data.get("status") or connector.status or "") == "disabled":
+        raise ApiError(
+            "CONNECTOR_DISABLED",
+            "已停用的连接器不能执行导入任务",
+            409,
+        )
+    frozen_connector_version = _connector_version(snapshot.get("connector_version"))
+    live_connector_version = _connector_version(connector.data.get("connector_version"))
+    if (
+        frozen_connector_version is None
+        or live_connector_version is None
+        or live_connector_version != frozen_connector_version
+    ):
+        raise ApiError(
+            "TASK_IMPORT_CONNECTOR_VERSION_MISMATCH",
+            "已发布任务冻结的连接器版本与当前连接器不一致",
+            409,
+            details=[
+                {
+                    "connector_id": connector_id,
+                    "task_connector_version": snapshot.get("connector_version"),
+                    "live_connector_version": connector.data.get("connector_version"),
+                }
+            ],
+        )
+    active_batch_id = session.scalar(
+        select(ImportBatch.import_batch_id)
+        .where(
+            ImportBatch.tenant_id == ctx.tenant_id,
+            ImportBatch.project_id == ctx.project_id,
+            ImportBatch.connector_id == connector_id,
+            ImportBatch.status.in_(("queued", "running")),
+        )
+        .order_by(ImportBatch.created_at)
+        .limit(1)
+    )
+    if active_batch_id is not None:
+        raise ApiError(
+            "CONNECTOR_IMPORT_ALREADY_ACTIVE",
+            "该平台连接当前已有导入批次在执行，请等待完成后重试",
+            409,
+            details=[{"connector_id": connector_id, "import_batch_id": active_batch_id}],
+        )
+    live_cursor = connector.data.get("sync_cursor")
+    if live_cursor is not None and (
+        not isinstance(live_cursor, str)
+        or len(live_cursor) > 1024
+        or any(ord(character) < 0x20 for character in live_cursor)
+    ):
+        raise ApiError(
+            "CONNECTOR_CURSOR_STATE_INVALID",
+            "连接器同步游标状态不合法",
+            409,
+        )
+    cursor_connector_version = connector.data.get("sync_cursor_connector_version")
+    if live_cursor is None:
+        if cursor_connector_version is not None:
+            raise ApiError(
+                "CONNECTOR_CURSOR_STATE_INVALID",
+                "连接器同步游标缺失但仍包含游标版本",
+                409,
+            )
+    elif _connector_version(cursor_connector_version) != frozen_connector_version:
+        raise ApiError(
+            "CONNECTOR_CURSOR_VERSION_MISMATCH",
+            "连接器同步游标不属于已发布任务冻结的连接器版本",
+            409,
+            details=[
+                {
+                    "connector_id": connector_id,
+                    "task_connector_version": frozen_connector_version,
+                    "cursor_connector_version": cursor_connector_version,
+                }
+            ],
+        )
+    runtime_snapshot = json.loads(json.dumps(snapshot, ensure_ascii=True))
+    runtime_cursor_policy = runtime_snapshot.get("cursor_policy")
+    if not isinstance(runtime_cursor_policy, dict):
+        raise ApiError(
+            "TASK_IMPORT_CONNECTOR_SNAPSHOT_INVALID",
+            "导入任务的连接器游标策略不合法",
+            409,
+        )
+    runtime_cursor_policy.pop("cursor_value", None)
+    if live_cursor:
+        runtime_cursor_policy["cursor_value"] = live_cursor
+    task_run_id = f"task_run_{uuid.uuid4().hex[:12]}"
+    import_batch_id = f"import_batch_{uuid.uuid4().hex[:12]}"
+    root_trace_id = ctx.trace_id
+    deadline_at = datetime.now(UTC) + timedelta(
+        seconds=get_settings().task_run_default_deadline_seconds
+    )
+    object_prefix = (
+        f"tenants/{ctx.tenant_id}/projects/{ctx.project_id}/runs/{task_run_id}/audio-import/"
+    )
+    target = {
+        "storage_provider": get_settings().object_storage_provider,
+        "bucket": get_settings().object_storage_bucket,
+        "object_prefix": object_prefix,
+        "target_asset_key": target_asset_key,
+        "dedupe_policy": dedupe_policy,
+    }
+    return {
+        **payload,
+        "task_run_id": task_run_id,
+        "import_batch_id": import_batch_id,
+        "root_trace_id": root_trace_id,
+        "execution_contract": AUDIO_PLATFORM_IMPORT_EXECUTION_CONTRACT,
+        "execution_deadline_at": deadline_at.isoformat(),
+        "connector_snapshot": runtime_snapshot,
+        "connector_snapshot_sha256": snapshot_sha256,
+        "target": target,
+        "target_object_prefix": object_prefix,
+        "affected_objects": [
+            {"type": "task_version", "id": payload.get("task_version_id")},
+            {"type": "connector", "id": snapshot.get("connector_id")},
+            {"type": "import_batch", "id": import_batch_id},
+            {"type": "data_asset", "id": target_asset_key},
+        ],
+        "next_actions": [
+            {
+                "key": "view_import_batch",
+                "label": "查看同步批次",
+                "route": f"import-batches/{import_batch_id}",
+            },
+            {"key": "view_trace", "label": "查看 Trace", "route": f"traces/{root_trace_id}"},
+        ],
     }
 
 
@@ -541,7 +832,7 @@ def enforce_task_execution_policy(
         root_trace_id = get_hotword_version(session, ctx, str(version_id)).root_trace_id
 
     non_production = execution_mode in NON_PRODUCTION_MODES
-    return {
+    prepared_run = {
         **payload,
         **binding,
         "root_trace_id": root_trace_id,
@@ -554,3 +845,6 @@ def enforce_task_execution_policy(
         "scene_profile_snapshot_sha256": scene_profile_snapshot_sha256 or None,
         "task_version_snapshot": _version_snapshot(task_version_id, data, status),
     }
+    if str(data.get("task_type_id") or "") == AUDIO_PLATFORM_IMPORT_TASK_TYPE_ID:
+        return _prepare_audio_import_run(session, ctx, prepared_run, data)
+    return prepared_run

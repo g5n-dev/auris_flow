@@ -1010,6 +1010,27 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
         }
         if "audio_inference_api_token" not in mounted_sources:
             errors.append("dagster-code: audio inference credential secret is required")
+        if environment.get("AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE") != (
+            "/run/secrets/platform_credential_bindings"
+        ):
+            errors.append(
+                "dagster-code: platform credential bindings must use its secret file"
+            )
+        if "platform_credential_bindings" not in mounted_sources:
+            errors.append(
+                "dagster-code: platform credential bindings secret is required"
+            )
+        platform_audio_hosts = {
+            value.strip()
+            for value in environment.get(
+                "AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS", ""
+            ).split(",")
+            if value.strip()
+        }
+        if "*" in platform_audio_hosts:
+            errors.append(
+                "dagster-code: platform audio host allowlist must not contain wildcard"
+            )
 
     for name, raw_service in services.items():
         if name == "dagster-code" or not isinstance(raw_service, dict):
@@ -1022,6 +1043,27 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
             errors.append(
                 f"{name}: audio inference credential is restricted to dagster-code"
             )
+        if (
+            name not in {"bff", "dagster-code"}
+            and "platform_credential_bindings" in mounted_sources
+        ):
+            errors.append(
+                f"{name}: platform credential bindings are restricted to bff and dagster-code"
+            )
+
+    bff = services.get("bff")
+    if isinstance(bff, dict):
+        bff_environment = _environment_map(bff)
+        bff_mounted_sources = {
+            str(item.get("source") or "") if isinstance(item, dict) else str(item)
+            for item in (bff.get("secrets") or [])
+        }
+        if bff_environment.get("PLATFORM_CREDENTIAL_BINDINGS_FILE") != (
+            "/run/secrets/platform_credential_bindings"
+        ):
+            errors.append("bff: platform credential bindings must use its secret file")
+        if "platform_credential_bindings" not in bff_mounted_sources:
+            errors.append("bff: platform credential bindings secret is required")
 
     edge_service = services.get("edge")
     if isinstance(edge_service, dict):

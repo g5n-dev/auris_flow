@@ -109,6 +109,28 @@ file 的 `0444` 只为 Compose 的非 root Alertmanager mount 提供只读访问
   `AURIS_AUDIO_INFERENCE_ENDPOINT`：endpoint 必须是无凭据/query/fragment 的 HTTPS URL；Provider
   和模型必须与 BFF 生成的服务端执行策略一致。把真实 Provider 签发的 bearer token 只写入
   `production/secrets/audio_inference_api_token`，覆盖初始化脚本生成的随机占位凭据并恢复 `0444`。
+- `production/secrets/platform_credential_bindings`：初始化值为 `{}`。每个
+  `credential_ref` 必须精确绑定六个键：
+  `tenant_id`、`project_id`、`platform_connection_id`、`platform_tenant_ref`、
+  `base_url` 与 `headers`，不允许缺键或额外键。例如：
+
+  ```json
+  {
+    "secret://platform/recordings-reader": {
+      "tenant_id": "aurora_auto",
+      "project_id": "sales_qa",
+      "platform_connection_id": "platform_connection_001",
+      "platform_tenant_ref": "external_tenant_001",
+      "base_url": "https://recordings.example.com",
+      "headers": {
+        "Authorization": "Bearer <secret>"
+      }
+    }
+  }
+  ```
+
+  文件只挂载给 BFF 与 `dagster-code`；前端只保存不透明引用，禁止保存明文凭证。若录音 URL
+  使用独立 CDN，用 `AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS` 配置精确主机列表，禁止 `*`。
 - `AURIS_INTERNAL_SUBNET` 与 `AURIS_EDGE_INTERNAL_IP`：两者必须匹配且不得与宿主机/VPN 网段冲突；
   修改后必须重新渲染 Compose 并执行生产策略门禁。
 - 所有应用和上游镜像引用；正式版本必须是发布清单给出的 digest。

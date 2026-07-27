@@ -69,6 +69,16 @@ def emit_task_run_terminal_event(
     }.get(record.status)
     if event_type is None or record.run_type != "task_run":
         return None
+    from app.services.audio_import_completion_service import (
+        finalize_audio_import_batch_from_task_terminal,
+    )
+
+    finalize_audio_import_batch_from_task_terminal(
+        session,
+        ctx,
+        record,
+        reason=reason,
+    )
     event_ctx = replace(
         ctx,
         trace_id=record.trace_id,

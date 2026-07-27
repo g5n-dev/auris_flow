@@ -223,7 +223,19 @@ def prepare_task_version_publish(
             409,
             details=[{"task_version_id": task_version_id, "status": version_status}],
         )
-    from app.services.task_execution_policy import validate_task_version_publish_binding
+    from app.services.task_execution_policy import (
+        freeze_import_task_version_connector,
+        validate_task_version_publish_binding,
+    )
+
+    frozen_version_data = freeze_import_task_version_connector(
+        session,
+        ctx,
+        version.data,
+    )
+    if frozen_version_data is not version.data:
+        version.data = frozen_version_data
+        session.flush()
 
     hotword_binding = validate_task_version_publish_binding(
         session,

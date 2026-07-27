@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from sqlalchemy.orm import Session
 
 from app.api.deps import ContextDep, PaginationDep, SessionDep
+from app.core.context import RequestContext
 from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
+from app.models import RunRecord
 from app.schemas import (
     RunCompletionReceiptRequest,
     TaskRunCancellationRequest,
@@ -15,6 +18,11 @@ from app.schemas import (
     parse_payload,
 )
 from app.services.experiment_service import bind_task_run_to_experiment
+from app.services.import_batch_service import create_import_batch_for_task_run
+from app.services.import_task_publish_service import (
+    AudioImportTaskPublishRequest,
+    publish_audio_import_task_version,
+)
 from app.services.release_gate_service import prepare_task_version_publish
 from app.services.resource_service import (
     create_idempotent_json_resource,
@@ -36,6 +44,14 @@ from app.services.task_execution_policy import (
 from app.services.task_run_control_service import create_task_run_control
 
 router = APIRouter(tags=["task-runs"])
+
+
+def _create_audio_import_batch(
+    session: Session,
+    ctx: RequestContext,
+    record: RunRecord,
+) -> None:
+    create_import_batch_for_task_run(session, ctx, record)
 
 
 @router.get("/task-types")
@@ -110,6 +126,19 @@ async def post_task_versions_by_id_publish(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
 ):
     require_any_role(ctx, ("project_admin",), "task_versions.publish")
+    version = get_resource(session, ctx, "task_versions", id)
+    if str(version.data.get("task_type_id") or "") == "audio-platform-import":
+        payload = parse_payload(
+            AudioImportTaskPublishRequest,
+            await request.json(),
+        ).model_dump(exclude_none=True)
+        return await publish_audio_import_task_version(
+            session,
+            ctx,
+            request,
+            id,
+            payload,
+        )
     body = await request.json()
     return await create_run(
         session,
@@ -138,6 +167,11 @@ async def post_task_runs(request: Request, session: SessionDep, ctx: ContextDep)
             session,
             ctx,
             bind_task_run_to_experiment(session, ctx, payload),
+        ),
+        prepare_record=lambda record: _create_audio_import_batch(
+            session,
+            ctx,
+            record,
         ),
     )
 

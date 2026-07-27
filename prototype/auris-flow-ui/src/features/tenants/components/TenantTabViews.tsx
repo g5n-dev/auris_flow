@@ -12,11 +12,31 @@ import {
   ShieldCheck,
   UserCheck
 } from "lucide-react";
+import type { ReactNode } from "react";
 
 import { QuotaPanel, StackedFacts, TimelineList } from "../../../shared/ui/FactDisplays";
 import { PanelHeader } from "../../../shared/ui/PanelHeader";
 import type { TenantWorkspace } from "../useTenantWorkspace";
 import { TenantDirectory } from "./TenantDirectory";
+
+function FactsPanel({
+  facts,
+  icon,
+  subtitle,
+  title
+}: {
+  facts: Array<[string, string]>;
+  icon: ReactNode;
+  subtitle: string;
+  title: string;
+}) {
+  return (
+    <section className="module-panel">
+      <PanelHeader title={title} subtitle={subtitle} icon={icon} />
+      <StackedFacts facts={facts} />
+    </section>
+  );
+}
 
 export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
   const {
@@ -33,20 +53,22 @@ export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
     setActiveModule,
     tenantAction
   } = workspace;
+  const openProjects = () => setActiveModule("projects");
+  const openCanvas = () => setActiveModule("canvas");
 
   const renderTenantProjects = () => (
     <>
       <section className="module-panel wide">
         <div className="compact-panel-head">
           <PanelHeader title="租户项目" subtitle={`${selectedTenant.name} / 项目归属只读，项目内部配置进入项目工作区`} icon={<Layers size={16} />} />
-          <button className="entity-primary-action" type="button" onClick={() => setActiveModule("projects")}>
+          <button className="entity-primary-action" type="button" onClick={openProjects}>
             打开项目工作区
           </button>
         </div>
         <div className="tenant-project-grid">
           {activeTenantProjects.length > 0 ? (
             activeTenantProjects.map((project) => (
-              <button key={project.name} type="button" className={project.risk === "正常" ? "tenant-project-card" : "tenant-project-card danger"} onClick={() => setActiveModule("projects")}>
+              <button key={project.name} type="button" className={project.risk === "正常" ? "tenant-project-card" : "tenant-project-card danger"} onClick={openProjects}>
                 <span>{project.status}</span>
                 <strong>{project.name}</strong>
                 <em>{project.dataScope}</em>
@@ -62,17 +84,19 @@ export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
               <GitBranch size={22} />
               <strong>还没有项目，租户边界已创建</strong>
               <span>下一步在项目工作区选择业务场景，配置数据源、成员、标签体系和质量目标。</span>
-              <button type="button" onClick={() => setActiveModule("projects")}>
+              <button type="button" onClick={openProjects}>
                 打开项目工作区
               </button>
             </div>
           )}
         </div>
       </section>
-      <section className="module-panel">
-        <PanelHeader title="项目隔离规则" subtitle="租户页只展示归属，不直接修改项目任务" icon={<ShieldCheck size={16} />} />
-        <StackedFacts facts={[["隔离主键", "tenant_id + project_id"], ["数据访问", "项目成员按角色授权"], ["跨项目实体", "通过实体映射表关联，不复制资产"], ["变更入口", "项目工作区 / 任务配置"]]} />
-      </section>
+      <FactsPanel
+        title="项目隔离规则"
+        subtitle="租户页只展示归属，不直接修改项目任务"
+        icon={<ShieldCheck size={16} />}
+        facts={[["隔离主键", "tenant_id + project_id"], ["数据访问", "项目成员按角色授权"], ["跨项目实体", "通过实体映射表关联，不复制资产"], ["变更入口", "项目工作区 / 任务配置"]]}
+      />
     </>
   );
   const renderTenantMembers = () => (
@@ -91,10 +115,12 @@ export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
           ))}
         </div>
       </section>
-      <section className="module-panel">
-        <PanelHeader title="权限边界" subtitle="平台级角色只控制租户边界，不越权改项目标签" icon={<ShieldCheck size={16} />} />
-        <StackedFacts facts={[["租户管理员", "成员、配额、全局审计"], ["项目管理员", "项目数据源、任务、成员"], ["标注主管", "标签版本、人工复核"], ["审计员", "只读审计、导出审批"]]} />
-      </section>
+      <FactsPanel
+        title="权限边界"
+        subtitle="平台级角色只控制租户边界，不越权改项目标签"
+        icon={<ShieldCheck size={16} />}
+        facts={[["租户管理员", "成员、配额、全局审计"], ["项目管理员", "项目数据源、任务、成员"], ["标注主管", "标签版本、人工复核"], ["审计员", "只读审计、导出审批"]]}
+      />
     </>
   );
   const renderTenantQuota = () => (
@@ -103,18 +129,20 @@ export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
         <PanelHeader title="资源配额" subtitle={`${selectedTenant.name} / 资源限制会影响项目任务调度`} icon={<Gauge size={16} />} />
         <QuotaPanel rows={quotaRows} />
       </section>
-      <section className="module-panel">
-        <PanelHeader title="配额策略" subtitle="调整配额必须进入审计日志" icon={<Settings size={16} />} />
-        <StackedFacts facts={[["超限行为", "暂停新任务，不影响已有资产读取"], ["并发控制", "项目任务共享租户并发池"], ["存储策略", "原始音频和派生资产分开统计"], ["审批策略", "高风险租户需管理员确认"]]} />
-      </section>
+      <FactsPanel
+        title="配额策略"
+        subtitle="调整配额必须进入审计日志"
+        icon={<Settings size={16} />}
+        facts={[["超限行为", "暂停新任务，不影响已有资产读取"], ["并发控制", "项目任务共享租户并发池"], ["存储策略", "原始音频和派生资产分开统计"], ["审批策略", "高风险租户需管理员确认"]]}
+      />
     </>
   );
   const renderTenantAsr = () => (
     <>
       <section className="module-panel wide tenant-asr-panel">
         <div className="compact-panel-head">
-          <PanelHeader title="ASR 数据接入" subtitle={`${selectedTenant.name} / 租户级拉取授权、游标、资产写入和审计边界`} icon={<BrainCircuit size={16} />} />
-          <button className="entity-primary-action" type="button" onClick={() => setActiveModule("canvas")}>
+          <PanelHeader title="平台音频接入" subtitle={`${selectedTenant.name} / 租户级拉取授权、游标、音频资产写入和审计边界`} icon={<BrainCircuit size={16} />} />
+          <button className="entity-primary-action" type="button" onClick={openCanvas}>
             配置拉取任务
           </button>
         </div>
@@ -205,10 +233,12 @@ export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
         <PanelHeader title="全局审计日志" subtitle={`${selectedTenant.name} / 成员、配额、导出、模型发布`} icon={<FileText size={16} />} />
         <TimelineList items={activeAuditItems} />
       </section>
-      <section className="module-panel">
-        <PanelHeader title="审计范围" subtitle="平台审计只记录租户边界动作，项目运行日志在项目页查看" icon={<Eye size={16} />} />
-        <StackedFacts facts={[["成员权限", "角色变更、邀请、禁用"], ["资源配额", "存储、并发、处理小时"], ["数据动作", "导出、回填审批"], ["模型发布", "灰度、回滚、阻断"]]} />
-      </section>
+      <FactsPanel
+        title="审计范围"
+        subtitle="平台审计只记录租户边界动作，项目运行日志在项目页查看"
+        icon={<Eye size={16} />}
+        facts={[["成员权限", "角色变更、邀请、禁用"], ["资源配额", "存储、并发、处理小时"], ["数据动作", "导出、回填审批"], ["模型发布", "灰度、回滚、阻断"]]}
+      />
     </>
   );
 
@@ -221,12 +251,12 @@ export function TenantTabViews({ workspace }: { workspace: TenantWorkspace }) {
     <>
       <TenantDirectory workspace={workspace} />
       <section className="module-panel">
-        <PanelHeader title="ASR 数据接入" subtitle={`${selectedTenant.name} / ${activeTenantAsr.status}`} icon={<BrainCircuit size={16} />} />
+        <PanelHeader title="平台音频接入" subtitle={`${selectedTenant.name} / ${activeTenantAsr.status}`} icon={<BrainCircuit size={16} />} />
         <div className="tenant-asr-mini">
           <strong>{activeTenantAsr.provider}</strong>
           <span>{activeTenantAsr.pullMode}</span>
           <em>游标 {activeTenantAsr.cursor}</em>
-          <button type="button" onClick={() => setActiveModule("canvas")}>
+          <button type="button" onClick={openCanvas}>
             配置拉取任务
           </button>
         </div>

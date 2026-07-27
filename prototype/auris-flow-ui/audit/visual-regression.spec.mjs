@@ -18,7 +18,7 @@ const moduleFilter = new Set(
 
 const modules = [
   { label: "首页", file: "01-home", tabs: ["总览", "待处理", "异常提醒", "最近资产"] },
-  { label: "租户", file: "02-tenants", tabs: ["概览", "项目", "成员", "ASR 接入", "资源配额", "审计日志"] },
+  { label: "租户", file: "02-tenants", tabs: ["概览", "项目", "成员", "音频接入", "资源配额", "审计日志"] },
   { label: "项目", file: "03-projects", tabs: ["项目概览", "数据源", "成员", "标签体系", "质量目标"] },
   { label: "任务", file: "04-canvas", tabs: ["流程配置", "流程模板", "编排版本", "输入输出", "触发与调度", "AB实验", "运行记录", "版本发布"] },
   { label: "数据", file: "05-data", tabs: ["音频数据", "人物/声纹", "事件", "关联视图"] },

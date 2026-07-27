@@ -1,0 +1,263 @@
+x-audio-import-gate-app-environment: &audio-import-gate-app-environment
+  AURIS_DAGSTER_EXECUTION_MODE: control-plane-acknowledgement
+  AURIS_OBJECT_STORAGE_ADAPTER: real
+  OBJECT_STORAGE_PROVIDER: minio
+  OBJECT_STORAGE_ENDPOINT: http://minio:9000
+  OBJECT_STORAGE_BUCKET: auris-flow
+  OBJECT_STORAGE_REGION: us-east-1
+  OBJECT_STORAGE_ALLOWED_BUCKETS: auris-flow
+  OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/object_storage_access_key
+  OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key
+  PLATFORM_CREDENTIAL_BINDINGS_FILE: /run/secrets/platform_credential_bindings
+  AUDIO_PLAYBACK_GRANT_SECRET_FILE: /run/secrets/audio_playback_grant_secret
+  SSL_CERT_FILE: /run/audio-import-gate-ca/ca.pem
+
+services:
+  audio-import-gate-secrets-augment:
+    image: python:3.12.11-slim-bookworm@sha256:519591d6871b7bc437060736b9f7456b8731f1499a57e22e6c285135ae657bf7
+    restart: "no"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - -c
+      - |
+        import json
+        import secrets
+        from pathlib import Path
+
+        target = Path("/run/auris-secrets")
+        values = {
+            "object_storage_access_key": "aurisgate" + secrets.token_hex(8),
+            "object_storage_secret_key": secrets.token_hex(32),
+            "audio_playback_grant_secret": secrets.token_urlsafe(48),
+            "platform_credential_bindings": json.dumps(
+                {
+                    "secret://platform/audio-import-gate": {
+                        "tenant_id": "aurora_auto",
+                        "project_id": "sales_qa",
+                        "platform_connection_id": "conn_platform_auth",
+                        "platform_tenant_ref": "audio-import-gate-tenant",
+                        "base_url": (
+                            "https://recordings.audio-import-gate.test:8443"
+                        ),
+                        "headers": {
+                            "Authorization": "Bearer audio-import-gate-fixture-auth"
+                        },
+                    }
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        }
+        for name, value in values.items():
+            path = target / name
+            path.write_text(value + "\n", encoding="utf-8")
+            path.chmod(0o444)
+    volumes:
+      - dagster_gate_secrets:/run/auris-secrets
+    depends_on:
+      dagster-gate-secrets-init:
+        condition: service_completed_successfully
+
+  audio-import-gate-pki-init:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    user: "0:0"
+    restart: "no"
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/audio_import_platform.py
+      - pki-init
+      - --ca-dir
+      - /run/audio-import-gate-ca
+      - --tls-dir
+      - /run/audio-import-gate-tls
+    volumes:
+      - ./tests/audio_import_platform.py:/opt/auris-gate/audio_import_platform.py:ro
+      - audio_import_gate_ca:/run/audio-import-gate-ca
+      - audio_import_gate_tls:/run/audio-import-gate-tls
+
+  audio-import-platform:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    user: "10001:10001"
+    init: true
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/audio_import_platform.py
+      - serve
+      - --tls-dir
+      - /run/audio-import-gate-tls
+    volumes:
+      - ./tests/audio_import_platform.py:/opt/auris-gate/audio_import_platform.py:ro
+      - audio_import_gate_tls:/run/audio-import-gate-tls:ro
+    networks:
+      audio-import-gate-platform:
+        ipv4_address: 93.184.216.2
+        aliases:
+          - recordings.audio-import-gate.test
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import ssl, urllib.request;
+          urllib.request.urlopen(
+          'https://127.0.0.1:8443/healthz',
+          context=ssl._create_unverified_context(),
+          timeout=2).read()
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+    depends_on:
+      audio-import-gate-pki-init:
+        condition: service_completed_successfully
+
+  minio:
+    secrets: !override []
+    volumes: !override
+      - minio_data:/data
+      - dagster_gate_secrets:/run/secrets:ro
+    depends_on: !override
+      minio-volume-init:
+        condition: service_completed_successfully
+      audio-import-gate-secrets-augment:
+        condition: service_completed_successfully
+
+  minio-bootstrap:
+    secrets: !override []
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+    depends_on: !override
+      minio:
+        condition: service_healthy
+      audio-import-gate-secrets-augment:
+        condition: service_completed_successfully
+
+  dagster-code:
+    environment:
+      APP_ENV: ci
+      AURIS_BFF_INTERNAL_URL: http://bff:8000
+      AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: dagster-v1
+      AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE: /run/secrets/platform_credential_bindings
+      AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS: recordings.audio-import-gate.test
+      AURIS_AUDIO_OBJECT_STORAGE_PROVIDER: minio
+      AURIS_AUDIO_OBJECT_STORAGE_ENDPOINT: http://minio:9000
+      AURIS_AUDIO_OBJECT_STORAGE_REGION: us-east-1
+      AURIS_AUDIO_OBJECT_STORAGE_ALLOWED_BUCKETS: auris-flow
+      AURIS_AUDIO_OBJECT_STORAGE_ACCESS_KEY_FILE: /run/secrets/object_storage_access_key
+      AURIS_AUDIO_OBJECT_STORAGE_SECRET_KEY_FILE: /run/secrets/object_storage_secret_key
+      SSL_CERT_FILE: /run/audio-import-gate-ca/ca.pem
+    volumes: !override
+      - dagster_gate_secrets:/run/secrets:ro
+      - audio_import_gate_ca:/run/audio-import-gate-ca:ro
+    networks: !override
+      - internal
+      - audio-import-gate-platform
+    depends_on: !override
+      dagster-storage-bootstrap:
+        condition: service_completed_successfully
+      minio-bootstrap:
+        condition: service_completed_successfully
+      audio-import-platform:
+        condition: service_healthy
+
+  bff:
+    environment:
+      <<: *audio-import-gate-app-environment
+    volumes: !override
+      - dagster_gate_secrets:/run/secrets:ro
+      - audio_import_gate_ca:/run/audio-import-gate-ca:ro
+    networks: !override
+      - internal
+      - app-egress
+      - audio-import-gate-platform
+    depends_on:
+      minio-bootstrap:
+        condition: service_completed_successfully
+      audio-import-platform:
+        condition: service_healthy
+
+  worker:
+    environment:
+      AURIS_DAGSTER_EXECUTION_MODE: control-plane-acknowledgement
+
+  audio-import-gate-verifier:
+    image: ${AURIS_BFF_IMAGE:-auris-flow-bff:dev}
+    user: "10001:10001"
+    init: true
+    restart: "no"
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    command:
+      - python
+      - /opt/auris-gate/verify_audio_import_stack.py
+      - --base-url
+      - http://bff:8000
+      - --source-commit
+      - ${AURIS_AUDIO_IMPORT_GATE_SOURCE_COMMIT:?set AURIS_AUDIO_IMPORT_GATE_SOURCE_COMMIT}
+      - --source-tree-dirty
+      - ${AURIS_AUDIO_IMPORT_GATE_SOURCE_TREE_DIRTY:?set AURIS_AUDIO_IMPORT_GATE_SOURCE_TREE_DIRTY}
+      - --timeout-seconds
+      - ${AURIS_AUDIO_IMPORT_GATE_RUN_TIMEOUT:-180}
+      - --run-suffix
+      - ${AURIS_AUDIO_IMPORT_GATE_RUN_SUFFIX:?set AURIS_AUDIO_IMPORT_GATE_RUN_SUFFIX}
+      - --artifact
+      - /artifacts/audio-import-real-stack-gate.json
+    environment:
+      APP_ENV: ci
+      AUTH_PROVIDER: dev
+      ALLOW_DEV_AUTH: "true"
+      DATABASE_URL_FILE: /run/secrets/product_database_url
+      PYTHONPATH: /app:/opt/auris-gate
+    volumes:
+      - dagster_gate_secrets:/run/secrets:ro
+      - ../scripts/verify_audio_import_stack.py:/opt/auris-gate/verify_audio_import_stack.py:ro
+      - ./tests/audio_import_platform.py:/opt/auris-gate/audio_import_platform.py:ro
+      - ${AURIS_AUDIO_IMPORT_GATE_ARTIFACT_DIR:?set AURIS_AUDIO_IMPORT_GATE_ARTIFACT_DIR}:/artifacts
+    networks:
+      - internal
+    depends_on:
+      bff:
+        condition: service_healthy
+      worker:
+        condition: service_healthy
+      dagster-daemon:
+        condition: service_healthy
+
+volumes:
+  audio_import_gate_ca:
+  audio_import_gate_tls:
+
+networks:
+  audio-import-gate-platform:
+    driver: bridge
+    internal: true
+    attachable: false
+    ipam:
+      config:
+        - subnet: 93.184.216.0/29

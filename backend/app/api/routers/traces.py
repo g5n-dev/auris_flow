@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.api.deps import ContextDep, SessionDep
 from app.core.response import envelope
@@ -231,7 +231,10 @@ def get_traces_by_trace_id(
 ) -> dict[str, Any]:
     require_trace_read(ctx)
     scope_filter = (
-        RunRecord.trace_id == trace_id,
+        or_(
+            RunRecord.trace_id == trace_id,
+            RunRecord.payload["root_trace_id"].as_string() == trace_id,
+        ),
         RunRecord.tenant_id == ctx.tenant_id,
         RunRecord.project_id == ctx.project_id,
     )

@@ -31,6 +31,56 @@ const asyncDispatchPollMs = Math.max(
   25,
   Number(process.env.AURIS_E2E_ASYNC_DISPATCH_POLL_MS || 100)
 );
+const audioImportTimeoutMs = Math.max(
+  30_000,
+  Number(process.env.AURIS_E2E_AUDIO_IMPORT_TIMEOUT_MS || 180_000)
+);
+const audioImportFixture = {
+  baseUrl: String(process.env.AURIS_E2E_AUDIO_IMPORT_BASE_URL || "").trim(),
+  credentialRef: String(process.env.AURIS_E2E_AUDIO_IMPORT_CREDENTIAL_REF || "").trim(),
+  platformConnectionId: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_PLATFORM_CONNECTION_ID || "conn_platform_auth"
+  ).trim(),
+  platformTenantRef: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_PLATFORM_TENANT_REF || "tenant-ext-001"
+  ).trim(),
+  storeScope: String(process.env.AURIS_E2E_AUDIO_IMPORT_STORE_SCOPE || "").trim(),
+  requestPath: String(process.env.AURIS_E2E_AUDIO_IMPORT_REQUEST_PATH || "/v1/recordings").trim(),
+  cursorParam: String(process.env.AURIS_E2E_AUDIO_IMPORT_CURSOR_PARAM || "cursor").trim(),
+  nextCursorPath: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_NEXT_CURSOR_PATH || "next_cursor"
+  ).trim(),
+  cursorField: String(process.env.AURIS_E2E_AUDIO_IMPORT_CURSOR_FIELD || "updated_at").trim(),
+  externalRecordIdField: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_EXTERNAL_ID_FIELD || "recording_id"
+  ).trim(),
+  audioUrlField: String(process.env.AURIS_E2E_AUDIO_IMPORT_AUDIO_URL_FIELD || "audio_url").trim(),
+  startedAtField: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_STARTED_AT_FIELD || "started_at"
+  ).trim(),
+  agentRefField: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_AGENT_REF_FIELD || "agent_id"
+  ).trim(),
+  storeRefField: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_STORE_REF_FIELD || "store_id"
+  ).trim(),
+  deviceRefField: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_DEVICE_REF_FIELD || "device_id"
+  ).trim(),
+  durationMsField: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_DURATION_MS_FIELD || "duration_ms"
+  ).trim(),
+  initialWindowStart: String(
+    process.env.AURIS_E2E_AUDIO_IMPORT_INITIAL_WINDOW_START || ""
+  ).trim()
+};
+const audioImportFixtureConfigured = Boolean(
+  audioImportFixture.baseUrl &&
+    audioImportFixture.credentialRef &&
+    audioImportFixture.platformConnectionId &&
+    audioImportFixture.platformTenantRef
+);
+const audioImportOnly = process.env.AURIS_E2E_ONLY_AUDIO_IMPORT === "1";
 const observedWorkerDispatches = [];
 const completionReceiptObservations = [];
 const realStackE2e = process.env.AURIS_REAL_STACK_E2E === "1";
@@ -122,6 +172,7 @@ let adminSessionToken = "";
 let annotatorSessionToken = "";
 let releaseApproverSessionToken = "";
 const writeMethods = new Set(["POST", "PUT", "PATCH", "DELETE"]);
+const safeRequestIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const activeGovernedAssetReadActionByPage = new WeakMap();
 const governedAssetReadActions = new Set(Object.values(GOVERNED_ASSET_READ_ACTION_BY_PATH));
 const governedAssetReadEpochHeader = "x-auris-e2e-asset-read-epoch";
@@ -179,9 +230,12 @@ async function installE2eRequestIsolation(page) {
       // MySQL stores idempotency keys in VARCHAR(128). Some UI scopes include
       // session, annotation and intent UUIDs, so retain the run scope while
       // deterministically compacting only overlong keys.
-      headers["idempotency-key"] = scopedKey.length <= 128
+      const safeRunScope = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,47}$/.test(runId)
+        ? runId
+        : `e2e-${sha256Hex(runId).slice(0, 32)}`;
+      headers["idempotency-key"] = safeRequestIdentifierPattern.test(scopedKey)
         ? scopedKey
-        : `${runId}:sha256:${sha256Hex(scopedKey).slice(0, 48)}`;
+        : `${safeRunScope}:sha256:${sha256Hex(scopedKey).slice(0, 48)}`;
       delete headers["Idempotency-Key"];
     }
     await route.continue({ headers });
@@ -4491,66 +4545,111 @@ async function runProjectCreateClosedLoopSmoke(page) {
   };
 }
 
-async function runTenantAsrPullClosedLoopSmoke(page) {
+async function runTenantAudioImportPullSmoke(page, audioImportClosedLoop) {
   await clickNav(page, "租户", "租户管理");
-  await clickModuleTab(page, "ASR 接入");
-  const responsePromise = page.waitForResponse(
-    (response) => response.url().includes("/api/v1/platform-sync-jobs") && response.request().method() === "POST",
-    { timeout: 10000 }
-  );
-  await page.locator(".tenant-asr-actions button").filter({ hasText: "拉取一次" }).first().click();
-  const response = await responsePromise;
-  const requestHeaders = response.request().headers();
-  assert(
-    requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
-      requestHeaders["x-project-id"] === defaultHeaders["X-Project-Id"],
-    "tenant ASR pull should carry current tenant/project context headers",
-    requestHeaders
-  );
-  assert(
-    requestHeaders["idempotency-key"]?.includes(runId),
-    "tenant ASR pull should carry current E2E run-scoped idempotency key",
-    requestHeaders
-  );
-  const json = await response.json().catch(() => ({}));
-  assert(response.status() === 202, `tenant ASR pull expected 202, got ${response.status()}`, json);
-  const syncRunId = json?.data?.run_id || json?.data?.id;
-  assert(syncRunId, "tenant ASR pull response missing run id", json);
-  assert(json?.data?.status === "pending", "tenant ASR pull should create pending platform sync run", json);
-  assert(json?.data?.run_type === "platform_sync", "tenant ASR pull should create platform_sync run", json);
-  assert(json?.meta?.trace_id, "tenant ASR pull missing trace id", json);
-  await assertBodyText(page, syncRunId, "tenant ASR pull should show backend run id");
-  await assertBodyText(page, shortTrace(json.meta.trace_id), "tenant ASR pull should show backend trace");
-
-  const detail = expectEnvelope(
-    await browserApi(page, `/api/v1/task-runs/${encodeURIComponent(syncRunId)}`),
-    "fetch tenant ASR pull run detail",
-    200
-  );
-  assert(detail.data.run_id === syncRunId, "tenant ASR pull run should be readable", detail);
-  assert(detail.data.run_type === "platform_sync", "tenant ASR pull detail should preserve platform_sync run type", detail);
-  assert(
-    detail.data.sync_scope === "tenant_asr_incremental" || detail.data.payload?.sync_scope === "tenant_asr_incremental",
-    "tenant ASR pull detail should preserve ASR sync scope",
-    detail
-  );
-  const trace = expectEnvelope(
-    await browserApi(page, `/api/v1/traces/${json.meta.trace_id}`),
-    "fetch tenant ASR pull trace",
-    200
-  );
-  assert(
-    trace.data.spans.some((span) => span.kind === "outbox" && span.event_type === "platform_sync.requested"),
-    "tenant ASR pull trace should include platform_sync outbox span",
-    trace
-  );
-
-  return {
-    id: syncRunId,
-    traceId: json.meta.trace_id,
-    status: json.data.status,
-    runType: json.data.run_type
+  await clickModuleTab(page, "音频接入");
+  let legacyPlatformSyncRequests = 0;
+  const observeLegacyPlatformSync = (request) => {
+    if (
+      request.method() === "POST" &&
+      new URL(request.url()).pathname === "/api/v1/platform-sync-jobs"
+    ) {
+      legacyPlatformSyncRequests += 1;
+    }
   };
+  page.on("request", observeLegacyPlatformSync);
+  if (audioImportClosedLoop.status === "skipped") {
+    try {
+      const pullButton = page.locator(".tenant-asr-actions button").filter({ hasText: "拉取一次" }).first();
+      await pullButton.waitFor({ state: "visible", timeout: 10_000 });
+      await pullButton.click();
+      await assertBodyText(
+        page,
+        "没有已发布的平台音频导入配置",
+        "tenant audio pull should explain why no production import can be created"
+      );
+      assert(
+        legacyPlatformSyncRequests === 0,
+        "tenant audio pull must not fall back to legacy /platform-sync-jobs",
+        { legacyPlatformSyncRequests }
+      );
+      return {
+        status: "skipped",
+        reasonCode: "REAL_AUDIO_IMPORT_FIXTURE_REQUIRED",
+        legacyPlatformSyncRequests
+      };
+    } finally {
+      page.off("request", observeLegacyPlatformSync);
+    }
+  }
+  const responsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/task-runs" &&
+      response.request().method() === "POST",
+    { timeout: 15_000 }
+  );
+  try {
+    await page.locator(".tenant-asr-actions button").filter({ hasText: "拉取一次" }).first().click();
+    const response = await responsePromise;
+    const requestHeaders = response.request().headers();
+    const requestPayload = response.request().postDataJSON();
+    assert(
+      requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
+        requestHeaders["x-project-id"] === defaultHeaders["X-Project-Id"],
+      "tenant audio pull should carry current tenant/project context headers",
+      requestHeaders
+    );
+    assert(
+      requestHeaders["idempotency-key"]?.includes(runId),
+      "tenant audio pull should carry current E2E run-scoped idempotency key",
+      requestHeaders
+    );
+    assert(
+      requestPayload.task_version_id === audioImportClosedLoop.taskVersionId &&
+        requestPayload.trigger_type === "manual" &&
+        requestPayload.execution_mode === "production",
+      "tenant audio pull must reuse the published import TaskVersion in production mode",
+      { requestPayload, audioImportClosedLoop }
+    );
+    const json = await response.json().catch(() => ({}));
+    assert(response.status() === 202, `tenant audio pull expected 202, got ${response.status()}`, json);
+    const taskRunId = json?.data?.run_id || json?.data?.id;
+    const importBatchId = json?.data?.import_batch_id || json?.data?.payload?.import_batch_id;
+    assert(taskRunId && importBatchId, "tenant audio pull response missing TaskRun or ImportBatch id", json);
+    assert(json?.data?.execution_mode === "production", "tenant audio pull must remain production", json);
+    assert(json?.meta?.trace_id, "tenant audio pull missing trace id", json);
+
+    const batchReadback = expectEnvelope(
+      await browserApi(page, `/api/v1/import-batches/${encodeURIComponent(importBatchId)}`),
+      "read back tenant-triggered import batch",
+      200
+    );
+    assert(
+      batchReadback.data.task_run_id === taskRunId,
+      "tenant-triggered import batch should bind the returned TaskRun",
+      batchReadback
+    );
+    await assertBodyText(page, taskRunId, "tenant audio pull should show backend TaskRun id");
+    await assertBodyText(page, importBatchId, "tenant audio pull should show backend ImportBatch id");
+    assert(
+      legacyPlatformSyncRequests === 0,
+      "tenant audio pull must not call legacy /platform-sync-jobs",
+      { legacyPlatformSyncRequests }
+    );
+
+    return {
+      id: taskRunId,
+      taskRunId,
+      importBatchId,
+      taskVersionId: requestPayload.task_version_id,
+      traceId: json.meta.trace_id,
+      status: json.data.status,
+      executionMode: json.data.execution_mode,
+      legacyPlatformSyncRequests
+    };
+  } finally {
+    page.off("request", observeLegacyPlatformSync);
+  }
 }
 
 async function runDataSceneProfileFailClosedSmoke(page) {
@@ -4603,7 +4702,7 @@ async function runDataSceneProfileFailClosedSmoke(page) {
   };
 }
 
-async function runDataConnectorImportClosedLoopSmoke(page) {
+async function runDataAudioImportClosedLoopSmoke(page) {
   await clickNav(page, "数据", "数据管理");
   await clickModuleTab(page, "音频数据");
   const activeSceneBinding = expectEnvelope(
@@ -4614,78 +4713,627 @@ async function runDataConnectorImportClosedLoopSmoke(page) {
     "load active SceneProfile binding before data connector import",
     200
   ).data;
-  const responsePromise = page.waitForResponse(
-    (response) => response.url().includes("/api/v1/connectors") && response.request().method() === "POST",
-    { timeout: 10000 }
-  );
-  await page.locator(".data-reference-head .data-connect-button").filter({ hasText: "连接器导入" }).first().click();
-  const response = await responsePromise;
-  const requestPayload = response.request().postDataJSON();
-  const requestHeaders = response.request().headers();
+  let connectorWriteCount = 0;
+  let legacyPlatformSyncRequests = 0;
+  const observeImportWrites = (request) => {
+    const pathname = new URL(request.url()).pathname;
+    if (
+      (pathname === "/api/v1/connectors" && request.method() === "POST") ||
+      (/^\/api\/v1\/connectors\/[^/]+$/.test(pathname) && request.method() === "PATCH")
+    ) connectorWriteCount += 1;
+    if (
+      pathname === "/api/v1/platform-sync-jobs" &&
+      request.method() === "POST"
+    ) legacyPlatformSyncRequests += 1;
+  };
+  page.on("request", observeImportWrites);
+  const recoveryResponses = [
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/connectors" &&
+        response.request().method() === "GET",
+      { timeout: 15_000 }
+    ),
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/task-versions" &&
+        response.request().method() === "GET",
+      { timeout: 15_000 }
+    ),
+    page.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/platform-connections" &&
+        response.request().method() === "GET",
+      { timeout: 15_000 }
+    )
+  ];
+  await page.getByTestId("data-connector-import").click();
+  const drawer = page.locator(".audio-import-drawer");
+  await drawer.waitFor({ state: "visible", timeout: 10_000 });
+  await Promise.all(recoveryResponses);
   assert(
-    requestHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
-      requestHeaders["x-project-id"] === defaultHeaders["X-Project-Id"],
-    "data connector import should carry current tenant/project context headers",
-    requestHeaders
+    connectorWriteCount === 0,
+    "opening the audio import drawer must not create a connector before the user tests it",
+    { connectorWriteCount }
   );
-  assert(
-    requestHeaders["idempotency-key"]?.includes(runId),
-    "data connector import should carry current E2E run-scoped idempotency key",
-    requestHeaders
-  );
-  assert(
-    requestPayload.scene_profile_id === activeSceneBinding.scene_profile_id &&
-      requestPayload.scene_profile_version_id === activeSceneBinding.scene_profile_version_id &&
-      requestPayload.scene_profile_snapshot_sha256 === activeSceneBinding.manifest_sha256,
-    "data connector import should lock the exact active SceneProfile snapshot",
-    { requestPayload, activeSceneBinding }
-  );
-  const json = await response.json().catch(() => ({}));
-  assert(response.status() === 201, `data connector import expected 201, got ${response.status()}`, json);
-  const connectorId = json?.data?.connector_id || json?.data?.id;
-  assert(connectorId, "data connector import response missing connector id", json);
-  assert(json?.data?.source === "data_module_connector_import", "data connector import should preserve source", json);
-  assert(json?.data?.target_asset_key, "data connector import should preserve target asset key", json);
-  assert(json?.meta?.trace_id, "data connector import missing trace id", json);
 
-  await assertLocatorText(page, ".data-operation-toast", "连接器资源已创建", "data connector import should show backend-created receipt");
-  await assertLocatorText(page, ".data-operation-toast", connectorId, "data connector import should show backend connector id");
-  await assertLocatorText(page, ".data-operation-toast", shortTrace(json.meta.trace_id), "data connector import should show short trace");
+  if (!audioImportFixtureConfigured) {
+    await drawer.getByRole("button", { name: "关闭导入配置" }).click();
+    page.off("request", observeImportWrites);
+    return {
+      status: "skipped",
+      reasonCode: "REAL_AUDIO_IMPORT_FIXTURE_REQUIRED",
+      requiredEnvironment: [
+        "AURIS_E2E_AUDIO_IMPORT_BASE_URL",
+        "AURIS_E2E_AUDIO_IMPORT_CREDENTIAL_REF"
+      ],
+      connectorWriteCount,
+      legacyPlatformSyncRequests,
+      targetAssetKey: "auris/audio/raw_recordings",
+      sceneProfileId: activeSceneBinding.scene_profile_id,
+      sceneProfileVersionId: activeSceneBinding.scene_profile_version_id,
+      sceneProfileSnapshotSha256: activeSceneBinding.manifest_sha256
+    };
+  }
 
-  const list = expectEnvelope(
-    await browserApi(page, "/api/v1/connectors?limit=100"),
-    "list UI-created data connectors",
+  let parsedSourceOrigin;
+  try {
+    parsedSourceOrigin = new URL(audioImportFixture.baseUrl);
+  } catch {
+    assert(false, "audio import E2E source URL is invalid", audioImportFixture);
+  }
+  assert(
+    parsedSourceOrigin.protocol === "https:" &&
+      parsedSourceOrigin.pathname === "/" &&
+      !parsedSourceOrigin.search &&
+      !parsedSourceOrigin.hash,
+    "audio import E2E source must be an HTTPS origin without path/query/fragment",
+    { baseUrl: audioImportFixture.baseUrl }
+  );
+  const stepPanel = () => drawer.locator(".audio-import-step-panel");
+  const field = (label) =>
+    stepPanel().locator(".audio-import-field").filter({ hasText: label }).locator("input, select").first();
+  const next = () => drawer.locator(".audio-import-drawer-foot button.primary").filter({ hasText: "下一步" }).first();
+
+  const platformConnection = drawer.getByTestId("audio-import-platform-connection");
+  if ((await platformConnection.evaluate((element) => element.tagName)) === "SELECT") {
+    await platformConnection.selectOption(audioImportFixture.platformConnectionId);
+  } else {
+    await platformConnection.fill(audioImportFixture.platformConnectionId);
+  }
+  await field("平台租户标识").fill(audioImportFixture.platformTenantRef);
+  await field("门店范围").fill(audioImportFixture.storeScope);
+  await next().click();
+  await drawer.getByRole("heading", { name: "配置平台音频 URL API" }).waitFor({ state: "visible" });
+
+  await field("配置名称").fill(`E2E 平台音频导入 ${runId}`);
+  await field("API 地址").fill(audioImportFixture.baseUrl);
+  await field("录音清单路径").fill(audioImportFixture.requestPath);
+  await field("credential_ref").fill(audioImportFixture.credentialRef);
+  await field("每页记录数").fill("3");
+  await field("增量游标参数名").fill(audioImportFixture.cursorParam);
+  await field("下一持久游标字段路径").fill(audioImportFixture.nextCursorPath);
+  if (audioImportFixture.initialWindowStart) {
+    await drawer.locator(".audio-import-stepper button").filter({ hasText: "游标与目标" }).click();
+    await field("首次拉取开始时间").fill(audioImportFixture.initialWindowStart);
+    await drawer.locator(".audio-import-stepper button").filter({ hasText: "测试与预览" }).click();
+  } else {
+    await next().click();
+  }
+  await drawer.getByRole("heading", { name: "测试连接并预览真实记录" }).waitFor({ state: "visible" });
+
+  const connectorResponsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/connectors" &&
+      response.request().method() === "POST",
+    { timeout: 20_000 }
+  );
+  const connectionTestResponsePromise = page.waitForResponse(
+    (response) =>
+      /\/api\/v1\/connectors\/[^/]+\/connection-tests$/.test(
+        new URL(response.url()).pathname
+      ) &&
+      response.request().method() === "POST",
+    { timeout: 30_000 }
+  );
+  await drawer.getByTestId("audio-import-test-connection").click();
+  const [connectorResponse, connectionTestResponse] = await Promise.all([
+    connectorResponsePromise,
+    connectionTestResponsePromise
+  ]);
+  const connectorPayload = connectorResponse.request().postDataJSON();
+  const connectorHeaders = connectorResponse.request().headers();
+  const connectorJson = await connectorResponse.json().catch(() => ({}));
+  const connectionTestJson = await connectionTestResponse.json().catch(() => ({}));
+  assert(
+    connectorHeaders["x-tenant-id"] === defaultHeaders["X-Tenant-Id"] &&
+      connectorHeaders["x-project-id"] === defaultHeaders["X-Project-Id"] &&
+      connectorHeaders["idempotency-key"]?.includes(runId),
+    "audio import connector write must carry tenant/project and run-scoped idempotency",
+    connectorHeaders
+  );
+  assert(
+    connectorPayload.source_type === "platform_audio_url_api" &&
+      connectorPayload.platform_connection_id === audioImportFixture.platformConnectionId &&
+      connectorPayload.credential_ref === audioImportFixture.credentialRef &&
+      connectorPayload.base_url === audioImportFixture.baseUrl &&
+      connectorPayload.request_path === audioImportFixture.requestPath &&
+      connectorPayload.pagination?.mode === "cursor" &&
+      connectorPayload.pagination?.page_size === 3 &&
+      connectorPayload.pagination?.cursor_param === audioImportFixture.cursorParam &&
+      connectorPayload.pagination?.next_cursor_path === audioImportFixture.nextCursorPath,
+    "audio import connector should persist the strong platform URL API contract",
+    connectorPayload
+  );
+  assert(
+    connectorPayload.scene_profile_id === activeSceneBinding.scene_profile_id &&
+      connectorPayload.scene_profile_version_id === activeSceneBinding.scene_profile_version_id &&
+      connectorPayload.scene_profile_snapshot_sha256 === activeSceneBinding.manifest_sha256,
+    "audio import connector must lock the exact active SceneProfile snapshot",
+    { connectorPayload, activeSceneBinding }
+  );
+  const connectorPayloadKeys = [];
+  const collectPayloadKeys = (value) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    for (const [key, nested] of Object.entries(value)) {
+      connectorPayloadKeys.push(key);
+      collectPayloadKeys(nested);
+    }
+  };
+  collectPayloadKeys(connectorPayload);
+  assert(
+    !connectorPayloadKeys.some((key) =>
+      /^(authorization|api[_-]?key|password|access[_-]?token)$/i.test(key)
+    ),
+    "audio import connector must persist only credential_ref, never plaintext credentials",
+    { connectorPayloadKeys }
+  );
+  assert(
+    connectorResponse.status() === 201 &&
+      connectionTestResponse.status() === 200 &&
+      connectionTestJson?.data?.status === "success",
+    "audio import real connection test must succeed through BFF",
+    { connector: connectorJson, connectionTest: connectionTestJson }
+  );
+  const connectorId = connectorJson?.data?.connector_id || connectorJson?.data?.id;
+  assert(connectorId, "audio import connector response missing connector id", connectorJson);
+  await assertLocatorText(
+    page,
+    ".audio-import-verification-actions",
+    "连接 已验证",
+    "audio import drawer should display the real connection-test receipt"
+  );
+
+  const previewResponsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/connectors/${encodeURIComponent(connectorId)}/record-previews` &&
+      response.request().method() === "POST",
+    { timeout: 30_000 }
+  );
+  await drawer.getByTestId("audio-import-preview-records").click();
+  const previewResponse = await previewResponsePromise;
+  const previewJson = await previewResponse.json().catch(() => ({}));
+  assert(
+    previewResponse.status() === 200 &&
+      previewJson?.data?.record_count === 3 &&
+      previewJson?.data?.records?.length === 3 &&
+      typeof previewJson?.data?.mapping_valid === "boolean",
+    "audio import preview must return exactly three real source records before field mapping",
+    previewJson
+  );
+  const preview = drawer.getByTestId("audio-import-record-preview");
+  await preview.waitFor({ state: "visible", timeout: 10_000 });
+  assert(
+    (await preview.locator(".audio-import-preview-row").count()) === 3,
+    "audio import drawer must render exactly three BFF preview records"
+  );
+  const previewText = await preview.innerText();
+  assert(
+    !/(https:\/\/|authorization|token)/i.test(previewText),
+    "audio import preview must not expose source audio URLs or authentication material",
+    { previewText }
+  );
+
+  await next().click();
+  await drawer.getByRole("heading", { name: "映射平台字段" }).waitFor({ state: "visible" });
+  await field("外部录音 ID").fill(audioImportFixture.externalRecordIdField);
+  await field("音频 URL").fill(audioImportFixture.audioUrlField);
+  await field("通话时间").fill(audioImportFixture.startedAtField);
+  await field("员工 ID").fill(audioImportFixture.agentRefField);
+  await field("门店 ID").fill(audioImportFixture.storeRefField);
+  await field("设备 ID").fill(audioImportFixture.deviceRefField);
+  await field("时长（毫秒）").fill(audioImportFixture.durationMsField);
+  await next().click();
+  await drawer.getByRole("heading", { name: "配置增量游标和目标资产" }).waitFor({ state: "visible" });
+  await field("唯一递增游标字段").fill(audioImportFixture.cursorField);
+  const initialWindow = field("首次拉取开始时间");
+  if (audioImportFixture.initialWindowStart) {
+    await initialWindow.fill(audioImportFixture.initialWindowStart);
+  }
+  assert(await initialWindow.inputValue(), "audio import initial time window must be configured");
+  const targetAssetKey = await field("目标音频资产").inputValue();
+  assert(targetAssetKey, "audio import target asset must be selected");
+  await drawer.locator(".audio-import-stepper button").filter({ hasText: "测试与预览" }).click();
+  const finalConnectionTestPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/connectors/${encodeURIComponent(connectorId)}/connection-tests` &&
+      response.request().method() === "POST",
+    { timeout: 30_000 }
+  );
+  await drawer.getByTestId("audio-import-test-connection").click();
+  const finalConnectionTestResponse = await finalConnectionTestPromise;
+  const finalConnectionTestJson = await finalConnectionTestResponse.json().catch(() => ({}));
+  assert(
+    finalConnectionTestResponse.status() === 200 &&
+      finalConnectionTestJson?.data?.status === "success",
+    "final mapped audio import configuration must pass a fresh real connection test",
+    finalConnectionTestJson
+  );
+  const finalPreviewPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/connectors/${encodeURIComponent(connectorId)}/record-previews` &&
+      response.request().method() === "POST",
+    { timeout: 30_000 }
+  );
+  await drawer.getByTestId("audio-import-preview-records").click();
+  const finalPreviewResponse = await finalPreviewPromise;
+  const finalPreviewJson = await finalPreviewResponse.json().catch(() => ({}));
+  assert(
+    finalPreviewResponse.status() === 200 &&
+      finalPreviewJson?.data?.record_count === 3 &&
+      finalPreviewJson?.data?.mapping_valid === true,
+    "final mapped cursor configuration must be validated against three real source records",
+    finalPreviewJson
+  );
+  await drawer.locator(".audio-import-stepper button").filter({ hasText: "发布与拉取" }).click();
+  await drawer.getByRole("heading", { name: "发布配置并立即拉取" }).waitFor({ state: "visible" });
+
+  const taskVersionResponsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/task-versions" &&
+      response.request().method() === "POST",
+    { timeout: 20_000 }
+  );
+  await drawer.getByTestId("audio-import-save-draft").click();
+  const taskVersionResponse = await taskVersionResponsePromise;
+  const taskVersionPayload = taskVersionResponse.request().postDataJSON();
+  const taskVersionJson = await taskVersionResponse.json().catch(() => ({}));
+  assert(taskVersionResponse.status() === 201, "audio import draft should be created", taskVersionJson);
+  const taskVersionId = taskVersionJson?.data?.task_version_id || taskVersionJson?.data?.id;
+  assert(taskVersionId, "audio import draft response missing TaskVersion id", taskVersionJson);
+  assert(
+    taskVersionPayload.task_type_id === "audio-platform-import" &&
+      taskVersionPayload.status === "draft" &&
+      taskVersionPayload.input_binding?.connector_id === connectorId &&
+      String(taskVersionPayload.input_binding?.connector_version || "") &&
+      taskVersionPayload.input_binding?.platform_connection_id ===
+        audioImportFixture.platformConnectionId &&
+      taskVersionPayload.input_binding?.platform_scope?.tenant_ref ===
+        audioImportFixture.platformTenantRef &&
+      taskVersionPayload.input_binding?.field_mapping?.external_record_id ===
+        audioImportFixture.externalRecordIdField &&
+      taskVersionPayload.input_binding?.field_mapping?.audio_url ===
+        audioImportFixture.audioUrlField &&
+      taskVersionPayload.input_binding?.field_mapping?.started_at ===
+        audioImportFixture.startedAtField &&
+      taskVersionPayload.input_binding?.cursor_policy?.field ===
+        audioImportFixture.cursorField &&
+      Boolean(taskVersionPayload.input_binding?.cursor_policy?.initial_window_start) &&
+      taskVersionPayload.input_binding?.target_asset_key === targetAssetKey &&
+      taskVersionPayload.input_binding?.dedupe_policy === "external_id_checksum",
+    "audio import draft must freeze connector version, platform scope, mapping, cursor and target",
+    taskVersionPayload
+  );
+  await assertLocatorText(
+    page,
+    ".audio-import-release-summary",
+    "草稿已保存",
+    "audio import drawer should show the BFF-read draft state"
+  );
+
+  const publishResponsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/task-versions/${encodeURIComponent(taskVersionId)}/publish` &&
+      response.request().method() === "POST",
+    { timeout: 20_000 }
+  );
+  await drawer.getByTestId("audio-import-publish").click();
+  const publishResponse = await publishResponsePromise;
+  const publishJson = await publishResponse.json().catch(() => ({}));
+  assert(
+    publishResponse.status() === 202 &&
+      (publishJson?.data?.task_version_id || publishJson?.data?.id) === taskVersionId &&
+      publishJson?.data?.status === "published",
+    "audio import TaskVersion must be published as an immutable version",
+    publishJson
+  );
+  await waitForEnabled(
+    drawer.getByTestId("audio-import-run-production"),
+    "audio import production run"
+  );
+
+  const taskRunResponsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/task-runs" &&
+      response.request().method() === "POST",
+    { timeout: 20_000 }
+  );
+  const firstBatchReadPromise = page.waitForResponse(
+    (response) =>
+      /\/api\/v1\/import-batches\/[^/]+$/.test(new URL(response.url()).pathname) &&
+      response.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+  const firstItemsReadPromise = page.waitForResponse(
+    (response) =>
+      /\/api\/v1\/import-batches\/[^/]+\/items$/.test(new URL(response.url()).pathname) &&
+      response.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+  await drawer.getByTestId("audio-import-run-production").click();
+  const taskRunResponse = await taskRunResponsePromise;
+  const taskRunPayload = taskRunResponse.request().postDataJSON();
+  const taskRunJson = await taskRunResponse.json().catch(() => ({}));
+  assert(
+    taskRunResponse.status() === 202 &&
+      taskRunPayload.task_version_id === taskVersionId &&
+      taskRunPayload.trigger_type === "manual" &&
+      taskRunPayload.execution_mode === "production",
+    "immediate audio pull must create the sole production TaskRun entrypoint",
+    { taskRunPayload, taskRunJson }
+  );
+  const taskRunId = taskRunJson?.data?.run_id || taskRunJson?.data?.id;
+  const importBatchId =
+    taskRunJson?.data?.import_batch_id || taskRunJson?.data?.payload?.import_batch_id;
+  const rootTraceId = taskRunJson?.data?.root_trace_id || taskRunJson?.meta?.trace_id;
+  assert(
+    taskRunId && importBatchId && rootTraceId,
+    "audio import TaskRun receipt must contain TaskRun, ImportBatch and root trace",
+    taskRunJson
+  );
+  const [firstBatchRead, firstItemsRead] = await Promise.all([
+    firstBatchReadPromise,
+    firstItemsReadPromise
+  ]);
+  assert(
+    firstBatchRead.status() === 200 && firstItemsRead.status() === 200,
+    "audio import drawer must read both ImportBatch and ImportBatchItems from BFF"
+  );
+  const technicalDetails = drawer.getByTestId("audio-import-technical-details");
+  await technicalDetails.waitFor({ state: "visible" });
+  await technicalDetails.locator("summary").click();
+  await assertLocatorText(
+    page,
+    '[data-testid="audio-import-technical-details"]',
+    "auris_flow_audio_import_v1",
+    "Dagster job name should only appear in technical details"
+  );
+
+  const terminalBatch = await waitForApiState(
+    page,
+    `/api/v1/import-batches/${encodeURIComponent(importBatchId)}`,
+    (data) => ["succeeded", "partial", "failed", "cancelled"].includes(data?.status),
+    "audio import batch terminal materialization",
+    audioImportTimeoutMs
+  );
+  assert(
+    terminalBatch.data.status === "succeeded",
+    "P0 audio import E2E requires a fully materialized successful ImportBatch",
+    terminalBatch
+  );
+  const terminalItems = expectEnvelope(
+    await browserApi(
+      page,
+      `/api/v1/import-batches/${encodeURIComponent(importBatchId)}/items`
+    ),
+    "read terminal audio import items",
     200
   );
   assert(
-    list.data.items.some((item) => item.id === connectorId || item.connector_id === connectorId),
-    "UI-created data connector should be listable through BFF",
-    { connectorId, list }
+    terminalItems.data.items.length >= 1 &&
+      terminalItems.data.items.every(
+        (item) =>
+          ["succeeded", "duplicate", "skipped"].includes(String(item.status).toLowerCase()) &&
+          item.root_trace_id === rootTraceId
+      ),
+    "terminal import items must preserve per-item result and the unified root trace",
+    terminalItems
   );
-  const trace = expectEnvelope(
-    await browserApi(page, `/api/v1/traces/${json.meta.trace_id}`),
-    "fetch UI-created data connector trace",
+  const createdSessionIds = Array.from(
+    new Set(
+      terminalItems.data.items
+        .map((item) => item.audio_session_id)
+        .filter(Boolean)
+    )
+  );
+  assert(createdSessionIds.length >= 1, "successful import must materialize at least one audio session", {
+    terminalBatch,
+    terminalItems
+  });
+
+  await drawer.locator(".audio-import-run-panel.is-succeeded").waitFor({
+    state: "visible",
+    timeout: 10_000
+  });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.locator(".sidebar-user-main").waitFor({ state: "visible", timeout: 20_000 });
+  await clickNav(page, "数据", "数据管理");
+  await clickModuleTab(page, "音频数据");
+  const recoveredBatchPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/import-batches/${encodeURIComponent(importBatchId)}` &&
+      response.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+  await page.getByTestId("data-connector-import").click();
+  await drawer.waitFor({ state: "visible", timeout: 10_000 });
+  await recoveredBatchPromise;
+  await drawer.locator(".audio-import-stepper button").filter({ hasText: "发布与拉取" }).click();
+  await assertLocatorText(
+    page,
+    ".audio-import-release-summary",
+    taskVersionId,
+    "page refresh must recover the published immutable TaskVersion from BFF"
+  );
+  await drawer.locator(".audio-import-run-panel.is-succeeded").waitFor({
+    state: "visible",
+    timeout: 15_000
+  });
+  await assertLocatorText(
+    page,
+    ".audio-import-run-panel",
+    "已完成",
+    "audio import UI must only show success after materialization readback"
+  );
+
+  const sessionReadPromise = page.waitForResponse(
+    (response) =>
+      /\/api\/v1\/audio-sessions\/[^/]+$/.test(new URL(response.url()).pathname) &&
+      response.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+  await drawer.locator(".audio-import-run-actions button").filter({ hasText: "查看新会话" }).click();
+  const sessionReadResponse = await sessionReadPromise;
+  const sessionJson = await sessionReadResponse.json().catch(() => ({}));
+  assert(sessionReadResponse.status() === 200, "new audio session should be readable", sessionJson);
+  const audioSessionId = sessionJson?.data?.session_id || sessionJson?.data?.id;
+  assert(
+    createdSessionIds.includes(audioSessionId) &&
+      sessionJson?.data?.platform_connection_id === audioImportFixture.platformConnectionId &&
+      sessionJson?.data?.import_batch_id === importBatchId &&
+      (sessionJson?.data?.root_trace_id || sessionJson?.data?.trace_id) === rootTraceId,
+    "new audio session must inherit platform connection, batch and unified trace",
+    { createdSessionIds, sessionJson }
+  );
+  const rootTrace = expectEnvelope(
+    await browserApi(page, `/api/v1/traces/${encodeURIComponent(rootTraceId)}`),
+    "read unified audio import root trace",
     200
   );
   assert(
-    trace.data.spans.some((span) => JSON.stringify(span).includes(connectorId)),
-    "UI-created data connector trace should reference connector id",
-    trace
+    rootTrace.data.spans.some(
+      (span) =>
+        span.kind === "run" &&
+        span.run_id === taskRunId &&
+        span.status === "success"
+    ) &&
+      rootTrace.data.spans.some(
+        (span) =>
+          span.kind === "audit" &&
+          span.object_id === importBatchId &&
+          span.action === "audio_import.batch_materialized"
+      ) &&
+      rootTrace.data.spans.some(
+        (span) =>
+          span.kind === "resource" &&
+          span.collection === "audio_sessions" &&
+          span.object_id === audioSessionId
+      ),
+    "root trace must join the production TaskRun, materialized batch and new AudioSession",
+    rootTrace
+  );
+  await drawer.locator('[aria-label="新音频会话详情"]').waitFor({ state: "visible" });
+
+  const playbackGrantPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/audio-sessions/${encodeURIComponent(audioSessionId)}/playback-grants` &&
+      response.request().method() === "POST",
+    { timeout: 20_000 }
+  );
+  const playbackMediaPromise = page.waitForResponse(
+    (response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/v1/audio-playback" &&
+        Boolean(url.searchParams.get("grant")) &&
+        response.request().method() === "GET"
+      );
+    },
+    { timeout: 20_000 }
+  );
+  const importedPlaybackButton = drawer
+    .locator(".audio-import-playback button")
+    .filter({ hasText: "播放录音" });
+  await waitForEnabled(importedPlaybackButton, "newly imported audio playback");
+  await importedPlaybackButton.click();
+  const [playbackGrantResponse, playbackMediaResponse] = await Promise.all([
+    playbackGrantPromise,
+    playbackMediaPromise
+  ]);
+  const playbackGrantJson = await playbackGrantResponse.json().catch(() => ({}));
+  assert(
+    playbackGrantResponse.status() === 201 &&
+      playbackGrantJson?.data?.playback_url?.startsWith("/api/v1/audio-playback?grant=") &&
+      playbackGrantJson?.data?.expires_at,
+    "new audio session playback must use a short-lived BFF grant",
+    playbackGrantJson
   );
   assert(
-    trace.data.spans.some((span) => span.kind === "outbox" && span.event_type === "connectors.created"),
-    "UI-created data connector trace should include connectors.created outbox span",
-    trace
+    playbackMediaResponse.status() === 206 &&
+      playbackMediaResponse.headers()["accept-ranges"] === "bytes" &&
+      playbackMediaResponse.request().headers().range?.startsWith("bytes="),
+    "newly imported audio must be range-playable from internal object storage",
+    {
+      status: playbackMediaResponse.status(),
+      responseHeaders: playbackMediaResponse.headers(),
+      requestHeaders: playbackMediaResponse.request().headers()
+    }
+  );
+  assert(
+    legacyPlatformSyncRequests === 0,
+    "audio import closed loop must not use legacy /platform-sync-jobs",
+    { legacyPlatformSyncRequests }
   );
 
+  const connectorTraceId = connectorJson?.meta?.trace_id;
+  assert(connectorTraceId, "audio import connector response missing trace", connectorJson);
+  const connectorTrace = expectEnvelope(
+    await browserApi(page, `/api/v1/traces/${connectorTraceId}`),
+    "read audio import connector trace",
+    200
+  );
+  assert(
+    connectorTrace.data.spans.some((span) => JSON.stringify(span).includes(connectorId)),
+    "audio import connector trace should reference its resource",
+    connectorTrace
+  );
+  await drawer.locator('button[aria-label="关闭导入配置"]').click();
+  await drawer.waitFor({ state: "hidden", timeout: 10_000 });
+  page.off("request", observeImportWrites);
   return {
     id: connectorId,
-    traceId: json.meta.trace_id,
-    status: json.data.status,
-    targetAssetKey: json.data.target_asset_key,
-    sceneProfileId: requestPayload.scene_profile_id,
-    sceneProfileVersionId: requestPayload.scene_profile_version_id,
-    sceneProfileSnapshotSha256: requestPayload.scene_profile_snapshot_sha256
+    connectorId,
+    connectorTraceId,
+    platformConnectionId: audioImportFixture.platformConnectionId,
+    taskVersionId,
+    taskRunId,
+    importBatchId,
+    audioSessionId,
+    rootTraceId,
+    traceId: connectorTraceId,
+    status: terminalBatch.data.status,
+    executionMode: taskRunPayload.execution_mode,
+    targetAssetKey,
+    previewCount: finalPreviewJson.data.record_count,
+    total: terminalBatch.data.total_items,
+    succeeded: terminalBatch.data.succeeded_items,
+    duplicates: terminalBatch.data.skipped_items,
+    failed: terminalBatch.data.failed_items,
+    playbackGrantStatus: playbackGrantResponse.status(),
+    playbackStatus: playbackMediaResponse.status(),
+    connectorWriteCount,
+    pageRefreshRecovered: true,
+    rootTraceReadable: true,
+    legacyPlatformSyncRequests,
+    sceneProfileId: connectorPayload.scene_profile_id,
+    sceneProfileVersionId: connectorPayload.scene_profile_version_id,
+    sceneProfileSnapshotSha256: connectorPayload.scene_profile_snapshot_sha256
   };
 }
 
@@ -6799,23 +7447,114 @@ try {
     "main page did not consume the single anonymous cookie-session startup probe",
     pendingMainExpectedResponses
   );
-  const authRestore = await verifyAuthSessionRestore(page, adminSession);
   adminSessionToken = adminSession.access_token;
-  annotatorSessionToken = (await serverLogin("annotator@auris.local")).access_token;
-  releaseApproverSessionToken = (
-    await serverLogin("release.approver@auris.local")
-  ).access_token;
+  const authRestore = audioImportOnly
+    ? null
+    : await verifyAuthSessionRestore(page, adminSession);
+  if (!audioImportOnly) {
+    annotatorSessionToken = (await serverLogin("annotator@auris.local")).access_token;
+    releaseApproverSessionToken = (
+      await serverLogin("release.approver@auris.local")
+    ).access_token;
+  }
   expectHealth(await browserApi(page, "/healthz"), "frontend proxied healthz");
 
+  if (audioImportOnly) {
+    enterArtifactStage("audio-import-only:browser-closed-loop");
+    assert(realStackE2e, "focused audio import E2E requires AURIS_REAL_STACK_E2E=1");
+    assert(
+      audioImportFixtureConfigured,
+      "focused audio import E2E requires the real HTTPS source and credential_ref",
+      {
+        requiredEnvironment: [
+          "AURIS_E2E_AUDIO_IMPORT_BASE_URL",
+          "AURIS_E2E_AUDIO_IMPORT_CREDENTIAL_REF"
+        ]
+      }
+    );
+    const audioImportClosedLoop = await runDataAudioImportClosedLoopSmoke(page);
+    assert(
+      audioImportClosedLoop.status === "succeeded",
+      "focused audio import E2E cannot skip or fake the real ImportBatch terminal state",
+      audioImportClosedLoop
+    );
+    const tenantAudioImportPull = await runTenantAudioImportPullSmoke(
+      page,
+      audioImportClosedLoop
+    );
+    assert(
+      tenantAudioImportPull.executionMode === "production" &&
+        tenantAudioImportPull.taskVersionId === audioImportClosedLoop.taskVersionId &&
+        tenantAudioImportPull.legacyPlatformSyncRequests === 0,
+      "tenant audio pull did not reuse the published production TaskVersion",
+      { tenantAudioImportPull, audioImportClosedLoop }
+    );
+    const result = {
+      schema_version: "auris.audio-import-browser-e2e.v1",
+      status: "ok",
+      stage: "completed",
+      mode: "audio-import-only",
+      runId,
+      baseUrl,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      executionProfile: {
+        realStack: true,
+        platformSource: "https",
+        dagster: "real",
+        objectStorage: "real",
+        uiEvidencePolicy: "browser-clicks-and-bff-readback"
+      },
+      audioImportClosedLoop,
+      tenantAudioImportPull,
+      consoleErrors,
+      pageErrors,
+      requestFailures,
+      failedResponses
+    };
+    assert(pageErrors.length === 0, "focused audio import browser raised page errors", result);
+    assert(
+      requestFailures.length === 0,
+      "focused audio import browser raised request failures",
+      result
+    );
+    assert(
+      failedResponses.length === 0,
+      "focused audio import browser observed unexpected HTTP failures",
+      result
+    );
+    assert(consoleErrors.length === 0, "focused audio import browser raised console errors", result);
+    enterArtifactStage("completed");
+    writeFileSync(artifactPath, JSON.stringify(result, null, 2), "utf8");
+    console.log(
+      JSON.stringify(
+        {
+          status: result.status,
+          stage: result.stage,
+          mode: result.mode,
+          runId: result.runId,
+          artifactPath,
+          taskRunId: audioImportClosedLoop.taskRunId,
+          importBatchId: audioImportClosedLoop.importBatchId,
+          audioSessionId: audioImportClosedLoop.audioSessionId
+        },
+        null,
+        2
+      )
+    );
+  } else {
   const uiLabelVersion = await runLabelVersionPageUiClosedLoopSmoke(page);
   const uiLabelEval = uiLabelVersion.evalRun;
   const uiLabelPublish = uiLabelVersion.releaseDeployment;
 
   enterArtifactStage("main:platform-ui-bff-smokes");
   const projectCreate = await runProjectCreateClosedLoopSmoke(page);
-  const tenantAsrPull = await runTenantAsrPullClosedLoopSmoke(page);
   const dataSceneProfileGate = await runDataSceneProfileFailClosedSmoke(page);
-  const dataConnectorImport = await runDataConnectorImportClosedLoopSmoke(page);
+  const audioImportClosedLoop = await runDataAudioImportClosedLoopSmoke(page);
+  const tenantAudioImportPull = await runTenantAudioImportPullSmoke(
+    page,
+    audioImportClosedLoop
+  );
   const dataExportAction = await runDataExportClosedLoopSmoke(page);
   const voiceprintEnrollmentGate = await runVoiceprintEnrollmentFailClosedSmoke(page);
   const listeningActions = await runListeningClosedLoopSmoke(page);
@@ -6995,22 +7734,22 @@ try {
     "pending"
   );
 
-  coreFlows.platformSync = runReceipt(
-    expectEnvelope(
-      await serverApi("/api/v1/platform-sync-jobs", {
-        method: "POST",
-        key: `${runId}:platform-sync`,
-        body: {
-          source: "platform_bff_e2e",
-          connector_id: "tenant_list_api",
-          sync_scope: ["tenant", "store", "employee"]
-        }
-      }),
-      "request platform sync run",
-      202
-    ),
-    "pending"
-  );
+  coreFlows.audioImport = audioImportClosedLoop.status === "skipped"
+    ? {
+        status: "skipped",
+        reasonCode: audioImportClosedLoop.reasonCode
+      }
+    : {
+        id: audioImportClosedLoop.taskRunId,
+        traceId: audioImportClosedLoop.rootTraceId,
+        status: audioImportClosedLoop.status,
+        runType: "audio_import",
+        taskVersionId: audioImportClosedLoop.taskVersionId,
+        importBatchId: audioImportClosedLoop.importBatchId,
+        audioSessionId: audioImportClosedLoop.audioSessionId,
+        executionMode: audioImportClosedLoop.executionMode,
+        playbackStatus: audioImportClosedLoop.playbackStatus
+      };
 
   coreFlows.knowledgeSync = runReceipt(
     expectEnvelope(
@@ -7163,12 +7902,21 @@ try {
     {
       module: "tenant",
       read: { status: "verified", endpoints: ["/api/v1/tenants"] },
-      writes: [
-        uiWrite("tenantAsrPull", tenantAsrPull.id, tenantAsrPull.traceId, {
-          status: tenantAsrPull.status,
-          runType: tenantAsrPull.runType
-        })
-      ]
+      writes: tenantAudioImportPull.status === "skipped"
+        ? []
+        : [
+            uiWrite(
+              "tenantAudioImportPull",
+              tenantAudioImportPull.taskRunId,
+              tenantAudioImportPull.traceId,
+              {
+                status: tenantAudioImportPull.status,
+                executionMode: tenantAudioImportPull.executionMode,
+                taskVersionId: tenantAudioImportPull.taskVersionId,
+                importBatchId: tenantAudioImportPull.importBatchId
+              }
+            )
+          ]
     },
     {
       module: "project",
@@ -7219,7 +7967,23 @@ try {
       module: "data",
       read: { status: "verified", endpoints: ["/api/v1/audio-sessions/aggregations"] },
       writes: [
-        uiWrite("dataConnectorImport", dataConnectorImport.id, dataConnectorImport.traceId),
+        ...(audioImportClosedLoop.status === "skipped"
+          ? []
+          : [
+              uiWrite(
+                "audioImportClosedLoop",
+                audioImportClosedLoop.taskRunId,
+                audioImportClosedLoop.rootTraceId,
+                {
+                  connectorId: audioImportClosedLoop.connectorId,
+                  taskVersionId: audioImportClosedLoop.taskVersionId,
+                  importBatchId: audioImportClosedLoop.importBatchId,
+                  audioSessionId: audioImportClosedLoop.audioSessionId,
+                  executionMode: audioImportClosedLoop.executionMode,
+                  playbackStatus: audioImportClosedLoop.playbackStatus
+                }
+              )
+            ]),
         uiWrite("dataExportAction", dataExportAction.id, dataExportAction.traceId)
       ]
     },
@@ -7523,7 +8287,7 @@ try {
       }
     ],
     projectCreate,
-    dataConnectorImport,
+    audioImportClosedLoop,
     dataExportAction,
     dataSceneProfileGate,
     voiceprintEnrollmentGate,
@@ -7535,7 +8299,7 @@ try {
     hotwordGovernance,
     domainPageActions: {
       ...domainPageActions,
-      tenantAsrPull
+      tenantAudioImportPull
     },
     globalExportAction,
     authLogout,
@@ -7618,6 +8382,7 @@ try {
       2
     )
   );
+  }
 } catch (error) {
   writeFailedArtifact(error, {
     consoleErrors,

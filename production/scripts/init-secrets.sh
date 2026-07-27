@@ -159,6 +159,7 @@ write_once audio_playback_grant_secret "$(random_hex 32)"
 write_once experiment_assignment_secret "$(random_hex 32)"
 write_once completion_receipt_key_bindings "{\"dagster-v1\":{\"secret\":\"${completion_key}\",\"allowed_sources\":[\"dagster\"],\"allowed_scopes\":[{\"tenant_id\":\"${TENANT_ID}\",\"project_id\":\"${PROJECT_ID}\"}]}}"
 write_once external_callback_key_bindings "{\"callback-v1\":{\"secret\":\"${callback_key}\",\"state\":\"active\"}}"
+write_once platform_credential_bindings "{}"
 
 echo "Secrets initialized in ${SECRETS_DIR}. Back them up in an external secret manager."
 echo "TLS certificate/key are intentionally not generated; install them under production/tls."

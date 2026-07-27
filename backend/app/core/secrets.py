@@ -29,6 +29,7 @@ PRODUCTION_FILE_ONLY_SETTINGS = frozenset(
         "object_storage_session_token",
         "oidc_client_secret",
         "otel_exporter_otlp_headers",
+        "platform_credential_bindings",
         "qdrant_api_key",
         "redis_url",
     }

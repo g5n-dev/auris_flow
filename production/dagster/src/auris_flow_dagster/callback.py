@@ -23,7 +23,15 @@ from auris_flow_dagster.http_transport import RejectRedirectHandler as _RejectRe
 SIGNATURE_VERSION = "auris-completion-v1"
 SOURCE = "dagster"
 MAX_SECRET_FILE_BYTES = 65_536
+MAX_CALLBACK_ERROR_BYTES = 65_536
 _SAFE_HEADER_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+_TRANSIENT_PROGRESS_CONFLICT_CODES = frozenset(
+    {
+        "AUDIO_IMPORT_PROGRESS_DISPATCH_BINDING_MISSING",
+        "AUDIO_IMPORT_PROGRESS_BATCH_NOT_RUNNING",
+        "IDEMPOTENCY_REQUEST_IN_PROGRESS",
+    }
+)
 
 
 class CompletionCallbackError(RuntimeError):
@@ -201,6 +209,7 @@ class CompletionCallbackClient:
         active_key_id: str | None = None,
         timeout_seconds: float = 5.0,
         max_attempts: int = 3,
+        progress_max_attempts: int = 5,
         opener: Callable[..., Any] | None = None,
         clock: Callable[[], datetime] | None = None,
         nonce_factory: Callable[[], str] | None = None,
@@ -222,61 +231,69 @@ class CompletionCallbackClient:
         self.active_key_id = active_key_id or os.environ.get(
             "AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID"
         )
-        if timeout_seconds <= 0 or max_attempts < 1 or max_attempts > 5:
+        if (
+            timeout_seconds <= 0
+            or max_attempts < 1
+            or max_attempts > 5
+            or progress_max_attempts < 1
+            or progress_max_attempts > 5
+        ):
             raise CompletionCallbackError("callback retry configuration is invalid")
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
+        self.progress_max_attempts = progress_max_attempts
         self._opener = opener or build_opener(_RejectRedirectHandler()).open
         self._clock = clock or (lambda: datetime.now(UTC))
         self._nonce_factory = nonce_factory or (lambda: secrets.token_hex(24))
         self._sleeper = sleeper
 
-    def post(
+    @staticmethod
+    def _validated_identifier(value: str, *, name: str) -> str:
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > 256
+            or not _SAFE_HEADER_VALUE.fullmatch(value)
+        ):
+            raise CompletionCallbackError(f"{name} is invalid")
+        return value
+
+    def _post_signed(
         self,
         scope: AurisRunContext,
         *,
         dagster_run_id: str,
-        status: str,
-        result_ref: Mapping[str, Any] | None = None,
-        metrics: Mapping[str, Any] | None = None,
-        error_code: str | None = None,
-        retryable: bool = True,
+        path: str,
+        idempotency_key: str,
+        payload: Mapping[str, Any],
+        request_suffix: str,
+        failure_kind: str,
+        max_attempts: int,
+        initial_backoff_seconds: float,
+        retryable_conflict_codes: frozenset[str] | None = None,
+        retry_409_until: datetime | None = None,
     ) -> dict[str, Any]:
-        if status not in {"success", "failed"}:
-            raise CompletionCallbackError("completion status is invalid")
-        if (
-            not dagster_run_id.strip()
-            or len(dagster_run_id) > 256
-            or not _SAFE_HEADER_VALUE.fullmatch(dagster_run_id)
-        ):
-            raise CompletionCallbackError("Dagster run id is invalid")
-
-        completion_receipt_id = f"dagster:{dagster_run_id}"
-        idempotency_key = f"dagster-completion:{dagster_run_id}"
-        payload: dict[str, Any] = {
-            "adapter": SOURCE,
-            "source": SOURCE,
-            "status": status,
-            "completion_receipt_id": completion_receipt_id,
-            "external_id": dagster_run_id,
-            "result_ref": dict(result_ref or {}),
-            "metrics": dict(metrics or {}),
-            "retryable": bool(retryable),
-        }
-        if status == "failed":
-            payload["error_code"] = error_code or "DAGSTER_WORKFLOW_FAILED"
-            payload["note"] = "Dagster 领域执行失败；请按 trace_id 查询受控日志"
         body = json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-        path = f"/api/v1/runs/{quote(scope.run_id, safe='')}/external-completion-receipts"
         url = f"{self.base_url}{path}"
-
         last_failure: BaseException | None = None
-        for attempt in range(1, self.max_attempts + 1):
+        attempt = 0
+        backoff_seconds = initial_backoff_seconds
+        while True:
+            attempt += 1
+            request_timeout = self.timeout_seconds
+            if retry_409_until is not None:
+                remaining_seconds = (
+                    retry_409_until - self._clock().astimezone(UTC)
+                ).total_seconds()
+                if remaining_seconds <= 0:
+                    last_failure = TimeoutError("callback registration deadline expired")
+                    break
+                request_timeout = min(request_timeout, remaining_seconds)
             keyring = CompletionKeyring.from_file(self.keyring_path)
             binding = keyring.select(scope, active_key_id=self.active_key_id)
             timestamp = self._clock().astimezone(UTC).isoformat()
@@ -308,7 +325,7 @@ class CompletionCallbackClient:
                     "X-Tenant-Id": scope.tenant_id,
                     "X-Project-Id": scope.project_id,
                     "X-Trace-Id": scope.trace_id,
-                    "X-Request-Id": f"dagster-{dagster_run_id}",
+                    "X-Request-Id": f"dagster-{dagster_run_id}-{request_suffix}",
                     "X-Auris-Key-Id": binding.key_id,
                     "X-Auris-Timestamp": timestamp,
                     "X-Auris-Nonce": nonce,
@@ -317,8 +334,9 @@ class CompletionCallbackClient:
                     "X-Auris-Signature": f"sha256={signature}",
                 },
             )
+            retry_registration_conflict = False
             try:
-                with self._opener(request, timeout=self.timeout_seconds) as response:
+                with self._opener(request, timeout=request_timeout) as response:
                     response_body = response.read(1_048_577)
                     if len(response_body) > 1_048_576:
                         raise CompletionCallbackError("BFF callback response is too large")
@@ -328,13 +346,146 @@ class CompletionCallbackClient:
                 return parsed
             except HTTPError as exc:
                 last_failure = exc
+                if exc.code == 409 and retryable_conflict_codes is not None:
+                    error_code = self._http_error_code(exc)
+                    if error_code not in retryable_conflict_codes:
+                        break
+                    retry_registration_conflict = retry_409_until is not None
                 if 400 <= exc.code < 500 and exc.code not in {408, 409, 425, 429}:
                     break
             except (OSError, URLError, TimeoutError, UnicodeDecodeError, ValueError) as exc:
                 last_failure = exc
-            if attempt < self.max_attempts:
-                self._sleeper(0.25 * (2 ** (attempt - 1)))
+
+            can_retry = attempt < max_attempts
+            if retry_registration_conflict and retry_409_until is not None:
+                can_retry = self._clock().astimezone(UTC) < retry_409_until
+            if not can_retry:
+                break
+
+            sleep_seconds = min(backoff_seconds, 4.0)
+            if retry_registration_conflict and retry_409_until is not None:
+                remaining_seconds = (
+                    retry_409_until - self._clock().astimezone(UTC)
+                ).total_seconds()
+                if remaining_seconds <= 0:
+                    break
+                sleep_seconds = min(sleep_seconds, remaining_seconds)
+            self._sleeper(sleep_seconds)
+            backoff_seconds = min(backoff_seconds * 2, 4.0)
 
         status_code = last_failure.code if isinstance(last_failure, HTTPError) else None
         suffix = f" (HTTP {status_code})" if status_code is not None else ""
-        raise CompletionCallbackError(f"BFF completion callback failed{suffix}") from last_failure
+        raise CompletionCallbackError(
+            f"BFF {failure_kind} callback failed{suffix}"
+        ) from last_failure
+
+    @staticmethod
+    def _http_error_code(error: HTTPError) -> str | None:
+        try:
+            body = error.read(MAX_CALLBACK_ERROR_BYTES + 1)
+            if len(body) > MAX_CALLBACK_ERROR_BYTES:
+                return None
+            payload = json.loads(body.decode("utf-8"))
+        except (AttributeError, OSError, UnicodeDecodeError, ValueError):
+            return None
+        if not isinstance(payload, Mapping):
+            return None
+        error_payload = payload.get("error")
+        if not isinstance(error_payload, Mapping):
+            return None
+        code = error_payload.get("code")
+        return code if isinstance(code, str) and code else None
+
+    def post(
+        self,
+        scope: AurisRunContext,
+        *,
+        dagster_run_id: str,
+        status: str,
+        result_ref: Mapping[str, Any] | None = None,
+        metrics: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        retryable: bool = True,
+    ) -> dict[str, Any]:
+        if status not in {"success", "failed"}:
+            raise CompletionCallbackError("completion status is invalid")
+        run_id = self._validated_identifier(dagster_run_id, name="Dagster run id")
+
+        completion_receipt_id = f"dagster:{run_id}"
+        idempotency_key = f"dagster-completion:{run_id}"
+        payload: dict[str, Any] = {
+            "adapter": SOURCE,
+            "source": SOURCE,
+            "status": status,
+            "completion_receipt_id": completion_receipt_id,
+            "external_id": run_id,
+            "result_ref": dict(result_ref or {}),
+            "metrics": dict(metrics or {}),
+            "retryable": bool(retryable),
+        }
+        if status == "failed":
+            payload["error_code"] = error_code or "DAGSTER_WORKFLOW_FAILED"
+            payload["note"] = "Dagster 领域执行失败；请按 trace_id 查询受控日志"
+        path = f"/api/v1/runs/{quote(scope.run_id, safe='')}/external-completion-receipts"
+        return self._post_signed(
+            scope,
+            dagster_run_id=run_id,
+            path=path,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            request_suffix="completion",
+            failure_kind="completion",
+            max_attempts=self.max_attempts,
+            initial_backoff_seconds=0.25,
+        )
+
+    def post_progress(
+        self,
+        scope: AurisRunContext,
+        *,
+        dagster_run_id: str,
+        import_batch_id: str,
+        stage: str,
+        deadline_at: datetime | None = None,
+    ) -> dict[str, Any]:
+        run_id = self._validated_identifier(dagster_run_id, name="Dagster run id")
+        batch_id = self._validated_identifier(import_batch_id, name="import batch id")
+        if stage not in {"downloading", "verifying"}:
+            raise CompletionCallbackError("progress stage is invalid")
+        normalized_deadline: datetime | None = None
+        if deadline_at is not None:
+            if deadline_at.tzinfo is None or deadline_at.utcoffset() is None:
+                raise CompletionCallbackError("progress deadline is invalid")
+            normalized_deadline = deadline_at.astimezone(UTC)
+            if normalized_deadline <= self._clock().astimezone(UTC):
+                raise CompletionCallbackError("progress deadline has expired")
+        idempotency_key = f"dagster-progress:{run_id}:{stage}"
+        payload = {
+            "adapter": SOURCE,
+            "source": SOURCE,
+            "progress_receipt_id": f"dagster:{run_id}:{stage}",
+            "external_id": run_id,
+            "tenant_id": scope.tenant_id,
+            "project_id": scope.project_id,
+            "task_run_id": scope.run_id,
+            "import_batch_id": batch_id,
+            "stage": stage,
+        }
+        path = f"/api/v1/runs/{quote(scope.run_id, safe='')}/external-progress-receipts"
+        response = self._post_signed(
+            scope,
+            dagster_run_id=run_id,
+            path=path,
+            idempotency_key=idempotency_key,
+            payload=payload,
+            request_suffix=f"progress-{stage}",
+            failure_kind="progress",
+            max_attempts=self.progress_max_attempts,
+            initial_backoff_seconds=0.5,
+            retryable_conflict_codes=_TRANSIENT_PROGRESS_CONFLICT_CODES,
+            retry_409_until=normalized_deadline if stage == "downloading" else None,
+        )
+        response_data = response.get("data")
+        if not isinstance(response_data, Mapping) or response_data.get("current_stage") != stage:
+            raise CompletionCallbackError("BFF progress callback acknowledgement is invalid")
+        return response

@@ -518,6 +518,29 @@ def _storage_object_for_recording(
 ) -> StorageObject | None:
     if not recording_id:
         return None
+    recording = session.scalar(
+        select(AudioRecording).where(
+            AudioRecording.recording_id == recording_id,
+            AudioRecording.tenant_id == ctx.tenant_id,
+            AudioRecording.project_id == ctx.project_id,
+        )
+    )
+    direct_storage_object_id = (
+        recording.payload.get("storage_object_id")
+        if recording is not None and isinstance(recording.payload, dict)
+        else None
+    )
+    if isinstance(direct_storage_object_id, str) and direct_storage_object_id:
+        direct = session.scalar(
+            select(StorageObject).where(
+                StorageObject.storage_object_id == direct_storage_object_id,
+                StorageObject.tenant_id == ctx.tenant_id,
+                StorageObject.project_id == ctx.project_id,
+                StorageObject.status != "superseded",
+            )
+        )
+        if direct is not None:
+            return direct
     return session.scalar(
         select(StorageObject)
         .where(

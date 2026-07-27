@@ -124,6 +124,19 @@ x-app-secrets: &app-secrets
   - external_callback_key_bindings
   - experiment_assignment_secret
 
+x-bff-secrets: &bff-secrets
+  - runtime_database_url
+  - redis_url
+  - object_storage_access_key
+  - object_storage_secret_key
+  - qdrant_api_key
+  - embedding_api_key
+  - audio_playback_grant_secret
+  - completion_receipt_key_bindings
+  - external_callback_key_bindings
+  - experiment_assignment_secret
+  - platform_credential_bindings
+
 services:
   mysql:
     <<: *service-security
@@ -450,6 +463,8 @@ services:
       AURIS_BFF_INTERNAL_URL: http://bff:8000
       AURIS_COMPLETION_RECEIPT_KEYRING_FILE: /run/secrets/completion_receipt_key_bindings
       AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: ${AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID:-dagster-v1}
+      AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE: /run/secrets/platform_credential_bindings
+      AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS: ${AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS:-}
       AURIS_AUDIO_OBJECT_STORAGE_PROVIDER: minio
       AURIS_AUDIO_OBJECT_STORAGE_ENDPOINT: http://minio:9000
       AURIS_AUDIO_OBJECT_STORAGE_REGION: us-east-1
@@ -466,6 +481,7 @@ services:
     secrets:
       - dagster_database_url
       - completion_receipt_key_bindings
+      - platform_credential_bindings
       - object_storage_access_key
       - object_storage_secret_key
       - audio_inference_api_token
@@ -557,7 +573,8 @@ services:
     environment:
       <<: *app-environment
       WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-1}
-    secrets: *app-secrets
+      PLATFORM_CREDENTIAL_BINDINGS_FILE: /run/secrets/platform_credential_bindings
+    secrets: *bff-secrets
     networks:
       - internal
       - app-egress
@@ -953,6 +970,8 @@ secrets:
     file: ${AURIS_SECRETS_DIR:-./secrets}/completion_receipt_key_bindings
   external_callback_key_bindings:
     file: ${AURIS_SECRETS_DIR:-./secrets}/external_callback_key_bindings
+  platform_credential_bindings:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/platform_credential_bindings
   experiment_assignment_secret:
     file: ${AURIS_SECRETS_DIR:-./secrets}/experiment_assignment_secret
   tls_cert:

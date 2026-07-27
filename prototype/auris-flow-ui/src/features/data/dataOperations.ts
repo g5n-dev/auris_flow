@@ -1,7 +1,6 @@
 import type { Dispatch, SetStateAction } from "react";
 
 import {
-  createConnectorResource,
   createExportRun,
   getBackendRun,
   retryBackendRun,
@@ -22,14 +21,10 @@ import type { DataAggregateKey, DataExportRun, DataSceneProfileLock } from "./ty
 type Setter<T> = Dispatch<SetStateAction<T>>;
 
 type DataOperationsInput = {
-  activeTab: string;
   aggregateFilters: Record<DataAggregateKey, string[]>;
   aggregationOrder: DataAggregateKey[];
   dataAction: string | null;
   dataExportRun: DataExportRun;
-  isRelationView: boolean;
-  canImportConnector: boolean;
-  connectorImportBlockedReason: string;
   canExportData: boolean;
   dataExportBlockedReason: string;
   sceneProfileLock: DataSceneProfileLock | null;
@@ -43,52 +38,6 @@ type DataOperationsInput = {
 const dataShortTrace = (trace?: string) => trace ? trace.slice(0, 12) : "no-trace";
 
 export function createDataOperations(input: DataOperationsInput) {
-  const openConnectorImport = async () => {
-    if (input.dataAction === "connector-import") return;
-    if (!input.sceneProfileLock || !input.canImportConnector) {
-      input.setDataNotice({
-        status: "error",
-        title: "连接器导入已禁用",
-        detail: input.connectorImportBlockedReason || "当前数据对象没有经过服务端验证的目标资产。"
-      });
-      return;
-    }
-    const connectorId = `ui_connector_${Date.now().toString(36)}`;
-    const connectorPayload = {
-      connector_id: connectorId,
-      name: "数据管理连接器导入",
-      source_type: input.activeTab === "events" ? "authenticated_events_api" : input.isRelationView ? "relation_repair_api" : "audio_and_event_connector",
-      status: "draft",
-      sync_mode: "manual",
-      target_asset_key: input.selectedAsset.assetKey,
-      source: "data_module_connector_import",
-      selected_asset_id: input.selectedAsset.id,
-      ...input.sceneProfileLock
-    };
-    input.setDataAction("connector-import");
-    input.setDataNotice({
-      status: "pending",
-      title: "正在创建连接器草稿",
-      detail: `${input.selectedAsset.id} / ${input.selectedAsset.assetKey} 正在写入 BFF，成功后可继续配置认证、调度和输出映射。`
-    });
-    try {
-      const receipt = await createConnectorResource(connectorPayload);
-      input.setDataNotice({
-        status: "success",
-        title: "连接器资源已创建",
-        detail: `${receipt.data.id} 已入台账，状态 ${receipt.data.status}；trace：${dataShortTrace(receipt.data.trace_id)}。`
-      });
-    } catch (error) {
-      input.setDataNotice({
-        status: "error",
-        title: "连接器创建失败",
-        detail: error instanceof Error ? `${error.message}。请检查当前租户/项目权限或稍后重试。` : "BFF 未返回可识别错误，请稍后重试。"
-      });
-    } finally {
-      input.setDataAction(null);
-    }
-  };
-
   const exportDataAssets = async () => {
     if (input.dataAction === "export") return;
     if (!input.sceneProfileLock || !input.canExportData) {
@@ -150,7 +99,6 @@ export function createDataOperations(input: DataOperationsInput) {
   };
 
   return {
-    exportDataAssets,
-    openConnectorImport
+    exportDataAssets
   };
 }

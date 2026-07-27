@@ -1,8 +1,8 @@
 export const frontendBundleBudgetPolicy = Object.freeze({
-  schemaVersion: 3,
-  auditedAt: "2026-07-20",
+  schemaVersion: 4,
+  auditedAt: "2026-07-27",
   rationale:
-    "以 8e009d9 已审计构建为量化参照；接受的确定性生产构建快照由 production/frontend/frontend-bundle.lock.json 独立锁定，预算只保留约 1% 缓冲。",
+    "保留 8e009d9 与既有数据资产闭环作为提交绑定参照；P0 平台音频导入闭环按锁定工具链记录本地验收增量。正式发行仍必须由 production/frontend/frontend-bundle.lock.json 独立审批，预算只保留约 1% 缓冲。",
   referenceAudit: Object.freeze({
     id: "frontend-decomposition/final-2026-07-18",
     totals: Object.freeze({
@@ -33,14 +33,28 @@ export const frontendBundleBudgetPolicy = Object.freeze({
       allBrotliBytes: 461_472
     })
   }),
+  workingAcceptance: Object.freeze({
+    status: "LOCAL_ACCEPTANCE",
+    id: "p0-platform-audio-import-closure/2026-07-27",
+    comparedToSourceCommit: "647fb5c7e7fb1cc600917be38385166004b9b552",
+    scope:
+      "data-assets connector configuration, production TaskRun, Dagster import, ImportBatch readback, AudioSession playback",
+    releaseEligible: false,
+    totals: Object.freeze({
+      jsRawBytes: 1_139_003,
+      jsBrotliBytes: 312_480,
+      allRawBytes: 2_255_017,
+      allBrotliBytes: 476_175
+    })
+  }),
   limits: Object.freeze({
-    totalJsRawBytes: 1_134_592,
-    totalJsBrotliBytes: 301_568,
+    totalJsRawBytes: 1_150_976,
+    totalJsBrotliBytes: 315_392,
     initialClosureBrotliBytes: 276_480,
     routeJsClosureBytes: 307_200,
     maxJsAssetBytes: 512_000,
-    totalAssetsRawBytes: 2_254_080,
-    totalAssetsBrotliBytes: 466_944,
+    totalAssetsRawBytes: 2_277_376,
+    totalAssetsBrotliBytes: 481_280,
     maxKnowledgeBytes: 80 * 1024,
     maxCatalogBytes: 180 * 1024,
     maxCssAssetBytes: 830 * 1024

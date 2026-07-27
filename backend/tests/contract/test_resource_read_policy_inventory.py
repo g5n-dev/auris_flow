@@ -89,6 +89,28 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "select",
             "VoiceprintEnrollment",
         ): 1,
+        # The stable projection IDs include tenant/project. The materializer also
+        # rejects a loaded row whose persisted scope does not match the TaskRun.
+        (
+            "services/audio_import_completion_service.py",
+            "_materialize_succeeded_item",
+            "get",
+            "AssetMaterialization",
+        ): 1,
+        (
+            "services/audio_import_completion_service.py",
+            "_materialize_succeeded_item",
+            "get",
+            "AssetLineageEdge",
+        ): 1,
+        # Progress receipts lock one TaskRun through an explicit run + tenant +
+        # project predicate before accepting any executor-provided identifiers.
+        (
+            "services/audio_import_progress_service.py",
+            "_scoped_run",
+            "select",
+            "RunRecord",
+        ): 1,
         (
             "services/calibration_service.py",
             "_sync_assignment_review_task",
@@ -686,3 +708,40 @@ def test_task_run_control_sensitive_sql_scope_guards_are_explicit() -> None:
         "RunRecord.run_type == 'task_run'",
     ):
         assert required_event_scope_check in worker_source
+
+
+def test_audio_import_sensitive_sql_scope_guards_are_explicit() -> None:
+    def function_source(relative_path: str, function_name: str) -> str:
+        path = APP_ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name == function_name
+        )
+        return ast.unparse(function)
+
+    scoped_run = function_source(
+        "services/audio_import_progress_service.py",
+        "_scoped_run",
+    )
+    for required_scope_check in (
+        "RunRecord.run_id == run_id",
+        "RunRecord.tenant_id == ctx.tenant_id",
+        "RunRecord.project_id == ctx.project_id",
+        "with_for_update()",
+    ):
+        assert required_scope_check in scoped_run
+
+    materialize = function_source(
+        "services/audio_import_completion_service.py",
+        "_materialize_succeeded_item",
+    )
+    for required_scope_check in (
+        "materialization.tenant_id != record.tenant_id",
+        "materialization.project_id != record.project_id",
+        "lineage.tenant_id != record.tenant_id",
+        "lineage.project_id != record.project_id",
+    ):
+        assert required_scope_check in materialize

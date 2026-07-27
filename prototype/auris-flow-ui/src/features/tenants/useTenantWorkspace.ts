@@ -20,11 +20,53 @@ import {
   resolveTenantOutputAssetKey
 } from "./model";
 import {
+  EMPTY_TENANT_DRAFT,
   createTenantMutation,
   pullTenantAsrMutation,
   updateTenantStatusMutation
 } from "./tenantMutations";
-import type { TenantDraft, TenantRiskFilter, TenantRow, TenantModuleProps } from "./types";
+import type {
+  TenantAsrBinding,
+  TenantDraft,
+  TenantRiskFilter,
+  TenantRow,
+  TenantModuleProps
+} from "./types";
+
+const bffTenantAudioImportUnavailable: TenantAsrBinding = {
+  provider: "BFF 未提供连接器详情",
+  serviceId: "请在数据资产新建导入配置",
+  status: "等待已发布导入配置",
+  endpoint: "由已发布 Connector 快照冻结",
+  auth: "credential_ref 仅由服务端解析",
+  pullMode: "手动立即拉取",
+  cursor: "由 BFF 批次回读",
+  quota: "由当前项目服务端策略控制",
+  retention: "由对象存储策略控制",
+  nextRun: "未调度",
+  quality: "本轮不执行 ASR",
+  pullSources: [],
+  outputAssets: [
+    ["auris/audio/raw_recordings", "Asset", "平台音频 URL 导入后的内部对象与会话"]
+  ],
+  runs: [],
+  guardrails: [
+    ["事实来源", "配置、运行、批次和会话只从当前租户项目 BFF 回读"],
+    ["执行入口", "拉取一次只创建最新匹配的已发布 production TaskRun"]
+  ]
+};
+
+const tenantProjectionRows = (
+  source: TenantModuleProps["projectionSource"],
+  items?: unknown[]
+) => source === "bff" ? normalizeTenantProjectionItems(items ?? []) : tenantRows;
+
+const tenantIdsByName = (
+  source: TenantModuleProps["projectionSource"],
+  rows: TenantRow[]
+) => source === "bff"
+  ? Object.fromEntries(rows.flatMap(({ name, tenantId }) => tenantId ? [[name, tenantId]] : []))
+  : { ...backendTenantIdByName };
 
 export function useTenantWorkspace({
   activeTab,
@@ -34,10 +76,8 @@ export function useTenantWorkspace({
   projectionItems,
   projectionSource
 }: TenantModuleProps) {
-  const initialTenants = projectionSource === "bff"
-    ? normalizeTenantProjectionItems(projectionItems ?? [])
-    : tenantRows;
-  const [tenants, setTenants] = useState<TenantRow[]>(initialTenants);
+  const initialTenants = tenantProjectionRows(projectionSource, projectionItems);
+  const [tenants, setTenants] = useState<TenantRow[]>(() => initialTenants);
   const [selectedTenantName, setSelectedTenantName] = useState(initialTenants[0]?.name ?? "");
   const [tenantQuery, setTenantQuery] = useState("");
   const [riskFilter, setRiskFilter] = useState<TenantRiskFilter>("all");
@@ -47,29 +87,19 @@ export function useTenantWorkspace({
   const [tenantNotice, setTenantNotice] = useState<OperationNotice>({
     status: "idle",
     title: "等待租户操作",
-    detail: "筛选、创建、暂停/恢复、ASR 拉取都会写入租户审计回执。"
+    detail: "筛选、创建、暂停/恢复和平台音频拉取都会写入租户审计回执。"
   });
   const [tenantAction, setTenantAction] = useState<string | null>(null);
   const [tenantBackendIds, setTenantBackendIds] = useState<Record<string, string>>(() => ({ ...backendTenantIdByName }));
-  const [tenantAsrRunOverrides, setTenantAsrRunOverrides] = useState<Record<string, Array<[string, string, string]>>>({});
   useEffect(() => {
-    const nextTenants: TenantRow[] = projectionSource === "bff"
-      ? normalizeTenantProjectionItems(projectionItems ?? [])
-      : tenantRows;
+    const nextTenants = tenantProjectionRows(projectionSource, projectionItems);
     setTenants(nextTenants);
     setSelectedTenantName((current) => nextTenants.some((tenant) => tenant.name === current)
       ? current
       : nextTenants[0]?.name ?? "");
-    setTenantBackendIds(projectionSource === "bff"
-      ? Object.fromEntries(nextTenants.flatMap((tenant) => tenant.tenantId ? [[tenant.name, tenant.tenantId]] : []))
-      : { ...backendTenantIdByName });
+    setTenantBackendIds(tenantIdsByName(projectionSource, nextTenants));
   }, [projectionItems, projectionSource]);
-  const [draftTenant, setDraftTenant] = useState<TenantDraft>({
-    name: "",
-    admin: "项目管理员",
-    scene: "汽车门店质检",
-    quotaTemplate: "标准配额"
-  });
+  const [draftTenant, setDraftTenant] = useState<TenantDraft>(EMPTY_TENANT_DRAFT);
 
   const tenantSceneUnbound = draftTenant.scene === "通用租户（稍后配置）";
   const tenantSceneCustom = Boolean(
@@ -82,21 +112,27 @@ export function useTenantWorkspace({
   const tenantAdminUnavailableReason = "当前身份缺少 system 平台角色；租户创建、暂停和恢复必须由平台管理员通过 BFF 执行。";
   const selectedTenant = tenants.find((tenant) => tenant.name === selectedTenantName) ?? tenants[0];
   const canCreateTenant = draftTenant.name.trim().length > 0 && draftTenant.admin.trim().length > 0;
-  const activeTenantAsr = tenantAsrBindings[selectedTenant.name] ?? defaultTenantAsrBinding;
-  const activeTenantAsrRuns = [
-    ...(tenantAsrRunOverrides[selectedTenant.name] ?? []),
-    ...activeTenantAsr.runs
-  ];
+  const truthMode = projectionSource === "bff";
+  const activeTenantAsr = truthMode
+    ? bffTenantAudioImportUnavailable
+    : tenantAsrBindings[selectedTenant.name] ?? defaultTenantAsrBinding;
+  const activeTenantAsrRuns = activeTenantAsr.runs;
   const filteredTenantRows = filterTenants(tenants, tenantQuery, riskFilter);
-  const activeAuditItems = tenantAuditItems[selectedTenant.name] ?? [
-    ["刚刚", "租户创建", `${selectedTenant.name} 已建立隔离空间`],
-    ["待配置", "项目接入", "创建项目后通过任务配置接入数据"],
-    ["待配置", "权限初始化", "补充管理员、标注员和审计角色"]
-  ];
-  const activeTenantProjects = tenantProjects[selectedTenant.name] ?? [];
-  const activeTenantMembers = tenantMembers[selectedTenant.name] ?? [
-    { name: draftTenant.admin || "项目管理员", role: "租户管理员", scope: "待分配", status: "待邀请", lastSeen: "未登录" }
-  ];
+  const activeAuditItems = truthMode
+    ? []
+    : tenantAuditItems[selectedTenant.name] ?? [
+      ["刚刚", "租户创建", `${selectedTenant.name} 已建立隔离空间`],
+      ["待配置", "项目接入", "创建项目后通过任务配置接入数据"],
+      ["待配置", "权限初始化", "补充管理员、标注员和审计角色"]
+    ];
+  const activeTenantProjects = truthMode
+    ? []
+    : tenantProjects[selectedTenant.name] ?? [];
+  const activeTenantMembers = truthMode
+    ? []
+    : tenantMembers[selectedTenant.name] ?? [
+      { name: draftTenant.admin || "项目管理员", role: "租户管理员", scope: "待分配", status: "待邀请", lastSeen: "未登录" }
+    ];
   const quotaRows = deriveTenantQuotaRows(selectedTenant);
 
   const openTenantOutputAsset = (asset: string) => {
@@ -108,8 +144,8 @@ export function useTenantWorkspace({
       objectId: assetKey,
       focusMode: "lineage",
       title: asset,
-      detail: `${selectedTenant.name} / ASR 接入输出资产`
-    }, "租户 ASR 接入", "tenants", asset));
+      detail: `${selectedTenant.name} / 平台音频接入输出资产`
+    }, "租户音频接入", "tenants", asset));
   };
   const selectTenantScene = (scene: string) => {
     if (scene === createTenantSceneValue) {
@@ -167,10 +203,8 @@ export function useTenantWorkspace({
     tenantBackendIds
   });
   const pullTenantAsrOnce = pullTenantAsrMutation({
-    activeTenantAsr,
     selectedTenant,
     setTenantAction,
-    setTenantAsrRunOverrides,
     setTenantNotice,
     tenantAction
   });

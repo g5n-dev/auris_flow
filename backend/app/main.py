@@ -35,6 +35,7 @@ from app.api.routers import (
     generic,
     hotwords,
     human_review,
+    imports,
     insights,
     label_closed_loop,
     label_fact_sets,
@@ -904,6 +905,7 @@ for router in [
     prompt_release.router,
     traces.router,
     workspace_context.router,
+    imports.router,
     generic.router,
 ]:
     app.include_router(router, prefix=settings.api_prefix)
@@ -941,19 +943,21 @@ def _openapi_with_completion_hmac_security() -> dict[str, Any]:
             },
         }
     )
-    operation = document["paths"][
-        f"{settings.api_prefix}/runs/{{id}}/external-completion-receipts"
-    ]["post"]
-    operation["security"] = [
-        {
-            "aurisCompletionSignature": [],
-            "aurisCompletionKeyId": [],
-        },
-        {
-            "aurisCompletionSignature": [],
-            "aurisCompletionLegacyKeyId": [],
-        },
-    ]
+    for receipt_path in (
+        "external-completion-receipts",
+        "external-progress-receipts",
+    ):
+        operation = document["paths"][f"{settings.api_prefix}/runs/{{id}}/{receipt_path}"]["post"]
+        operation["security"] = [
+            {
+                "aurisCompletionSignature": [],
+                "aurisCompletionKeyId": [],
+            },
+            {
+                "aurisCompletionSignature": [],
+                "aurisCompletionLegacyKeyId": [],
+            },
+        ]
     return document
 
 
