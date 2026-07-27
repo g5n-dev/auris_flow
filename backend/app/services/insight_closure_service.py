@@ -55,6 +55,13 @@ REPORT_SECTION_TITLES = {
 }
 
 
+def _server_generated_id(prefix: str) -> str:
+    """Generate an opaque ID that cannot accidentally resemble a phone number."""
+
+    token = uuid.uuid4().hex[:12]
+    return f"{prefix}_{token[:4]}_{token[4:8]}_{token[8:]}"
+
+
 def _scene_metric_catalog(
     session: Session,
     ctx: RequestContext,
@@ -1100,7 +1107,7 @@ async def create_insight_report(
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
     if replay is not None:
         return replay
-    report_id = body.report_id or f"insight_report_{uuid.uuid4().hex[:12]}"
+    report_id = body.report_id or _server_generated_id("insight_report")
     evidence_refs, evidence_pack_ids = _resolve_evidence_refs(session, ctx, body.evidence_refs)
     evidence_resources = _load_evidence_resources(session, ctx, evidence_refs)
     metric_results, scene_lock = _load_report_metric_results(session, ctx, body=body)
@@ -1326,7 +1333,7 @@ async def create_insight_action(
         )
     _resolve_evidence_refs(session, ctx, evidence_refs)
 
-    action_id = body.action_id or f"insight_action_{uuid.uuid4().hex[:12]}"
+    action_id = body.action_id or _server_generated_id("insight_action")
     if session.get(InsightAction, action_id) is not None:
         raise ApiError("INSIGHT_ACTION_ALREADY_EXISTS", "动作 ID 已存在", 409)
     branch, minimum_branch = _review_branch(body, metric.payload)
@@ -1511,7 +1518,7 @@ async def create_insight_experiment(
         object_ref=f"insight_experiment:{body.experiment_id or 'new'}",
     )
     _assert_scene_snapshot(session, ctx, action_scene_lock)
-    experiment_id = body.experiment_id or f"insight_experiment_{uuid.uuid4().hex[:12]}"
+    experiment_id = body.experiment_id or _server_generated_id("insight_experiment")
 
     def prepare(record: RunRecord) -> None:
         if session.get(InsightExperiment, experiment_id) is not None:
