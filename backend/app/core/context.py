@@ -29,7 +29,9 @@ from app.core.project_membership import (
 from app.core.request_identifiers import (
     REQUEST_IDENTIFIER_PATTERN_TEXT,
     is_safe_request_identifier,
+    public_id_from_hex,
     sanitized_request_id,
+    server_generated_public_id,
 )
 from app.models import AuthSession, IdempotencyRecord, Project, Tenant, TraceRef, User
 
@@ -170,7 +172,7 @@ def initialize_server_trace(request: Request) -> ServerTraceContext:
         getattr(request.state, "trace_id", None)
         if getattr(request.state, "server_trace_initialized", False)
         else None
-    ) or f"trace_{uuid.uuid4().hex}"
+    ) or server_generated_public_id("trace", suffix_length=32)
     request.state.trace_id = root_trace_id
     request.state.server_trace_initialized = True
     parent_trace_id = _validated_trace_header(
@@ -478,7 +480,11 @@ async def request_context(
 
 
 def _external_completion_user_id(key_id: str) -> str:
-    return f"ext_completion_{uuid.uuid5(uuid.NAMESPACE_URL, key_id).hex[:16]}"
+    return public_id_from_hex(
+        "ext_completion",
+        uuid.uuid5(uuid.NAMESPACE_URL, key_id).hex,
+        suffix_length=16,
+    )
 
 
 async def signed_completion_context(

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import RunRecord, StorageObject
 from app.schemas.evaluation import LabelingEvalCompletionResult
 from app.schemas.requests import RunCompletionReceiptRequest
@@ -616,7 +617,11 @@ def build_promptfoo_completion_payload(
     payload = RunCompletionReceiptRequest(
         status="success",
         adapter=dispatch_adapter,
-        completion_receipt_id=f"promptfoo_{document_sha256[:24]}",
+        completion_receipt_id=public_id_from_hex(
+            "promptfoo",
+            document_sha256,
+            suffix_length=24,
+        ),
         source=dispatch_adapter,
         external_id=dispatch_external_id,
         result_ref={

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from datetime import UTC, datetime
 from typing import Any, TypedDict
 from urllib.error import HTTPError, URLError
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import server_generated_public_id
 from app.models import EvalDatasetVersion, StorageObject
 from app.schemas import EvalDatasetVersionCreateRequest
 from app.services.adapters import (
@@ -42,7 +42,11 @@ class _ManifestSnapshot(TypedDict):
 
 
 def _new_dataset_id() -> str:
-    return f"evalset-{uuid.uuid4().hex[:20]}"
+    return server_generated_public_id(
+        "evalset",
+        suffix_length=20,
+        separator="-",
+    )
 
 
 def _error_details(storage_object: StorageObject) -> list[dict[str, Any]]:

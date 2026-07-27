@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,6 +18,7 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import server_generated_public_id
 from app.core.response import envelope
 from app.models import (
     AudioRecording,
@@ -328,7 +328,7 @@ def create_json_resource(
     resource_key = (
         payload.get("id")
         or payload.get(f"{key_prefix}_id")
-        or f"{key_prefix}_{uuid.uuid4().hex[:12]}"
+        or server_generated_public_id(key_prefix, suffix_length=12)
     )
     data = {
         "id": resource_key,

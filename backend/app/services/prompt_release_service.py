@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from datetime import UTC, datetime
 from typing import Any, TypeVar
 
@@ -12,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.models import (
     EvalDatasetVersion,
     HumanReviewDecision,
@@ -1636,7 +1636,7 @@ def _create_release_command(
             details=[release_command_data(existing)],
         )
     head = _release_head(session, ctx, deployment.environment, for_update=True)
-    resolved_command_id = command_id or f"rc_{uuid.uuid4().hex[:24]}"
+    resolved_command_id = command_id or server_generated_public_id("rc", suffix_length=24)
     run_id = f"release_command_{resolved_command_id}"
     deployment_payload = deployment.payload or {}
     root_trace_id = str(
@@ -2326,7 +2326,11 @@ def _append_release_head_event(
     }
     content_sha256 = _strict_canonical_sha256(document)
     event = ReleaseBundleHeadEvent(
-        head_event_id=f"rbhe_{content_sha256[:24]}",
+        head_event_id=public_id_from_hex(
+            "rbhe",
+            content_sha256,
+            suffix_length=24,
+        ),
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         environment=head.environment,
@@ -2444,11 +2448,12 @@ def _activate_release_head(
     prompt = _set_prompt_active_pointer(session, ctx, deployment)
     head = _release_head(session, ctx, deployment.environment, for_update=True)
     if head is None:
-        head_id = (
-            "rbh_"
-            + hashlib.sha256(
+        head_id = public_id_from_hex(
+            "rbh",
+            hashlib.sha256(
                 f"{ctx.tenant_id}:{ctx.project_id}:{deployment.environment}".encode()
-            ).hexdigest()[:24]
+            ).hexdigest(),
+            suffix_length=24,
         )
         head = ReleaseBundleHead(
             release_head_id=head_id,
@@ -3134,7 +3139,11 @@ def ingest_release_monitor_sample(
                     reason="在线硬阈值触发自动安全回滚",
                     expected_deployment_status=body.expected_status,
                     target=target,
-                    command_id=f"rc_auto_{sample_sha256[:20]}",
+                    command_id=public_id_from_hex(
+                        "rc_auto",
+                        sample_sha256,
+                        suffix_length=20,
+                    ),
                 )
                 automatic_action = "auto-rollback-requested"
                 event_type = "release_deployment.auto-rollback-requested"

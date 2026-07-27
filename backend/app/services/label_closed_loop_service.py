@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import uuid
 from bisect import bisect_right
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -15,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.domain.label_aggregation import (
     AggregationMode,
     AggregationPolicy,
@@ -2127,8 +2127,10 @@ def create_aggregation_run(
         for observation_id, contribution in sorted(contributions.items()):
             source = by_id[observation_id]
             member = LabelAggregateMember(
-                aggregate_member_id=(
-                    "lam_" + canonical_sha256([aggregate_id, observation_id])[:24]
+                aggregate_member_id=public_id_from_hex(
+                    "lam",
+                    canonical_sha256([aggregate_id, observation_id]),
+                    suffix_length=24,
                 ),
                 aggregate_id=aggregate_id,
                 observation_id=observation_id,
@@ -2257,7 +2259,11 @@ def create_aggregation_run(
 def _create_aggregate_review_task(
     session: Session, ctx: RequestContext, aggregate: LabelAggregate
 ) -> str:
-    review_task_id = f"hrt_{canonical_sha256(['label-aggregate', aggregate.aggregate_id])[:24]}"
+    review_task_id = public_id_from_hex(
+        "hrt",
+        canonical_sha256(["label-aggregate", aggregate.aggregate_id]),
+        suffix_length=24,
+    )
     payload = {
         "id": review_task_id,
         "review_task_id": review_task_id,
@@ -2329,7 +2335,11 @@ def _create_taxonomy_suggestion(
                 409,
             )
         return suggestion_id, existing.review_task_id
-    review_task_id = f"hrt_{canonical_sha256(['taxonomy', suggestion_id])[:24]}"
+    review_task_id = public_id_from_hex(
+        "hrt",
+        canonical_sha256(["taxonomy", suggestion_id]),
+        suffix_length=24,
+    )
     record = LabelTaxonomySuggestion(
         suggestion_id=suggestion_id,
         tenant_id=ctx.tenant_id,
@@ -2668,7 +2678,11 @@ def materialize_human_review_feedback(
             "prompt_version_candidates": "prompt-version-candidate",
         }[target.collection]
         target_id = str(target.resource_key)
-        feedback_id = f"fb_{canonical_sha256([decision_id, target_type, target_id])[:24]}"
+        feedback_id = public_id_from_hex(
+            "fb",
+            canonical_sha256([decision_id, target_type, target_id]),
+            suffix_length=24,
+        )
         before = target_befores.get(f"{target.collection}:{target_id}", {})
         after = dict(target.data)
         feedback = FeedbackExample(
@@ -2908,7 +2922,10 @@ def create_label_badcase(
     ctx: RequestContext,
     body: LabelBadcaseCreateRequest,
 ) -> dict[str, Any]:
-    badcase_id = body.badcase_id or f"badcase_{uuid.uuid4().hex[:20]}"
+    badcase_id = body.badcase_id or server_generated_public_id(
+        "badcase",
+        suffix_length=20,
+    )
     if session.get(Badcase, badcase_id) is not None:
         raise ApiError("BADCASE_ALREADY_EXISTS", "Badcase 已存在", 409)
     payload = body.model_dump(mode="json", exclude_none=True)

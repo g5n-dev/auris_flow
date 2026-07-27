@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import UTC, datetime
 from typing import Any, Literal, overload
@@ -15,6 +14,7 @@ from sqlalchemy.sql import Select
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import server_generated_public_id
 from app.core.response import collection_envelope, envelope
 from app.domain.calibration.rubrics import RUBRIC_PROFILES
 from app.models import (
@@ -373,7 +373,8 @@ async def create_scene_profile(
     if profile is None:
         created_at = datetime.now(UTC)
         profile = SceneProfile(
-            scene_profile_id=body.scene_profile_id or f"scene_{uuid.uuid4().hex[:16]}",
+            scene_profile_id=body.scene_profile_id
+            or server_generated_public_id("scene", suffix_length=16),
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             scene_key=body.scene_key,
@@ -398,7 +399,9 @@ async def create_scene_profile(
         raise ApiError("SCENE_PROFILE_VERSION_EXISTS", "场景版本已经存在", 409)
 
     manifest = body.manifest.model_dump(mode="json")
-    scene_profile_version_id = body.scene_profile_version_id or f"scenev_{uuid.uuid4().hex[:16]}"
+    scene_profile_version_id = body.scene_profile_version_id or server_generated_public_id(
+        "scenev", suffix_length=16
+    )
     version = SceneProfileVersion(
         scene_profile_version_id=scene_profile_version_id,
         scene_profile_id=profile.scene_profile_id,
@@ -476,7 +479,7 @@ async def request_scene_profile_generation(
     profile_id = (
         profile.scene_profile_id
         if profile
-        else (body.scene_profile_id or f"scene_{uuid.uuid4().hex[:16]}")
+        else (body.scene_profile_id or server_generated_public_id("scene", suffix_length=16))
     )
     if body.scene_profile_id and profile and body.scene_profile_id != profile.scene_profile_id:
         raise ApiError("SCENE_PROFILE_KEY_CONFLICT", "scene_key 已绑定到其他场景配置", 409)
@@ -578,7 +581,8 @@ def materialize_scene_profile_generation_completion(
     canonical_manifest = manifest.model_dump(mode="json")
     version = SceneProfileVersion(
         scene_profile_version_id=str(
-            result_ref.get("scene_profile_version_id") or f"scenev_{uuid.uuid4().hex[:16]}"
+            result_ref.get("scene_profile_version_id")
+            or server_generated_public_id("scenev", suffix_length=16)
         ),
         scene_profile_id=profile.scene_profile_id,
         tenant_id=record.tenant_id,
@@ -1162,7 +1166,7 @@ async def bind_project_scene_profile(
                 409,
             )
         binding = ProjectSceneProfileBinding(
-            binding_id=f"sceneb_{uuid.uuid4().hex[:16]}",
+            binding_id=server_generated_public_id("sceneb", suffix_length=16),
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             environment=body.environment,

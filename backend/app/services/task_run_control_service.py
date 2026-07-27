@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, Literal
@@ -12,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import server_generated_public_id
 from app.core.response import envelope
 from app.models import OutboxEvent, RunRecord
 from app.services.audit_service import record_audit
@@ -336,7 +336,7 @@ async def create_task_run_control(
         )
 
     run_type, event_type = CONTROL_ACTIONS[action]
-    control_id = f"{run_type}_{uuid.uuid4().hex[:12]}"
+    control_id = server_generated_public_id(run_type, suffix_length=12)
     control = RunRecord(
         run_id=control_id,
         tenant_id=ctx.tenant_id,

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from app.core.database import SessionLocal
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import RunRecord, StorageObject
 from app.schemas.requests import RunCompletionReceiptRequest
 from app.services.promptfoo_eval_adapter import (
@@ -367,6 +368,11 @@ def test_completion_payload_validates_artifacts_and_matches_internal_eval_schema
     assert validated.source == "dagster"
     assert validated.external_id == DISPATCH_EXTERNAL_ID
     assert validated.external_id != document.provider_run_id
+    assert validated.completion_receipt_id == public_id_from_hex(
+        "promptfoo",
+        result_sha256,
+        suffix_length=24,
+    )
     assert validated.result_ref["labeling_eval_result"]["binding_sha256"] == (
         request.bundle.binding_sha256
     )

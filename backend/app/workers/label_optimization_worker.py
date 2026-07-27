@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.core.logging import get_logger, log_event
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.domain.label_optimization import IterationState, StopReason, evaluate_iteration_budget
 from app.models import (
     LabelEvalResult,
@@ -276,7 +277,11 @@ def _create_eval_runs(
         digest = _canonical_sha256(
             [round_record.optimization_run_id, round_record.round_number, candidate_id]
         )
-        eval_run_id = f"eval_label_opt_{digest[:24]}"
+        eval_run_id = public_id_from_hex(
+            "eval_label_opt",
+            digest,
+            suffix_length=24,
+        )
         existing = session.scalar(
             select(RunRecord).where(
                 RunRecord.run_id == eval_run_id,
@@ -400,7 +405,11 @@ def _create_next_generation(
 ) -> LabelOptimizationRound:
     next_number = current.round_number + 1
     digest = _canonical_sha256([current.optimization_run_id, "generation", next_number])
-    run_id = f"label_optimization_{digest[:24]}"
+    run_id = public_id_from_hex(
+        "label_optimization",
+        digest,
+        suffix_length=24,
+    )
     generation = session.scalar(
         select(RunRecord).where(
             RunRecord.run_id == run_id,
@@ -862,7 +871,10 @@ def process_schedule_once(
     now: datetime | None = None,
 ) -> dict[str, Any]:
     utc_now = _aware_utc(now or datetime.now(UTC))
-    trace_id = f"trace_label_opt_scheduler_{uuid.uuid4().hex[:20]}"
+    trace_id = server_generated_public_id(
+        "trace_label_opt_scheduler",
+        suffix_length=20,
+    )
     ctx = scheduler_context(schedule, trace_id=trace_id)
     _reconcile_active_session(session, ctx, schedule, now=utc_now)
     due_kinds = _due_kinds(schedule, utc_now)

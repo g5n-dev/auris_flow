@@ -23,6 +23,7 @@ from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.logging import get_logger, log_event
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.core.response import envelope
 from app.core.runtime_guards import (
     FAILURE_INJECTION_KEYS,
@@ -1091,10 +1092,14 @@ def _link_completion_trace_to_run_root(
         (
             f"{ctx.tenant_id}|{ctx.project_id}|{ctx.trace_id}|{record.run_id}|{root_trace_id}"
         ).encode()
-    ).hexdigest()[:24]
+    ).hexdigest()
     session.merge(
         TraceRef(
-            trace_ref_id=f"trace_ref_completion_{digest}",
+            trace_ref_id=public_id_from_hex(
+                "trace_ref_completion",
+                digest,
+                suffix_length=24,
+            ),
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             status="active",
@@ -1717,7 +1722,7 @@ async def complete_run_from_receipt(
             400,
             details=[{"run_id": run_id}],
         )
-    receipt_id = str(raw_receipt_id or f"completion_{uuid.uuid4().hex[:12]}")
+    receipt_id = str(raw_receipt_id or server_generated_public_id("completion", suffix_length=12))
     receipt_hash = _completion_receipt_hash({**receipt_request_body, "run_id": run_id})
     legacy_receipt_hash = _completion_receipt_hash({**payload, "run_id": run_id})
     stored_receipt_request_body = receipt_request_body
@@ -2508,7 +2513,9 @@ async def create_run(
         }
 
     run_id = (
-        payload.get("run_id") or payload.get("task_run_id") or f"{run_type}_{uuid.uuid4().hex[:12]}"
+        payload.get("run_id")
+        or payload.get("task_run_id")
+        or server_generated_public_id(run_type, suffix_length=12)
     )
     # New RunRecord/Outbox pairs trace the current request; an explicit override
     # is reserved for retries that continue their source run's causal trace. A

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex, public_suffix_from_hex
 from app.models import (
     HumanReviewDecision,
     HumanReviewTask,
@@ -734,7 +735,7 @@ def _materialize_modified_prompt_candidate(
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         prompt_asset_id=version.prompt_asset_id,
-        version=f"revision-{content_sha256[:12]}",
+        version=("revision-" + public_suffix_from_hex(content_sha256, suffix_length=12)),
         parent_version_id=version.prompt_version_id,
         label_version_id=version.label_version_id,
         schema_version=version.schema_version,
@@ -749,9 +750,10 @@ def _materialize_modified_prompt_candidate(
         trace_id=ctx.trace_id,
     )
     session.add(child_version)
-    review_task_id = (
-        "hrt_"
-        + hashlib.sha256(_canonical_json(["prompt", child_id]).encode("utf-8")).hexdigest()[:24]
+    review_task_id = public_id_from_hex(
+        "hrt",
+        hashlib.sha256(_canonical_json(["prompt", child_id]).encode("utf-8")).hexdigest(),
+        suffix_length=24,
     )
     child_payload = {
         "id": child_id,
@@ -1116,8 +1118,8 @@ def _canonical_json(value: Any) -> str:
 
 
 def _scoped_id(prefix: str, *parts: str) -> str:
-    digest = hashlib.sha256(_canonical_json(parts).encode("utf-8")).hexdigest()[:24]
-    return f"{prefix}_{digest}"
+    digest = hashlib.sha256(_canonical_json(parts).encode("utf-8")).hexdigest()
+    return public_id_from_hex(prefix, digest, suffix_length=24)
 
 
 def _source_trace_id(payload: dict[str, Any], fallback: str | None) -> str | None:

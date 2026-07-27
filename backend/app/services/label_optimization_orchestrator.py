@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.domain.label_optimization import (
     OptimizationMetrics,
     OptimizationScope,
@@ -577,9 +577,13 @@ def execute_trigger_scan(
         )
 
     triggered = decision.should_trigger and not duplicate_hash
-    scan_id = f"label_opt_scan_{uuid.uuid4().hex[:20]}"
+    scan_id = server_generated_public_id("label_opt_scan", suffix_length=20)
     run_id = (
-        f"label_optimization_{decision.canonical_hash[:24]}"
+        public_id_from_hex(
+            "label_optimization",
+            decision.canonical_hash,
+            suffix_length=24,
+        )
         if triggered and decision.canonical_hash
         else None
     )

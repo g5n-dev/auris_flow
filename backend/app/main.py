@@ -7,7 +7,6 @@ import math
 import os
 import re
 import time
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http.client import HTTPException
@@ -68,6 +67,7 @@ from app.core.request_identifiers import (
     is_safe_request_identifier,
     safe_idempotency_key_for_response,
     sanitized_request_id,
+    server_generated_public_id,
 )
 from app.schemas import ApiErrorEnvelope
 from app.services.adapters import object_storage_client_for_provider
@@ -249,7 +249,7 @@ async def request_logging_middleware(
     request: Request,
     call_next: RequestResponseEndpoint,
 ) -> Response:
-    request.state.trace_id = f"trace_{uuid.uuid4().hex}"
+    request.state.trace_id = server_generated_public_id("trace", suffix_length=32)
     request.state.server_trace_initialized = True
     request.state.request_id = sanitized_request_id(_single_request_id_header(request))
     annotate_current_span(
@@ -428,7 +428,7 @@ async def request_logging_middleware(
 def error_payload(request: Request, exc: ApiError) -> dict:
     trace_id = getattr(request.state, "trace_id", None)
     if not trace_id:
-        trace_id = f"trace_{uuid.uuid4().hex}"
+        trace_id = server_generated_public_id("trace", suffix_length=32)
         request.state.trace_id = trace_id
     request_id = getattr(request.state, "request_id", None)
     if not request_id:

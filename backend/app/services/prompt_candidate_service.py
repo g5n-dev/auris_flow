@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import PromptAsset, PromptVersion, PromptVersionCandidate, RunRecord
 from app.services.audit_service import record_audit
 from app.services.outbox_service import enqueue_event
@@ -44,10 +45,14 @@ def _candidate_id(record: RunRecord, result_ref: dict[str, Any]) -> str:
     draft_ref = result_ref.get("draft_ref") or result_ref.get("candidate_id")
     if isinstance(draft_ref, str) and draft_ref:
         return draft_ref
-    digest = hashlib.sha1(
+    digest = hashlib.sha256(
         f"{record.tenant_id}|{record.project_id}|{record.run_id}".encode()
-    ).hexdigest()[:12]
-    return f"prompt_candidate_{digest}"
+    ).hexdigest()
+    return public_id_from_hex(
+        "prompt_candidate",
+        digest,
+        suffix_length=12,
+    )
 
 
 def materialize_prompt_candidate(
@@ -296,7 +301,11 @@ def materialize_optimization_prompt_candidates(
         )
         session.add(version)
 
-        review_task_id = f"hrt_{_canonical_sha256(['prompt', prompt_version_id])[:24]}"
+        review_task_id = public_id_from_hex(
+            "hrt",
+            _canonical_sha256(["prompt", prompt_version_id]),
+            suffix_length=24,
+        )
         candidate_payload = {
             "id": prompt_version_id,
             "candidate_id": prompt_version_id,

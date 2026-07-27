@@ -12,6 +12,7 @@ from app.core.config import Settings, get_settings
 from app.core.context import RequestContext
 from app.core.database import SessionLocal
 from app.core.logging import get_logger, log_event
+from app.core.request_identifiers import public_id_from_hex
 from app.models import RunRecord
 from app.repositories.outbox_events import database_utc_now
 from app.services.audit_service import record_audit
@@ -90,8 +91,12 @@ def _control_id(
     run_type, _ = CONTROL_DEFINITIONS[action]
     digest = hashlib.sha256(
         (f"v1|{source.tenant_id}|{source.project_id}|{source.run_id}|{action}|{cycle}").encode()
-    ).hexdigest()[:24]
-    return f"{run_type}_auto_{digest}"
+    ).hexdigest()
+    return public_id_from_hex(
+        f"{run_type}_auto",
+        digest,
+        suffix_length=24,
+    )
 
 
 def _source_key(source: RunRecord) -> _SourceKey:

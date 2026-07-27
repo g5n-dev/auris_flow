@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import UTC, datetime
 from typing import Any, Never
 
@@ -209,9 +210,12 @@ def test_enqueue_requires_exact_plan_confirmation_and_preserves_point_trace() ->
         assert rebuild.payload["trace_id"] == "trace_original_qdrant"
         assert rebuild.payload["rebuild_trace_id"] == result["rebuild_trace_id"]
         assert rebuild.payload["qdrant_payload"]["trace_id"] == "trace_original_qdrant"
+        assert re.fullmatch(r"qdrant_rebuild_[a-p]{16}_[a-p]+", rebuild.aggregate_id)
+        assert re.fullmatch(r"trace_qdrant_rebuild_[a-p]{32}", result["rebuild_trace_id"])
         audit = session.scalar(select(AuditLog).where(AuditLog.action == "qdrant.rebuild.enqueued"))
         assert audit is not None
         assert audit.trace_id == result["rebuild_trace_id"]
+        assert re.fullmatch(r"qdrant_rebuild_plan_[a-p]{32}", audit.object_id)
 
 
 def test_verify_requires_confirmed_qdrant_receipt() -> None:

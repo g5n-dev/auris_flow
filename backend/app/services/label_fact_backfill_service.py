@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.domain.label_mapping import sha256_document
 from app.domain.label_mapping.canonical import CanonicalJsonError
 from app.models import HumanReviewDecision, LabelAggregate, LabelFact, LabelFactHead
@@ -362,7 +363,12 @@ def _validate_existing_head(chain: _ChainProjection) -> None:
         return
     expected = (
         not any(projection.legacy for projection in chain.facts)
-        and head.fact_head_id == f"lfh_{chain.logical_key_sha256[:24]}"
+        and head.fact_head_id
+        == public_id_from_hex(
+            "lfh",
+            chain.logical_key_sha256,
+            suffix_length=24,
+        )
         and head.fact_namespace == FACT_NAMESPACE
         and head.logical_key_sha == chain.logical_key_sha256
         and head.current_fact_id == current.fact.fact_id
@@ -630,7 +636,11 @@ def backfill_legacy_label_facts(
         current = chain.facts[-1]
         session.add(
             LabelFactHead(
-                fact_head_id=f"lfh_{chain.logical_key_sha256[:24]}",
+                fact_head_id=public_id_from_hex(
+                    "lfh",
+                    chain.logical_key_sha256,
+                    suffix_length=24,
+                ),
                 tenant_id=ctx.tenant_id,
                 project_id=ctx.project_id,
                 fact_namespace=FACT_NAMESPACE,

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -11,6 +10,10 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import (
+    server_generated_public_id,
+    server_generated_public_suffix,
+)
 from app.models import HumanReviewDecision, HumanReviewTask, JsonResource, QualityAppeal
 from app.services.audit_service import record_audit
 from app.services.label_review_projection_service import sync_label_review_projection
@@ -155,7 +158,7 @@ def create_quality_appeal(
         or source_payload.get("source_trace_id")
         or source_trace_id
     )
-    appeal_token = uuid.uuid4().hex[:16]
+    appeal_token = server_generated_public_suffix(suffix_length=16)
     appeal_id = f"qap_{appeal_token}"
     review_task_id = f"hrt_qap_{appeal_token}"
     review_task_payload = {
@@ -429,7 +432,7 @@ def _create_appeal_decision(
     reason: str,
     decided_at: datetime,
 ) -> str:
-    decision_id = f"hrd_qap_{uuid.uuid4().hex[:16]}"
+    decision_id = server_generated_public_id("hrd_qap", suffix_length=16)
     payload = {
         "id": decision_id,
         "decision_id": decision_id,

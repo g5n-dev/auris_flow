@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from http.client import BadStatusLine, IncompleteRead
 from urllib.parse import quote
@@ -3399,6 +3400,10 @@ def test_labeling_evaluation_insight_closed_loop_contract(client, auth_headers):
     assert feedback_data["eval_run_id"] == eval_run_id
     assert feedback_data["run_type"] == "eval_feedback"
     assert feedback_data["feedback_task_id"].startswith(f"feedback_{eval_run_id}_")
+    assert re.fullmatch(
+        rf"feedback_{re.escape(eval_run_id)}_[a-p]{{10}}",
+        feedback_data["feedback_task_id"],
+    )
     assert feedback_data["eval_run_trace_id"] == eval_trace_id
     assert {"type": "feedback_task", "id": feedback_data["feedback_task_id"]} in feedback_data[
         "affected_objects"
@@ -3473,6 +3478,7 @@ def test_labeling_evaluation_insight_closed_loop_contract(client, auth_headers):
     assert materialization["source_run_id"] == metric_run_id
     metric_result_ids = materialization["metric_result_ids"]
     assert len(metric_result_ids) == len(metric_keys)
+    assert all(re.fullmatch(r"metric_[a-p]{24}", item) for item in metric_result_ids)
 
     insight_report = client.post(
         "/api/v1/insights/reports",

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.domain.label_mapping import sha256_document
 from app.models import (
     InsightReport,
@@ -183,7 +184,11 @@ def bind_insight_report_metrics(
         }
 
     binding = InsightReportMetricBinding(
-        report_metric_binding_id=f"irmb_{content_sha256[:24]}",
+        report_metric_binding_id=public_id_from_hex(
+            "irmb",
+            content_sha256,
+            suffix_length=24,
+        ),
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         report_id=report.report_id,

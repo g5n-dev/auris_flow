@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.domain.label_optimization import IterationBudget, OptimizationMetrics
 from app.models import (
     FeedbackExample,
@@ -753,7 +753,7 @@ def produce_metric_snapshot(
     }
     snapshot_sha256 = _canonical_sha256(snapshot_document)
     snapshot = LabelOptimizationMetricSnapshot(
-        snapshot_id=f"loms_{snapshot_sha256[:24]}",
+        snapshot_id=public_id_from_hex("loms", snapshot_sha256, suffix_length=24),
         schedule_id=schedule.schedule_id,
         tenant_id=schedule.tenant_id,
         project_id=schedule.project_id,
@@ -825,7 +825,11 @@ def create_round(
     now: datetime,
     consecutive_failed_rounds: int = 0,
 ) -> LabelOptimizationRound:
-    round_id = f"lor_{_canonical_sha256([optimization_run_id, round_number])[:24]}"
+    round_id = public_id_from_hex(
+        "lor",
+        _canonical_sha256([optimization_run_id, round_number]),
+        suffix_length=24,
+    )
     existing = session.get(LabelOptimizationRound, round_id)
     if existing is not None:
         return existing
@@ -884,7 +888,11 @@ def scheduler_context(schedule: LabelOptimizationSchedule, *, trace_id: str) -> 
         project_id=schedule.project_id,
         user_id="label-optimization-scheduler",
         roles=("project_admin", "model_engineer"),
-        request_id=f"scheduler-{uuid.uuid4().hex[:20]}",
+        request_id=server_generated_public_id(
+            "scheduler",
+            suffix_length=20,
+            separator="-",
+        ),
         trace_id=trace_id,
         idempotency_key=f"scheduler:{schedule.schedule_id}:{trace_id}",
         correlation_id=trace_id,

@@ -27,6 +27,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.database import SessionLocal
+from app.core.request_identifiers import public_id_from_hex, public_suffix_from_hex
 from app.models import AuditLog, OutboxDeliveryAttempt, OutboxEvent, Project, Tenant
 from app.services.audit_service import record_audit
 from app.services.outbox_service import enqueue_event
@@ -39,6 +40,50 @@ MAX_PLAN_BYTES = 8 * 1024 * 1024
 MAX_PLAN_ITEMS = 100_000
 SCOPE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _rebuild_trace_id(plan_sha256: str) -> str:
+    return public_id_from_hex(
+        "trace_qdrant_rebuild",
+        plan_sha256,
+        suffix_length=32,
+    )
+
+
+def _rebuild_request_id(plan_sha256: str) -> str:
+    return public_id_from_hex(
+        "qdrant-rebuild",
+        plan_sha256,
+        suffix_length=24,
+        separator="-",
+    )
+
+
+def _rebuild_idempotency_key(plan_sha256: str) -> str:
+    return "qdrant-rebuild:" + public_suffix_from_hex(plan_sha256, suffix_length=32)
+
+
+def _rebuild_plan_object_id(plan_sha256: str) -> str:
+    return public_id_from_hex(
+        "qdrant_rebuild_plan",
+        plan_sha256,
+        suffix_length=32,
+    )
+
+
+def _rebuild_aggregate_id(plan_sha256: str, source_event_id: int) -> str:
+    event_hex = format(source_event_id, "x")
+    return (
+        public_id_from_hex(
+            "qdrant_rebuild",
+            plan_sha256,
+            suffix_length=16,
+        )
+        + "_"
+        + public_suffix_from_hex(event_hex, suffix_length=len(event_hex))
+    )
+
+
 TRACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 COLLECTION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")
 SUPPORTED_EVENT_COLLECTIONS = {
@@ -450,7 +495,7 @@ def enqueue_plan(
     if not SHA256_RE.fullmatch(confirmation_sha256) or confirmation_sha256 != plan_sha256:
         raise QdrantRebuildError("confirmation must exactly equal the rebuild plan SHA-256")
     tenant_id, project_id, cutoff = _plan_scope(plan)
-    rebuild_trace_id = f"trace_qdrant_rebuild_{plan_sha256[:32]}"
+    rebuild_trace_id = _rebuild_trace_id(plan_sha256)
     event_ids: list[int] = []
     for candidate in candidates:
         source_trace_id = str(candidate.plan_item["original_trace_id"])
@@ -459,9 +504,9 @@ def enqueue_plan(
             project_id=project_id,
             user_id=REBUILD_ACTOR,
             roles=("system",),
-            request_id=f"qdrant-rebuild-{plan_sha256[:24]}",
+            request_id=_rebuild_request_id(plan_sha256),
             trace_id=source_trace_id,
-            idempotency_key=f"qdrant-rebuild:{plan_sha256[:32]}",
+            idempotency_key=_rebuild_idempotency_key(plan_sha256),
             parent_trace_id=rebuild_trace_id,
             correlation_id=rebuild_trace_id,
             actor_kind="service",
@@ -472,7 +517,7 @@ def enqueue_plan(
             ctx,
             event_type=str(candidate.plan_item["source_event_type"]),
             aggregate_type=REBUILD_AGGREGATE_TYPE,
-            aggregate_id=f"qdrant_rebuild_{plan_sha256[:16]}_{source_event_id}",
+            aggregate_id=_rebuild_aggregate_id(plan_sha256, source_event_id),
             payload={
                 **candidate.replay_payload,
                 "rebuild_plan_sha256": plan_sha256,
@@ -491,7 +536,7 @@ def enqueue_plan(
             AuditLog.tenant_id == tenant_id,
             AuditLog.project_id == project_id,
             AuditLog.action == "qdrant.rebuild.enqueued",
-            AuditLog.object_id == plan_sha256,
+            AuditLog.object_id == _rebuild_plan_object_id(plan_sha256),
         )
     )
     if existing_audit is None:
@@ -500,9 +545,9 @@ def enqueue_plan(
             project_id=project_id,
             user_id=REBUILD_ACTOR,
             roles=("system",),
-            request_id=f"qdrant-rebuild-{plan_sha256[:24]}",
+            request_id=_rebuild_request_id(plan_sha256),
             trace_id=rebuild_trace_id,
-            idempotency_key=f"qdrant-rebuild:{plan_sha256[:32]}",
+            idempotency_key=_rebuild_idempotency_key(plan_sha256),
             actor_kind="service",
         )
         record_audit(
@@ -510,7 +555,7 @@ def enqueue_plan(
             audit_ctx,
             action="qdrant.rebuild.enqueued",
             object_type="qdrant_rebuild_plan",
-            object_id=plan_sha256,
+            object_id=_rebuild_plan_object_id(plan_sha256),
             after={
                 "cutoff_event_id": cutoff,
                 "collections": plan["collections"],
@@ -531,9 +576,12 @@ def enqueue_plan(
 def verify_plan(session: Session, plan: dict[str, Any]) -> dict[str, Any]:
     candidates, plan_sha256 = _assert_plan_matches_authority(session, plan)
     tenant_id, project_id, cutoff = _plan_scope(plan)
-    rebuild_trace_id = f"trace_qdrant_rebuild_{plan_sha256[:32]}"
+    rebuild_trace_id = _rebuild_trace_id(plan_sha256)
     expected = {
-        f"qdrant_rebuild_{plan_sha256[:16]}_{candidate.plan_item['source_event_id']}": candidate
+        _rebuild_aggregate_id(
+            plan_sha256,
+            int(candidate.plan_item["source_event_id"]),
+        ): candidate
         for candidate in candidates
     }
     events = (

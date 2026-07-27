@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import LabelEvalResult, LabelEvalSuiteResult, RunRecord
 from app.schemas.evaluation import LabelingEvalCompletionResult
 from app.services.audit_service import record_audit
@@ -408,7 +409,7 @@ def materialize_label_eval_completion(
 
     gates = _gate_results(result)
     status = "passed" if all(bool(gate["passed"]) for gate in gates) else "blocked"
-    eval_result_id = f"ler_{result_sha256[:24]}"
+    eval_result_id = public_id_from_hex("ler", result_sha256, suffix_length=24)
     row = LabelEvalResult(
         eval_result_id=eval_result_id,
         tenant_id=ctx.tenant_id,
@@ -438,7 +439,11 @@ def materialize_label_eval_completion(
         suite_sha256 = _canonical_sha256(suite_document)
         session.add(
             LabelEvalSuiteResult(
-                suite_result_id=f"lesr_{suite_sha256[:24]}",
+                suite_result_id=public_id_from_hex(
+                    "lesr",
+                    suite_sha256,
+                    suffix_length=24,
+                ),
                 tenant_id=ctx.tenant_id,
                 project_id=ctx.project_id,
                 eval_result_id=eval_result_id,

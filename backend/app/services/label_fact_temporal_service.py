@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.domain.label_mapping import sha256_document
 from app.models import (
     HumanReviewDecision,
@@ -499,15 +500,16 @@ def append_label_fact_revision(
         root_trace_id=root_trace_id,
     )
     content_sha256 = sha256_document(content_document)
-    fact_id = (
-        "lf_"
-        + uuid.uuid5(
+    fact_id = public_id_from_hex(
+        "lf",
+        uuid.uuid5(
             uuid.NAMESPACE_URL,
             (
                 f"auris-flow:label-fact:{ctx.tenant_id}:{ctx.project_id}:"
                 f"{request.fact_namespace}:{logical_key_sha256}:{revision}:{content_sha256}"
             ),
-        ).hex[:24]
+        ).hex,
+        suffix_length=24,
     )
 
     fact = LabelFact(
@@ -557,7 +559,11 @@ def append_label_fact_revision(
 
     if head is None:
         head = LabelFactHead(
-            fact_head_id=f"lfh_{logical_key_sha256[:24]}",
+            fact_head_id=public_id_from_hex(
+                "lfh",
+                logical_key_sha256,
+                suffix_length=24,
+            ),
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             fact_namespace=request.fact_namespace,

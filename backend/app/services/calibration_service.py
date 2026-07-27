@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import uuid
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -13,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.project_membership import project_member_user_ids
+from app.core.request_identifiers import server_generated_public_id
 from app.domain.calibration import (
     RUBRIC_PROFILES,
     calculate_calibration_metrics,
@@ -59,7 +59,7 @@ MIN_GOLD_COVERAGE_PPM = 800_000
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:20]}"
+    return server_generated_public_id(prefix, suffix_length=20)
 
 
 def _isoformat(value: datetime | None) -> str | None:

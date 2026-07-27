@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import (
     AssetLineageEdge,
     AssetMaterialization,
@@ -36,8 +37,8 @@ _SOURCE_FIELDS = frozenset({"started_at", "duration_ms", "store_ref", "agent_ref
 
 
 def _stable_id(prefix: str, *parts: str, length: int = 32) -> str:
-    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()[:length]
-    return f"{prefix}_{digest}"
+    digest = hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+    return public_id_from_hex(prefix, digest, suffix_length=length)
 
 
 def _required_text(value: Any, *, field: str, maximum: int) -> str:

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import (
     FeedbackExample,
     HumanReviewTask,
@@ -748,9 +749,9 @@ def _materialize_taxonomy_candidate(
             .order_by(LabelVersionItem.label_id)
         )
     )
-    candidate_id = (
-        "lv_"
-        + canonical_sha256(
+    candidate_id = public_id_from_hex(
+        "lv",
+        canonical_sha256(
             [
                 ctx.tenant_id,
                 ctx.project_id,
@@ -759,7 +760,8 @@ def _materialize_taxonomy_candidate(
                 action,
                 canonical_target_label_id,
             ]
-        )[:24]
+        ),
+        suffix_length=24,
     )
     if session.get(LabelVersion, candidate_id) is not None:
         raise ApiError(
@@ -793,9 +795,10 @@ def _materialize_taxonomy_candidate(
             409,
         )
     if action == "create":
-        created_label_id = (
-            "label_"
-            + canonical_sha256([ctx.tenant_id, ctx.project_id, suggestion.normalized_label])[:20]
+        created_label_id = public_id_from_hex(
+            "label",
+            canonical_sha256([ctx.tenant_id, ctx.project_id, suggestion.normalized_label]),
+            suffix_length=20,
         )
         node = session.scalar(
             select(LabelNode).where(
@@ -811,8 +814,11 @@ def _materialize_taxonomy_candidate(
                 "configuration_status": "pending",
             }
             node = LabelNode(
-                node_id="ln_"
-                + canonical_sha256([ctx.tenant_id, ctx.project_id, created_label_id])[:24],
+                node_id=public_id_from_hex(
+                    "ln",
+                    canonical_sha256([ctx.tenant_id, ctx.project_id, created_label_id]),
+                    suffix_length=24,
+                ),
                 tenant_id=ctx.tenant_id,
                 project_id=ctx.project_id,
                 label_id=created_label_id,
@@ -934,7 +940,11 @@ def _materialize_taxonomy_candidate(
     candidate.payload = {**candidate.payload, **candidate_payload}
     for item in item_documents:
         version_item = LabelVersionItem(
-            label_version_item_id="lvi_" + canonical_sha256([candidate_id, item["label_id"]])[:24],
+            label_version_item_id=public_id_from_hex(
+                "lvi",
+                canonical_sha256([candidate_id, item["label_id"]]),
+                suffix_length=24,
+            ),
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             label_version_id=candidate_id,
@@ -1215,7 +1225,11 @@ def _resource_for_update(
 
 
 def _scoped_id(prefix: str, *parts: str) -> str:
-    return f"{prefix}_{canonical_sha256(list(parts))[:24]}"
+    return public_id_from_hex(
+        prefix,
+        canonical_sha256(list(parts)),
+        suffix_length=24,
+    )
 
 
 def _object_type(bundle: _ReviewBundle) -> str:

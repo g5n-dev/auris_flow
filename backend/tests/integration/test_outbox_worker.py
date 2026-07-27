@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
@@ -2395,6 +2396,8 @@ def test_dead_letter_task_run_can_create_retry_run(client, auth_headers):
     )
     assert response.status_code == 202
     failed_run_id = response.json()["data"]["run_id"]
+    assert re.fullmatch(r"task_run_[a-p]{12}", failed_run_id)
+    assert "[REDACTED_PHONE]" not in response.text
 
     assert process_once() == 1
     with SessionLocal() as session:
@@ -2446,6 +2449,8 @@ def test_dead_letter_task_run_can_create_retry_run(client, auth_headers):
     retry_body = retry.json()
     retry_run_id = retry_body["data"]["run_id"]
     assert retry_run_id != failed_run_id
+    assert re.fullmatch(r"task_run_[a-p]{12}", retry_run_id)
+    assert "[REDACTED_PHONE]" not in retry.text
     assert retry_body["data"]["status"] == "pending"
     assert retry_body["data"]["retry_of_run_id"] == failed_run_id
     assert retry_body["data"]["retry_of_trace_id"] == response.json()["data"]["trace_id"]

@@ -15,6 +15,7 @@ from app.core.context import (
 )
 from app.core.errors import ApiError
 from app.core.project_membership import project_member_roles
+from app.core.request_identifiers import public_id_from_hex
 from app.domain.label_policy import PolicyCompileError, compile_policy, evaluate_policy
 from app.domain.label_policy.compiler import COMPILER_VERSION
 from app.domain.label_policy.defaults import default_release_policy
@@ -102,7 +103,11 @@ class _ReleaseEvalSnapshot:
 
 def _scoped_artifact_id(prefix: str, *parts: str) -> str:
     payload = "\x1f".join(parts).encode("utf-8")
-    return f"{prefix}_{hashlib.sha256(payload).hexdigest()[:24]}"
+    return public_id_from_hex(
+        prefix,
+        hashlib.sha256(payload).hexdigest(),
+        suffix_length=24,
+    )
 
 
 def _policy_data(policy: LabelPolicyVersion) -> dict[str, Any]:

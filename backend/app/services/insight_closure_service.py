@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.core.response import envelope
 from app.models import (
     InsightAction,
@@ -2180,8 +2181,12 @@ def _materialize_metric_aggregation(
                 f"auris-flow:metric-result:{record.tenant_id}:{record.project_id}:"
                 f"{record.run_id}:{result.metric_key}"
             ),
-        ).hex[:24]
-        metric_result_id = f"metric_{digest}"
+        ).hex
+        metric_result_id = public_id_from_hex(
+            "metric",
+            digest,
+            suffix_length=24,
+        )
         if session.get(MetricResult, metric_result_id) is not None:
             raise ApiError(
                 "INSIGHT_METRIC_RESULT_ALREADY_EXISTS",

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -12,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import server_generated_public_id
 from app.models import ImportBatch, JsonResource
 from app.repositories.json_resources import JsonResourceRepository
 from app.schemas.scene_profiles import SceneProfileManifest
@@ -675,8 +675,8 @@ def _prepare_audio_import_run(
     runtime_cursor_policy.pop("cursor_value", None)
     if live_cursor:
         runtime_cursor_policy["cursor_value"] = live_cursor
-    task_run_id = f"task_run_{uuid.uuid4().hex[:12]}"
-    import_batch_id = f"import_batch_{uuid.uuid4().hex[:12]}"
+    task_run_id = server_generated_public_id("task_run", suffix_length=12)
+    import_batch_id = server_generated_public_id("import_batch", suffix_length=12)
     root_trace_id = ctx.trace_id
     deadline_at = datetime.now(UTC) + timedelta(
         seconds=get_settings().task_run_default_deadline_seconds

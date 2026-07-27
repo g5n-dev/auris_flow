@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 
 from app.auth_models import OidcIdentity, UserSecurityState
 from app.core.database import SessionLocal
+from app.core.request_identifiers import public_id_from_hex
 from app.models import AuditLog, Project, Tenant, TraceRef, User
 
 BOOTSTRAP_ROLE = "project_admin"
@@ -159,8 +160,16 @@ def _result(spec: IdentityBootstrapSpec, *, created: bool) -> IdentityBootstrapR
         user_id=spec.user_id,
         tenant_id=spec.tenant_id,
         project_id=spec.project_id,
-        trace_id=f"trace_oidc_bootstrap_{evidence_hash[:32]}",
-        trace_ref_id=f"trace_ref_oidc_bootstrap_{evidence_hash[:32]}",
+        trace_id=public_id_from_hex(
+            "trace_oidc_bootstrap",
+            evidence_hash,
+            suffix_length=32,
+        ),
+        trace_ref_id=public_id_from_hex(
+            "trace_ref_oidc_bootstrap",
+            evidence_hash,
+            suffix_length=32,
+        ),
     )
 
 

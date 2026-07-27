@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
@@ -752,8 +753,16 @@ def test_task_publish_freezes_connector_snapshot_and_production_run_creates_one_
     assert created_run.status_code == replayed_run.status_code == 202
     assert created_run.json() == replayed_run.json()
     run_data = created_run.json()["data"]
-    assert run_data["import_batch_id"].startswith("import_batch_")
-    assert run_data["root_trace_id"]
+    assert re.fullmatch(r"task_run_[a-p]{12}", run_data["run_id"])
+    assert re.fullmatch(r"import_batch_[a-p]{12}", run_data["import_batch_id"])
+    assert re.fullmatch(r"trace_[a-p]{32}", run_data["root_trace_id"])
+    assert run_data["root_trace_id"] == created_run.json()["meta"]["trace_id"]
+    next_action_routes = {action["key"]: action["route"] for action in run_data["next_actions"]}
+    assert next_action_routes["view_import_batch"] == (
+        f"import-batches/{run_data['import_batch_id']}"
+    )
+    assert next_action_routes["view_trace"] == f"traces/{run_data['root_trace_id']}"
+    assert "[REDACTED_PHONE]" not in created_run.text
 
     concurrent = client.post(
         "/api/v1/task-runs",
@@ -849,6 +858,9 @@ def test_task_publish_freezes_connector_snapshot_and_production_run_creates_one_
     assert batch_detail.json()["data"]["status"] == "queued"
     assert batch_detail.json()["data"]["current_stage"] == "queued"
     assert batch_detail.json()["data"]["total_items"] == 0
+    assert batch_detail.json()["data"]["import_batch_id"] == run_data["import_batch_id"]
+    assert batch_detail.json()["data"]["task_run_id"] == run_data["run_id"]
+    assert batch_detail.json()["data"]["root_trace_id"] == run_data["root_trace_id"]
 
     batch_items = client.get(
         f"/api/v1/import-batches/{run_data['import_batch_id']}/items",

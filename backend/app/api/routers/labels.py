@@ -11,6 +11,7 @@ from sqlalchemy import select
 from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex
 from app.core.response import collection_envelope, envelope
 from app.models import (
     EvalDatasetVersion,
@@ -514,7 +515,11 @@ async def post_label_optimization_runs(request: Request, session: SessionDep, ct
                 details=[{"run_id": previous.run_id, "created_at": created_at.isoformat()}],
             )
 
-    run_id = request_body.optimization_run_id or f"label_optimization_{trigger_hash[:24]}"
+    run_id = request_body.optimization_run_id or public_id_from_hex(
+        "label_optimization",
+        trigger_hash,
+        suffix_length=24,
+    )
     locked_versions = {
         "label_version_id": request_body.label_version_id,
         "prompt_version_id": request_body.prompt_version_id,

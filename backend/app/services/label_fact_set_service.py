@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex
 from app.models import (
     AuditLog,
     IdempotencyRecord,
@@ -285,7 +286,7 @@ def _fact_set_id(ctx: RequestContext, manifest_sha256: str) -> str:
             "tenant_id": ctx.tenant_id,
         }
     )
-    return f"lfs_{digest[:24]}"
+    return public_id_from_hex("lfs", digest, suffix_length=24)
 
 
 def _head_id(ctx: RequestContext, environment: str, fact_namespace: str) -> str:
@@ -297,7 +298,7 @@ def _head_id(ctx: RequestContext, environment: str, fact_namespace: str) -> str:
             "tenant_id": ctx.tenant_id,
         }
     )
-    return f"lfsh_{digest[:24]}"
+    return public_id_from_hex("lfsh", digest, suffix_length=24)
 
 
 def _validate_partition_anchor(request: LabelFactSetCreateRequest) -> None:
@@ -1109,7 +1110,7 @@ def _new_head_event(
         payload=payload,
     )
     content_sha256 = label_fact_set_head_event_content_sha256(event)
-    event.head_event_id = f"lfshe_{content_sha256[:24]}"
+    event.head_event_id = public_id_from_hex("lfshe", content_sha256, suffix_length=24)
     event.content_sha256 = content_sha256
     return event
 

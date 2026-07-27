@@ -4,7 +4,6 @@ import hashlib
 import hmac
 import json
 import math
-import uuid
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from datetime import UTC, datetime
 from statistics import mean, variance
@@ -19,6 +18,7 @@ from app.core.config import get_settings
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.core.response import collection_envelope, envelope
 from app.models import (
     ControlledExperiment,
@@ -491,7 +491,10 @@ async def create_experiment(
     if replay is not None:
         return replay
 
-    experiment_id = body.experiment_id or f"exp_{uuid.uuid4().hex[:20]}"
+    experiment_id = body.experiment_id or server_generated_public_id(
+        "exp",
+        suffix_length=20,
+    )
     existing = session.get(ControlledExperiment, experiment_id)
     if existing is not None:
         raise ApiError("EXPERIMENT_ALREADY_EXISTS", "实验 ID 已存在", 409)
@@ -794,7 +797,11 @@ def resolve_experiment_assignment(
     assignment_digest = _hmac_sha256(f"{experiment.design_sha256}:{subject_key_sha256}:assignment")
     bucket = int(assignment_digest[:16], 16) % 1_000_000
     assignment = ExperimentAssignment(
-        assignment_id=f"assign_{assignment_digest[:24]}",
+        assignment_id=public_id_from_hex(
+            "assign",
+            assignment_digest,
+            suffix_length=24,
+        ),
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         experiment_id=experiment.experiment_id,
@@ -856,7 +863,11 @@ def resolve_experiment_exposure(
             raise ApiError("EXPERIMENT_EXPOSURE_CONFLICT", "曝光键已绑定其他实验主体", 409)
         return existing
     exposure = ExperimentExposure(
-        exposure_id=f"exposure_{exposure_key_sha256[:24]}",
+        exposure_id=public_id_from_hex(
+            "exposure",
+            exposure_key_sha256,
+            suffix_length=24,
+        ),
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         experiment_id=experiment.experiment_id,
@@ -1047,7 +1058,11 @@ def resolve_experiment_outcomes(
                 }
             )
             outcome = ExperimentOutcome(
-                outcome_id=f"outcome_{outcome_digest[:24]}",
+                outcome_id=public_id_from_hex(
+                    "outcome",
+                    outcome_digest,
+                    suffix_length=24,
+                ),
                 tenant_id=ctx.tenant_id,
                 project_id=ctx.project_id,
                 experiment_id=experiment.experiment_id,
@@ -1717,7 +1732,7 @@ async def compute_experiment_metric_snapshot(
     snapshot_version = current_version + 1
     evidence_sha256 = _experiment_evidence_sha256(experiment, outcomes)
     snapshot = ExperimentMetricSnapshot(
-        metric_snapshot_id=f"expm_{uuid.uuid4().hex[:20]}",
+        metric_snapshot_id=server_generated_public_id("expm", suffix_length=20),
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         experiment_id=experiment_id,
@@ -1943,7 +1958,7 @@ async def record_experiment_decision(
         else {"type": "experiment_state_change", "status": experiment.status}
     )
     decision = ExperimentDecision(
-        decision_id=f"expd_{uuid.uuid4().hex[:20]}",
+        decision_id=server_generated_public_id("expd", suffix_length=20),
         tenant_id=ctx.tenant_id,
         project_id=ctx.project_id,
         experiment_id=experiment_id,
