@@ -11,6 +11,29 @@ from pydantic_settings import BaseSettings, PydanticBaseSettingsSource, Settings
 
 PRODUCTION_ENVIRONMENTS = frozenset({"prod", "production", "release"})
 MAX_SECRET_FILE_BYTES = 64 * 1024
+PRODUCTION_FILE_ONLY_SETTINGS = frozenset(
+    {
+        "audio_playback_grant_secret",
+        "auth_token_secret",
+        "completion_receipt_key_bindings",
+        "completion_receipt_secret",
+        "database_url",
+        "dev_auth_password",
+        "dev_auth_token",
+        "embedding_api_key",
+        "experiment_assignment_secret",
+        "external_callback_key_bindings",
+        "external_callback_secret",
+        "object_storage_access_key",
+        "object_storage_secret_key",
+        "object_storage_session_token",
+        "oidc_client_secret",
+        "otel_exporter_otlp_headers",
+        "platform_credential_bindings",
+        "qdrant_api_key",
+        "redis_url",
+    }
+)
 
 
 def is_production_environment(value: str) -> bool:
@@ -131,6 +154,17 @@ class SecretFileSettingsSource(PydanticBaseSettingsSource):
                 )
             except SecretFileLoadError as exc:
                 raise SettingsError(str(exc)) from None
+        if production:
+            inline_fields = sorted(
+                field_name
+                for field_name in PRODUCTION_FILE_ONLY_SETTINGS
+                if self._has_nonempty_inline_value(field_name)
+            )
+            if inline_fields:
+                display_name = inline_fields[0].upper()
+                raise SettingsError(
+                    f"{display_name} must be provided through {display_name}_FILE in prod/release"
+                )
         return loaded
 
     def _file_reference(self, field_name: str) -> str | None:
@@ -141,6 +175,19 @@ class SecretFileSettingsSource(PydanticBaseSettingsSource):
         if raw_value is None:
             return None
         return str(raw_value)
+
+    def _has_nonempty_inline_value(self, field_name: str) -> bool:
+        # Earlier sources have priority. Every effective inline source fails
+        # closed in production; only `<SETTING>_FILE` may carry secret values.
+        for source_name in (
+            "InitSettingsSource",
+            "EnvSettingsSource",
+            "DotEnvSettingsSource",
+        ):
+            source_values = self.settings_sources_data.get(source_name, {})
+            if field_name in source_values:
+                return bool(str(source_values[field_name]).strip())
+        return False
 
 
 def _casefold_mapping(values: Mapping[str, Any]) -> dict[str, Any]:

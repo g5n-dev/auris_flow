@@ -1,0 +1,79 @@
+---
+config:
+  layout: elk
+  securityLevel: strict
+  htmlLabels: false
+  flowchart:
+    htmlLabels: false
+    curve: basis
+    nodeSpacing: 34
+    rankSpacing: 58
+    diagramPadding: 20
+---
+flowchart TB
+    accTitle: Auris Flow production architecture
+    accDescr: Three horizontal layers show the browser product experience, tenant and project scoped domain control, and authoritative or rebuildable infrastructure. The browser reaches infrastructure only through the FastAPI BFF.
+
+    subgraph EXPERIENCE["01 · 产品体验　PRODUCT EXPERIENCE"]
+        direction LR
+        WORKSPACE["React 工作台"]
+        ASSETS["首页 · 数据资产 · 调听"]
+        QUALITY["标签 · 知识 · 评测"]
+        ACTIONS["洞察 · 设置 · 发布"]
+
+        WORKSPACE --> ASSETS
+        ASSETS --> QUALITY
+        QUALITY --> ACTIONS
+    end
+
+    subgraph CONTROL["02 · 领域控制　TENANT · PROJECT · TRACE"]
+        direction LR
+        IDP["通用 OIDC IdP<br/>Keycloak 仅作参考"]
+        AUTH["OIDC · RBAC<br/>会话 · CSRF"]
+        BFF["FastAPI BFF<br/>/api/v1/*"]
+        DOMAIN["领域服务<br/>幂等 · 审计 · Trace"]
+        ASYNC["Worker · Outbox<br/>租约 · 重试 · 死信"]
+        EXECUTION["内部执行适配器<br/>Dagster"]
+        CALLBACK["签名状态回写<br/>HMAC · 重放保护"]
+
+        IDP --> AUTH
+        AUTH --> BFF
+        BFF --> DOMAIN
+        DOMAIN --> ASYNC
+        ASYNC --> EXECUTION
+        EXECUTION --> CALLBACK
+    end
+
+    subgraph INFRA["03 · 数据与基础设施　AUTHORITATIVE · REBUILDABLE"]
+        direction LR
+        MYSQL[("MySQL<br/>权威业务事实")]
+        OBJECTS[("对象存储<br/>权威音频 · 证据")]
+        REDIS[("Redis<br/>可重建缓存 · 锁")]
+        QDRANT[("Qdrant<br/>可重建语义索引")]
+        PROVIDER["模型 / Embedding<br/>可替换 Provider"]
+        OBSERVABILITY["OTel · Prometheus · Grafana<br/>非 /readyz 硬依赖"]
+
+        MYSQL ~~~ OBJECTS
+        OBJECTS ~~~ REDIS
+        REDIS ~~~ QDRANT
+        QDRANT ~~~ PROVIDER
+        PROVIDER ~~~ OBSERVABILITY
+    end
+
+    EXPERIENCE == "仅经 BFF" ==> CONTROL
+    CONTROL == "权威写入 · 派生能力 · 观测" ==> INFRA
+
+    classDef product fill:#EAF2FF,stroke:#165DFF,color:#10203C,stroke-width:2px
+    classDef control fill:#E8F8F4,stroke:#0F766E,color:#113C35,stroke-width:2px
+    classDef truth fill:#FFF3D6,stroke:#D97706,color:#4B2A08,stroke-width:2px
+    classDef derived fill:#F3EDFF,stroke:#722ED1,color:#2E1854,stroke-width:2px
+    classDef external fill:#F3F5F8,stroke:#667085,color:#1D2939,stroke-width:1.5px
+
+    class WORKSPACE,ASSETS,QUALITY,ACTIONS product
+    class AUTH,BFF,DOMAIN,ASYNC control
+    class MYSQL,OBJECTS truth
+    class REDIS,QDRANT derived
+    class IDP,EXECUTION,CALLBACK,PROVIDER,OBSERVABILITY external
+
+    linkStyle 0,1,2,14 stroke:#165DFF,stroke-width:2.4px
+    linkStyle 3,4,5,6,7,8,15 stroke:#0F766E,stroke-width:2.2px

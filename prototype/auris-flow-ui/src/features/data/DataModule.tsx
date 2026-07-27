@@ -1,9 +1,14 @@
+import { useState } from "react";
+
 import type { DataAssetItem } from "../../shared/contracts/dataAssets";
+import type { OperationNotice } from "../../shared/contracts/operations";
 import { LABEL_DEMO_MODE } from "../../shared/runtime/demoMode";
+import { resolveProjectSceneLock } from "../../shared/runtime/projectSceneLock";
 import { dataAssets } from "./dataAssets";
 import { DataContractStrip } from "./components/DataContractStrip";
 import { DataHeader } from "./components/DataHeader";
 import { DataHierarchyView } from "./components/DataHierarchyView";
+import { AudioImportDrawer } from "./components/AudioImportDrawer";
 import { DataPivotPanel } from "./components/DataPivotPanel";
 import { DataRelationView } from "./components/DataRelationView";
 import {
@@ -13,6 +18,7 @@ import {
 import { EventDataPage } from "./pages/EventDataPage";
 import type { DataModuleProps } from "./types";
 import { useDataWorkspace } from "./useDataWorkspace";
+import { useAudioImportFlow } from "./audioImportFlowController";
 import { voiceprintRecords } from "./voiceprintFixtures";
 
 function TruthVoiceprintUnavailable() {
@@ -56,6 +62,69 @@ function TruthDataUnavailable({
   );
 }
 
+const AUDIO_IMPORT_COLD_START_ASSET = "auris/audio/raw_recordings";
+
+function OperationToast({ notice }: { notice: OperationNotice }) {
+  return (
+    <div className={`operation-toast data-operation-toast is-${notice.status}`} role="status" aria-live="polite">
+      <strong>{notice.title}</strong>
+      <span>{notice.detail}</span>
+    </div>
+  );
+}
+
+function EmptyAudioImportWorkspace({ props }: { props: DataModuleProps }) {
+  const [notice, setNotice] = useState<OperationNotice>({
+    status: "idle",
+    title: "尚无音频会话",
+    detail: "先创建平台音频导入配置；首批数据写入后，会话将从 BFF 聚合读模型出现。"
+  });
+  const { lock: sceneProfileLock, blockedReason } = resolveProjectSceneLock(
+    props.workspaceSceneBinding,
+    props.workspaceSceneState
+  );
+  const flow = useAudioImportFlow({
+    targetAssetKey: AUDIO_IMPORT_COLD_START_ASSET,
+    sceneProfileLock,
+    setDataNotice: setNotice
+  });
+  return (
+    <div className="data-reference-page" data-testid="data-audio-empty-import-ready">
+      <section className="data-reference-head">
+        <div>
+          <h2>项目数据资产</h2>
+          <p>当前 BFF 已返回有效空集 · 0 个音频会话</p>
+          <div className="data-asset-inline-status">
+            <span>目标资产 {AUDIO_IMPORT_COLD_START_ASSET}</span>
+            <span>等待首批平台音频</span>
+          </div>
+        </div>
+        <div>
+          <button
+            type="button"
+            className="data-connect-button"
+            data-testid="data-connector-import"
+            disabled={!sceneProfileLock}
+            title={!sceneProfileLock ? blockedReason : undefined}
+            onClick={flow.openDrawer}
+          >
+            {flow.open ? "配置中" : "新建导入配置"}
+          </button>
+          {!sceneProfileLock && (
+            <span data-testid="data-connector-blocked-reason">{blockedReason}</span>
+          )}
+        </div>
+      </section>
+      <OperationToast notice={notice} />
+      <section className="module-panel wide tenant-empty-state">
+        <strong>没有会话不是配置入口的前置条件</strong>
+        <span>通过上方“新建导入配置”关联外部平台，完成测试、预览、发布和立即拉取。</span>
+      </section>
+      <AudioImportDrawer flow={flow} />
+    </div>
+  );
+}
+
 function DataWorkspaceContent({
   props,
   dataItems,
@@ -66,53 +135,65 @@ function DataWorkspaceContent({
   truthMode: boolean;
 }) {
   const workspace = useDataWorkspace({ ...props, dataItems, truthMode });
+  const audioImportFlow = useAudioImportFlow({
+    targetAssetKey: AUDIO_IMPORT_COLD_START_ASSET,
+    sceneProfileLock: workspace.sceneProfileLock,
+    setDataNotice: workspace.setDataNotice
+  });
   const {
     activeTab,
-    dataAction,
     dataNotice,
     isContractCollapsed,
     isPivotCollapsed,
     isRelationView,
     openAssetsFromDataAsset,
-    openConnectorImport,
     openListeningFromDataAsset,
     selectedAssetId,
-    setActiveModule,
     setSelectedAssetId
   } = workspace;
-  if (activeTab === "events") {
-    return (
-      <EventDataPage
-        dataAssets={dataItems}
-        selectedAssetId={selectedAssetId}
-        setSelectedAssetId={setSelectedAssetId}
-        openListeningFromDataAsset={openListeningFromDataAsset}
-        openAssetsFromDataAsset={openAssetsFromDataAsset}
-        openConnectorImport={openConnectorImport}
-        isConnectorImporting={dataAction === "connector-import"}
-      />
-    );
-  }
   return (
-    <div
-      className={[
-        "data-reference-page",
-        isRelationView ? "relation-view-page" : "",
-        isPivotCollapsed ? "pivot-collapsed" : "pivot-expanded",
-        isContractCollapsed ? "contract-collapsed" : "contract-expanded"
-      ].join(" ")}
-    >
-      <DataHeader workspace={workspace} />
-      <div className={`operation-toast data-operation-toast is-${dataNotice.status}`} role="status" aria-live="polite">
-        <strong>{dataNotice.title}</strong>
-        <span>{dataNotice.detail}</span>
-      </div>
-      {!truthMode && <DataContractStrip workspace={workspace} />}
-      {!truthMode && <DataPivotPanel workspace={workspace} />}
-      {isRelationView
-        ? <DataRelationView workspace={workspace} />
-        : <DataHierarchyView workspace={workspace} />}
-    </div>
+    <>
+      {activeTab === "events"
+        ? (
+          <EventDataPage
+            dataAssets={dataItems}
+            selectedAssetId={selectedAssetId}
+            setSelectedAssetId={setSelectedAssetId}
+            openListeningFromDataAsset={openListeningFromDataAsset}
+            openAssetsFromDataAsset={openAssetsFromDataAsset}
+            openConnectorImport={audioImportFlow.openDrawer}
+            isConnectorImporting={audioImportFlow.open}
+          />
+        )
+        : (
+          <div
+            className={[
+              "data-reference-page",
+              isRelationView ? "relation-view-page" : "",
+              isPivotCollapsed ? "pivot-collapsed" : "pivot-expanded",
+              isContractCollapsed ? "contract-collapsed" : "contract-expanded"
+            ].join(" ")}
+          >
+            <DataHeader
+              workspace={workspace}
+              openConnectorImport={audioImportFlow.openDrawer}
+              connectorImportOpen={audioImportFlow.open}
+            />
+            <OperationToast notice={dataNotice} />
+            {!truthMode && <DataContractStrip workspace={workspace} />}
+            {!truthMode && <DataPivotPanel workspace={workspace} />}
+            {isRelationView
+              ? <DataRelationView workspace={workspace} />
+              : (
+                <DataHierarchyView
+                  workspace={workspace}
+                  openConnectorImport={audioImportFlow.openDrawer}
+                />
+              )}
+          </div>
+        )}
+      <AudioImportDrawer flow={audioImportFlow} />
+    </>
   );
 }
 
@@ -159,6 +240,9 @@ export function DataModule(props: DataModuleProps) {
     ? projectDataAggregationItems(props.projectionItems)
     : { items: [], blockedReason: DATA_PROJECTION_SCHEMA_BLOCKED_REASON };
   if (!projection.items.length) {
+    if (!projection.blockedReason) {
+      return <EmptyAudioImportWorkspace props={props} />;
+    }
     return (
       <TruthDataUnavailable
         testId="data-projection-invalid"

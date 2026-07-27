@@ -90,10 +90,12 @@ def test_real_callback_client_reconciles_without_private_gate_control_header() -
 
         sent = client.send_signed_callback(payload)
         assert sent.status == "success", sent
+        assert sent.details["delivery_id"] != sent.details["callback_receipt_id"]
 
         reconciled = client.reconcile_callback(payload)
         assert reconciled.status == "success", reconciled
         assert reconciled.details["reconciled"] is True
+        assert reconciled.details["delivery_id"] == sent.details["delivery_id"]
         assert reconciled.details["callback_receipt_id"] == sent.details["callback_receipt_id"]
 
         # Gate introspection remains private even though the simulated external

@@ -88,6 +88,7 @@ class Settings(BaseSettings):
     external_callback_url: str = "http://127.0.0.1:8089/callbacks/platform"
     external_callback_secret: str = "auris-dev-callback-secret"
     external_callback_key_bindings: str = ""
+    platform_credential_bindings: str = "{}"
     external_callback_active_key_id: str = ""
     external_callback_legacy_hmac_enabled: bool = False
     external_callback_signature_tolerance_seconds: int = 300
@@ -126,6 +127,7 @@ class Settings(BaseSettings):
     completion_receipt_allowed_sources: str = "dagster,object_storage,external_callback"
     experiment_assignment_secret: str = "auris-local-experiment-assignment-secret"
     rate_limit_per_minute: int = 240
+    max_request_body_bytes: int = 1024 * 1024
     outbox_lease_seconds: int = 60
     outbox_claim_batch_size: int = 1
     outbox_claim_retries: int = 3
@@ -210,6 +212,8 @@ class Settings(BaseSettings):
             raise ValueError("OIDC_CLOCK_SKEW_SECONDS must be between 0 and 300")
         if not 0 < self.oidc_http_timeout_seconds <= 30:
             raise ValueError("OIDC_HTTP_TIMEOUT_SECONDS must be greater than 0 and at most 30")
+        if not 16 * 1024 <= self.max_request_body_bytes <= 8 * 1024 * 1024:
+            raise ValueError("MAX_REQUEST_BODY_BYTES must be between 16384 and 8388608")
         if not 60 <= self.oidc_authorization_state_ttl_seconds <= 900:
             raise ValueError("OIDC_AUTHORIZATION_STATE_TTL_SECONDS must be between 60 and 900")
         if not 300 <= self.oidc_session_ttl_seconds <= 2592000:

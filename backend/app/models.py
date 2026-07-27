@@ -361,6 +361,141 @@ class RunRecord(Base, TimestampMixin):
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
+class ImportBatch(Base, TimestampMixin):
+    __tablename__ = "import_batches"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "import_batch_id",
+            name="uq_import_batches_scope_id",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "task_run_id",
+            name="uq_import_batches_scope_run",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "task_run_id"],
+            [
+                "run_records.tenant_id",
+                "run_records.project_id",
+                "run_records.run_id",
+            ],
+            name="fk_import_batches_scope_run",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'partial', 'succeeded', 'failed', 'cancelled')",
+            name="ck_import_batches_status",
+        ),
+        CheckConstraint(
+            "current_stage IN "
+            "('queued', 'listing', 'downloading', 'verifying', 'materializing', 'completed')",
+            name="ck_import_batches_current_stage",
+        ),
+        CheckConstraint(
+            "total_items >= 0 AND succeeded_items >= 0 AND skipped_items >= 0 "
+            "AND failed_items >= 0",
+            name="ck_import_batches_nonnegative_counts",
+        ),
+        CheckConstraint(
+            "succeeded_items + skipped_items + failed_items <= total_items",
+            name="ck_import_batches_count_bounds",
+        ),
+        Index(
+            "ix_import_batches_scope_status_created",
+            "tenant_id",
+            "project_id",
+            "status",
+            "created_at",
+        ),
+        Index(
+            "ix_import_batches_scope_task_version",
+            "tenant_id",
+            "project_id",
+            "task_version_id",
+            "created_at",
+        ),
+    )
+
+    import_batch_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    task_run_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    task_version_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    connector_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    current_stage: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    total_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    succeeded_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    skipped_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    failed_items: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    cursor_before: Mapped[str | None] = mapped_column(String(1024))
+    cursor_after: Mapped[str | None] = mapped_column(String(1024))
+    root_trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
+class ImportBatchItem(Base, TimestampMixin):
+    __tablename__ = "import_batch_items"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "import_batch_id",
+            "external_record_id",
+            name="uq_import_batch_items_scope_external",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "project_id", "import_batch_id"],
+            [
+                "import_batches.tenant_id",
+                "import_batches.project_id",
+                "import_batches.import_batch_id",
+            ],
+            name="fk_import_batch_items_scope_batch",
+            ondelete="RESTRICT",
+            onupdate="RESTRICT",
+        ),
+        CheckConstraint(
+            "status IN ('queued', 'running', 'succeeded', 'skipped', 'failed')",
+            name="ck_import_batch_items_status",
+        ),
+        Index(
+            "ix_import_batch_items_scope_batch_status",
+            "tenant_id",
+            "project_id",
+            "import_batch_id",
+            "status",
+        ),
+        Index(
+            "ix_import_batch_items_scope_audio_session",
+            "tenant_id",
+            "project_id",
+            "audio_session_id",
+        ),
+    )
+
+    import_item_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    import_batch_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    external_record_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="queued")
+    error_code: Mapped[str | None] = mapped_column(String(128))
+    object_version: Mapped[str | None] = mapped_column(String(512))
+    audio_session_id: Mapped[str | None] = mapped_column(String(128))
+    root_trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
+
+
 class MetricResult(Base, TimestampMixin):
     __tablename__ = "metric_results"
     __table_args__ = (

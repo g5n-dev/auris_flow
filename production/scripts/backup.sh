@@ -334,7 +334,10 @@ minio_mc ls --recursive --versions --json auris/auris-flow \
   --listing "${STAGING_DIR}/minio/source-listing.jsonl" \
   --bucket auris-flow \
   --output "${STAGING_DIR}/minio/versions.json"
-minio_backup_script="$(mktemp "${TMPDIR:-/tmp}/auris-flow-minio-backup.XXXXXX")"
+# Keep Docker bind inputs on a host-visible filesystem. In particular, the
+# systemd timer runs with PrivateTmp=true, whose private /tmp is not visible to
+# the Docker daemon's mount namespace.
+minio_backup_script="$(mktemp "${STAGING_DIR}/.auris-flow-minio-backup.XXXXXX")"
 "${PYTHON}" "${BACKUP_TOOLS}/minio_versions.py" emit-backup-shell \
   --plan "${STAGING_DIR}/minio/versions.json" \
   --output "${minio_backup_script}"

@@ -15,7 +15,8 @@ export const authSessionToUser = (session: AuthSession): AuthUser => ({
   projectId: session.user.project_id,
   authToken: "",
   expiresAt: session.expires_at ?? "",
-  provider: session.provider ?? session.user.provider
+  provider: session.provider ?? session.user.provider,
+  projectMemberships: session.user.project_memberships ?? []
 });
 
 /** Purge tokens persisted by pre-OIDC builds; new sessions are cookie-only. */

@@ -3,7 +3,7 @@
 ## 适用范围
 
 本 Runbook 只适用于 Auris Flow Linux 单机 Docker Compose 基线。它不是滚动、蓝绿或高可用部署；
-升级需要计划停写窗口。当前仓库仍是 `v1.0.0` 候选，下面流程必须先在隔离 RC 环境演练，不能被
+升级需要计划停写窗口。当前仓库仍是 `v1.0.0` 候选，下面流程必须先在隔离的无标签 staging 环境演练，不能被
 解释为已经完成正式升级认证。
 
 版本/API/配置/数据库规则以
@@ -33,7 +33,7 @@
 4. 完成空环境恢复演练；若目标 release 含 contract，必须另行证明恢复旧 backup 到旧 release。
 5. 把成功/失败、耗时、镜像 digest、migration head、backup ID 和关键 trace 记入变更单。
 
-RC 演练不能以 SQLite、fake Dagster、确定性测试向量或本地 callback receipt 替代生产路径。
+staging 演练不能以 SQLite、fake Dagster、确定性测试向量或本地 callback receipt 替代生产路径。
 
 ## 生产升级
 

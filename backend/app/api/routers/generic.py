@@ -38,6 +38,7 @@ from app.schemas import (
     ApiErrorEnvelope,
     ExternalCallbackRequest,
     ExternalRunCompletionReceiptRequest,
+    ExternalRunProgressReceiptRequest,
     KnowledgeBuildRequest,
     KnowledgeRecallRequest,
     RunCompletionReceiptRequest,
@@ -52,7 +53,9 @@ from app.schemas.public_runs import (
     RunCompletionReceiptPendingResponse,
 )
 from app.services.adapters import object_storage_client_for_provider
+from app.services.audio_import_progress_service import apply_audio_import_progress
 from app.services.audit_service import record_audit
+from app.services.connector_import_service import prepare_platform_audio_connector_payload
 from app.services.idempotency_service import (
     replay_or_conflict,
     request_hash,
@@ -235,6 +238,25 @@ def prepare_connector_payload(
     existing_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     prepared = bind_active_scene_profile_lock(session, ctx, payload)
+    platform_audio_payload = prepare_platform_audio_connector_payload(
+        session,
+        ctx,
+        prepared,
+        existing_payload=existing_payload,
+    )
+    if platform_audio_payload is not None:
+        return {
+            **platform_audio_payload,
+            **{
+                field: prepared[field]
+                for field in (
+                    "scene_profile_id",
+                    "scene_profile_version_id",
+                    "scene_profile_snapshot_sha256",
+                )
+                if field in prepared
+            },
+        }
     target_asset_key = prepared.get(
         "target_asset_key",
         (existing_payload or {}).get("target_asset_key"),
@@ -1189,6 +1211,11 @@ def get_connectors(session: SessionDep, ctx: ContextDep, page: PaginationDep):
     )
 
 
+@router.get("/connectors/{id}")
+def get_connectors_by_id(id: str, session: SessionDep, ctx: ContextDep) -> dict[str, Any]:
+    return envelope(get_resource(session, ctx, "connectors", id).data, ctx)
+
+
 @router.post("/connectors", status_code=201)
 async def post_connectors(request: Request, session: SessionDep, ctx: ContextDep):
     return await create_idempotent_json_resource(
@@ -1198,6 +1225,7 @@ async def post_connectors(request: Request, session: SessionDep, ctx: ContextDep
         "connectors",
         key_prefix="connector",
         status="draft",
+        reject_existing=True,
         prepare_payload=lambda payload: prepare_connector_payload(session, ctx, payload),
     )
 
@@ -1216,6 +1244,30 @@ async def patch_connectors_by_id(id: str, request: Request, session: SessionDep,
             payload,
             existing_payload=resource.data,
         ),
+    )
+
+
+@router.get("/platform-connections")
+def get_platform_connections(
+    session: SessionDep, ctx: ContextDep, page: PaginationDep
+) -> dict[str, Any]:
+    resource_page = list_resource_page(session, ctx, "connectors", page)
+    items = [
+        {
+            "platform_connection_id": str(item.get("connector_id") or item.get("id") or ""),
+            "name": item.get("name"),
+            "status": item.get("status"),
+            "auth_mode": item.get("auth_mode"),
+        }
+        for item in resource_page.items
+        if (item.get("type") or item.get("source_type")) in {"platform_auth", "platform_connection"}
+    ]
+    return collection_envelope(
+        items,
+        ctx,
+        total=resource_page.total,
+        limit=resource_page.limit,
+        next_cursor=resource_page.next_cursor,
     )
 
 
@@ -1654,6 +1706,51 @@ async def post_runs_by_id_external_completion_receipts(
         strict_external_receipt=True,
         completion_auth=getattr(request.state, "completion_signature", None),
     )
+
+
+@router.post(
+    "/runs/{id}/external-progress-receipts",
+    status_code=202,
+    responses={
+        422: {"model": ApiErrorEnvelope, "description": "请求参数校验失败"},
+    },
+)
+async def post_runs_by_id_external_progress_receipts(
+    id: str,
+    body: ExternalRunProgressReceiptRequest,
+    request: Request,
+    session: SessionDep,
+    ctx: SignedCompletionContextDep,
+    _signature_headers: ExternalCompletionHmacHeadersDep,
+) -> dict[str, Any]:
+    body_hash = await request_hash(request)
+    operation = f"audio_import.external_progress:{id}"
+    replay = replay_or_conflict(
+        session,
+        ctx,
+        operation=operation,
+        body_hash=body_hash,
+    )
+    if replay is not None:
+        return replay
+    data = apply_audio_import_progress(
+        session,
+        ctx,
+        run_id=id,
+        payload=body.model_dump(),
+        completion_auth=getattr(request.state, "completion_signature", None),
+    )
+    response = envelope(data, ctx)
+    save_idempotency_result(
+        session,
+        ctx,
+        operation=operation,
+        body_hash=body_hash,
+        status_code=202,
+        response_json=response,
+    )
+    session.commit()
+    return response
 
 
 @router.get("/work-items")

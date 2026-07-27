@@ -30,8 +30,19 @@ IDEMPOTENCY_EXEMPT_OPERATIONS = {
     ("post", "/auth/dev-login"),
     ("post", "/auth/oidc/back-channel-logout"),
     ("post", "/auth/logout"),
+    # A scope transition is already idempotent for the same target project and
+    # rotates the opaque credential atomically for a changed target.
+    ("post", "/auth/session/scope-transitions"),
 }
-PAGING_EXEMPT_PATHS = {"/hotword-statistics", "/insights/metric-comparisons"}
+PAGING_EXEMPT_PATHS = {
+    "/hotword-statistics",
+    "/insights/metric-comparisons",
+    # A batch is already bounded by the signed audio-import receipt item cap;
+    # this endpoint returns that one finite batch atomically for failure retry.
+    "/import-batches/{import_batch_id}/items",
+    # This is one bounded option document, not an independently pageable list.
+    "/workspace-context-options",
+}
 TYPED_RESOURCE_PREFIXES = (
     "/work-items",
     "/event-links",

@@ -31,6 +31,8 @@ from app.models import (  # noqa: E402
     AssetMaterialization,
     AssetPartition,
     ExternalCallbackReceipt,
+    ImportBatch,
+    ImportBatchItem,
     JsonResource,
     VoiceprintEnrollment,
     OutboxEvent,
@@ -152,7 +154,6 @@ RUN_EVENT_TYPES: dict[str, str] = {
     "knowledge_build": "knowledge_index.build_requested",
     "knowledge_sync": "knowledge_source.sync_requested",
     "label_publish": "label_version.publish_requested",
-    "platform_sync": "platform_sync.requested",
     "provider_test": "provider_test.requested",
     "release_command": "release_deployment.command-requested",
     "settings_publish": "settings.publish_requested",
@@ -342,11 +343,6 @@ def collect_expected_runs(result: dict[str, Any]) -> list[ExpectedRun]:
             "dagster",
         ),
         (
-            "coreFlows.platformSync",
-            result.get("coreFlows", {}).get("platformSync"),
-            "dagster",
-        ),
-        (
             "coreFlows.knowledgeSync",
             result.get("coreFlows", {}).get("knowledgeSync"),
             "qdrant",
@@ -378,6 +374,17 @@ def collect_expected_runs(result: dict[str, Any]) -> list[ExpectedRun]:
     ]
     for label, value, adapter in dispatch_paths:
         item = maybe_run(value, label, adapter)
+        if item:
+            expected.append(item)
+
+    audio_import = result.get("coreFlows", {}).get("audioImport")
+    if isinstance(audio_import, dict) and audio_import.get("status") != "skipped":
+        item = maybe_run(
+            audio_import,
+            "coreFlows.audioImport",
+            "dagster",
+            expected_status="success",
+        )
         if item:
             expected.append(item)
 
@@ -1586,7 +1593,9 @@ def bff_json_request(
             for key, value in DEFAULT_E2E_HEADERS.items()
             if include_default_auth or key != "Authorization"
         },
-        "X-Request-Id": f"e2e-completion-{hashlib.sha1(path.encode()).hexdigest()[:12]}",
+        "X-Request-Id": (
+            f"e2e-completion-{hashlib.sha256(path.encode()).hexdigest()[:12]}"
+        ),
     }
     if auth_token:
         headers["Authorization"] = f"Bearer {auth_token}"
@@ -3951,6 +3960,314 @@ def verify_approved_voiceprint_qdrant_index(started_at: datetime) -> dict[str, A
     }
 
 
+def verify_audio_import_closed_loop(
+    result: dict[str, Any],
+    run_event_pairs: list[tuple[ExpectedRun, RunRecord, OutboxEvent]],
+) -> dict[str, Any]:
+    evidence = result.get("audioImportClosedLoop")
+    if not isinstance(evidence, dict):
+        fail("Audio import closed-loop browser evidence is missing")
+    if evidence.get("status") == "skipped":
+        if evidence.get("reasonCode") != "REAL_AUDIO_IMPORT_FIXTURE_REQUIRED":
+            fail(
+                "Audio import closed-loop skip is not a governed prerequisite skip",
+                evidence,
+            )
+        return {
+            "status": "skipped",
+            "reason_code": evidence.get("reasonCode"),
+        }
+
+    run_id = evidence.get("taskRunId")
+    import_batch_id = evidence.get("importBatchId")
+    audio_session_id = evidence.get("audioSessionId")
+    root_trace_id = evidence.get("rootTraceId")
+    task_version_id = evidence.get("taskVersionId")
+    connector_id = evidence.get("connectorId")
+    platform_connection_id = evidence.get("platformConnectionId")
+    target_asset_key = evidence.get("targetAssetKey")
+    required_browser_evidence = {
+        "taskRunId": run_id,
+        "importBatchId": import_batch_id,
+        "audioSessionId": audio_session_id,
+        "rootTraceId": root_trace_id,
+        "taskVersionId": task_version_id,
+        "connectorId": connector_id,
+        "platformConnectionId": platform_connection_id,
+        "targetAssetKey": target_asset_key,
+    }
+    if (
+        any(
+            not isinstance(value, str) or not value
+            for value in required_browser_evidence.values()
+        )
+        or evidence.get("status") != "succeeded"
+        or evidence.get("executionMode") != "production"
+        or evidence.get("previewCount") != 3
+        or evidence.get("playbackGrantStatus") != 201
+        or evidence.get("playbackStatus") != 206
+        or not isinstance(evidence.get("connectorWriteCount"), int)
+        or not 1 <= evidence.get("connectorWriteCount") <= 2
+        or evidence.get("pageRefreshRecovered") is not True
+        or evidence.get("rootTraceReadable") is not True
+        or evidence.get("legacyPlatformSyncRequests") != 0
+    ):
+        fail(
+            "Audio import browser evidence does not prove the production P0 chain",
+            {"evidence": evidence},
+        )
+
+    pair = next(
+        (
+            (expected, run, event)
+            for expected, run, event in run_event_pairs
+            if expected.label == "coreFlows.audioImport" and run.run_id == run_id
+        ),
+        None,
+    )
+    if pair is None:
+        fail(
+            "Audio import TaskRun is missing from outbox dispatch verification",
+            {"run_id": run_id},
+        )
+    _expected, run, event = pair
+    dispatch = run.payload.get("dispatch") or event.payload.get("adapter_dispatch")
+    dispatch_details = (
+        dispatch.get("details")
+        if isinstance(dispatch, dict) and isinstance(dispatch.get("details"), dict)
+        else {}
+    )
+    completion = run.payload.get("completion_receipt")
+    completion_auth = (
+        completion.get("auth")
+        if isinstance(completion, dict) and isinstance(completion.get("auth"), dict)
+        else {}
+    )
+    result_ref = (
+        completion.get("result_ref")
+        if isinstance(completion, dict)
+        and isinstance(completion.get("result_ref"), dict)
+        else {}
+    )
+    connector_snapshot = (
+        run.payload.get("connector_snapshot")
+        if isinstance(run.payload.get("connector_snapshot"), dict)
+        else {}
+    )
+    target = (
+        run.payload.get("target") if isinstance(run.payload.get("target"), dict) else {}
+    )
+    if (
+        run.run_type != "task_run"
+        or run.status != "success"
+        or run.trace_id != root_trace_id
+        or run.payload.get("execution_mode") != "production"
+        or run.payload.get("execution_contract") != "auris-flow-audio-import-v1"
+        or run.payload.get("task_version_id") != task_version_id
+        or run.payload.get("import_batch_id") != import_batch_id
+        or run.payload.get("root_trace_id") != root_trace_id
+        or connector_snapshot.get("connector_id") != connector_id
+        or connector_snapshot.get("platform_connection_id") != platform_connection_id
+        or target.get("target_asset_key") != target_asset_key
+        or event.event_type != "task_run.requested"
+        or not isinstance(dispatch, dict)
+        or dispatch.get("adapter") != "dagster"
+        or dispatch_details.get("job_name") != "auris_flow_audio_import_v1"
+        or not isinstance(completion, dict)
+        or completion.get("adapter") != "dagster"
+        or completion.get("source") != "dagster"
+        or completion.get("status") != "success"
+        or completion.get("root_trace_id") != root_trace_id
+        or completion_auth.get("auth_mode") != "signed_external_completion"
+        or completion_auth.get("authenticated_source") != "dagster"
+        or not completion_auth.get("signature_key_id")
+        or not completion_auth.get("signature_mode")
+        or result_ref.get("schema_version") != "auris-flow-audio-import-result-v1"
+        or result_ref.get("execution_contract") != "auris-flow-audio-import-v1"
+        or result_ref.get("import_batch_id") != import_batch_id
+    ):
+        fail(
+            "Audio import TaskRun did not complete through the allowlisted signed Dagster contract",
+            {
+                "run_id": run_id,
+                "run_type": run.run_type,
+                "run_status": run.status,
+                "run_trace_id": run.trace_id,
+                "run_payload": run.payload,
+                "event_type": event.event_type,
+            },
+        )
+
+    with SessionLocal() as session:
+        batch = session.get(ImportBatch, str(import_batch_id))
+        items = list(
+            session.scalars(
+                select(ImportBatchItem).where(
+                    ImportBatchItem.tenant_id == run.tenant_id,
+                    ImportBatchItem.project_id == run.project_id,
+                    ImportBatchItem.import_batch_id == import_batch_id,
+                )
+            )
+        )
+        if (
+            batch is None
+            or batch.tenant_id != run.tenant_id
+            or batch.project_id != run.project_id
+            or batch.task_run_id != run_id
+            or batch.task_version_id != task_version_id
+            or batch.connector_id != connector_id
+            or batch.status != "succeeded"
+            or batch.current_stage != "completed"
+            or batch.root_trace_id != root_trace_id
+            or batch.failed_items != 0
+            or batch.succeeded_items < 1
+            or batch.total_items != len(items)
+            or batch.total_items != evidence.get("total")
+            or batch.succeeded_items != evidence.get("succeeded")
+            or batch.skipped_items != evidence.get("duplicates")
+            or batch.failed_items != evidence.get("failed")
+            or batch.payload.get("completion_receipt_id")
+            != completion.get("completion_receipt_id")
+        ):
+            fail(
+                "Audio ImportBatch does not match the completed production TaskRun",
+                {
+                    "evidence": evidence,
+                    "batch": {
+                        "id": batch.import_batch_id if batch else None,
+                        "task_run_id": batch.task_run_id if batch else None,
+                        "task_version_id": batch.task_version_id if batch else None,
+                        "connector_id": batch.connector_id if batch else None,
+                        "status": batch.status if batch else None,
+                        "current_stage": batch.current_stage if batch else None,
+                        "total_items": batch.total_items if batch else None,
+                        "succeeded_items": batch.succeeded_items if batch else None,
+                        "skipped_items": batch.skipped_items if batch else None,
+                        "failed_items": batch.failed_items if batch else None,
+                        "root_trace_id": batch.root_trace_id if batch else None,
+                        "payload": batch.payload if batch else None,
+                    },
+                },
+            )
+
+        succeeded_items = [item for item in items if item.status == "succeeded"]
+        if not succeeded_items:
+            fail(
+                "Audio import has no newly materialized successful item",
+                {"items": items},
+            )
+        verified_storage_ids: list[str] = []
+        materialized_session_ids: list[str] = []
+        for item in succeeded_items:
+            storage_object_id = item.payload.get("storage_object_id")
+            storage_object = (
+                session.get(StorageObject, storage_object_id)
+                if isinstance(storage_object_id, str) and storage_object_id
+                else None
+            )
+            session_resource = (
+                session.scalar(
+                    select(JsonResource).where(
+                        JsonResource.tenant_id == run.tenant_id,
+                        JsonResource.project_id == run.project_id,
+                        JsonResource.collection == "audio_sessions",
+                        JsonResource.resource_key == item.audio_session_id,
+                    )
+                )
+                if item.audio_session_id
+                else None
+            )
+            stored_version = (
+                storage_object.payload.get("object_version_id")
+                if storage_object is not None
+                and isinstance(storage_object.payload, dict)
+                else None
+            )
+            if (
+                item.root_trace_id != root_trace_id
+                or not item.external_record_id
+                or not item.object_version
+                or not item.audio_session_id
+                or storage_object is None
+                or storage_object.tenant_id != run.tenant_id
+                or storage_object.project_id != run.project_id
+                or storage_object.source_type != "task_run"
+                or storage_object.source_id != run_id
+                or storage_object.status != "verified"
+                or stored_version != item.object_version
+                or not storage_object.etag
+                or not storage_object.content_sha256
+                or session_resource is None
+                or session_resource.data.get("import_batch_id") != import_batch_id
+                or session_resource.data.get("platform_connection_id")
+                != platform_connection_id
+                or session_resource.data.get("root_trace_id") != root_trace_id
+            ):
+                fail(
+                    "Audio import item is missing exact-version storage or scoped AudioSession materialization",
+                    {
+                        "item_id": item.import_item_id,
+                        "item_status": item.status,
+                        "item_object_version": item.object_version,
+                        "item_audio_session_id": item.audio_session_id,
+                        "storage_object_id": storage_object_id,
+                        "storage_status": storage_object.status
+                        if storage_object
+                        else None,
+                        "storage_version": stored_version,
+                        "session": session_resource.data if session_resource else None,
+                    },
+                )
+            verified_storage_ids.append(str(storage_object_id))
+            materialized_session_ids.append(str(item.audio_session_id))
+
+        manifest_storage_object_id = batch.payload.get("manifest_storage_object_id")
+        manifest_storage_object = (
+            session.get(StorageObject, manifest_storage_object_id)
+            if isinstance(manifest_storage_object_id, str)
+            else None
+        )
+        if (
+            manifest_storage_object is None
+            or manifest_storage_object.tenant_id != run.tenant_id
+            or manifest_storage_object.project_id != run.project_id
+            or manifest_storage_object.source_type != "task_run"
+            or manifest_storage_object.source_id != run_id
+            or manifest_storage_object.status != "verified"
+            or manifest_storage_object.content_sha256
+            != batch.payload.get("manifest_sha256")
+        ):
+            fail(
+                "Audio import manifest is not a verified exact-run storage object",
+                {
+                    "manifest_storage_object_id": manifest_storage_object_id,
+                    "manifest_sha256": batch.payload.get("manifest_sha256"),
+                },
+            )
+
+    if audio_session_id not in materialized_session_ids:
+        fail(
+            "Browser-opened AudioSession was not materialized by the verified import batch",
+            {
+                "audio_session_id": audio_session_id,
+                "materialized_session_ids": materialized_session_ids,
+            },
+        )
+    return {
+        "status": "verified",
+        "task_run_id": run_id,
+        "task_version_id": task_version_id,
+        "import_batch_id": import_batch_id,
+        "audio_session_id": audio_session_id,
+        "root_trace_id": root_trace_id,
+        "dagster_job": dispatch_details.get("job_name"),
+        "completion_receipt_id": completion.get("completion_receipt_id"),
+        "verified_audio_storage_objects": verified_storage_ids,
+        "manifest_storage_object_id": manifest_storage_object_id,
+        "playback_status": evidence.get("playbackStatus"),
+    }
+
+
 def main() -> None:
     if not os.environ.get("DATABASE_URL"):
         fail("DATABASE_URL is required for E2E outbox dispatch verification")
@@ -3996,6 +4313,7 @@ def main() -> None:
     checked_audio_intelligence = verify_audio_intelligence_materialization(
         run_event_pairs
     )
+    checked_audio_import = verify_audio_import_closed_loop(result, run_event_pairs)
     checked_audio_range_stream = verify_audio_recording_range_stream()
     checked_agentic_execution = verify_agentic_execution_trace(run_event_pairs)
     checked_voiceprint_enrollment = verify_voiceprint_enrollment_gate(result)
@@ -4019,6 +4337,7 @@ def main() -> None:
         "checked_qdrant_recall": checked_qdrant_recall,
         "checked_asset_materializations": checked_asset_materializations,
         "checked_audio_intelligence": checked_audio_intelligence,
+        "checked_audio_import": checked_audio_import,
         "checked_audio_range_stream": checked_audio_range_stream,
         "checked_agentic_execution": checked_agentic_execution,
         "checked_voiceprint_enrollment": checked_voiceprint_enrollment,
@@ -4031,6 +4350,9 @@ def main() -> None:
             "blocked_run_count": len(blocked),
             "asset_materialization_count": len(checked_asset_materializations),
             "audio_intelligence_count": len(checked_audio_intelligence),
+            "audio_import_closed_loop": (
+                1 if checked_audio_import.get("status") == "verified" else 0
+            ),
             "audio_range_stream": 1,
             "agentic_execution_count": len(checked_agentic_execution),
             "qdrant_recall_count": len(checked_qdrant_recall),

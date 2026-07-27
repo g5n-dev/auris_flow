@@ -23,6 +23,7 @@ from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.logging import get_logger, log_event
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex, server_generated_public_id
 from app.core.response import envelope
 from app.core.runtime_guards import (
     FAILURE_INJECTION_KEYS,
@@ -32,6 +33,7 @@ from app.core.runtime_guards import (
 from app.models import (
     ExternalCallbackReceipt,
     IdempotencyRecord,
+    ImportBatch,
     InsightReport,
     RunCompletionReceipt,
     RunRecord,
@@ -232,10 +234,13 @@ RUN_SYSTEM_PAYLOAD_KEYS = {
     "download_ref",
     "error",
     "error_code",
+    "experiment_completion",
     "external_run_id",
     "failed_event_id",
     "id",
+    "import_batch",
     "insight_completion",
+    "label_eval_result",
     "materialized_assets",
     "materialized_outputs",
     "metrics",
@@ -247,6 +252,7 @@ RUN_SYSTEM_PAYLOAD_KEYS = {
     "prompt_candidate_id",
     "prompt_candidate_status",
     "release_command_result",
+    "registered_storage_objects",
     "result_ref",
     "retry_count",
     "retryable",
@@ -647,6 +653,15 @@ def _validate_completion_receipt(
         )
     if not actual_external_id and expected_external_id and not strict_external_receipt:
         payload["external_id"] = expected_external_id
+    if (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    ):
+        from app.services.audio_import_completion_service import (
+            validate_audio_import_completion_contract,
+        )
+
+        validate_audio_import_completion_contract(record, payload)
     return adapter, str(payload.get("external_id") or "")
 
 
@@ -1077,10 +1092,14 @@ def _link_completion_trace_to_run_root(
         (
             f"{ctx.tenant_id}|{ctx.project_id}|{ctx.trace_id}|{record.run_id}|{root_trace_id}"
         ).encode()
-    ).hexdigest()[:24]
+    ).hexdigest()
     session.merge(
         TraceRef(
-            trace_ref_id=f"trace_ref_completion_{digest}",
+            trace_ref_id=public_id_from_hex(
+                "trace_ref_completion",
+                digest,
+                suffix_length=24,
+            ),
             tenant_id=ctx.tenant_id,
             project_id=ctx.project_id,
             status="active",
@@ -1232,7 +1251,24 @@ def apply_staged_dagster_completion(
         if staged_processing_state == "pending_cancel"
         else "dagster_staged_completion_bound"
     )
-    transition_run(record, target_status, reason=completion_reason)
+    is_audio_import = (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    )
+    if target_status == "success":
+        from app.services.audio_import_progress_service import (
+            mark_audio_import_batch_materializing,
+        )
+
+        mark_audio_import_batch_materializing(
+            session,
+            ctx,
+            record,
+            completion_receipt_id=receipt.completion_receipt_id,
+            result_ref=payload.get("result_ref"),
+        )
+    if not is_audio_import:
+        transition_run(record, target_status, reason=completion_reason)
     registered_storage_objects = (
         register_hotword_completion_storage_objects(
             session,
@@ -1288,6 +1324,22 @@ def apply_staged_dagster_completion(
             record,
             completion_receipt,
         )
+    import_batch_completion: dict[str, Any] | None = None
+    if is_audio_import:
+        from app.services.audio_import_completion_service import (
+            materialize_audio_import_completion,
+        )
+
+        import_batch_completion = materialize_audio_import_completion(
+            session,
+            ctx,
+            record,
+            completion_receipt,
+        )
+        if import_batch_completion is not None and import_batch_completion["status"] == "failed":
+            target_status = "failed"
+        completion_receipt["business_status"] = target_status
+        transition_run(record, target_status, reason=completion_reason)
     record.payload = {
         **record.payload,
         "status": target_status,
@@ -1304,21 +1356,77 @@ def apply_staged_dagster_completion(
         "metrics": payload.get("metrics") or {},
         "registered_storage_objects": registered_storage_objects,
         "experiment_completion": experiment_completion,
+        "import_batch": import_batch_completion,
         "next_actions": [
-            {"key": "view_trace", "label": "查看 Trace", "route": f"traces/{record.trace_id}"},
             {
-                "key": "view_result" if target_status == "success" else "retry",
-                "label": "查看结果" if target_status == "success" else "创建重试运行",
+                "key": "view_trace",
+                "label": "查看 Trace",
+                "route": (
+                    f"traces/{completion_root_trace_id}"
+                    if is_audio_import
+                    else f"traces/{record.trace_id}"
+                ),
             },
+            *(
+                [
+                    {
+                        "key": "view_import_batch",
+                        "label": "查看同步批次",
+                        "route": (f"import-batches/{import_batch_completion['import_batch_id']}"),
+                    },
+                    *(
+                        [
+                            {
+                                "key": "view_audio_session",
+                                "label": "查看新会话",
+                                "route": (
+                                    "audio-sessions/"
+                                    f"{import_batch_completion['audio_session_ids'][0]}"
+                                ),
+                            }
+                        ]
+                        if import_batch_completion.get("audio_session_ids")
+                        else []
+                    ),
+                ]
+                if import_batch_completion is not None
+                else [
+                    {
+                        "key": "view_result" if target_status == "success" else "retry",
+                        "label": ("查看结果" if target_status == "success" else "创建重试运行"),
+                    }
+                ]
+            ),
+            *(
+                [{"key": "retry", "label": "重试失败项"}]
+                if target_status == "failed" and import_batch_completion is not None
+                else []
+            ),
         ],
     }
     if target_status == "failed":
+        audio_import_items_failed = bool(
+            is_audio_import
+            and import_batch_completion is not None
+            and import_batch_completion["status"] == "failed"
+            and completion_receipt["status"] == "success"
+        )
         record.terminal_reason = str(
-            payload.get("error_code") or "DAGSTER_COMPLETION_REPORTED_FAILURE"
+            payload.get("error_code")
+            or (
+                "AUDIO_IMPORT_ALL_ITEMS_FAILED"
+                if audio_import_items_failed
+                else "DAGSTER_COMPLETION_REPORTED_FAILURE"
+            )
         )
         record.payload = {
             **record.payload,
-            "error": payload.get("note") or "completion receipt reported failure",
+            "error": payload.get("note")
+            or (
+                "所有音频导入项均失败"
+                if audio_import_items_failed
+                else "completion receipt reported failure"
+            ),
             "error_code": record.terminal_reason,
             "retryable": bool(payload.get("retryable", True)),
         }
@@ -1614,7 +1722,7 @@ async def complete_run_from_receipt(
             400,
             details=[{"run_id": run_id}],
         )
-    receipt_id = str(raw_receipt_id or f"completion_{uuid.uuid4().hex[:12]}")
+    receipt_id = str(raw_receipt_id or server_generated_public_id("completion", suffix_length=12))
     receipt_hash = _completion_receipt_hash({**receipt_request_body, "run_id": run_id})
     legacy_receipt_hash = _completion_receipt_hash({**payload, "run_id": run_id})
     stored_receipt_request_body = receipt_request_body
@@ -1661,6 +1769,18 @@ async def complete_run_from_receipt(
                 record,
                 payload.get("result_ref"),
                 completion_receipt_id=receipt_id,
+            )
+        if str(payload.get("status") or "success") == "success":
+            from app.services.audio_import_progress_service import (
+                mark_audio_import_batch_materializing,
+            )
+
+            mark_audio_import_batch_materializing(
+                session,
+                ctx,
+                record,
+                completion_receipt_id=receipt_id,
+                result_ref=payload.get("result_ref"),
             )
         public_receipt_state = (
             "pending_cancellation_resolution" if stage_cancellation_receipt else "pending_binding"
@@ -1821,7 +1941,24 @@ async def complete_run_from_receipt(
         persisted_completion_result_ref = sanitize_audio_intelligence_result(
             raw_completion_result_ref
         )
-    transition_run(record, target_status, reason=f"{adapter}_completion_received")
+    is_audio_import = (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    )
+    if target_status == "success":
+        from app.services.audio_import_progress_service import (
+            mark_audio_import_batch_materializing,
+        )
+
+        mark_audio_import_batch_materializing(
+            session,
+            ctx,
+            record,
+            completion_receipt_id=receipt_id,
+            result_ref=raw_completion_result_ref,
+        )
+    if not is_audio_import:
+        transition_run(record, target_status, reason=f"{adapter}_completion_received")
     completion_receipt: dict[str, Any] = {
         "completion_receipt_id": receipt_id,
         "receipt_hash": receipt_hash,
@@ -1851,6 +1988,22 @@ async def complete_run_from_receipt(
             record,
             completion_receipt,
         )
+    import_batch_completion: dict[str, Any] | None = None
+    if is_audio_import:
+        from app.services.audio_import_completion_service import (
+            materialize_audio_import_completion,
+        )
+
+        import_batch_completion = materialize_audio_import_completion(
+            session,
+            ctx,
+            record,
+            completion_receipt,
+        )
+        if import_batch_completion is not None and import_batch_completion["status"] == "failed":
+            target_status = "failed"
+        completion_receipt["business_status"] = target_status
+        transition_run(record, target_status, reason=f"{adapter}_completion_received")
     record.payload = {
         **record.payload,
         "status": target_status,
@@ -1877,17 +2030,75 @@ async def complete_run_from_receipt(
         "label_eval_result": label_eval_result,
         "release_command_result": release_command_result,
         "experiment_completion": experiment_completion,
+        "import_batch": import_batch_completion,
         "next_actions": [
-            {"key": "view_trace", "label": "查看 Trace", "route": f"traces/{record.trace_id}"},
-            {"key": "view_result", "label": "查看结果"},
+            {
+                "key": "view_trace",
+                "label": "查看 Trace",
+                "route": (
+                    f"traces/{completion_root_trace_id}"
+                    if is_audio_import
+                    else f"traces/{record.trace_id}"
+                ),
+            },
+            *(
+                [
+                    {
+                        "key": "view_import_batch",
+                        "label": "查看同步批次",
+                        "route": (f"import-batches/{import_batch_completion['import_batch_id']}"),
+                    },
+                    *(
+                        [
+                            {
+                                "key": "view_audio_session",
+                                "label": "查看新会话",
+                                "route": (
+                                    "audio-sessions/"
+                                    f"{import_batch_completion['audio_session_ids'][0]}"
+                                ),
+                            }
+                        ]
+                        if import_batch_completion.get("audio_session_ids")
+                        else []
+                    ),
+                ]
+                if import_batch_completion is not None
+                else [{"key": "view_result", "label": "查看结果"}]
+            ),
         ]
         if target_status == "success"
         else [
+            *(
+                [
+                    {
+                        "key": "view_import_batch",
+                        "label": "查看同步批次",
+                        "route": (f"import-batches/{import_batch_completion['import_batch_id']}"),
+                    }
+                ]
+                if import_batch_completion is not None
+                else []
+            ),
             {
                 "key": "review_eval_gates" if target_status == "blocked" else "retry",
-                "label": "查看评测阻断项" if target_status == "blocked" else "创建重试运行",
+                "label": (
+                    "查看评测阻断项"
+                    if target_status == "blocked"
+                    else "重试失败项"
+                    if is_audio_import
+                    else "创建重试运行"
+                ),
             },
-            {"key": "view_trace", "label": "查看 Trace", "route": f"traces/{record.trace_id}"},
+            {
+                "key": "view_trace",
+                "label": "查看 Trace",
+                "route": (
+                    f"traces/{completion_root_trace_id}"
+                    if is_audio_import
+                    else f"traces/{record.trace_id}"
+                ),
+            },
         ],
     }
     if adapter == "external_callback":
@@ -1911,10 +2122,26 @@ async def complete_run_from_receipt(
                 },
             }
     if target_status == "failed":
+        audio_import_items_failed = bool(
+            is_audio_import
+            and import_batch_completion is not None
+            and import_batch_completion["status"] == "failed"
+            and completion_receipt["status"] == "success"
+        )
         record.payload = {
             **record.payload,
-            "error": payload.get("note") or "completion receipt reported failure",
-            "error_code": payload.get("error_code") or "COMPLETION_RECEIPT_FAILED",
+            "error": payload.get("note")
+            or (
+                "所有音频导入项均失败"
+                if audio_import_items_failed
+                else "completion receipt reported failure"
+            ),
+            "error_code": payload.get("error_code")
+            or (
+                "AUDIO_IMPORT_ALL_ITEMS_FAILED"
+                if audio_import_items_failed
+                else "COMPLETION_RECEIPT_FAILED"
+            ),
             "retryable": bool(payload.get("retryable", True)),
         }
     if target_status == "success" and record.run_type == "audio_intelligence":
@@ -2286,7 +2513,9 @@ async def create_run(
         }
 
     run_id = (
-        payload.get("run_id") or payload.get("task_run_id") or f"{run_type}_{uuid.uuid4().hex[:12]}"
+        payload.get("run_id")
+        or payload.get("task_run_id")
+        or server_generated_public_id(run_type, suffix_length=12)
     )
     # New RunRecord/Outbox pairs trace the current request; an explicit override
     # is reserved for retries that continue their source run's causal trace. A
@@ -2445,7 +2674,29 @@ async def retry_run(
     )
     if not record:
         raise ApiError("NOT_FOUND", f"运行不存在：{run_id}", 404)
-    if record.status not in RUN_RETRYABLE_STATUSES:
+    is_audio_import_retry = (
+        record.run_type == "task_run"
+        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    )
+    partial_audio_import_retry = False
+    if is_audio_import_retry and record.status == "success":
+        import_batch_id = str(record.payload.get("import_batch_id") or "").strip()
+        source_batch = session.scalar(
+            select(ImportBatch)
+            .where(
+                ImportBatch.import_batch_id == import_batch_id,
+                ImportBatch.task_run_id == record.run_id,
+                ImportBatch.tenant_id == ctx.tenant_id,
+                ImportBatch.project_id == ctx.project_id,
+            )
+            .with_for_update()
+        )
+        partial_audio_import_retry = bool(
+            source_batch is not None
+            and source_batch.status == "partial"
+            and source_batch.current_stage == "completed"
+        )
+    if record.status not in RUN_RETRYABLE_STATUSES and not partial_audio_import_retry:
         raise ApiError(
             "RUN_NOT_RETRYABLE",
             f"运行状态 {record.status} 不能重试",
@@ -2487,12 +2738,44 @@ async def retry_run(
         return public_run_response(replay, ctx)
     retry_payload = retry_payload_from_record(record, ctx, payload)
     retry_reason = str(retry_payload.get("retry_reason") or "manual retry")
+    prepare_payload: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     prepare_record = _insight_report_retry_hook(
         session,
         ctx,
         record,
         reason=retry_reason,
     )
+    if is_audio_import_retry:
+        from app.services.import_batch_service import create_import_batch_for_task_run
+        from app.services.task_execution_policy import enforce_task_execution_policy
+
+        # A failed/partial audio-import batch never advances its live cursor.
+        # Re-applying the published immutable TaskVersion therefore reads the
+        # same source window; external-id + checksum dedupe turns that full
+        # window retry into an effective failed-item retry without trusting a
+        # caller-supplied list of object locators.
+        def prepare_audio_import_retry_payload(
+            candidate: dict[str, Any],
+        ) -> dict[str, Any]:
+            return enforce_task_execution_policy(
+                session,
+                ctx,
+                {
+                    **candidate,
+                    "execution_mode": "production",
+                    "trigger_type": "retry",
+                },
+            )
+
+        def prepare_audio_import_retry_record(retry_record: RunRecord) -> None:
+            create_import_batch_for_task_run(
+                session,
+                ctx,
+                retry_record,
+            )
+
+        prepare_payload = prepare_audio_import_retry_payload
+        prepare_record = prepare_audio_import_retry_record
     log_event(
         logger,
         "run.retry.requested",
@@ -2511,8 +2794,12 @@ async def retry_run(
         payload=retry_payload,
         status="pending",
         idempotency_operation=operation,
+        prepare_payload=prepare_payload,
         prepare_record=prepare_record,
-        run_trace_id=record.trace_id,
+        # Audio-import retries create a new root trace and retain causal
+        # linkage through retry_of_trace_id. Other legacy retries continue
+        # their source trace for backward compatibility.
+        run_trace_id=None if is_audio_import_retry else record.trace_id,
     )
 
 

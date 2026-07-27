@@ -7,6 +7,7 @@ from fastapi import APIRouter, Request
 from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex
 from app.core.response import collection_envelope, envelope
 from app.models import PromptVersionCandidate
 from app.schemas import (
@@ -298,10 +299,14 @@ async def post_eval_runs_by_id_feedback_tasks(
         )
     body = parse_payload(EvalFeedbackTaskRequest, raw_body).model_dump(exclude_none=True)
     badcase_refs = body["badcase_refs"]
-    feedback_digest = hashlib.sha1(
+    feedback_digest = hashlib.sha256(
         f"{id}|{body.get('target')}|{','.join(badcase_refs)}".encode()
-    ).hexdigest()[:10]
-    feedback_task_id = body.get("feedback_task_id") or f"feedback_{id}_{feedback_digest}"
+    ).hexdigest()
+    feedback_task_id = body.get("feedback_task_id") or public_id_from_hex(
+        f"feedback_{id}",
+        feedback_digest,
+        suffix_length=10,
+    )
     return await create_run(
         session,
         ctx,

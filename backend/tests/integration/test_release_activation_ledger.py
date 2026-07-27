@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC
 from types import SimpleNamespace
 
@@ -7,6 +8,7 @@ import pytest
 
 from app.core.database import SessionLocal
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import (
     PromptAsset,
     ReleaseBundleHead,
@@ -69,6 +71,17 @@ def test_bootstrap_appends_generation_one_activation_ledger_event(client, auth_h
                 environment="production",
             )
             .one()
+        )
+        expected_head_id = public_id_from_hex(
+            "rbh",
+            hashlib.sha256(f"{TENANT_ID}:{PROJECT_ID}:production".encode()).hexdigest(),
+            suffix_length=24,
+        )
+        assert session.get(ReleaseBundleHead, expected_head_id) is not None
+        assert event.head_event_id == public_id_from_hex(
+            "rbhe",
+            event.content_sha256,
+            suffix_length=24,
         )
         assert event.generation == 1
         assert event.previous_generation is None

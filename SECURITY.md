@@ -51,7 +51,7 @@
 
 ## Known Gaps Before Public Release
 
-以下是正式公开 RC/生产声明前仍需完成的运营与外部状态门禁，不应被误写成 OIDC/会话或 callback
+以下是正式发布/生产声明前仍需完成的运营与外部状态门禁，不应被误写成 OIDC/会话或 callback
 协议尚未实现：
 
 - 在真实企业 IdP 演练登录、登出、重新认证、禁用用户、角色降权、JWKS overlap/retire 和 IdP

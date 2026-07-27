@@ -26,9 +26,42 @@ from app.core.project_membership import (
     project_member_role_binding,
     user_has_project_membership,
 )
+from app.core.request_identifiers import (
+    REQUEST_IDENTIFIER_PATTERN_TEXT,
+    is_safe_request_identifier,
+    public_id_from_hex,
+    sanitized_request_id,
+    server_generated_public_id,
+)
 from app.models import AuthSession, IdempotencyRecord, Project, Tenant, TraceRef, User
 
 ContextSessionDep = Annotated[Session, Depends(get_session)]
+OptionalIdempotencyKeyHeader = Annotated[
+    str | None,
+    Header(
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        pattern=REQUEST_IDENTIFIER_PATTERN_TEXT,
+        description=(
+            "写操作幂等键；1–128 个 ASCII 字符，首字符为字母或数字，"
+            "其余可使用字母、数字、点、下划线、冒号或连字符。"
+        ),
+    ),
+]
+RequiredIdempotencyKeyHeader = Annotated[
+    str,
+    Header(
+        alias="Idempotency-Key",
+        min_length=1,
+        max_length=128,
+        pattern=REQUEST_IDENTIFIER_PATTERN_TEXT,
+        description=(
+            "写操作幂等键；1–128 个 ASCII 字符，首字符为字母或数字，"
+            "其余可使用字母、数字、点、下划线、冒号或连字符。"
+        ),
+    ),
+]
 
 
 @dataclass(frozen=True)
@@ -74,6 +107,13 @@ def actor_allows_scope(actor: AuthActor, tenant_id: str, project_id: str) -> boo
         not actor.project_ids or "*" in actor.project_ids or project_id in actor.project_ids
     )
     return tenant_allowed and project_allowed
+
+
+def _request_id(request: Request, caller_value: str | None) -> str:
+    initialized = getattr(request.state, "request_id", None)
+    if is_safe_request_identifier(initialized):
+        return initialized
+    return sanitized_request_id(caller_value)
 
 
 def _validated_trace_header(value: str | None, *, header: str) -> str | None:
@@ -132,7 +172,7 @@ def initialize_server_trace(request: Request) -> ServerTraceContext:
         getattr(request.state, "trace_id", None)
         if getattr(request.state, "server_trace_initialized", False)
         else None
-    ) or f"trace_{uuid.uuid4().hex}"
+    ) or server_generated_public_id("trace", suffix_length=32)
     request.state.trace_id = root_trace_id
     request.state.server_trace_initialized = True
     parent_trace_id = _validated_trace_header(
@@ -340,7 +380,7 @@ async def request_context(
     x_business_date: str | None = Header(default=None, alias="X-Business-Date"),
     x_model_version: str | None = Header(default=None, alias="X-Model-Version"),
     x_label_version: str | None = Header(default=None, alias="X-Label-Version"),
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: OptionalIdempotencyKeyHeader = None,
     authorization: str | None = Header(default=None, alias="Authorization"),
     x_csrf_token: str | None = Header(default=None, alias="X-CSRF-Token"),
 ) -> RequestContext:
@@ -420,7 +460,7 @@ async def request_context(
         project_id=x_project_id or "sales_qa",
         user_id=actor.user_id,
         roles=actor.roles,
-        request_id=x_request_id or getattr(request.state, "request_id", None) or str(uuid.uuid4()),
+        request_id=_request_id(request, x_request_id),
         trace_id=trace.root_trace_id,
         idempotency_key=idempotency_key,
         parent_trace_id=trace.parent_trace_id,
@@ -440,16 +480,20 @@ async def request_context(
 
 
 def _external_completion_user_id(key_id: str) -> str:
-    return f"ext_completion_{uuid.uuid5(uuid.NAMESPACE_URL, key_id).hex[:16]}"
+    return public_id_from_hex(
+        "ext_completion",
+        uuid.uuid5(uuid.NAMESPACE_URL, key_id).hex,
+        suffix_length=16,
+    )
 
 
 async def signed_completion_context(
     request: Request,
     session: ContextSessionDep,
+    idempotency_key: RequiredIdempotencyKeyHeader,
     x_tenant_id: str = Header(alias="X-Tenant-Id"),
     x_project_id: str = Header(alias="X-Project-Id"),
     x_request_id: str | None = Header(default=None, alias="X-Request-Id"),
-    idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> RequestContext:
     trace = initialize_server_trace(request)
     if not x_tenant_id:
@@ -470,7 +514,7 @@ async def signed_completion_context(
         project_id=x_project_id,
         user_id=user_id,
         roles=("system", "external_completion_client"),
-        request_id=x_request_id or getattr(request.state, "request_id", None) or str(uuid.uuid4()),
+        request_id=_request_id(request, x_request_id),
         trace_id=trace.root_trace_id,
         idempotency_key=idempotency_key,
         parent_trace_id=trace.parent_trace_id,

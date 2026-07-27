@@ -10,10 +10,11 @@
 - 在替代宿主机、相同 release 镜像、Compose 配置、外部 secrets 和备份均可用，且权威数据不超过 100 GiB 时，目标 `RTO <= 4h`。
 - 数据量、磁盘/网络吞吐或镜像拉取时间超出上述前提时，RTO 必须通过本环境的季度恢复演练重新测量，不能沿用默认值。
 
-MySQL 和 MinIO 是权威来源。Qdrant 按架构是派生索引、不得成为唯一业务事实来源，但当前候选只
-验证了兼容 snapshot 恢复和固定合成夹具的跨存储绑定；全部 collection 的治理化重建器与第二空
-目标演练仍是正式发行阻断项。Redis 是可丢弃缓存。Dagster 运行元数据与 Keycloak 配置随 MySQL
-一并备份，但仍不改变业务数据权威边界。
+MySQL 和 MinIO 是权威来源。Qdrant 按架构是派生索引、不得成为唯一业务事实来源；v1 的治理化
+重建只支持知识域 `knowledge_chunks`。`app.qdrant_rebuild` 只从 MySQL 中已经确认成功的知识
+Qdrant Outbox 意图生成租户/项目级重建计划，命令本身不读取 MinIO，只保留已确认事件中的对象
+引用；MinIO 对象版本仍由本 Runbook 的权威恢复步骤独立校验。Redis 是可丢弃缓存。Dagster 运行
+元数据与 Keycloak 配置随 MySQL 一并备份，但仍不改变业务数据权威边界。
 
 ## 安全边界
 
@@ -55,7 +56,7 @@ MySQL 和 MinIO 是权威来源。Qdrant 按架构是派生索引、不得成为
   `regular-file` 类型与精确 mode）；这不会替代恢复前对目标 release bundle 的独立 Sigstore 与
   全成员校验。
 
-MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历史，因此本实现不使用 mirror，而是逐代读取并重放版本。生产 Qdrant 写路径当前只支持未命名 dense vector，并要求每个非空 collection 的每个 point payload 都包含非空、非通配的 `tenant_id` 与 `project_id`；空 collection 以 `empty-collection` 显式建模。备份遇到 named/sparse vector、缺失 scope、重复 point ID、分页循环或数量漂移都会拒绝继续，不会静默降级。Qdrant collection snapshot 只用于当前候选的兼容恢复；在通用治理化重建器通过独立正式门禁前，不得把“派生索引”的架构目标描述为已经具备完整重建能力。
+MinIO 官方说明普通 `mc mirror` 只复制当前对象、不保留版本历史，因此本实现不使用 mirror，而是逐代读取并重放版本。生产 Qdrant 写路径当前只支持未命名 dense vector，并要求每个非空 collection 的每个 point payload 都包含非空、非通配的 `tenant_id` 与 `project_id`；空 collection 以 `empty-collection` 显式建模。备份遇到 named/sparse vector、缺失 scope、重复 point ID、分页循环或数量漂移都会拒绝继续，不会静默降级。v1 治理化重建只覆盖已注册的 `knowledge_chunks` 写事件。`voiceprint_embeddings` 没有经过验证的专用声纹向量 provider，禁止退化为文本 embedding，写入以 `VOICEPRINT_VECTOR_PROVIDER_UNSUPPORTED` 非重试错误关闭；包含历史声纹 Qdrant 成功回执或任何其他未注册 collection 的备份不能走 `rebuild-required`，只能使用兼容 snapshot，直到专用 provider 与重建契约另行验收。
 
 ## 创建备份
 
@@ -105,6 +106,40 @@ release metadata，再核对当前 Compose project 中全部 running service 的
 RepoDigest 均等于已签名 image lock；任何未知 service、可变 tag、stale container 或 metadata
 漂移都会在写备份前失败。脚本固定 `default` Docker context 与 `auris-flow` project，拒绝环境变量
 重定向。
+
+### 3. 安装每日停写备份定时器
+
+单机基线使用宿主机 systemd 定时器，而不是给容器挂载 Docker socket。默认每天 02:17 开始，
+带最多 10 分钟随机延迟；`Persistent=true` 会在宿主机错过窗口后补跑。这个动作会先关闭 edge 和
+全部写端，完成签名备份后按原先实际运行的服务集合分阶段恢复，因此必须把窗口纳入维护公告，并按
+业务低峰调整 `OnCalendar`。备份输出必须是独立加密故障域的绝对路径。
+
+```bash
+sudo install -d -m 0700 /etc/auris-flow
+sudo install -m 0600 \
+  production/systemd/backup.env.example \
+  /etc/auris-flow/backup.env
+sudo "${EDITOR:?set EDITOR}" /etc/auris-flow/backup.env
+sudo install -d -m 0755 production/runtime-metrics
+sudo install -m 0644 \
+  production/systemd/auris-flow-backup.service \
+  production/systemd/auris-flow-backup.timer \
+  /etc/systemd/system/
+sudo systemd-analyze verify \
+  /etc/systemd/system/auris-flow-backup.service \
+  /etc/systemd/system/auris-flow-backup.timer
+sudo systemctl daemon-reload
+sudo systemctl enable --now auris-flow-backup.timer
+systemctl list-timers auris-flow-backup.timer
+```
+
+上线前先在同配置的 staging 主机执行一次 `sudo systemctl start auris-flow-backup.service`，确认
+service 返回 0、外部目录出现可离线验包的新 backup、原先运行的写端全部恢复且 `/readyz` 正常。
+包装脚本使用非阻塞 `flock` 拒绝并发维护，拒绝正在运行的 migration/bootstrap，并在退出、失败或
+信号中断时恢复原服务集合；恢复不完整会以退出码 3 保持 systemd failed，不能忽略后手工标绿。
+只有 `backup.sh` 完整签名并验证成功才原子更新
+`production/runtime-metrics/auris_backup.prom`；失败不会推进 success timestamp，systemd 失败状态
+提供即时信号，`AurisBackupStale` 则持续守住 24 小时 RPO 边界。
 
 ## 恢复到空环境
 
@@ -177,9 +212,16 @@ production/scripts/restore.sh \
 任一步失败都会留下 TSV 诊断报告。MySQL 或 MinIO 成功、Qdrant 失败时，不回滚权威数据，也不
 伪装成完整成功；当前候选必须修复版本兼容问题后重做空环境 snapshot 恢复。
 
-### 3. 不使用 Qdrant snapshot 的路径（当前为阻断状态）
+### 3. 不使用 Qdrant snapshot 的治理化重建
 
-以下命令只用于验证恢复器会 fail closed，不是当前候选支持的生产恢复完成路径：
+以下路径把 Qdrant 当作派生数据重建。它不信任调用参数中的 point、collection 或 scope，也不
+直接写 Qdrant：计划只能来自已恢复 MySQL 中状态为 `processed/confirmed` 且存在成功 Qdrant
+delivery receipt 的历史 Outbox 事实；执行阶段创建新的 Outbox 事件，由 Worker 使用原始 point
+identity 重放。最终仍必须由签名备份中的全量 Qdrant 指纹和 scoped probe 判定等价。
+
+v1 仅注册 `knowledge_chunks`。`voiceprint_embeddings` 尚无经过验证的专用声纹向量 provider，
+禁止退化为文本 embedding；相关写入以 `VOICEPRINT_VECTOR_PROVIDER_UNSUPPORTED` 非重试错误
+关闭，历史声纹 Qdrant 回执也会使本命令 fail closed，必须改走兼容 snapshot。
 
 ```bash
 production/scripts/restore.sh \
@@ -190,20 +232,73 @@ production/scripts/restore.sh \
 
 此模式把 Qdrant 留空，创建权限 `0600` 的 `*.state.json`，状态固定为
 `pending-qdrant-rebuild`，并以退出码 **3** 结束；它不会写 `complete`，也不会声称 Qdrant 一致。
-当前没有任何受支持命令能把该状态转换为生产可接受的 `complete`：现有业务 build run 会生成新的
-trace/point identity，无法证明恢复为备份时的完整语义集合；voiceprint 等 collection 也尚未具备
-统一的权威对象重建契约。不要手工 upsert、重放历史 Outbox、启动 BFF/Worker 后批量提交 build，
-也不要调用 `finalize-restore.sh` 掩盖这一缺口。
+保持 `edge` 停止，完成 migration 和 Dagster storage bootstrap 后，只启动恢复所需的内部服务；
+不得开放公网写入口：
 
-正式支持该模式前，必须在第二个独立空 Compose project 中，用版本化治理化 reconciler 仅从恢复的
-MySQL/MinIO 重建全部受支持 collection，校验 embedding provider/model/dimension/fingerprint、
-tenant/project/trace、Audit/Outbox/receipt 和全量 point 指纹，再把 snapshot/rebuild 两次观测绑定
-到同一 signed backup、tag 与新鲜 challenge 的正式证据。上述门禁未完成时，snapshot 缺失意味着
-恢复保持阻断，写入面不得重新开放。
+```bash
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm migrate
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml run --rm --no-deps dagster-storage-bootstrap
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml \
+  up -d keycloak dagster-code dagster-webserver dagster-daemon bff worker
+```
+
+对已恢复的**每个** tenant/project 分别生成 owner-only 计划。计划只包含 event/point ID、trace 和
+SHA-256，不包含业务 payload；不要把计划或校验证据写进仓库、镜像或普通日志：
+
+```bash
+umask 077
+PLAN=/var/tmp/auris-flow-qdrant-rebuild-plan.json
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml exec -T bff \
+  python -m app.qdrant_rebuild plan \
+  --tenant-id TENANT_ID --project-id PROJECT_ID >"${PLAN}"
+PLAN_SHA256="$(sha256sum "${PLAN}" | awk '{print $1}')"
+```
+
+人工核对计划的 scope、collection 和 point count 后，必须逐字确认计划摘要。命令会在同一数据库
+事务中重新生成计划；计划之后出现任何非重建业务事件都会拒绝执行：
+
+```bash
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml exec -T bff \
+  python -m app.qdrant_rebuild enqueue \
+  --confirm-sha256 "${PLAN_SHA256}" <"${PLAN}"
+```
+
+等待 Worker 清空本轮 Outbox 后，对每个 scope 保存不含业务正文的 receipt 证据；未全部
+`processed/confirmed`、point ID 不一致或回执 adapter 不是 Qdrant 时命令返回非零：
+
+```bash
+EVIDENCE=/var/tmp/auris-flow-qdrant-rebuild-evidence.json
+docker --context default compose --project-name auris-flow \
+  --project-directory production --env-file production/.env \
+  --file production/compose.yaml exec -T bff \
+  python -m app.qdrant_rebuild verify <"${PLAN}" >"${EVIDENCE}"
+```
+
+所有 scope 均通过后，才运行 `production/scripts/finalize-restore.sh`。该 finalizer 会再次冻结
+`edge`、Dagster、BFF 与 Worker，等待 Outbox 清空，再把实时 collection 的全量 point/vector/payload
+指纹和 scoped probe 与同一签名备份逐一比较；provider/model/dimension/fingerprint 漂移、遗漏
+scope、未注册 collection 或任何额外 point 都会保持 `pending-qdrant-rebuild`。不要手工 upsert、
+修改旧 Outbox 状态或绕过 finalizer。
+
+上述命令存在不等于 P2 恢复门禁已经通过。正式发行前仍必须在第二个独立空 Compose project 中
+执行真实 `rebuild-required` 恢复演练，覆盖每个 scope 的 `knowledge_chunks`，并由
+`finalize-restore.sh` 产出与同一 signed backup、release identity 和新鲜 challenge 绑定的完成
+证明；没有这次演练与证明时，只能描述为“具备治理化重建机制”，不能描述为“生产恢复已验收”。
 
 ### 4. 启动与业务校验
 
-本节只适用于 `--qdrant-mode snapshot` 已完整成功的恢复；`pending-qdrant-rebuild` 状态不得执行。
+本节只适用于 `--qdrant-mode snapshot` 已完整成功，或治理化重建已由
+`finalize-restore.sh` 转为签名 `complete` 的恢复；`pending-qdrant-rebuild` 状态不得执行。
 
 ```bash
 cd /opt/auris-flow
@@ -225,9 +320,9 @@ docker --context default compose --project-name auris-flow \
 
 确认：
 
-- `/healthz` 存活，`/readyz` 对 MySQL、Redis、MinIO、Qdrant、Dagster、OIDC 与 observability
-  全部严格通过；observability 会实时探测 Collector、Tempo、Prometheus、Alertmanager 与
-  node-exporter，而不是只检查应用内 SDK 标志；
+- `/healthz` 存活，`/readyz` 对 MySQL、Redis、MinIO、Qdrant、Dagster 与 OIDC 强依赖严格通过；
+  observability 状态仍在响应中报告并由内部深探针实时检查 Collector、Tempo、Prometheus、
+  Alertmanager 与 node-exporter，但默认不因监控栈故障级联关闭业务流量；
 - 核心 tenant/project 的资产数、对象逐代 SHA-256/大小、知识索引 point 数与备份报告一致；
 - 新登录、任务提交、Outbox 投递和回调签名链路正常；
 - 恢复报告进入受控审计存储，不写入普通应用日志。
@@ -267,7 +362,7 @@ deployment：
 python3 scripts/verify_backup_restore_gate.py \
   --artifact /absolute/release-evidence/backup-restore-gate.json \
   --expected-commit FULL_SOURCE_COMMIT \
-  --expected-release-tag v1.0.0-rc.1 \
+  --expected-release-tag v1.0.0 \
   --signature-bundle /absolute/release-evidence/backup-restore-gate.sigstore.json \
   --release-bundle-root /absolute/verified-deployment \
   --formal
@@ -288,7 +383,8 @@ tenant/project/trace 边界的 recovery fixture；Alembic 版本行、Dagster �
 - 该基线是完整停写恢复点，不提供 MySQL binlog 增量/PITR。需要低于 24 小时 RPO 时，应增加加密 binlog 外送和相应恢复演练。
 - MinIO 恢复保留内容版本、删除语义、大小和属性；provider 分配的新 version ID 与 ETag 均不要求等于源值。恢复器以代际顺序建立源/目标 version 映射，并以实际内容 SHA-256 判定等价；应用不把 provider version ID 或 ETag 当作不可替代的唯一业务事实。
 - Qdrant snapshot 只支持兼容版本；v2 以前缺少全量语义指纹和 scoped probe 的 metadata 会 fail
-  closed。架构要求 Qdrant 不成为唯一事实来源；但在全部 collection 的治理化 rebuilder、第二空
-  目标 `rebuild-required` 演练及其正式签名证据完成前，不得宣称任意 snapshot 都可安全丢弃并从
-  MySQL/MinIO 完整重建。
+  closed。治理化 rebuilder 只接受已注册的知识 Qdrant Outbox 写事件；声纹 collection 在专用
+  向量 provider、维度/模型契约和恢复验证完成前明确不受支持。未来新增 collection 必须先登记
+  事件/collection 映射、补齐重建测试和空目标恢复演练，不能因 Qdrant 被定义为派生层就自动视为
+  可恢复。首个正式发行仍以第二空目标真实演练及其 finalize 证明为准。
 - Redis RDB 不自动恢复。缓存预热时间应计入本环境 RTO。

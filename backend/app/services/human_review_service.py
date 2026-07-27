@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -11,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import server_generated_public_id
 from app.models import (
     HumanReviewDecision,
     HumanReviewTask,
@@ -210,7 +210,7 @@ def apply_human_review_decision(
     now = datetime.now(UTC).isoformat()
     review_task_id = str(task.resource_key)
     evidence_pack_id = str(task_before.get("evidence_pack_id") or "")
-    decision_id = f"hrd_{uuid.uuid4().hex[:12]}"
+    decision_id = server_generated_public_id("hrd", suffix_length=12)
     affected_objects: list[dict[str, str]] = []
     label_conflicts = _resolve_label_conflicts_for_update(
         session,

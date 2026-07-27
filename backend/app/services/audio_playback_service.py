@@ -87,7 +87,6 @@ def _resolve_browser_auth_session(
         or identity.issuer_sha256 != issuer_sha256
         or identity.user_id != browser_session.user_id
         or identity.tenant_id != browser_session.tenant_id
-        or identity.project_id != browser_session.project_id
         or security is None
         or security.status != "active"
         or security.authz_version <= 0
@@ -130,6 +129,8 @@ def resolve_playback_issuing_session(
     separate tables. A colliding identifier is ambiguous and therefore denied.
     Browser sessions additionally re-evaluate the identity, user security state,
     tenant/project status, and current effective project roles for every stream.
+    The identity project is the login default; the browser session and live
+    membership define the current runtime project after a scope transition.
     """
 
     if not grant.auth_session_id:

@@ -6,9 +6,12 @@ from typing import Any
 import pytest
 
 from app.services.adapters import (
+    AUDIO_IMPORT_EXECUTION_CONTRACT,
+    AUDIO_IMPORT_JOB_NAME,
     AUDIO_INTELLIGENCE_EXECUTION_CONTRACT,
     AUDIO_INTELLIGENCE_JOB_NAME,
     AdapterRegistry,
+    LocalDagsterClient,
     RealDagsterClient,
     dispatch_event,
 )
@@ -45,6 +48,63 @@ def _audio_payload() -> dict[str, Any]:
         "dagster_run_draft": {"job_name": "draft_selected_job"},
         "run_config": {
             "execution_envelope": {"tenant_id": "forged_tenant"},
+            "resources": {"unsafe": {"config": {"token": "must-not-forward"}}},
+        },
+    }
+
+
+def _audio_import_payload() -> dict[str, Any]:
+    run_id = "task_run_audio_import_001"
+    return {
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": "trace_audio_import_001",
+        "root_trace_id": "root_audio_import_001",
+        "run_id": run_id,
+        "event_type": "task_run.requested",
+        "execution_contract": AUDIO_IMPORT_EXECUTION_CONTRACT,
+        "execution_deadline_at": "2099-07-21T12:00:00+00:00",
+        "dispatch_idempotency_key": "outbox:audio-import:001",
+        "outbox_fencing_token": "921:4",
+        "import_batch_id": "import_batch_001",
+        "connector_snapshot": {
+            "connector_id": "connector_platform_audio_001",
+            "connector_version": "1",
+            "platform_connection_id": "platform_connection_001",
+            "platform_scope": {"tenant_ref": "tenant-external-001", "store_refs": ["store-01"]},
+            "source_type": "platform_audio_url_api",
+            "base_url": "https://recordings.example.test",
+            "request_path": "/v1/recordings",
+            "credential_ref": "secret://platform/recordings-reader",
+            "pagination": {
+                "mode": "cursor",
+                "page_size": 100,
+                "cursor_param": "cursor",
+                "next_cursor_path": "meta.next_cursor",
+            },
+            "field_mapping": {
+                "external_record_id": "id",
+                "audio_url": "recording_url",
+                "started_at": "started_at",
+                "duration_ms": "duration_ms",
+                "store_ref": "store_id",
+            },
+            "cursor_policy": {
+                "field": "updated_at",
+                "initial_window_start": "2026-07-01T00:00:00+00:00",
+            },
+        },
+        "target": {
+            "storage_provider": "minio",
+            "bucket": "auris-flow",
+            "object_prefix": (f"tenants/aurora_auto/projects/sales_qa/runs/{run_id}/audio-import/"),
+            "target_asset_key": "auris/sources/platform_audio",
+            "dedupe_policy": "external_id_checksum",
+        },
+        # Caller-selected engine configuration must never escape the BFF.
+        "job_name": "caller_selected_import_job",
+        "run_config": {
+            "execution_envelope": {"tenant_id": "forged"},
             "resources": {"unsafe": {"config": {"token": "must-not-forward"}}},
         },
     }
@@ -170,3 +230,74 @@ def test_known_control_plane_event_retains_generic_job_for_ci_and_control_tests(
     params = request["variables"]["executionParams"]
     assert params["selector"]["pipelineName"] == "auris_flow_generic_job"
     assert params["runConfigData"]["execution"] == {"mode": "control-plane-acknowledgement"}
+
+
+def test_audio_import_task_run_selects_allowlisted_job_and_server_envelope() -> None:
+    client = RecordingDagsterClient()
+    payload = _audio_import_payload()
+
+    dispatch = client.submit_run_request(payload)
+
+    assert dispatch.status == "success"
+    assert dispatch.details["job_name"] == AUDIO_IMPORT_JOB_NAME
+    request = client.requests[0]
+    params = request["variables"]["executionParams"]
+    assert params["selector"]["pipelineName"] == AUDIO_IMPORT_JOB_NAME
+    assert set(params["runConfigData"]) == {"auris_context", "execution_envelope"}
+    envelope = params["runConfigData"]["execution_envelope"]
+    assert envelope["execution_contract"] == AUDIO_IMPORT_EXECUTION_CONTRACT
+    assert envelope["root_trace_id"] == "root_audio_import_001"
+    assert envelope["import_batch_id"] == "import_batch_001"
+    assert envelope["connector"] == payload["connector_snapshot"]
+    assert envelope["target"] == payload["target"]
+    assert "must-not-forward" not in repr(request)
+    assert "caller_selected_import_job" not in repr(request)
+
+
+def test_local_audio_import_dispatch_reports_the_same_allowlisted_job() -> None:
+    payload = _audio_import_payload()
+
+    dispatch = LocalDagsterClient().submit_run_request(payload)
+
+    assert dispatch.status == "success"
+    assert dispatch.details["job_name"] == AUDIO_IMPORT_JOB_NAME
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_field"),
+    [
+        (lambda payload: payload.pop("import_batch_id"), "import_batch_id"),
+        (lambda payload: payload.pop("root_trace_id"), "root_trace_id"),
+        (
+            lambda payload: payload["connector_snapshot"].__setitem__(
+                "base_url", "http://127.0.0.1/internal"
+            ),
+            "connector.base_url",
+        ),
+        (
+            lambda payload: payload["target"].__setitem__(
+                "object_prefix", "tenants/other/projects/sales_qa/runs/forged/audio-import/"
+            ),
+            "target.object_prefix",
+        ),
+        (
+            lambda payload: payload["connector_snapshot"]["field_mapping"].pop("audio_url"),
+            "connector.field_mapping.audio_url",
+        ),
+    ],
+)
+def test_audio_import_execution_contract_fails_closed_before_graphql(
+    mutation: Any,
+    expected_field: str,
+) -> None:
+    client = RecordingDagsterClient()
+    payload = deepcopy(_audio_import_payload())
+    mutation(payload)
+
+    dispatch = client.submit_run_request(payload)
+
+    assert dispatch.status == "failed"
+    assert dispatch.error_code == "DAGSTER_EXECUTION_CONTRACT_INVALID"
+    assert dispatch.retryable is False
+    assert expected_field in str(dispatch.details.get("invalid_field") or "")
+    assert client.requests == []

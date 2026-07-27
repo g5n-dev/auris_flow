@@ -11,9 +11,10 @@ from app.core.audio_playback import create_audio_playback_grant
 from app.core.browser_session import create_browser_session
 from app.core.database import SessionLocal
 from app.main import settings
-from app.models import AuthSession, Project, Tenant, User
+from app.models import AudioRecording, AuthSession, JsonResource, Project, Tenant, User
 
 AUDIO_SESSION_ID = "S20250526-000128"
+SECONDARY_AUDIO_SESSION_ID = "S20250526-SCOPE-SWITCH"
 
 
 def _issue_playback_url(client, auth_headers, *, key: str) -> str:
@@ -241,6 +242,107 @@ def test_oidc_cookie_session_grant_streams_and_logout_revokes_playback(client):
     denied = client.get(playback_url, headers={"Range": "bytes=0-15"})
     assert denied.status_code == 403
     assert denied.json()["error"]["code"] == "AUDIO_PLAYBACK_GRANT_REVOKED"
+
+
+def test_oidc_scope_transition_keeps_range_and_head_playback_in_target_project(
+    client,
+):
+    with SessionLocal.begin() as session:
+        session.add(
+            Project(
+                project_id="audio_scope_project",
+                tenant_id="aurora_auto",
+                name="Audio Scope Project",
+                status="active",
+                data={
+                    "member_user_ids": ["u_admin_001"],
+                    "members": [
+                        {
+                            "user_id": "u_admin_001",
+                            "roles": ["project_admin"],
+                        }
+                    ],
+                },
+            )
+        )
+        session.add(
+            JsonResource(
+                collection="audio_sessions",
+                resource_key=SECONDARY_AUDIO_SESSION_ID,
+                tenant_id="aurora_auto",
+                project_id="audio_scope_project",
+                status="active",
+                trace_id="trace_audio_scope_project",
+                data={
+                    "audio_session_id": SECONDARY_AUDIO_SESSION_ID,
+                    "recording_id": "REC-SCOPE-SWITCH",
+                },
+            )
+        )
+        session.add(
+            AudioRecording(
+                recording_id="REC-SCOPE-SWITCH",
+                tenant_id="aurora_auto",
+                project_id="audio_scope_project",
+                status="registered",
+                trace_id="trace_audio_scope_project",
+                payload={
+                    "recording_id": "REC-SCOPE-SWITCH",
+                    "file_name": "scope-switch.wav",
+                },
+            )
+        )
+
+    issued, csrf_token = _issue_oidc_browser_session(client)
+    switched = client.post(
+        "/api/v1/auth/session/scope-transitions",
+        headers={
+            "Origin": "http://localhost:5173",
+            "X-CSRF-Token": csrf_token,
+        },
+        json={"project_id": "audio_scope_project"},
+    )
+    assert switched.status_code == 200, switched.text
+    switched_data = switched.json()["data"]
+    assert switched_data["project_id"] == "audio_scope_project"
+
+    grant = client.post(
+        f"/api/v1/audio-sessions/{SECONDARY_AUDIO_SESSION_ID}/playback-grants",
+        headers={
+            "X-Tenant-Id": "aurora_auto",
+            "X-Project-Id": "audio_scope_project",
+            "Origin": "http://localhost:5173",
+            "X-CSRF-Token": switched_data["csrf_token"],
+            "Idempotency-Key": "oidc-scope-transition-audio-playback",
+        },
+    )
+    assert grant.status_code == 201, grant.text
+    playback_url = grant.json()["data"]["playback_url"]
+
+    partial = client.get(playback_url, headers={"Range": "bytes=0-15"})
+    assert partial.status_code == 206, partial.text
+    assert partial.content.startswith(b"RIFF")
+    assert partial.headers["Accept-Ranges"] == "bytes"
+    assert partial.headers["Content-Range"].startswith("bytes 0-15/")
+
+    metadata = client.head(playback_url, headers={"Range": "bytes=0-15"})
+    assert metadata.status_code == 206, metadata.text
+    assert metadata.content == b""
+    assert metadata.headers["Accept-Ranges"] == "bytes"
+    assert metadata.headers["Content-Range"].startswith("bytes 0-15/")
+
+    with SessionLocal() as session:
+        identity = session.get(OidcIdentity, "oidc_audio_admin")
+        active_browser_session = session.scalar(
+            select(BrowserAuthSession).where(
+                BrowserAuthSession.user_id == issued.user_id,
+                BrowserAuthSession.project_id == "audio_scope_project",
+                BrowserAuthSession.revoked_at.is_(None),
+            )
+        )
+        assert identity is not None
+        assert identity.project_id == "sales_qa"
+        assert active_browser_session is not None
 
 
 def test_oidc_playback_grant_rechecks_user_security_state(client):

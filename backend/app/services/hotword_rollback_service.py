@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -10,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import server_generated_public_id
 from app.models import HotwordPack, HotwordPackVersion, RunRecord
 from app.schemas.hotwords import HotwordRollbackRequest
 from app.services.audit_service import record_audit
@@ -200,7 +200,7 @@ def create_hotword_rollback(
         )
     _assert_no_active_rollback(session, ctx, source_version_id=source.version_id)
 
-    run_id = f"hotword_rollback_{uuid.uuid4().hex[:12]}"
+    run_id = server_generated_public_id("hotword_rollback", suffix_length=12)
     requested_at = datetime.now(UTC).isoformat()
     frozen_target = {
         "pack_id": pack.pack_id,

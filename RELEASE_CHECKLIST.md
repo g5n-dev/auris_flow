@@ -1,14 +1,15 @@
 # Release Checklist
 
-Use this checklist before creating an Auris Flow release candidate tag. Passing the
-repository checks creates a **candidate**; it does not replace the human authority,
-external repository controls, clean-host installation, or recovery drill below.
+Use this checklist before promoting an Auris Flow staging candidate or publishing the
+final release. Staging remains untagged; passing repository checks does not replace
+private release authority, external repository controls, clean-host installation, or
+the recovery drill below.
 
 ## P0 — Trusted Release Tree
 
 - [ ] Run `python3 scripts/check_platform_readiness.py --release` and confirm
-  `open_source_release_readiness: 12/12 passed` against the exact clean, committed
-  candidate HEAD; staged-only content is not release evidence.
+  every named release check passes against the exact clean, committed candidate HEAD;
+  staged-only content is not release evidence. Do not depend on a fixed check count.
 - [ ] Before signed images/deployment exist, run
   `bash scripts/verify_release.sh --pre-image`; do not use any skip flag for the
   real-stack, real-Dagster, product-Dagster, browser, visual, migration, audit, or
@@ -49,9 +50,10 @@ external repository controls, clean-host installation, or recovery drill below.
 - [ ] Confirm `git status --short` is empty and `git diff --check` is clean after the
   candidate commit is created.
 - [ ] Confirm a fresh clone of that commit can install locked dependencies, migrate,
-  test, and build the frontend bundle without untracked files or developer caches.
-  Treat this as functional locked-source reproducibility; the separate release-image
-  workflow must build and scan all three first-party multi-architecture images.
+  load the production entrypoints, smoke the BFF, and build the frontend bundle without
+  untracked files or developer caches. Full test suites run once in the parallel
+  `Verify` shards; the separate release-image workflow builds and scans all three
+  first-party multi-architecture images.
 - [ ] Confirm runtime OpenAPI drift is zero, including every `/api/v1/*` operation and
   the `evaluation-lock` contract.
 - [ ] Confirm `python3 scripts/scan_secrets.py` reports `secret scan ok` and no generated
@@ -62,7 +64,7 @@ external repository controls, clean-host installation, or recovery drill below.
   `doc/reports/change-submission-plan.md` and the layout decision in
   `doc/reports/repository-layout-review.md`.
 
-## P1 — Identity, Isolation, and Rights
+## P1 — Identity and Isolation
 
 - [ ] Exercise OIDC Authorization Code + PKCE login, cookie restore, CSRF-protected
   mutation, logout/re-authentication, user disable, role reduction, and JWKS
@@ -77,9 +79,10 @@ external repository controls, clean-host installation, or recovery drill below.
   logs, SBOM, attestations, and release metadata.
 - [ ] Exercise callback/completion HMAC key overlap, retirement, nonce replay rejection,
   body-bound idempotency, timeout reconciliation, dead-letter, and governed replay.
-- [ ] Confirm the project owner signed
-  `open-source-rights-authorization.md`, replaced every blocked placeholder
-  in `NOTICE`, and reviewed `THIRD_PARTY_NOTICES.md` plus public dataset licenses.
+- [ ] Record private distribution approval for the exact release commit and confirm the
+  canonical Apache-2.0 `LICENSE`, concise `NOTICE`, `THIRD_PARTY_NOTICES.md`, exact
+  artifact conclusions and public dataset licenses all match that commit. Do not commit
+  personal identity or signature evidence to the public repository.
 
 ## P2 — Real Production Runtime
 
@@ -188,14 +191,14 @@ external repository controls, clean-host installation, or recovery drill below.
 
 ## Human Release Authority
 
-- [ ] Project owner confirms the release date, `v1.0.0-rc.1` tag, personal Apache-2.0
-  rights holder/copyright text, and final `NOTICE` content.
+- [ ] Project owner privately approves the exact untagged staging commit, the final
+  `v1.0.0` release date, Apache-2.0 distribution, and the concise `NOTICE`.
 - [ ] Release approver reviews all automated evidence, external clean-install evidence,
   backup/restore report, unresolved risk register, and known limitations.
 - [ ] Maintainers confirm the release is described as a single-host production baseline,
   not a highly available SaaS, and that no incomplete gate is hidden by documentation.
-- [ ] After at least one external RC installation and fixes, repeat every gate from the
-  final commit before approving `v1.0.0`.
+- [ ] After at least one external untagged staging installation and fixes, repeat every
+  gate from the final commit before approving `v1.0.0`.
 
 ## Repository Administration
 

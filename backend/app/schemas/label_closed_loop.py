@@ -7,6 +7,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from app.core.request_identifiers import public_suffix_from_hex
+
 SHA256_PATTERN = r"^[0-9a-f]{64}$"
 ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$"
 
@@ -300,9 +302,12 @@ class LabelExtractionRunCreateRequest(StrictRequest):
     @model_validator(mode="after")
     def lock_at_least_one_source_lineage(self) -> LabelExtractionRunCreateRequest:
         if not self.source_bindings:
-            digest = hashlib.sha256(
-                f"{self.model_version}\0{self.prompt_version_id}".encode()
-            ).hexdigest()[:16]
+            digest = public_suffix_from_hex(
+                hashlib.sha256(
+                    f"{self.model_version}\0{self.prompt_version_id}".encode()
+                ).hexdigest(),
+                suffix_length=16,
+            )
             self.source_bindings = [ExtractionSourceBinding(source_family=f"model:{digest}")]
         families = [item.source_family for item in self.source_bindings]
         if len(families) != len(set(families)):

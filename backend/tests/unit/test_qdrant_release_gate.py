@@ -11,6 +11,8 @@ from pydantic import ValidationError
 from app.core.config import Settings
 from app.main import OBJECT_STORAGE_READINESS_TIMEOUT_SECONDS, settings
 
+pytestmark = pytest.mark.usefixtures("allow_inline_production_settings_for_policy_tests")
+
 SECURE_RELEASE_SETTINGS = {
     "database_url": f"mysql+pymysql://auris:{'M' * 48}@mysql:3306/auris_flow",
     "redis_url": f"redis://:{'R' * 48}@redis:6379/0",

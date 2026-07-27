@@ -98,6 +98,11 @@ def _sha256(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
+def _callback_delivery_id(idempotency_key: str) -> str:
+    digest = _sha256(f"auris-callback-delivery-v1\x00{idempotency_key}".encode())
+    return f"callback_delivery_{digest[:32]}"
+
+
 def reference_semantic_vector(text: str, *, dimension: int) -> list[float]:
     """Map a few semantic concepts without feature hashing or quality claims."""
 
@@ -245,6 +250,7 @@ class SupportState:
     embedding_requests: list[dict[str, Any]] = field(default_factory=list)
     audio_requests: list[dict[str, Any]] = field(default_factory=list)
     receipts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    receipts_by_delivery: dict[str, str] = field(default_factory=dict)
     idempotency: dict[str, CallbackIdempotencyBinding] = field(default_factory=dict)
     last_callback: tuple[CallbackSignatureRequest, str] | None = field(
         default=None, repr=False
@@ -302,6 +308,18 @@ class GateSupportHandler(BaseHTTPRequestHandler):
         parsed = urlsplit(self.path)
         if parsed.path == "/healthz" and not parsed.query:
             self._send(200, {"status": "ok", "mode": self.state.mode})
+            return
+        if self.state.mode == "callback" and parsed.path.startswith(
+            "/receipts/by-delivery/"
+        ):
+            delivery_id = parsed.path.removeprefix("/receipts/by-delivery/")
+            with self.state.lock:
+                receipt_id = self.state.receipts_by_delivery.get(delivery_id)
+                receipt = self.state.receipts.get(receipt_id) if receipt_id else None
+            if receipt is None:
+                self._send(404, {"status": "not_found"})
+            else:
+                self._send(200, {"status": "ok", "data": receipt})
             return
         if self.state.mode == "callback" and parsed.path.startswith("/receipts/"):
             receipt_id = parsed.path.removeprefix("/receipts/")
@@ -450,15 +468,22 @@ class GateSupportHandler(BaseHTTPRequestHandler):
             idempotency_key=request.idempotency_key,
             body=body,
         )
-        receipt_id = (
-            "callback_receipt_"
-            + hashlib.sha256(request.idempotency_key.encode("utf-8")).hexdigest()[:16]
+        expected_delivery_id = _callback_delivery_id(request.idempotency_key)
+        delivery_id = (
+            self.headers.get("X-Auris-Delivery-Id", "") or expected_delivery_id
         )
+        if delivery_id != expected_delivery_id:
+            raise GateSupportError("callback delivery identifier is invalid")
+        receipt_digest = _sha256(
+            f"remote-receipt-v1\x00{request.idempotency_key}".encode()
+        )
+        receipt_id = "callback_receipt_remote_" + receipt_digest[:24]
         host = self.headers.get("Host", "callback.production-gate.invalid:8443")
         receipt_scheme = (
             "https" if isinstance(self.connection, ssl.SSLSocket) else "http"
         )
         receipt = {
+            "delivery_id": delivery_id,
             "callback_receipt_id": receipt_id,
             "receipt_url": f"{receipt_scheme}://{host}/receipts/{receipt_id}",
             "remote_trace_id": f"remote_{self.headers.get('X-Auris-Trace-Id', '')}",
@@ -485,6 +510,7 @@ class GateSupportHandler(BaseHTTPRequestHandler):
             if existing_receipt is None:
                 self.state.idempotency[request.idempotency_key] = candidate
                 self.state.receipts[receipt_id] = receipt
+                self.state.receipts_by_delivery[delivery_id] = receipt_id
             else:
                 receipt = existing_receipt
             self.state.last_callback = (request, signature)
@@ -651,6 +677,7 @@ def healthcheck(*, url: str, ca_file: str, server_name: str) -> None:
     if parsed.scheme != "https" or not parsed.hostname or not parsed.port:
         raise GateSupportError("healthcheck URL is invalid")
     context = ssl.create_default_context(cafile=ca_file)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
     with socket.create_connection((parsed.hostname, parsed.port), timeout=2) as raw:
         with context.wrap_socket(raw, server_hostname=server_name) as tls:
             request = (

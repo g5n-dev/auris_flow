@@ -156,3 +156,67 @@ def test_production_secret_file_path_must_be_absolute(
     assert "absolute" in message
     assert "never-disclosed" not in message
     assert str(relative_path) not in message
+
+
+def test_production_rejects_inline_environment_secret_without_disclosing_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = "must-never-appear-inline-production-secret"
+    _clear_secret_environment(monkeypatch, "auth_token_secret")
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("AUTH_TOKEN_SECRET", canary)
+
+    with pytest.raises(SettingsError) as raised:
+        Settings(_env_file=None)
+
+    message = str(raised.value)
+    assert "AUTH_TOKEN_SECRET_FILE" in message
+    assert canary not in message
+
+
+def test_production_rejects_inline_initializer_secret_without_disclosing_it() -> None:
+    canary = "must-never-appear-initializer-production-secret"
+
+    with pytest.raises(SettingsError) as raised:
+        Settings(
+            _env_file=None,
+            app_env="production",
+            auth_token_secret=canary,
+        )
+
+    message = str(raised.value)
+    assert "AUTH_TOKEN_SECRET_FILE" in message
+    assert canary not in message
+
+
+def test_production_rejects_inline_dotenv_secret_without_disclosing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    canary = "must-never-appear-dotenv-production-secret"
+    monkeypatch.delenv("APP_ENV", raising=False)
+    _clear_secret_environment(monkeypatch, "audio_playback_grant_secret")
+    dotenv_path = tmp_path / ".env"
+    dotenv_path.write_text(
+        f"APP_ENV=production\nAUDIO_PLAYBACK_GRANT_SECRET={canary}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SettingsError) as raised:
+        Settings(_env_file=dotenv_path)
+
+    message = str(raised.value)
+    assert "AUDIO_PLAYBACK_GRANT_SECRET_FILE" in message
+    assert canary not in message
+
+
+def test_local_environment_keeps_inline_secret_compatibility(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inline_value = "local-inline-secret-remains-supported"
+    _clear_secret_environment(monkeypatch, "auth_token_secret")
+    monkeypatch.setenv("AUTH_TOKEN_SECRET", inline_value)
+
+    configured = Settings(_env_file=None, app_env="local")
+
+    assert configured.auth_token_secret == inline_value

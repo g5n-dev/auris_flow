@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.domain.label_mapping import sha256_document
 from app.models import (
     HumanReviewDecision,
@@ -395,10 +396,10 @@ def submit_manual_label_draft(
             "project_id": ctx.project_id,
             "tenant_id": ctx.tenant_id,
         }
-    )[:24]
-    aggregate_id = f"lagg_manual_{id_digest}"
-    review_task_id = f"hrt_manual_{id_digest}"
-    decision_id = f"hrd_manual_{id_digest}"
+    )
+    aggregate_id = public_id_from_hex("lagg_manual", id_digest, suffix_length=24)
+    review_task_id = public_id_from_hex("hrt_manual", id_digest, suffix_length=24)
+    decision_id = public_id_from_hex("hrd_manual", id_digest, suffix_length=24)
     for model, identifier in (
         (LabelAggregate, aggregate_id),
         (HumanReviewTask, review_task_id),

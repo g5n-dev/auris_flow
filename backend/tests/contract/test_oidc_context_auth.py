@@ -329,9 +329,11 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
         "app.api.routers.auth.get_oidc_authorization_flow",
         lambda: StubAuthorizationFlow(),
     )
+    reflected_cookie_value = "a" * 64
 
     started = client.get(
         "/api/v1/auth/oidc/login?return_path=/insights",
+        headers={"Cookie": f"{LOCAL_TRANSACTION_COOKIE}={reflected_cookie_value}"},
         follow_redirects=False,
     )
     assert started.status_code == 303
@@ -339,6 +341,9 @@ def test_oidc_login_callback_cookie_restore_and_logout_flow(client, monkeypatch)
     assert started.headers["cache-control"] == "no-store"
     transaction_secret = client.cookies.get(LOCAL_TRANSACTION_COOKIE)
     assert transaction_secret is not None
+    assert transaction_secret != reflected_cookie_value
+    assert len(transaction_secret) == 64
+    assert all(character in "0123456789abcdef" for character in transaction_secret)
     transaction_cookie_header = started.headers["set-cookie"]
     assert f"{LOCAL_TRANSACTION_COOKIE}=" in transaction_cookie_header
     assert "HttpOnly" in transaction_cookie_header

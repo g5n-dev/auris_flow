@@ -17,12 +17,17 @@ alone is not a production release.
 - Enable private vulnerability reporting, secret scanning, and push protection.
 - Allow the release workflow to write packages and request an OIDC identity.
 - Treat GHCR release tags as immutable. Never retarget or delete a published
-  release tag to repair a release; publish the next release candidate instead.
+  release tag to repair a release; publish the next patch version instead.
 
-## Candidate procedure
+## Untagged staging and final release procedure
 
-1. Run the complete release verification on the candidate commit.
-2. Push an annotated SemVer tag such as `v1.0.0-rc.1`. A manual dispatch must select
+1. Merge the candidate to protected `main`, run all normal checks, and install that
+   exact commit on an external Linux host as an explicitly untagged staging build.
+   Complete OIDC, upgrade/rollback, backup/restore, callback recovery, alert and core
+   business-flow drills without creating a public RC tag.
+2. Repeat the complete release verification on the unchanged staging commit. Only
+   after private approval, push the final annotated SemVer tag such as `v1.0.0`.
+   A manual dispatch must select
    that exact tag as the workflow ref and submit the same tag input; branch-ref
    dispatches and forks fail closed because their signing identity is not canonical.
 3. Approve the protected `release` environment only after checking the source
@@ -203,9 +208,8 @@ any bounded annotated-tag chain, and requires the final commit to equal the appr
 source commit. Between the two pre-publication tag checks it also requires the BFF,
 Dagster, and edge GHCR SemVer tags to resolve to the signed image-lock digests and
 repeats keyless Cosign verification against the exact tag-bound workflow identity.
-Only then does `gh release edit --draft=false` make the release visible. RC tags stay
-prereleases and are never marked latest; a formal SemVer release is explicitly marked
-latest. A post-publication mismatch fails the job but deliberately does not delete or
+Only then does `gh release edit --draft=false` make the release visible. A formal SemVer
+release is explicitly marked latest. A post-publication mismatch fails the job but deliberately does not delete or
 rewrite the Release; maintainers must treat it as a security incident. These checks do
 not replace an externally administered release-tag ruleset, tag deletion and update
 restrictions, protected release environments, or GitHub immutable release settings.

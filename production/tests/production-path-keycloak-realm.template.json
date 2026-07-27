@@ -50,7 +50,7 @@
           "consentRequired": false,
           "config": {
             "included.client.audience": "auris-flow-api",
-            "id.token.claim": "true",
+            "id.token.claim": "false",
             "access.token.claim": "true",
             "userinfo.token.claim": "false"
           }

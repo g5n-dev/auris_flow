@@ -12,5 +12,12 @@ export const defaultCurrentUser: AuthUser = {
   tenantId: "aurora_auto",
   projectId: "sales_qa",
   authToken: "",
-  expiresAt: ""
+  expiresAt: "",
+  projectMemberships: [
+    {
+      project_id: "sales_qa",
+      project_name: "销售话术质检",
+      roles: ["project_admin", "asset_manager"]
+    }
+  ]
 };

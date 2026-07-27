@@ -14,6 +14,7 @@ from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
 from app.core.redaction import trusted_sha256
+from app.core.request_identifiers import public_id_from_hex
 from app.core.response import envelope
 from app.models import (
     AuditLog,
@@ -223,7 +224,19 @@ def prepare_task_version_publish(
             409,
             details=[{"task_version_id": task_version_id, "status": version_status}],
         )
-    from app.services.task_execution_policy import validate_task_version_publish_binding
+    from app.services.task_execution_policy import (
+        freeze_import_task_version_connector,
+        validate_task_version_publish_binding,
+    )
+
+    frozen_version_data = freeze_import_task_version_connector(
+        session,
+        ctx,
+        version.data,
+    )
+    if frozen_version_data is not version.data:
+        version.data = frozen_version_data
+        session.flush()
 
     hotword_binding = validate_task_version_publish_binding(
         session,
@@ -804,7 +817,11 @@ def materialize_control_plane_release(
                 }
             )
             head = TaskVersionReleaseHead(
-                release_head_id=f"tvrh_{release_head_scope_sha256[:24]}",
+                release_head_id=public_id_from_hex(
+                    "tvrh",
+                    release_head_scope_sha256,
+                    suffix_length=24,
+                ),
                 tenant_id=ctx.tenant_id,
                 project_id=ctx.project_id,
                 task_type_id=task_type_id,

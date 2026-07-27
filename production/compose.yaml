@@ -12,9 +12,26 @@ x-auris-restore-attestation-trust:
   public_key_file: ${AURIS_SECRETS_DIR:-./secrets}/restore_attestation_signing_public_key.pem
   exposure: host-restore-tools-only
 
-x-service-security: &service-security
-  restart: unless-stopped
+x-runtime-guardrails: &runtime-guardrails
+  # Compose limits are hard ceilings, not reservations. The defaults fit the
+  # documented single-host baseline and can be tightened through the env file.
+  cpus: ${AURIS_CONTAINER_CPU_LIMIT:-2.0}
+  mem_limit: ${AURIS_CONTAINER_MEMORY_LIMIT:-2g}
+  pids_limit: ${AURIS_CONTAINER_PIDS_LIMIT:-512}
   init: true
+  ulimits:
+    nofile:
+      soft: 65536
+      hard: 65536
+  logging:
+    driver: json-file
+    options:
+      max-size: 10m
+      max-file: "5"
+
+x-service-security: &service-security
+  <<: *runtime-guardrails
+  restart: unless-stopped
   cap_drop: [ALL]
   security_opt:
     - no-new-privileges:true
@@ -26,7 +43,7 @@ x-app-environment: &app-environment
   AUTH_PROVIDER: oidc
   ALLOW_DEV_AUTH: "false"
   DEPENDENCY_CHECK_MODE: strict
-  REQUIRED_DEPENDENCY_CHECKS: auth,database,redis,object_storage,qdrant,dagster,observability
+  REQUIRED_DEPENDENCY_CHECKS: auth,database,redis,object_storage,qdrant,dagster
   DATABASE_URL_FILE: /run/secrets/runtime_database_url
   REDIS_URL_FILE: /run/secrets/redis_url
   OBJECT_STORAGE_ENDPOINT: http://minio:9000
@@ -76,6 +93,7 @@ x-app-environment: &app-environment
   CORS_ALLOWED_ORIGINS: https://${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST}
   TRUSTED_HOSTS: ${AURIS_PUBLIC_HOST:?set AURIS_PUBLIC_HOST},bff
   SECURITY_HEADERS_ENABLED: "true"
+  MAX_REQUEST_BODY_BYTES: ${AURIS_MAX_REQUEST_BODY_BYTES:-1048576}
   OTEL_ENABLED: "true"
   OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318/v1/traces
   OTEL_SERVICE_NAME: auris-flow-bff
@@ -105,6 +123,19 @@ x-app-secrets: &app-secrets
   - completion_receipt_key_bindings
   - external_callback_key_bindings
   - experiment_assignment_secret
+
+x-bff-secrets: &bff-secrets
+  - runtime_database_url
+  - redis_url
+  - object_storage_access_key
+  - object_storage_secret_key
+  - qdrant_api_key
+  - embedding_api_key
+  - audio_playback_grant_secret
+  - completion_receipt_key_bindings
+  - external_callback_key_bindings
+  - experiment_assignment_secret
+  - platform_credential_bindings
 
 services:
   mysql:
@@ -205,6 +236,7 @@ services:
       start_period: 10s
 
   minio-volume-init:
+    <<: *runtime-guardrails
     image: ${MINIO_IMAGE:-minio/minio:RELEASE.2025-04-22T22-12-26Z}
     user: "0:0"
     restart: "no"
@@ -431,6 +463,8 @@ services:
       AURIS_BFF_INTERNAL_URL: http://bff:8000
       AURIS_COMPLETION_RECEIPT_KEYRING_FILE: /run/secrets/completion_receipt_key_bindings
       AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID: ${AURIS_COMPLETION_RECEIPT_ACTIVE_KEY_ID:-dagster-v1}
+      AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE: /run/secrets/platform_credential_bindings
+      AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS: ${AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS:-}
       AURIS_AUDIO_OBJECT_STORAGE_PROVIDER: minio
       AURIS_AUDIO_OBJECT_STORAGE_ENDPOINT: http://minio:9000
       AURIS_AUDIO_OBJECT_STORAGE_REGION: us-east-1
@@ -447,6 +481,7 @@ services:
     secrets:
       - dagster_database_url
       - completion_receipt_key_bindings
+      - platform_credential_bindings
       - object_storage_access_key
       - object_storage_secret_key
       - audio_inference_api_token
@@ -464,10 +499,6 @@ services:
     depends_on:
       dagster-storage-bootstrap:
         condition: service_completed_successfully
-      otel-collector:
-        condition: service_started
-      observability-health:
-        condition: service_healthy
 
   dagster-webserver:
     <<: *service-security
@@ -542,7 +573,8 @@ services:
     environment:
       <<: *app-environment
       WEB_CONCURRENCY: ${AURIS_BFF_WORKERS:-1}
-    secrets: *app-secrets
+      PLATFORM_CREDENTIAL_BINDINGS_FILE: /run/secrets/platform_credential_bindings
+    secrets: *bff-secrets
     networks:
       - internal
       - app-egress
@@ -567,10 +599,6 @@ services:
         condition: service_healthy
       identity-bootstrap:
         condition: service_completed_successfully
-      otel-collector:
-        condition: service_started
-      observability-health:
-        condition: service_healthy
 
   worker:
     <<: *service-security
@@ -600,10 +628,6 @@ services:
       start_period: 30s
     depends_on:
       bff:
-        condition: service_healthy
-      otel-collector:
-        condition: service_started
-      observability-health:
         condition: service_healthy
 
   otel-collector:
@@ -755,8 +779,6 @@ services:
         condition: service_healthy
       tempo:
         condition: service_started
-      observability-health:
-        condition: service_healthy
 
   node-exporter:
     <<: *service-security
@@ -816,6 +838,7 @@ services:
         condition: service_started
 
   edge:
+    <<: *runtime-guardrails
     restart: unless-stopped
     image: ${AURIS_EDGE_IMAGE:-auris-flow-edge:dev}
     build:
@@ -947,6 +970,8 @@ secrets:
     file: ${AURIS_SECRETS_DIR:-./secrets}/completion_receipt_key_bindings
   external_callback_key_bindings:
     file: ${AURIS_SECRETS_DIR:-./secrets}/external_callback_key_bindings
+  platform_credential_bindings:
+    file: ${AURIS_SECRETS_DIR:-./secrets}/platform_credential_bindings
   experiment_assignment_secret:
     file: ${AURIS_SECRETS_DIR:-./secrets}/experiment_assignment_secret
   tls_cert:

@@ -14,6 +14,7 @@ security:
   - browserSession: []
 tags:
   - name: auth
+  - name: workspace-context
   - name: ops
   - name: tenants
   - name: projects
@@ -240,6 +241,42 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /auth/session/scope-transitions:
+    post:
+      tags: [auth]
+      summary: 在当前租户内切换到有效项目成员范围
+      description: >
+        仅接受不透明浏览器会话。服务端在事务内重新校验用户、身份、租户、目标项目和实时成员角色；
+        目标项目变化时撤销旧会话并签发新的高熵 cookie 与 CSRF token，同时保留原始绝对过期时间。
+        相同项目请求保持幂等且不轮换。目标不可见统一返回 404，角色失效返回 403。
+      operationId: postAuthSessionScopeTransitions
+      security:
+        - browserSession: []
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/XCsrfToken"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthSessionScopeTransitionRequest"
+      responses:
+        "200":
+          description: 已激活目标项目范围；响应禁止缓存
+          headers:
+            Set-Cookie:
+              description: >
+                项目变化时写入新的不透明会话 cookie；相同项目请求不重复轮换。
+              schema:
+                type: string
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthSessionScopeTransitionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /auth/logout:
     post:
       tags: [auth]
@@ -268,6 +305,37 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AuthLogoutResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /workspace-context-options:
+    get:
+      tags: [workspace-context]
+      summary: 读取当前认证范围的工作区权威选项文档
+      description: >
+        仅从当前 tenant/project 范围内的权威项目、门店、业务日期、模型版本、标签版本和
+        production scene binding 构建选项；空范围返回空数组或 null，不回退到前端 fixture。
+      operationId: getWorkspaceContextOptions
+      security:
+        - bearerAuth: []
+        - browserSession: []
+      parameters:
+        - $ref: "#/components/parameters/OptionalXTenantId"
+        - $ref: "#/components/parameters/OptionalXProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+      responses:
+        "200":
+          description: 当前 tenant/project 的工作区权威上下文
+          headers:
+            Cache-Control:
+              description: 固定为 no-store，避免缓存旧项目范围的权威选项。
+              schema:
+                type: string
+                enum: [no-store]
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WorkspaceContextOptionsResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -797,6 +865,20 @@ paths:
           $ref: "#/components/responses/Error"
 
   /connectors/{id}:
+    get:
+      tags: [connectors]
+      summary: 读取连接器配置详情
+      operationId: getConnectorsById
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObject"
+        default:
+          $ref: "#/components/responses/Error"
     patch:
       tags: [connectors]
       summary: 更新连接器配置
@@ -812,6 +894,92 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObject"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /connectors/{connector_id}/connection-tests:
+    post:
+      tags: [connectors]
+      summary: 测试平台音频连接器的真实连通性
+      description: >
+        使用服务端 credential_ref 绑定访问外部平台；不接收或返回明文凭证。
+        探测期间若连接器版本或语义配置发生变化，以
+        CONNECTOR_CHANGED_DURING_PROBE 拒绝旧结果，不覆盖新配置。
+      operationId: postConnectorsByConnectorIdConnectionTests
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: connector_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectorProbeRequest"
+      responses:
+        "200":
+          description: 连通性测试成功并记录安全观察结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorConnectionTestResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /connectors/{connector_id}/record-previews:
+    post:
+      tags: [connectors]
+      summary: 预览平台音频源记录并校验字段映射
+      description: >
+        最多返回三条脱敏源记录；签名 URL、Authorization 与其他敏感字段不会持久化或回传。
+        探测期间连接器发生变化时拒绝旧预览结果。
+      operationId: postConnectorsByConnectorIdRecordPreviews
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: connector_id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConnectorProbeRequest"
+      responses:
+        "200":
+          description: 脱敏预览与映射校验结果
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectorRecordPreviewResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /platform-connections:
+    get:
+      tags: [connectors]
+      summary: 平台连接列表
+      operationId: getPlatformConnections
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericList"
         default:
           $ref: "#/components/responses/Error"
 
@@ -912,6 +1080,60 @@ paths:
       responses:
         "202":
           $ref: "#/components/responses/AcceptedRun"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /import-batches/{import_batch_id}:
+    get:
+      tags: [connectors, task-runs]
+      summary: 读取音频导入批次
+      description: >
+        从 BFF 强表回读批次阶段、统计、游标和 root_trace_id；只有业务对象完成物化后
+        批次才可进入 succeeded。
+      operationId: getImportBatchesByImportBatchId
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: import_batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 导入批次详情
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportBatchResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /import-batches/{import_batch_id}/items:
+    get:
+      tags: [connectors, task-runs]
+      summary: 读取音频导入批次明细
+      description: >
+        返回该批次受执行回执上限约束的全部导入项，包括外部记录 ID、结果、错误码、
+        精确对象版本、audio_session_id 与 root_trace_id。
+      operationId: getImportBatchesByImportBatchIdItems
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: import_batch_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 批次导入项
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportBatchItemListResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1645,6 +1867,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/RunCompletionReceiptPendingResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /runs/{id}/external-progress-receipts:
+    post:
+      tags: [task-runs]
+      summary: 接收音频导入执行阶段的签名进度回执
+      description: >
+        仅接受白名单 Dagster 音频导入运行的 downloading / verifying 阶段。
+        回执必须绑定租户、项目、TaskRun、ImportBatch 和可信 external_id；
+        重放由签名 nonce 与 Idempotency-Key 双重约束。
+      operationId: postRunsByIdExternalProgressReceipts
+      security:
+        - aurisCompletionSignature: []
+          aurisCompletionKeyId: []
+        - aurisCompletionSignature: []
+          aurisCompletionLegacyKeyId: []
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - $ref: "#/components/parameters/XAurisKeyId"
+        - $ref: "#/components/parameters/XAurisSignatureId"
+        - $ref: "#/components/parameters/XAurisTimestamp"
+        - $ref: "#/components/parameters/XAurisNonce"
+        - $ref: "#/components/parameters/XAurisSource"
+        - $ref: "#/components/parameters/XAurisSignatureMode"
+        - $ref: "#/components/parameters/XAurisSignature"
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ExternalRunProgressReceiptRequest"
+      responses:
+        "202":
+          description: 进度回执已应用或作为同一阶段的幂等重放返回
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AudioImportProgressResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6803,7 +7068,9 @@ components:
       required: false
       schema:
         type: string
-      description: 可选客户端请求 ID；缺失时服务端生成新的 request_id。
+      description: >
+        可选客户端请求 ID；仅接受 1–128 个受限 ASCII 字符。
+        缺失或不合规时服务端生成新的 request_id，不回显原始值。
     XTraceId:
       name: X-Trace-Id
       in: header
@@ -6818,7 +7085,12 @@ components:
       required: true
       schema:
         type: string
-      description: 写操作和异步动作必填。
+        minLength: 1
+        maxLength: 128
+        pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+      description: >
+        写操作和异步动作必填；1–128 个 ASCII 字符，首字符为字母或数字，
+        其余可使用字母、数字、点、下划线、冒号或连字符。
     XAurisKeyId:
       name: X-Auris-Key-Id
       in: header
@@ -7305,6 +7577,243 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    ConnectorProbeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        limit:
+          type: integer
+          minimum: 1
+          maximum: 3
+          default: 3
+    ConnectorConnectionTestData:
+      type: object
+      additionalProperties: false
+      required: [connector_id, status, response_status, tested_at]
+      properties:
+        connector_id:
+          type: string
+        status:
+          type: string
+          enum: [success]
+        response_status:
+          type: integer
+          minimum: 100
+          maximum: 599
+        tested_at:
+          type: string
+          format: date-time
+    ConnectorConnectionTestResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConnectorConnectionTestData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ConnectorRecordPreviewData:
+      type: object
+      additionalProperties: false
+      required:
+        [connector_id, status, record_count, records, fields, mapping_valid, mapping_errors, previewed_at]
+      properties:
+        connector_id:
+          type: string
+        status:
+          type: string
+          enum: [success]
+        record_count:
+          type: integer
+          minimum: 0
+          maximum: 3
+        records:
+          type: array
+          maxItems: 3
+          items:
+            type: object
+            additionalProperties: true
+          description: 脱敏源记录；凭据、授权头和签名 URL 参数不得出现。
+        fields:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        mapping_valid:
+          type: boolean
+        mapping_errors:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+        previewed_at:
+          type: string
+          format: date-time
+    ConnectorRecordPreviewResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ConnectorRecordPreviewData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ImportBatchStatus:
+      type: string
+      enum: [queued, running, partial, succeeded, failed, cancelled]
+    ImportBatchData:
+      type: object
+      additionalProperties: false
+      required:
+        - import_batch_id
+        - task_run_id
+        - task_version_id
+        - connector_id
+        - status
+        - current_stage
+        - total_items
+        - succeeded_items
+        - skipped_items
+        - failed_items
+        - root_trace_id
+        - trace_id
+      properties:
+        import_batch_id: {type: string}
+        task_run_id: {type: string}
+        task_version_id: {type: string}
+        connector_id: {type: string}
+        status:
+          $ref: "#/components/schemas/ImportBatchStatus"
+        current_stage:
+          type: string
+          enum: [queued, listing, downloading, verifying, materializing, completed]
+        total_items: {type: integer, minimum: 0}
+        succeeded_items: {type: integer, minimum: 0}
+        skipped_items: {type: integer, minimum: 0}
+        failed_items: {type: integer, minimum: 0}
+        cursor_before: {type: string, nullable: true}
+        cursor_after: {type: string, nullable: true}
+        root_trace_id: {type: string}
+        trace_id: {type: string}
+        started_at: {type: string, format: date-time, nullable: true}
+        finished_at: {type: string, format: date-time, nullable: true}
+        created_at: {type: string, format: date-time}
+        updated_at: {type: string, format: date-time}
+        error_code:
+          type: string
+          nullable: true
+          pattern: '^[A-Z][A-Z0-9_]{2,127}$'
+        reason: {type: string, nullable: true}
+    ImportBatchResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/ImportBatchData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ImportBatchItem:
+      type: object
+      additionalProperties: false
+      required:
+        [import_item_id, import_batch_id, external_record_id, status, root_trace_id, trace_id]
+      properties:
+        import_item_id: {type: string}
+        import_batch_id: {type: string}
+        external_record_id: {type: string}
+        status:
+          type: string
+          enum: [succeeded, skipped, failed]
+        error_code:
+          type: string
+          nullable: true
+          pattern: '^[A-Z][A-Z0-9_]{2,127}$'
+        object_version: {type: string, nullable: true}
+        audio_session_id: {type: string, nullable: true}
+        root_trace_id: {type: string}
+        trace_id: {type: string}
+    ImportBatchItemListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/ImportBatchItem"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    ExternalRunProgressReceiptRequest:
+      type: object
+      additionalProperties: false
+      required:
+        [adapter, source, progress_receipt_id, tenant_id, project_id, task_run_id, external_id, import_batch_id, stage]
+      properties:
+        adapter:
+          type: string
+          enum: [dagster]
+        source:
+          type: string
+          enum: [dagster]
+        progress_receipt_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_:-]{0,255}$'
+        tenant_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
+        project_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$'
+        task_run_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+        external_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$'
+        import_batch_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          pattern: '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$'
+        stage:
+          type: string
+          enum: [downloading, verifying]
+    AudioImportProgressData:
+      type: object
+      additionalProperties: false
+      required: [run_id, import_batch_id, status, current_stage, applied, root_trace_id]
+      properties:
+        run_id: {type: string}
+        import_batch_id: {type: string}
+        status:
+          $ref: "#/components/schemas/ImportBatchStatus"
+        current_stage:
+          type: string
+          enum: [downloading, verifying]
+        applied:
+          type: boolean
+        root_trace_id:
+          type: string
+    AudioImportProgressResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/AudioImportProgressData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
     OIDCBackChannelLogoutRequest:
       type: object
       additionalProperties: true
@@ -7317,11 +7826,28 @@ components:
           writeOnly: true
           description: >
             OIDC Provider 签名的短期 Logout Token；不得写入日志、错误响应或持久化原值。
+    AuthProjectMembership:
+      type: object
+      additionalProperties: false
+      required: [project_id, project_name, roles]
+      properties:
+        project_id:
+          type: string
+        project_name:
+          type: string
+        roles:
+          type: array
+          minItems: 1
+          uniqueItems: true
+          items:
+            type: string
+      description: >
+        当前用户在同一租户内仍然有效且至少保留一个实时角色的项目成员关系。
     AuthSessionUser:
       type: object
       additionalProperties: false
       required:
-        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name]
+        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name, project_memberships, provider]
       properties:
         user_id:
           type: string
@@ -7347,6 +7873,12 @@ components:
           type: string
         project_name:
           type: string
+        project_memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuthProjectMembership"
+          description: >
+            服务端从当前有效项目和成员角色实时计算；前端不得追加 fixture 项目。
         provider:
           type: string
           enum: [oidc_session, oidc_bearer, dev_session, configured]
@@ -7357,6 +7889,77 @@ components:
           description: >
             仅浏览器 cookie 会话返回的轮换 CSRF token；只保存在前端内存，写操作经
             X-CSRF-Token 回传。bearer/dev-login 响应可省略。
+    AuthSessionScopeTransitionRequest:
+      type: object
+      additionalProperties: false
+      required: [project_id]
+      properties:
+        project_id:
+          type: string
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$"
+    AuthSessionScopeTransitionData:
+      type: object
+      additionalProperties: false
+      required:
+        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name, project_memberships, provider, csrf_token, previous_project_id, current_project_id]
+      properties:
+        user_id: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        role: {type: string}
+        roles:
+          type: array
+          minItems: 1
+          items: {type: string}
+        initials: {type: string}
+        tenant_id: {type: string}
+        tenant_name: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
+        project_memberships:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuthProjectMembership"
+        provider:
+          type: string
+          enum: [oidc_session]
+        csrf_token:
+          type: string
+          minLength: 32
+        previous_project_id:
+          type: string
+        current_project_id:
+          type: string
+    AuthSessionScopeTransitionResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/AuthSessionScopeTransitionData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    AuthDevLoginUser:
+      type: object
+      additionalProperties: false
+      required:
+        [user_id, name, email, role, roles, initials, tenant_id, tenant_name, project_id, project_name]
+      properties:
+        user_id: {type: string}
+        name: {type: string}
+        email: {type: string, format: email}
+        role: {type: string}
+        roles:
+          type: array
+          minItems: 1
+          items: {type: string}
+        initials: {type: string}
+        tenant_id: {type: string}
+        tenant_name: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
     AuthLoginResponse:
       type: object
       additionalProperties: false
@@ -7379,7 +7982,7 @@ components:
               type: string
               format: date-time
             user:
-              $ref: "#/components/schemas/AuthSessionUser"
+              $ref: "#/components/schemas/AuthDevLoginUser"
         meta:
           $ref: "#/components/schemas/ApiMeta"
     AuthSessionResponse:
@@ -7389,6 +7992,106 @@ components:
       properties:
         data:
           $ref: "#/components/schemas/AuthSessionUser"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    WorkspaceContextScope:
+      type: object
+      additionalProperties: false
+      required: [tenant_id, tenant_name, project_id, project_name]
+      properties:
+        tenant_id: {type: string}
+        tenant_name: {type: string}
+        project_id: {type: string}
+        project_name: {type: string}
+    WorkspaceStoreOption:
+      type: object
+      additionalProperties: false
+      required: [store_id, name, status]
+      properties:
+        store_id: {type: string}
+        name: {type: string}
+        status: {type: string}
+    WorkspaceVersionOption:
+      type: object
+      additionalProperties: false
+      required: [id, label, status]
+      properties:
+        id: {type: string}
+        label: {type: string}
+        status: {type: string}
+        source_task_version_ids:
+          type: array
+          uniqueItems: true
+          items: {type: string}
+    WorkspaceContextDefaults:
+      type: object
+      additionalProperties: false
+      required: [store_id, business_date, model_version, label_version]
+      properties:
+        store_id: {type: string, nullable: true}
+        business_date: {type: string, format: date, nullable: true}
+        model_version: {type: string, nullable: true}
+        label_version: {type: string, nullable: true}
+    WorkspaceSceneBinding:
+      type: object
+      additionalProperties: false
+      required:
+        [binding_id, environment, scene_profile_id, scene_profile_version_id, manifest_sha256, status, resource_version, trace_id]
+      properties:
+        binding_id: {type: string}
+        environment: {type: string, enum: [production]}
+        scene_profile_id: {type: string}
+        scene_profile_version_id: {type: string}
+        manifest_sha256:
+          type: string
+          pattern: "^[0-9a-f]{64}$"
+        status: {type: string, enum: [active]}
+        resource_version: {type: integer, minimum: 1}
+        trace_id: {type: string}
+    WorkspaceContextOptionsData:
+      type: object
+      additionalProperties: false
+      required:
+        [scope, stores, business_dates, model_versions, label_versions, defaults, active_scene_binding, as_of, trace_id]
+      properties:
+        scope:
+          $ref: "#/components/schemas/WorkspaceContextScope"
+        stores:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceStoreOption"
+        business_dates:
+          type: array
+          uniqueItems: true
+          items:
+            type: string
+            format: date
+        model_versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceVersionOption"
+        label_versions:
+          type: array
+          items:
+            $ref: "#/components/schemas/WorkspaceVersionOption"
+        defaults:
+          $ref: "#/components/schemas/WorkspaceContextDefaults"
+        active_scene_binding:
+          allOf:
+            - $ref: "#/components/schemas/WorkspaceSceneBinding"
+          nullable: true
+        as_of:
+          type: string
+          format: date-time
+        trace_id:
+          type: string
+    WorkspaceContextOptionsResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/WorkspaceContextOptionsData"
         meta:
           $ref: "#/components/schemas/ApiMeta"
     AuthLogoutResponse:

@@ -81,8 +81,9 @@ def store_authorization_state(
     issued_at = _as_utc(now or datetime.now(UTC))
     transaction_sha256 = _validated_transaction_hash(transaction_secret)
     prune_authorization_states(session, now=issued_at, limit=_DEFAULT_CLEANUP_LIMIT)
-    # A browser transaction may have only one outstanding state. Reusing the
-    # short-lived HttpOnly transaction cookie replaces an older unfinished login.
+    # A transaction binding may have only one outstanding state. The HTTP login
+    # flow rotates bindings so a superseded callback fails closed, while this
+    # uniqueness also protects direct callers from duplicate pending states.
     session.execute(
         delete(OidcAuthorizationState).where(
             OidcAuthorizationState.transaction_sha256 == transaction_sha256,

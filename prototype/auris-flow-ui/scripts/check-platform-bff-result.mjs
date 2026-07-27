@@ -121,6 +121,104 @@ if (now - completedAt > maxAgeMs) {
 if (outboxResultPath && !outboxResult) {
   fail("outbox E2E result artifact does not exist", { outboxResultPath });
 }
+if (result.mode === "audio-import-only") {
+  const audioImport = result.audioImportClosedLoop;
+  const tenantPull = result.tenantAudioImportPull;
+  const invalidRuntimeMarkers = collectForbiddenRuntimeMarkers(result, "$audioImportBrowser");
+  const diagnostics = [
+    ...(Array.isArray(result.consoleErrors) ? result.consoleErrors : ["consoleErrors missing"]),
+    ...(Array.isArray(result.pageErrors) ? result.pageErrors : ["pageErrors missing"]),
+    ...(Array.isArray(result.requestFailures) ? result.requestFailures : ["requestFailures missing"]),
+    ...(Array.isArray(result.failedResponses) ? result.failedResponses : ["failedResponses missing"])
+  ];
+  if (
+    !requireRealStack ||
+    result.schema_version !== "auris.audio-import-browser-e2e.v1" ||
+    result.stage !== "completed" ||
+    result.executionProfile?.realStack !== true ||
+    result.executionProfile?.platformSource !== "https" ||
+    result.executionProfile?.dagster !== "real" ||
+    result.executionProfile?.objectStorage !== "real" ||
+    result.executionProfile?.uiEvidencePolicy !== "browser-clicks-and-bff-readback" ||
+    invalidRuntimeMarkers.length ||
+    diagnostics.length
+  ) {
+    fail("focused audio import browser artifact is not a clean real-stack run", {
+      requireRealStack,
+      schema_version: result.schema_version,
+      stage: result.stage,
+      executionProfile: result.executionProfile,
+      invalidRuntimeMarkers,
+      diagnostics
+    });
+  }
+  if (
+    !audioImport?.connectorId ||
+    !audioImport?.connectorTraceId ||
+    !audioImport?.platformConnectionId ||
+    !audioImport?.taskVersionId ||
+    !audioImport?.taskRunId ||
+    !audioImport?.importBatchId ||
+    !audioImport?.audioSessionId ||
+    !audioImport?.rootTraceId ||
+    audioImport?.status !== "succeeded" ||
+    audioImport?.executionMode !== "production" ||
+    audioImport?.previewCount !== 3 ||
+    !(audioImport?.total >= 1) ||
+    !(audioImport?.succeeded >= 1) ||
+    audioImport?.failed !== 0 ||
+    audioImport?.playbackGrantStatus !== 201 ||
+    audioImport?.playbackStatus !== 206 ||
+    !Number.isInteger(audioImport?.connectorWriteCount) ||
+    audioImport.connectorWriteCount < 1 ||
+    audioImport.connectorWriteCount > 2 ||
+    audioImport?.pageRefreshRecovered !== true ||
+    audioImport?.rootTraceReadable !== true ||
+    audioImport?.legacyPlatformSyncRequests !== 0 ||
+    !audioImport?.targetAssetKey ||
+    !audioImport?.sceneProfileId ||
+    !audioImport?.sceneProfileVersionId ||
+    !/^[0-9a-f]{64}$/.test(audioImport?.sceneProfileSnapshotSha256 ?? "")
+  ) {
+    fail("focused browser run did not close the real audio import user story", {
+      audioImport
+    });
+  }
+  if (
+    !tenantPull?.taskRunId ||
+    !tenantPull?.importBatchId ||
+    !tenantPull?.traceId ||
+    tenantPull?.taskRunId === audioImport.taskRunId ||
+    tenantPull?.importBatchId === audioImport.importBatchId ||
+    tenantPull?.taskVersionId !== audioImport.taskVersionId ||
+    !["pending", "queued", "submitted"].includes(tenantPull?.status) ||
+    tenantPull?.executionMode !== "production" ||
+    tenantPull?.legacyPlatformSyncRequests !== 0
+  ) {
+    fail("focused browser tenant pull did not reuse the published production TaskVersion", {
+      tenantPull,
+      audioImport
+    });
+  }
+  console.log(
+    JSON.stringify(
+      {
+        status: "ok",
+        checked: "audio-import-browser-real-stack",
+        resultPath,
+        runId: result.runId,
+        taskRunId: audioImport.taskRunId,
+        importBatchId: audioImport.importBatchId,
+        audioSessionId: audioImport.audioSessionId,
+        playbackStatus: audioImport.playbackStatus,
+        tenantTaskRunId: tenantPull.taskRunId
+      },
+      null,
+      2
+    )
+  );
+  process.exit(0);
+}
 if (requireRealStack) {
   if (
       result.executionProfile?.realStack !== true ||
@@ -226,7 +324,15 @@ const expectedCoverageModules = [
   "assets",
   "settings"
 ];
-const expectedWriteCoverageModules = expectedCoverageModules.filter((module) => module !== "home");
+const audioImportClosedLoop = result.audioImportClosedLoop;
+const audioImportFixtureSkipped =
+  audioImportClosedLoop?.status === "skipped" &&
+  audioImportClosedLoop?.reasonCode === "REAL_AUDIO_IMPORT_FIXTURE_REQUIRED";
+const expectedWriteCoverageModules = expectedCoverageModules.filter(
+  (module) =>
+    module !== "home" &&
+    !(audioImportFixtureSkipped && module === "tenant")
+);
 const allowedCoverageWriteSources = new Set(["ui-click", "browser-api", "server-api", "pytest"]);
 const coverageMatrix = Array.isArray(result.coverageMatrix) ? result.coverageMatrix : [];
 const coverageByModule = new Map(coverageMatrix.map((item) => [item.module, item]));
@@ -720,18 +826,53 @@ if (!result.projectCreate?.id || !result.projectCreate?.name || !result.projectC
     value: result.projectCreate
   });
 }
-if (
-  !result.dataConnectorImport?.id ||
-  !result.dataConnectorImport?.traceId ||
-  !result.dataConnectorImport?.status ||
-  !result.dataConnectorImport?.targetAssetKey ||
-  !result.dataConnectorImport?.sceneProfileId ||
-  !result.dataConnectorImport?.sceneProfileVersionId ||
-  !/^[0-9a-f]{64}$/.test(result.dataConnectorImport?.sceneProfileSnapshotSha256 ?? "")
+if (audioImportFixtureSkipped) {
+  if (
+    requireRealStack ||
+    audioImportClosedLoop.connectorWriteCount !== 0 ||
+    audioImportClosedLoop.legacyPlatformSyncRequests !== 0 ||
+    !audioImportClosedLoop.targetAssetKey ||
+    !audioImportClosedLoop.sceneProfileId ||
+    !audioImportClosedLoop.sceneProfileVersionId ||
+    !/^[0-9a-f]{64}$/.test(audioImportClosedLoop.sceneProfileSnapshotSha256 ?? "")
+  ) {
+    fail(
+      "real-stack P0 audio import cannot be skipped and local prerequisite skips must remain write-free",
+      { requireRealStack, value: audioImportClosedLoop }
+    );
+  }
+} else if (
+  !audioImportClosedLoop?.connectorId ||
+  !audioImportClosedLoop?.connectorTraceId ||
+  !audioImportClosedLoop?.platformConnectionId ||
+  !audioImportClosedLoop?.taskVersionId ||
+  !audioImportClosedLoop?.taskRunId ||
+  !audioImportClosedLoop?.importBatchId ||
+  !audioImportClosedLoop?.audioSessionId ||
+  !audioImportClosedLoop?.rootTraceId ||
+  audioImportClosedLoop?.status !== "succeeded" ||
+  audioImportClosedLoop?.executionMode !== "production" ||
+  audioImportClosedLoop?.previewCount !== 3 ||
+  !(audioImportClosedLoop?.total >= 1) ||
+  !(audioImportClosedLoop?.succeeded >= 1) ||
+  audioImportClosedLoop?.failed !== 0 ||
+  audioImportClosedLoop?.playbackGrantStatus !== 201 ||
+  audioImportClosedLoop?.playbackStatus !== 206 ||
+  !Number.isInteger(audioImportClosedLoop?.connectorWriteCount) ||
+  audioImportClosedLoop.connectorWriteCount < 1 ||
+  audioImportClosedLoop.connectorWriteCount > 2 ||
+  audioImportClosedLoop?.pageRefreshRecovered !== true ||
+  audioImportClosedLoop?.rootTraceReadable !== true ||
+  audioImportClosedLoop?.legacyPlatformSyncRequests !== 0 ||
+  !audioImportClosedLoop?.targetAssetKey ||
+  !audioImportClosedLoop?.sceneProfileId ||
+  !audioImportClosedLoop?.sceneProfileVersionId ||
+  !/^[0-9a-f]{64}$/.test(audioImportClosedLoop?.sceneProfileSnapshotSha256 ?? "")
 ) {
-  fail("platform BFF E2E dataConnectorImport is missing its resource receipt or immutable SceneProfile lock", {
-    value: result.dataConnectorImport
-  });
+  fail(
+    "platform BFF E2E audio import did not close connector, immutable version, production run, batch, session and playback",
+    { value: audioImportClosedLoop }
+  );
 }
 if (
   !result.dataExportAction?.id ||
@@ -865,8 +1006,7 @@ for (const key of ["saveDraft", "publishGate", "runOnce"]) {
 const expectedDomainPageActions = {
   knowledgeSync: "knowledge_sync",
   knowledgeIndex: "knowledge_build",
-  settingsProviderTest: "provider_test",
-  tenantAsrPull: "platform_sync"
+  settingsProviderTest: "provider_test"
 };
 for (const [key, expectedRunType] of Object.entries(expectedDomainPageActions)) {
   const receipt = result.domainPageActions?.[key];
@@ -879,6 +1019,66 @@ for (const [key, expectedRunType] of Object.entries(expectedDomainPageActions)) 
     fail(`platform BFF E2E domain page action ${key} has unexpected status or runType`, {
       expected: { status: "pending", runType: expectedRunType },
       value: receipt
+    });
+  }
+}
+const tenantAudioImportPull = result.domainPageActions?.tenantAudioImportPull;
+if (audioImportFixtureSkipped) {
+  if (
+    tenantAudioImportPull?.status !== "skipped" ||
+    tenantAudioImportPull?.reasonCode !== "REAL_AUDIO_IMPORT_FIXTURE_REQUIRED" ||
+    tenantAudioImportPull?.legacyPlatformSyncRequests !== 0
+  ) {
+    fail("tenant audio pull prerequisite skip must be explicit and must not call the legacy endpoint", {
+      value: tenantAudioImportPull
+    });
+  }
+} else if (
+  !tenantAudioImportPull?.taskRunId ||
+  !tenantAudioImportPull?.importBatchId ||
+  tenantAudioImportPull?.taskVersionId !== audioImportClosedLoop.taskVersionId ||
+  !tenantAudioImportPull?.traceId ||
+  !["pending", "queued", "submitted"].includes(tenantAudioImportPull?.status) ||
+  tenantAudioImportPull?.executionMode !== "production" ||
+  tenantAudioImportPull?.legacyPlatformSyncRequests !== 0
+) {
+  fail("tenant pull must reuse the published audio import TaskVersion through a production TaskRun", {
+    value: tenantAudioImportPull,
+    audioImportClosedLoop
+  });
+}
+if (!audioImportFixtureSkipped) {
+  const dataAudioImportWrite = (coverageByModule.get("data")?.writes || []).find(
+    (item) => item.key === "audioImportClosedLoop"
+  );
+  const tenantAudioImportWrite = (coverageByModule.get("tenant")?.writes || []).find(
+    (item) => item.key === "tenantAudioImportPull"
+  );
+  if (
+    dataAudioImportWrite?.via !== "ui-click" ||
+    dataAudioImportWrite?.id !== audioImportClosedLoop.taskRunId ||
+    dataAudioImportWrite?.traceId !== audioImportClosedLoop.rootTraceId ||
+    dataAudioImportWrite?.importBatchId !== audioImportClosedLoop.importBatchId ||
+    dataAudioImportWrite?.audioSessionId !== audioImportClosedLoop.audioSessionId ||
+    dataAudioImportWrite?.executionMode !== "production" ||
+    dataAudioImportWrite?.playbackStatus !== 206
+  ) {
+    fail("data module must cover the entire audio import closed loop through UI clicks", {
+      value: dataAudioImportWrite,
+      audioImportClosedLoop
+    });
+  }
+  if (
+    tenantAudioImportWrite?.via !== "ui-click" ||
+    tenantAudioImportWrite?.id !== tenantAudioImportPull.taskRunId ||
+    tenantAudioImportWrite?.traceId !== tenantAudioImportPull.traceId ||
+    tenantAudioImportWrite?.taskVersionId !== audioImportClosedLoop.taskVersionId ||
+    tenantAudioImportWrite?.importBatchId !== tenantAudioImportPull.importBatchId ||
+    tenantAudioImportWrite?.executionMode !== "production"
+  ) {
+    fail("tenant module must reuse the published audio import configuration through UI clicks", {
+      value: tenantAudioImportWrite,
+      tenantAudioImportPull
     });
   }
 }
@@ -960,7 +1160,6 @@ const expectedCoreFlows = [
   "labelPublish",
   "audioIngest",
   "audioIntelligence",
-  "platformSync",
   "knowledgeSync",
   "assetQualityRetry",
   "externalCallback",
@@ -972,7 +1171,6 @@ const expectedCoreFlowSemantics = {
   labelPublish: { status: "completed", runType: "release_deployment" },
   audioIngest: { status: "pending", runType: "audio_ingest" },
   audioIntelligence: { status: "pending", runType: "audio_intelligence" },
-  platformSync: { status: "pending", runType: "platform_sync" },
   knowledgeSync: { status: "pending", runType: "knowledge_sync" },
   assetQualityRetry: { status: "pending", runType: "asset_check_retry" },
   externalCallback: { status: "pending", runType: "external_callback" },
@@ -993,6 +1191,32 @@ for (const key of expectedCoreFlows) {
       value: receipt
     });
   }
+}
+const audioImportCoreFlow = result.coreFlows?.audioImport;
+if (audioImportFixtureSkipped) {
+  if (
+    audioImportCoreFlow?.status !== "skipped" ||
+    audioImportCoreFlow?.reasonCode !== "REAL_AUDIO_IMPORT_FIXTURE_REQUIRED"
+  ) {
+    fail("core audio import prerequisite skip is missing", {
+      value: audioImportCoreFlow
+    });
+  }
+} else if (
+  audioImportCoreFlow?.id !== audioImportClosedLoop.taskRunId ||
+  audioImportCoreFlow?.traceId !== audioImportClosedLoop.rootTraceId ||
+  audioImportCoreFlow?.status !== "succeeded" ||
+  audioImportCoreFlow?.runType !== "audio_import" ||
+  audioImportCoreFlow?.taskVersionId !== audioImportClosedLoop.taskVersionId ||
+  audioImportCoreFlow?.importBatchId !== audioImportClosedLoop.importBatchId ||
+  audioImportCoreFlow?.audioSessionId !== audioImportClosedLoop.audioSessionId ||
+  audioImportCoreFlow?.executionMode !== "production" ||
+  audioImportCoreFlow?.playbackStatus !== 206
+) {
+  fail("core audio import evidence does not match the browser-closed P0 chain", {
+    value: audioImportCoreFlow,
+    audioImportClosedLoop
+  });
 }
 
 const labelPublish = result.coreFlows?.labelPublish;
@@ -1054,7 +1278,8 @@ console.log(
       failedResponses,
       checkedObjects: ["labelVersion", "evalRun", "feedbackTask", "insightAction", "insightReport"],
       checkedProjectCreate: "projectCreate",
-      checkedDataConnectorImport: "dataConnectorImport",
+      checkedAudioImportClosedLoop:
+        "connector -> test/preview -> immutable TaskVersion -> production TaskRun -> ImportBatch -> AudioSession -> playback grant/range",
       checkedDataExportAction: "dataExportAction",
       checkedDataSceneProfileGate: "dataSceneProfileGate",
       checkedVoiceprintEnrollmentGate: "voiceprintEnrollmentGate",
@@ -1077,6 +1302,7 @@ console.log(
       },
       checkedCanvasToolbarActions: ["saveDraft", "publishGate", "runOnce"],
       checkedDomainPageActions: Object.keys(expectedDomainPageActions),
+      checkedTenantAudioImportPull: "published TaskVersion -> production TaskRun -> ImportBatch readback",
       checkedGlobalExportAction: "globalExportAction",
       checkedCoreFlows: expectedCoreFlows,
       checkedCoverageModules: expectedCoverageModules,

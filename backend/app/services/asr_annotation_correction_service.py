@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import AsrAnnotationCorrection, Badcase
 from app.schemas.hotwords import AsrTranscriptCorrectionRequest, HotwordBadcaseCreateRequest
 from app.services.audio_intelligence_service import validate_scoped_storage_object_reference
@@ -163,7 +164,12 @@ def _resolve_or_create_badcase(
         )
         return evidence_case.badcase_id
 
-    badcase_id = f"A-ANN-{hashlib.sha256(correction_id.encode()).hexdigest()[:12].upper()}"
+    badcase_id = public_id_from_hex(
+        "A-ANN",
+        hashlib.sha256(correction_id.encode()).hexdigest(),
+        suffix_length=12,
+        separator="-",
+    )
     expected_count = 0 if body.error_type == "false_boost" else 1
     weighted_error_count = 0.0 if body.error_type == "false_boost" else 1.0
     created = create_badcase(
@@ -311,7 +317,11 @@ def record_asr_annotation_correction(
             409,
         )
 
-    correction_id = f"asrc_{correction_fingerprint[:24]}"
+    correction_id = public_id_from_hex(
+        "asrc",
+        correction_fingerprint,
+        suffix_length=24,
+    )
     source_badcase_id = _resolve_or_create_badcase(
         session,
         ctx,

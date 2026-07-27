@@ -8,7 +8,7 @@ const port = configuredPort ? Number(configuredPort) : 0;
 
 const moduleChecks = [
   { nav: "首页", title: "运营首页", tabs: ["总览", "待处理", "异常提醒", "最近资产"] },
-  { nav: "租户", title: "租户管理", tabs: ["概览", "项目", "成员", "ASR 接入", "资源配额", "审计日志"] },
+  { nav: "租户", title: "租户管理", tabs: ["概览", "项目", "成员", "音频接入", "资源配额", "审计日志"] },
   { nav: "项目", title: "项目管理", tabs: ["项目概览", "数据源", "成员", "标签体系", "质量目标"] },
   { nav: "任务", title: "任务配置", tabs: ["流程配置", "流程模板", "编排版本", "输入输出", "触发与调度", "AB实验", "运行记录", "版本发布"] },
   { nav: "数据", title: "数据管理", tabs: ["音频数据", "人物/声纹", "事件", "关联视图"] },
@@ -1396,10 +1396,10 @@ async function assertProjectionSourceStates(page, failedResponses, browserErrors
       assert(!(await connectorButton.isDisabled()), "已验证 target_asset_key 的数据会话未开放连接器导入");
       await page.locator('[data-testid="scene-runtime-context"][data-state="bound"]').waitFor({ state: "visible", timeout: 8000 });
 
-      let boundConnectorPayload = null;
+      let prematureConnectorPosts = 0;
       const boundConnectorHandler = async (route) => {
         if (route.request().method() !== "POST") return route.continue();
-        boundConnectorPayload = route.request().postDataJSON();
+        prematureConnectorPosts += 1;
         return route.fulfill({
           status: 201,
           contentType: "application/json",
@@ -1412,17 +1412,19 @@ async function assertProjectionSourceStates(page, failedResponses, browserErrors
       await page.route("**/api/v1/connectors", boundConnectorHandler);
       try {
         await connectorButton.click();
-        await page.locator(".data-operation-toast").filter({ hasText: "连接器资源已创建" }).waitFor({ state: "visible", timeout: 5000 });
+        const importDrawer = page.getByRole("dialog", { name: "平台音频 URL 导入" });
+        await importDrawer.waitFor({ state: "visible", timeout: 5000 });
+        await importDrawer.getByText("关联外部平台", { exact: true }).waitFor({ state: "visible" });
+        await page.waitForTimeout(150);
+        assert(
+          prematureConnectorPosts === 0,
+          "打开导入配置抽屉时不应提前创建 Connector"
+        );
+        await importDrawer.getByRole("button", { name: "关闭导入配置" }).click();
+        await importDrawer.waitFor({ state: "hidden", timeout: 5000 });
       } finally {
         await page.unroute("**/api/v1/connectors", boundConnectorHandler);
       }
-      assert(
-        boundConnectorPayload?.scene_profile_id === "scene_ui_smoke_audio" &&
-          boundConnectorPayload?.scene_profile_version_id === "scenev_ui_smoke_audio_v1" &&
-          boundConnectorPayload?.scene_profile_snapshot_sha256 === uiSmokeSceneManifestSha256,
-        "数据连接器写入未锁定当前 SceneProfile 三元快照",
-        boundConnectorPayload
-      );
 
       let boundDataExportPayload = null;
       const boundDataExportHandler = async (route) => {
@@ -1624,7 +1626,51 @@ const projectionFixtures = {
   },
   "/api/v1/tenants": { data: { items: [{ id: "aurora_auto", name: "极光汽车" }] } },
   "/api/v1/projects": { data: { items: [{ id: "sales_qa", name: "销售话术质检" }] } },
+  "/api/v1/connectors": { data: { items: [], next_cursor: null } },
+  "/api/v1/platform-connections": { data: { items: [], next_cursor: null } },
   "/api/v1/task-versions": { data: { items: [{ id: "task_version_v3", status: "draft" }] } },
+  "/api/v1/workspace-context-options": {
+    data: {
+      scope: {
+        tenant_id: "aurora_auto",
+        tenant_name: "极光汽车",
+        project_id: "sales_qa",
+        project_name: "销售话术质检"
+      },
+      stores: [
+        {
+          store_id: "BJ-AURORA-001",
+          name: "北京极光旗舰店",
+          status: "active"
+        }
+      ],
+      business_dates: ["2026-07-25"],
+      model_versions: [
+        {
+          id: "asr_v2.3.1",
+          label: "ASR v2.3.1",
+          status: "published",
+          source_task_version_ids: ["task_version_v3"]
+        }
+      ],
+      label_versions: [
+        {
+          id: "label_v1_8_4",
+          label: "v1.8.4",
+          status: "published"
+        }
+      ],
+      defaults: {
+        store_id: "BJ-AURORA-001",
+        business_date: "2026-07-25",
+        model_version: "asr_v2.3.1",
+        label_version: "label_v1_8_4"
+      },
+      active_scene_binding: null,
+      as_of: "2026-07-25T00:00:00+00:00",
+      trace_id: "trace_ui_smoke_workspace"
+    }
+  },
   "/api/v1/audio-sessions/aggregations": {
     data: {
       items: [{

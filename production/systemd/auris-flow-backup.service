@@ -1,0 +1,29 @@
+[Unit]
+Description=Auris Flow quiesced production backup
+Documentation=file:/opt/auris-flow/doc/runbooks/backup-restore.md
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+ConditionPathIsExecutable=/opt/auris-flow/production/scripts/scheduled-backup.sh
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory=/opt/auris-flow
+EnvironmentFile=/etc/auris-flow/backup.env
+ExecStart=/opt/auris-flow/production/scripts/scheduled-backup.sh
+TimeoutStartSec=4h
+UMask=0077
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictRealtime=true

@@ -82,6 +82,11 @@ def test_release_and_verify_workflows_bound_every_job_runtime() -> None:
         "publish-release",
     }
     assert set(verify_jobs) == {
+        "policy",
+        "backend",
+        "production-tests",
+        "dagster",
+        "frontend",
         "clean-clone-reproducibility",
         "verify",
         "release-verify",
@@ -93,7 +98,7 @@ def test_release_and_verify_workflows_bound_every_job_runtime() -> None:
 def test_codeql_workflow_bounds_the_matrix_runtime() -> None:
     jobs = _job_blocks(CODEQL_WORKFLOW.read_text(encoding="utf-8"))
 
-    assert set(jobs) == {"analyze"}
+    assert set(jobs) == {"analyze", "policy"}
     assert re.search(r"^    timeout-minutes: [1-9]\d*$", jobs["analyze"], re.MULTILINE)
 
 
@@ -523,6 +528,15 @@ def test_release_workflow_binds_manual_and_push_runs_to_the_tag_commit() -> None
     assert '"${GITHUB_REF}" != "${expected_ref}"' in text
     assert '"${GITHUB_WORKFLOW_REF}" != "${expected_workflow_ref}"' in text
     assert "release workflow must execute from the exact requested tag ref" in text
+    assert '"https://github.com/${GITHUB_REPOSITORY}.git"' in text
+    assert '"+refs/heads/main:refs/remotes/release-policy/main"' in text
+    assert (
+        "git merge-base --is-ancestor \\\n"
+        '            "${RESOLVED_COMMIT}" refs/remotes/release-policy/main'
+    ) in text
+    assert "release tag commit must already be reachable from protected main" in text
+    assert "release workflow accepts final SemVer tags only" in text
+    assert "-rc" not in _job_blocks(text)["release-context"]
 
 
 def test_release_checklist_separates_pull_request_and_tag_only_controls() -> None:
@@ -828,11 +842,27 @@ def test_strict_release_jobs_install_pinned_cosign_before_visual_gate() -> None:
         assert block.index(pinned_login) < block.index("bash scripts/verify_release.sh")
         assert block.index(pinned_installer) < block.index("bash scripts/verify_release.sh")
 
-    fast_verify_job = verify_jobs["verify"]
-    assert "packages: read" not in fast_verify_job
-    assert pinned_login not in fast_verify_job
-    assert pinned_installer not in fast_verify_job
-    assert "bash scripts/verify_fast.sh" in fast_verify_job
+    aggregate_verify_job = verify_jobs["verify"]
+    assert "packages: read" not in aggregate_verify_job
+    assert pinned_login not in aggregate_verify_job
+    assert pinned_installer not in aggregate_verify_job
+    assert "name: Verify" in aggregate_verify_job
+    assert "if: always()" in aggregate_verify_job
+    for dependency in (
+        "policy",
+        "backend",
+        "production-tests",
+        "dagster",
+        "frontend",
+        "clean-clone-reproducibility",
+    ):
+        assert f"      - {dependency}" in aggregate_verify_job
+
+    assert "bash scripts/verify_static.sh" in verify_jobs["policy"]
+    assert "bash scripts/verify_backend.sh" in verify_jobs["backend"]
+    assert "bash scripts/verify_production_tests.sh" in verify_jobs["production-tests"]
+    assert "bash scripts/verify_dagster_tests.sh" in verify_jobs["dagster"]
+    assert "bash scripts/verify_frontend.sh" in verify_jobs["frontend"]
 
 
 def test_final_dependency_evidence_manifest_requires_all_audits() -> None:

@@ -5,6 +5,7 @@ import logging
 
 import pytest
 
+from app.core import redaction as redaction_module
 from app.core.context import RequestContext
 from app.core.logging import LOGGER_NAME, get_logger, log_event
 from app.core.redaction import redact_structured_value, trusted_sha256
@@ -128,6 +129,127 @@ def test_redaction_scans_untrusted_reference_values() -> None:
         "asset_key": "customer/[REDACTED_PHONE]",
         "partition_key": "tenant/[REDACTED_PHONE]",
         "callback_ref": "[REDACTED_SECRET]",
+    }
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    (
+        (
+            "联系 owner+alerts@example.co.uk 或 用户@example.cn",
+            "联系 [REDACTED_EMAIL] 或 [REDACTED_EMAIL]",
+        ),
+        ("边界 <owner@example.com> 正常", "边界 <[REDACTED_EMAIL]> 正常"),
+        ("一级域名过短 a@b.c 不脱敏", "一级域名过短 a@b.c 不脱敏"),
+        ("缺少域名 not-an-email@ 不脱敏", "缺少域名 not-an-email@ 不脱敏"),
+        ("非法后缀 owner@example.com_foo 不脱敏", "非法后缀 owner@example.com_foo 不脱敏"),
+    ),
+)
+def test_redaction_scans_email_addresses_without_a_backtracking_regex(
+    value: str,
+    expected: str,
+) -> None:
+    assert redact_structured_value({"description": value}) == {"description": expected}
+
+
+def test_email_scanner_has_a_linear_character_classification_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    local_checks = 0
+    domain_checks = 0
+    original_local_check = redaction_module._is_email_local_character
+    original_domain_check = redaction_module._is_email_domain_character
+
+    def count_local(character: str) -> bool:
+        nonlocal local_checks
+        local_checks += 1
+        return original_local_check(character)
+
+    def count_domain(character: str) -> bool:
+        nonlocal domain_checks
+        domain_checks += 1
+        return original_domain_check(character)
+
+    monkeypatch.setattr(redaction_module, "_is_email_local_character", count_local)
+    monkeypatch.setattr(redaction_module, "_is_email_domain_character", count_domain)
+    adversarial = ("+" * 31 + "@segment") * 80
+
+    assert redaction_module._redact_email_addresses(adversarial) == adversarial
+    assert local_checks + domain_checks <= 2 * len(adversarial)
+
+
+def test_redaction_bounds_every_content_regex_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    scanned_lengths: list[int] = []
+
+    class RegexProbe:
+        def search(self, value: str) -> None:
+            scanned_lengths.append(len(value))
+            return None
+
+        def sub(self, replacement: str, value: str) -> str:
+            del replacement
+            scanned_lengths.append(len(value))
+            return value
+
+    probe = RegexProbe()
+    for pattern_name in (
+        "AUTHORIZATION_VALUE_PATTERN",
+        "JWT_PATTERN",
+        "PEM_PATTERN",
+        "API_KEY_PATTERN",
+        "DANGEROUS_URL_PATTERN",
+        "COOKIE_VALUE_PATTERN",
+        "PHONE_PATTERN",
+        "IDENTITY_PATTERN",
+        "LICENSE_PLATE_PATTERN",
+        "VIN_PATTERN",
+    ):
+        monkeypatch.setattr(redaction_module, pattern_name, probe)
+
+    boundary_value = "a" * redaction_module.MAX_REGEX_SCAN_LENGTH
+    assert redact_structured_value({"description": boundary_value}) == {
+        "description": f"{boundary_value[:300]}...[TRUNCATED]"
+    }
+    assert scanned_lengths
+    assert max(scanned_lengths) <= redaction_module.MAX_REGEX_SCAN_LENGTH
+
+
+def test_redaction_rejects_oversized_adversarial_text_before_regex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedRegexCall:
+        def search(self, value: str) -> None:
+            raise AssertionError(f"unexpected regex search for {len(value)} bytes")
+
+        def sub(self, replacement: str, value: str) -> str:
+            raise AssertionError(
+                f"unexpected regex substitution for {len(value)} bytes using {replacement}"
+            )
+
+    probe = UnexpectedRegexCall()
+    for pattern_name in (
+        "AUTHORIZATION_VALUE_PATTERN",
+        "JWT_PATTERN",
+        "PEM_PATTERN",
+        "API_KEY_PATTERN",
+        "DANGEROUS_URL_PATTERN",
+        "COOKIE_VALUE_PATTERN",
+        "PHONE_PATTERN",
+        "IDENTITY_PATTERN",
+        "LICENSE_PLATE_PATTERN",
+        "VIN_PATTERN",
+    ):
+        monkeypatch.setattr(redaction_module, pattern_name, probe)
+
+    oversized = (
+        ("a" * redaction_module.MAX_REGEX_SCAN_LENGTH)
+        + "@"
+        + ("." * redaction_module.MAX_REGEX_SCAN_LENGTH)
+        + "!"
+    )
+
+    assert redact_structured_value({"description": oversized}) == {
+        "description": f"[REDACTED_TEXT length={len(oversized)}]"
     }
 
 

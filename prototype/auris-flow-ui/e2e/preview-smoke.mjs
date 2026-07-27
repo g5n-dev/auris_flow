@@ -56,6 +56,22 @@ function sha256(bytes) {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
+function safePreviewReturnPath(rawValue) {
+  if (typeof rawValue !== "string" || !rawValue.startsWith("/") || rawValue.startsWith("//")) {
+    return "/";
+  }
+  const base = new URL("http://preview.local/");
+  const candidate = new URL(rawValue, base);
+  if (
+    candidate.origin !== base.origin ||
+    candidate.username !== "" ||
+    candidate.password !== ""
+  ) {
+    return "/";
+  }
+  return `${candidate.pathname}${candidate.search}${candidate.hash}`;
+}
+
 function responseHeader(response, name) {
   const value = response.headers[name.toLowerCase()];
   return Array.isArray(value) ? value.join(", ") : value;
@@ -332,9 +348,7 @@ const bffStub = createHttpServer(async (request, response) => {
   if (path === "/api/v1/auth/oidc/login" && request.method === "GET") {
     const requestedReturnPath = new URL(request.url ?? "", "http://preview.local")
       .searchParams.get("return_path");
-    const returnPath = requestedReturnPath?.startsWith("/") && !requestedReturnPath.startsWith("//")
-      ? requestedReturnPath
-      : "/";
+    const returnPath = safePreviewReturnPath(requestedReturnPath);
     oidcLoginRequests += 1;
     response.writeHead(303, {
       Location: returnPath,
@@ -365,6 +379,55 @@ const bffStub = createHttpServer(async (request, response) => {
         csrf_token: "preview-smoke-csrf-fixture"
       },
       meta: { trace_id: "trace_preview_session", request_id: "preview-session" }
+    });
+    return;
+  }
+  if (path === "/api/v1/workspace-context-options" && request.method === "GET") {
+    sendJson(response, 200, {
+      data: {
+        scope: {
+          tenant_id: "aurora_auto",
+          tenant_name: "极光汽车",
+          project_id: "sales_qa",
+          project_name: "销售话术质检"
+        },
+        stores: [
+          {
+            store_id: "BJ-AURORA-001",
+            name: "北京极光旗舰店",
+            status: "active"
+          }
+        ],
+        business_dates: ["2026-07-25"],
+        model_versions: [
+          {
+            id: "asr_v2.3.1",
+            label: "ASR v2.3.1",
+            status: "published",
+            source_task_version_ids: ["taskv_preview_smoke"]
+          }
+        ],
+        label_versions: [
+          {
+            id: "label_v1_8_4",
+            label: "v1.8.4",
+            status: "published"
+          }
+        ],
+        defaults: {
+          store_id: "BJ-AURORA-001",
+          business_date: "2026-07-25",
+          model_version: "asr_v2.3.1",
+          label_version: "label_v1_8_4"
+        },
+        active_scene_binding: null,
+        as_of: "2026-07-25T00:00:00+00:00",
+        trace_id: "trace_preview_workspace"
+      },
+      meta: {
+        trace_id: "trace_preview_workspace",
+        request_id: "preview-workspace"
+      }
     });
     return;
   }

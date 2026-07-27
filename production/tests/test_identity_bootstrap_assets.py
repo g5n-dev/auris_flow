@@ -50,6 +50,25 @@ def test_keycloak_reference_client_registers_standard_backchannel_logout() -> No
     assert client["attributes"]["backchannel.logout.session.required"] == "true"
 
 
+def test_keycloak_api_audience_is_never_added_to_id_tokens() -> None:
+    for realm_path in (
+        PRODUCTION / "keycloak" / "auris-flow-realm.template.json",
+        PRODUCTION / "tests" / "production-path-keycloak-realm.template.json",
+    ):
+        realm = json.loads(realm_path.read_text(encoding="utf-8"))
+        client = next(
+            item for item in realm["clients"] if item["clientId"] == "auris-flow-web"
+        )
+        mapper = next(
+            item
+            for item in client["protocolMappers"]
+            if item["name"] == "auris-flow-api-audience"
+        )
+
+        assert mapper["config"]["id.token.claim"] == "false"
+        assert mapper["config"]["access.token.claim"] == "true"
+
+
 def test_keycloak_entrypoint_reads_operator_password_from_secret_without_exporting_it() -> (
     None
 ):

@@ -1346,6 +1346,19 @@ def _finalize_success(
                 for action in next_actions
             ],
         }
+        if (
+            event.event_type == "task_run.requested"
+            and run.run_type == "task_run"
+            and run.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+        ):
+            from app.services.audio_import_completion_service import (
+                mark_audio_import_batch_running,
+            )
+
+            active_session = object_session(run)
+            if active_session is None:
+                raise RuntimeError("audio import dispatch requires an attached session")
+            mark_audio_import_batch_running(active_session, run)
         if event.event_type in {
             "task_run.requested",
             "audio_intelligence.requested",

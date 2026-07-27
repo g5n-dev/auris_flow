@@ -5,7 +5,6 @@ import json
 import math
 import re
 import unicodedata
-import uuid
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -17,6 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import server_generated_public_id
 from app.models import (
     AsrAnnotationCorrection,
     AssetMaterialization,
@@ -121,7 +121,7 @@ SENSITIVE_CATEGORIES = frozenset(
 
 
 def _new_id(prefix: str) -> str:
-    return f"{prefix}_{uuid.uuid4().hex[:20]}"
+    return server_generated_public_id(prefix, suffix_length=20)
 
 
 def _iso(value: datetime | None) -> str | None:

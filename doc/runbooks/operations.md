@@ -9,12 +9,12 @@ node-exporter，以及使用 secret-backed 通用 HTTPS webhook 的 Alertmanager
 存在，不等于端到端生产演练已经完成。
 
 当前仍是 `v1.0.0` 候选。Compose 已内置 Alertmanager 和通用 webhook 路由，但仓库内验证不拥有
-真实通知系统，不能证明消息已送达、被值班人员确认或在 resolved 后关闭。正式 RC 必须连接实际
+真实通知系统，不能证明消息已送达、被值班人员确认或在 resolved 后关闭。无标签 staging 必须连接实际
 通知渠道并保存这三项外部证据。单机形态没有节点 HA，宿主机离线会造成整体不可用。
 
 ## 服务目标（SLO）
 
-以下是首版候选的运营目标，不是无条件商业 SLA。正式 `v1.0.0` 前必须以 RC 真实负载与恢复演练
+以下是首版候选的运营目标，不是无条件商业 SLA。正式 `v1.0.0` 前必须以 staging 真实负载与恢复演练
 校准并由 owner 批准：
 
 | 指标 | 初始目标 | 口径 |
@@ -130,12 +130,13 @@ callback body。只保留必要 UTC 时间、service、event、request ID、业�
 `otel-collector`、`prometheus` 或 `tempo` target 连续 2 分钟不可抓取。Compose 中另有
 `observability-health` 内部后台深探针，直接访问 Collector health extension、Tempo/Prometheus/
 Alertmanager readiness 和 node-exporter metrics，并强制导出 marker、等待 Collector batch、从
-Tempo 按 trace ID 读回；其 `/ready` 状态有严格新鲜度上限。BFF、Worker、Dagster code location
-在该探针健康前不会启动，BFF 严格 readiness 还会导出自身限频 marker，并通过探针的内部
-`/traces/{trace_id}` 校验同一 service/span/trace 已进入 Tempo；首次未可见时 fail closed，轮换后的
-传播宽限最多 10 秒，最近成功证明最多保留 20 秒，计入 edge 缓存后的最坏陈旧窗口不超过 25 秒。
+Tempo 按 trace ID 读回；其 `/ready` 状态有严格新鲜度上限。BFF `/readyz` 仍报告该状态并导出自身
+限频 marker，通过探针的内部 `/traces/{trace_id}` 校验同一 service/span/trace 是否已进入 Tempo；
+首次未可见时 observability 检查标记为 `not_ready`，轮换后的传播宽限最多 10 秒，最近成功证明最多
+保留 20 秒。监控栈不作为 BFF、Worker 或 Dagster code location 的 Compose 启动依赖，也不进入默认
+业务强依赖集合，避免遥测故障级联停止业务；需要可审计性的高风险操作仍须按本 Runbook 主动暂停。
 
-Prometheus 无法可靠报告自身完全离线，Alertmanager 也无法交付自身完全离线的通知。生产 RC
+Prometheus 无法可靠报告自身完全离线，Alertmanager 也无法交付自身完全离线的通知。无标签 staging
 必须由 Compose 宿主机之外的独立 watchdog 定时访问受控 readiness/合成端点并验证通知回执；仓库
 内联合探针只能作为启动门禁，不能替代这份外部证据。
 
@@ -277,7 +278,7 @@ clamp 为 0；cancelled 单独展示，不伪装成 success 或 failed。
    200 不能判定业务成功；只看到 completion 而无法按哈希核对 manifest 也必须按一致性事故处理。
 4. `production-path` 的音频 HTTPS endpoint 仅验证协议/TLS，固定标记
    `reference_protocol_only=true`、`model_quality_certified=false`。真实模型准确率、容量、限流和 SLA
-   必须在外部 RC 环境单独认证并留证。
+   必须在外部无标签 staging 环境单独认证并留证。
 5. Provider 请求不含对象存储凭据、presigned URL 或音频字节。为 Provider 单独配置受信网络内的最小
    只读对象存储身份，只允许输入前缀；它必须按 bucket/key/version 读取并校验长度/SHA-256。禁止复用
    Dagster 凭据。若 Provider POST 或结果 manifest PUT 返回任何 3xx，按凭据边界异常直接失败，不跟随。
@@ -377,7 +378,7 @@ overlay、tmpfs、squashfs 和伪文件系统。Docker named volume 共用其所
 
 ## alert-testing
 
-每季度、每个 RC 以及 alerts/metrics 变更后执行。只在隔离 staging/演练 Compose project；不得
+每季度、每个候选提交以及 alerts/metrics 变更后执行。只在隔离 staging/演练 Compose project；不得
 在生产填盘、制造死信或触发 IdP 账户锁定。
 
 先用固定 digest 的 promtool/amtool 做配置、规则场景和 UTF-8 strict 校验；两个容器均为无网络、

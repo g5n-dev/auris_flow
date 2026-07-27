@@ -1,17 +1,4 @@
 Auris Flow
 
-Copyright holder: project-owner confirmation required before public release.
-
-This distribution is intended to be licensed under the Apache License,
-Version 2.0. The repository contains the standard license text, but this
-NOTICE does not assert ownership or authority on behalf of an unidentified
-person. A release may be tagged or published only after the signed release
-authorization record identifies the individual rights holder.
-
-Third-party software remains subject to its own license terms. See
-THIRD_PARTY_NOTICES.md and the release SBOM.
-
-Public audio datasets are not bundled with this distribution. Dataset license
-metadata and download-at-use requirements are recorded in
-doc/backend-spec/public-audio-datasets-v0.1.json. The Apache-2.0 license for
-Auris Flow does not replace or relicense those datasets.
+This distribution includes third-party software subject to its own license terms.
+See THIRD_PARTY_NOTICES.md.

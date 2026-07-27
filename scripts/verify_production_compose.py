@@ -17,6 +17,10 @@ PRODUCTION_DIR = ROOT / "production"
 COMPOSE_FILE = PRODUCTION_DIR / "compose.yaml"
 ENV_FILE = PRODUCTION_DIR / ".env.example"
 NGINX_CONFIG = PRODUCTION_DIR / "edge" / "nginx.conf"
+SCHEDULED_BACKUP_SCRIPT = PRODUCTION_DIR / "scripts" / "scheduled-backup.sh"
+BACKUP_SYSTEMD_SERVICE = PRODUCTION_DIR / "systemd" / "auris-flow-backup.service"
+BACKUP_SYSTEMD_TIMER = PRODUCTION_DIR / "systemd" / "auris-flow-backup.timer"
+BACKUP_SYSTEMD_ENV = PRODUCTION_DIR / "systemd" / "backup.env.example"
 REQUIRED_SERVICES = frozenset(
     {
         "mysql",
@@ -374,6 +378,22 @@ def validate_edge_nginx(source: str) -> list[str]:
             errors.append(
                 "edge nginx: audio playback location must overwrite X-Forwarded-For"
             )
+        if not re.search(r"(?m)^\s*proxy_buffering\s+off\s*;", body):
+            errors.append(
+                "edge nginx: audio playback location must disable proxy buffering"
+            )
+        if not re.search(r"(?m)^\s*proxy_request_buffering\s+off\s*;", body):
+            errors.append(
+                "edge nginx: audio playback location must disable request buffering"
+            )
+        if not _nginx_header_binding(body, "Range", "$http_range"):
+            errors.append(
+                "edge nginx: audio playback location must explicitly forward Range"
+            )
+        if not _nginx_header_binding(body, "If-Range", "$http_if_range"):
+            errors.append(
+                "edge nginx: audio playback location must explicitly forward If-Range"
+            )
     return errors
 
 
@@ -390,6 +410,177 @@ def _validate_image(name: str, service: dict[str, Any], *, release: bool) -> lis
         errors.append(f"{name}: release image must be pinned by sha256 digest")
     if release and service.get("build"):
         errors.append(f"{name}: release compose must consume prebuilt images")
+    return errors
+
+
+def _validate_runtime_guardrails(
+    name: str,
+    service: dict[str, Any],
+) -> list[str]:
+    errors: list[str] = []
+    try:
+        cpu_limit = float(str(service.get("cpus")))
+    except (TypeError, ValueError):
+        cpu_limit = 0.0
+    if not 0.25 <= cpu_limit <= 16.0:
+        errors.append(f"{name}: CPU limit must be between 0.25 and 16")
+
+    try:
+        memory_limit = int(str(service.get("mem_limit")))
+    except (TypeError, ValueError):
+        memory_limit = 0
+    if not 128 * 1024 * 1024 <= memory_limit <= 64 * 1024 * 1024 * 1024:
+        errors.append(f"{name}: memory limit must be between 128 MiB and 64 GiB")
+
+    pids_limit = service.get("pids_limit")
+    if (
+        isinstance(pids_limit, bool)
+        or not isinstance(pids_limit, int)
+        or not 64 <= pids_limit <= 4096
+    ):
+        errors.append(f"{name}: PID limit must be between 64 and 4096")
+    if service.get("init") is not True:
+        errors.append(f"{name}: init process must be enabled")
+
+    nofile = (service.get("ulimits") or {}).get("nofile")
+    if nofile != {"soft": 65536, "hard": 65536}:
+        errors.append(f"{name}: nofile soft/hard limits must both be 65536")
+
+    logging = service.get("logging")
+    if (
+        not isinstance(logging, dict)
+        or logging.get("driver") != "json-file"
+        or logging.get("options") != {"max-file": "5", "max-size": "10m"}
+    ):
+        errors.append(
+            f"{name}: json-file logs must rotate at 10m with five retained files"
+        )
+    return errors
+
+
+def validate_backup_scheduler_assets(
+    *,
+    wrapper_source: str | None = None,
+    service_source: str | None = None,
+    timer_source: str | None = None,
+    env_source: str | None = None,
+) -> list[str]:
+    wrapper_source = (
+        SCHEDULED_BACKUP_SCRIPT.read_text(encoding="utf-8")
+        if wrapper_source is None
+        else wrapper_source
+    )
+    service_source = (
+        BACKUP_SYSTEMD_SERVICE.read_text(encoding="utf-8")
+        if service_source is None
+        else service_source
+    )
+    timer_source = (
+        BACKUP_SYSTEMD_TIMER.read_text(encoding="utf-8")
+        if timer_source is None
+        else timer_source
+    )
+    env_source = (
+        BACKUP_SYSTEMD_ENV.read_text(encoding="utf-8")
+        if env_source is None
+        else env_source
+    )
+    errors: list[str] = []
+
+    wrapper_markers = {
+        'PRODUCTION_PROJECT_NAME="auris-flow"',
+        'DOCKER_CONTEXT_NAME="default"',
+        "flock -n 9",
+        "trap restore_on_exit EXIT",
+        "compose stop --timeout",
+        "--storage-boundary encrypted-external",
+        "restart_phase keycloak",
+        "restart_phase bff",
+        "restart_phase worker",
+        "restart_phase edge",
+    }
+    if not all(marker in wrapper_source for marker in wrapper_markers):
+        errors.append(
+            "backup scheduler: lock, quiesce, encrypted backup and recovery phases are required"
+        )
+    if (
+        "ONE_SHOT_WRITERS=(" not in wrapper_source
+        or "one-shot writer" not in wrapper_source
+    ):
+        errors.append("backup scheduler: active one-shot writers must fail closed")
+    if re.search(r"\bcompose\s+down\b|/var/run/docker\.sock", wrapper_source):
+        errors.append(
+            "backup scheduler: destructive Compose down and Docker socket mounts are forbidden"
+        )
+
+    required_service_settings = {
+        "User=root",
+        "Group=root",
+        "EnvironmentFile=/etc/auris-flow/backup.env",
+        "ExecStart=/opt/auris-flow/production/scripts/scheduled-backup.sh",
+        "TimeoutStartSec=4h",
+        "UMask=0077",
+        "NoNewPrivileges=true",
+        "ProtectSystem=full",
+    }
+    if not all(marker in service_source for marker in required_service_settings):
+        errors.append(
+            "backup scheduler: systemd service must use the hardened governed wrapper"
+        )
+    if re.search(r"(?m)^\s*Environment\s*=", service_source):
+        errors.append(
+            "backup scheduler: inline systemd environment values are forbidden"
+        )
+
+    required_timer_settings = {
+        "OnCalendar=*-*-* 02:17:00",
+        "RandomizedDelaySec=10m",
+        "AccuracySec=1m",
+        "Persistent=true",
+        "Unit=auris-flow-backup.service",
+    }
+    if not all(marker in timer_source for marker in required_timer_settings):
+        errors.append("backup scheduler: bounded persistent daily timer is required")
+
+    environment: dict[str, str] = {}
+    for line in env_source.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        key, separator, value = stripped.partition("=")
+        if not separator or not key or key in environment:
+            errors.append(
+                "backup scheduler: environment example must be unique KEY=VALUE lines"
+            )
+            continue
+        environment[key] = value
+    required_paths = {
+        "AURIS_BACKUP_OUTPUT_ROOT",
+        "AURIS_COMPOSE_ENV_FILE",
+        "AURIS_RUNTIME_METRICS_DIR",
+        "AURIS_BACKUP_LOCK_FILE",
+    }
+    if set(environment) != required_paths | {
+        "AURIS_BACKUP_STOP_TIMEOUT_SECONDS",
+        "AURIS_BACKUP_RESTART_WAIT_SECONDS",
+    }:
+        errors.append("backup scheduler: environment example has an unexpected key set")
+    if any(
+        not environment.get(key, "").startswith("/")
+        or ".." in Path(environment.get(key, "")).parts
+        for key in required_paths
+    ):
+        errors.append(
+            "backup scheduler: all operational paths must be absolute and traversal-free"
+        )
+    if any(
+        marker in key.casefold()
+        for key in environment
+        for marker in ("password", "secret", "token", "private_key")
+    ):
+        errors.append(
+            "backup scheduler: secret values must not be accepted in the env file"
+        )
     return errors
 
 
@@ -458,6 +649,7 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
             errors.append(f"{name}: service definition must be an object")
             continue
         errors.extend(_validate_image(name, raw_service, release=release))
+        errors.extend(_validate_runtime_guardrails(name, raw_service))
         if (
             name not in ONE_SHOT_SERVICES
             and name not in PROFILE_UTILITY_SERVICES
@@ -599,13 +791,12 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
             "database",
             "redis",
             "object_storage",
-            "observability",
             "qdrant",
             "dagster",
         }
-        if not expected_checks.issubset(required_checks):
+        if required_checks != expected_checks:
             errors.append(
-                f"{name}: all production dependencies must be strict readiness checks"
+                f"{name}: strict readiness must contain exactly the business dependencies"
             )
 
     dagster_storage_bootstrap = services.get("dagster-storage-bootstrap")
@@ -705,17 +896,73 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
                 "observability-health: the background pipeline monitor is required"
             )
 
+    node_exporter = services.get("node-exporter")
+    if isinstance(node_exporter, dict):
+        node_command = {
+            str(argument) for argument in (node_exporter.get("command") or [])
+        }
+        required_arguments = {
+            "--path.rootfs=/host",
+            "--collector.textfile.directory=/var/lib/node_exporter/textfile_collector",
+        }
+        if not required_arguments.issubset(node_command):
+            errors.append(
+                "node-exporter: host capacity and textfile collectors must be enabled"
+            )
+        volumes = node_exporter.get("volumes") or []
+        host_mounts = [
+            item
+            for item in volumes
+            if isinstance(item, dict) and item.get("target") == "/host"
+        ]
+        if host_mounts != [
+            {
+                "type": "bind",
+                "source": "/",
+                "target": "/host",
+                "read_only": True,
+                "bind": {"propagation": "rslave"},
+            }
+        ]:
+            errors.append(
+                "node-exporter: host root must be mounted read-only with rslave propagation"
+            )
+        metric_mounts = [
+            item
+            for item in volumes
+            if isinstance(item, dict)
+            and item.get("target") == "/var/lib/node_exporter/textfile_collector"
+        ]
+        metric_source = (
+            str(metric_mounts[0].get("source") or "") if len(metric_mounts) == 1 else ""
+        )
+        if (
+            len(metric_mounts) != 1
+            or metric_mounts[0].get("type") != "bind"
+            or metric_mounts[0].get("read_only") is not True
+            or not Path(metric_source).is_absolute()
+        ):
+            errors.append(
+                "node-exporter: runtime textfile metrics require one read-only absolute bind"
+            )
+
     for name in (*APP_SERVICES, "dagster-code"):
         service = services.get(name)
         if not isinstance(service, dict):
             continue
-        dependency = (service.get("depends_on") or {}).get("observability-health")
-        if (
-            not isinstance(dependency, dict)
-            or dependency.get("condition") != "service_healthy"
-        ):
+        dependencies = set(service.get("depends_on") or {})
+        telemetry_dependencies = dependencies & {
+            "alertmanager",
+            "grafana",
+            "node-exporter",
+            "observability-health",
+            "otel-collector",
+            "prometheus",
+            "tempo",
+        }
+        if telemetry_dependencies:
             errors.append(
-                f"{name}: observability-health dependency must use service_healthy"
+                f"{name}: telemetry services must not gate business process startup"
             )
 
     for name in COMPOSITE_HEALTH_COVERED_SERVICES:
@@ -763,6 +1010,27 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
         }
         if "audio_inference_api_token" not in mounted_sources:
             errors.append("dagster-code: audio inference credential secret is required")
+        if environment.get("AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE") != (
+            "/run/secrets/platform_credential_bindings"
+        ):
+            errors.append(
+                "dagster-code: platform credential bindings must use its secret file"
+            )
+        if "platform_credential_bindings" not in mounted_sources:
+            errors.append(
+                "dagster-code: platform credential bindings secret is required"
+            )
+        platform_audio_hosts = {
+            value.strip()
+            for value in environment.get(
+                "AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS", ""
+            ).split(",")
+            if value.strip()
+        }
+        if "*" in platform_audio_hosts:
+            errors.append(
+                "dagster-code: platform audio host allowlist must not contain wildcard"
+            )
 
     for name, raw_service in services.items():
         if name == "dagster-code" or not isinstance(raw_service, dict):
@@ -775,6 +1043,27 @@ def validate_compose(document: dict[str, Any], *, release: bool = False) -> list
             errors.append(
                 f"{name}: audio inference credential is restricted to dagster-code"
             )
+        if (
+            name not in {"bff", "dagster-code"}
+            and "platform_credential_bindings" in mounted_sources
+        ):
+            errors.append(
+                f"{name}: platform credential bindings are restricted to bff and dagster-code"
+            )
+
+    bff = services.get("bff")
+    if isinstance(bff, dict):
+        bff_environment = _environment_map(bff)
+        bff_mounted_sources = {
+            str(item.get("source") or "") if isinstance(item, dict) else str(item)
+            for item in (bff.get("secrets") or [])
+        }
+        if bff_environment.get("PLATFORM_CREDENTIAL_BINDINGS_FILE") != (
+            "/run/secrets/platform_credential_bindings"
+        ):
+            errors.append("bff: platform credential bindings must use its secret file")
+        if "platform_credential_bindings" not in bff_mounted_sources:
+            errors.append("bff: platform credential bindings secret is required")
 
     edge_service = services.get("edge")
     if isinstance(edge_service, dict):
@@ -1010,6 +1299,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         errors = validate_compose(document, release=args.release)
         errors.extend(validate_edge_nginx(NGINX_CONFIG.read_text(encoding="utf-8")))
+        errors.extend(validate_backup_scheduler_assets())
     except ComposePolicyError as exc:
         print(f"production compose policy failed: {exc}", file=sys.stderr)
         return 2

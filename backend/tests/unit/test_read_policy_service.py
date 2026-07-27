@@ -74,6 +74,33 @@ def test_oidc_identity_trace_object_uses_an_admin_only_sensitive_policy() -> Non
         )
 
 
+def test_new_operational_trace_objects_use_least_privilege_policies() -> None:
+    assert trace_reference_collection("browser_auth_session") == "browser_auth_sessions"
+    assert trace_reference_collection("qdrant_rebuild_plan") == "qdrant_rebuild_plans"
+
+    for role in ("annotator", "asset_manager", "model_engineer"):
+        assert not trace_reference_is_visible(
+            {"type": "browser_auth_session", "id": "session-hidden"},
+            _context(role),
+        )
+    for role in ("project_admin", "system"):
+        assert trace_reference_is_visible(
+            {"type": "browser_auth_session", "id": "session-visible"},
+            _context(role),
+        )
+
+    for role in ("annotator", "model_engineer", "review_arbitrator"):
+        assert not trace_reference_is_visible(
+            {"type": "qdrant_rebuild_plan", "id": "plan-hidden"},
+            _context(role),
+        )
+    for role in ("project_admin", "asset_manager", "system"):
+        assert trace_reference_is_visible(
+            {"type": "qdrant_rebuild_plan", "id": "plan-visible"},
+            _context(role),
+        )
+
+
 def test_prompt_candidate_trace_objects_reuse_sensitive_collection_policy() -> None:
     for object_type in (
         "prompt_candidate",
@@ -373,6 +400,8 @@ def test_all_static_audit_and_outbox_object_types_have_trace_policies() -> None:
         ("label_recompute_run_item", "label_recompute_runs"),
         ("label_version_deprecation_preflight", "label_versions"),
         ("oidc_identity", "oidc_identities"),
+        ("browser_auth_session", "browser_auth_sessions"),
+        ("qdrant_rebuild_plan", "qdrant_rebuild_plans"),
         ("release_bundle_head_event", "task_versions"),
         ("task_run_cancellation", "task_versions"),
         ("task_run_status_sync", "task_versions"),

@@ -91,15 +91,22 @@ def _claims(**overrides: object) -> dict[str, object]:
         "aud": AUDIENCE,
         "iat": NOW - 60,
         "exp": NOW + 300,
+        "typ": "Bearer",
         "email": "operator@example.test",
     }
     claims.update(overrides)
     return claims
 
 
-def _rs256_token(key: Any, *, kid: str, claims: Mapping[str, object] | None = None) -> str:
+def _rs256_token(
+    key: Any,
+    *,
+    kid: str,
+    claims: Mapping[str, object] | None = None,
+    header_type: str = "JWT",
+) -> str:
     token = JsonWebToken(["RS256"]).encode(
-        {"alg": "RS256", "kid": kid, "typ": "JWT"},
+        {"alg": "RS256", "kid": kid, "typ": header_type},
         dict(claims or _claims()),
         key,
     )
@@ -313,6 +320,62 @@ def test_rejects_non_matching_exact_issuer_or_audience(
 
     with pytest.raises(OIDCTokenValidationError):
         _validator(transport).validate(token)
+
+
+@pytest.mark.parametrize(
+    "purpose_claims",
+    [
+        {"typ": "ID"},
+        {"token_use": "id", "typ": None},
+        {"typ": None},
+    ],
+)
+def test_api_bearer_rejects_id_or_undifferentiated_tokens(
+    rsa_key_a: Any,
+    purpose_claims: dict[str, object],
+) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    claims = _claims(**purpose_claims)
+    if claims.get("typ") is None:
+        claims.pop("typ", None)
+    token = _rs256_token(rsa_key_a, kid="key-a", claims=claims)
+
+    with pytest.raises(OIDCTokenValidationError):
+        _validator(transport).validate(token)
+
+
+@pytest.mark.parametrize(
+    "purpose_claims",
+    [
+        {"typ": "Bearer"},
+        {"typ": None, "token_use": "access"},
+    ],
+)
+def test_api_bearer_accepts_explicit_access_token_purpose(
+    rsa_key_a: Any,
+    purpose_claims: dict[str, object],
+) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    claims = _claims(**purpose_claims)
+    if claims.get("typ") is None:
+        claims.pop("typ", None)
+    token = _rs256_token(rsa_key_a, kid="key-a", claims=claims)
+
+    assert _validator(transport).validate(token).subject == "oidc-user-001"
+
+
+def test_api_bearer_accepts_rfc9068_access_token_header(rsa_key_a: Any) -> None:
+    transport = _transport({"keys": [_public_jwk(rsa_key_a)]})
+    claims = _claims()
+    claims.pop("typ")
+    token = _rs256_token(
+        rsa_key_a,
+        kid="key-a",
+        claims=claims,
+        header_type="at+jwt",
+    )
+
+    assert _validator(transport).validate(token).subject == "oidc-user-001"
 
 
 @pytest.mark.parametrize("claim", ["iss", "sub", "aud", "exp"])

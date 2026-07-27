@@ -31,13 +31,14 @@ export type AuthFormState = {
 };
 
 export type TopbarContextOption = {
+  id: string;
   value: string;
   meta: string;
 };
 
 export type TopbarCoreContextKey = TopbarContextKey;
 
-export type TopbarVisibleContextKey = Exclude<TopbarContextKey, "tenant" | "date">;
+export type TopbarVisibleContextKey = Exclude<TopbarContextKey, "tenant">;
 
 export type MockMutationStatus = "草稿" | "校验中" | "待审批" | "已提交" | "失败";
 

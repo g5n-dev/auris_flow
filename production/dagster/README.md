@@ -10,9 +10,12 @@ the BFF rather than through Dagster APIs.
 `run_config`. Known control-plane/CI events continue to launch `auris_flow_generic_job` with
 top-level `runConfigData.auris_context`. `audio_intelligence.requested` plus the exact
 `auris-flow-audio-intelligence-v1` contract launches `auris_flow_audio_intelligence_v1`; an
-unknown/missing event mapping or incomplete contract fails before any GraphQL request.
+audio-import TaskRun (`task_run.requested` plus `auris-flow-audio-import-v1`) launches the fixed
+`auris_flow_audio_import_v1` job. Caller-provided `job_name`, Dagster canvas state and arbitrary
+run config are never forwarded. An unknown/missing event mapping or incomplete contract fails
+before any GraphQL request.
 
-Both jobs reject the run before work unless these authoritative scope fields are valid:
+All three jobs reject the run before work unless these authoritative scope fields are valid:
 
 - `tenant_id`
 - `project_id`
@@ -27,6 +30,79 @@ provider/model/capabilities, and the input object's bucket, key, provider versio
 content type and SHA-256. Only the envelope SHA-256 and non-sensitive routing identifiers are put
 in Dagster tags; raw object locations and hashes stay in run config and the internal evidence
 ledger.
+
+The audio-import v1 envelope freezes the import batch/root trace, connector/version/platform
+binding, platform scope, HTTPS origin/path, opaque credential reference, pagination and field
+mapping, cursor policy, target asset, dedupe policy, and the exact tenant/project/run object
+prefix. The code location rejects scope drift, unknown fields, plaintext or credential-bearing
+URLs, non-public DNS results, redirects, oversized listing/audio responses and malformed WAV
+content before any object is registered. Each platform request resolves the logical host once,
+rejects the request if any answer is non-public, and opens the TCP connection directly to one of
+those verified addresses while retaining the frozen hostname for TLS certificate verification,
+SNI and the HTTP `Host` header. The HTTP stack cannot perform a second logical-host resolution.
+
+Platform discovery uses bounded cursor pagination. Download URLs may contain an expiring query
+signature, but are never returned in the result, written to the manifest, logged, or sent the
+connector authorization header. CDN hosts must match the platform origin or the exact
+`AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS` allowlist. Audio is streamed into a bounded spooled file,
+length/type/RIFF-WAVE structure and SHA-256 are verified, then conditionally written to a
+content-addressed key under the frozen run prefix. A successful write must return a non-null exact
+MinIO/S3 version ID and a canonical strong ETag; retries reuse the exact current version only when
+its stored length/type/hash metadata and strong ETag are present. Missing, malformed or weak ETags
+fail closed.
+
+The platform tenant is enforced by a dedicated credential binding rather than by a caller-selected
+query/header. The binding must exactly match tenant, project, platform connection, external tenant
+and HTTPS origin before its headers can be loaded. If the frozen platform scope contains stores,
+`field_mapping.store_ref` is mandatory and every source record is checked against that exact
+allowlist before its audio URL is fetched. The frozen `cursor_policy.field` is also mandatory on
+every record. In the v1 contract it is a persistent incremental cursor, not an opaque page-only
+token: values must be bounded, comparable, unique and strictly increasing across the frozen
+window. Every non-terminal `next_cursor_path` value must equal that page's final normalized record
+cursor; an empty page cannot carry a next cursor. Type changes, equal/regressed values, a mismatched
+next cursor, or a duplicate `external_record_id` fail the whole batch before any record on that
+page is downloaded. This makes a page-boundary cursor safe to reuse in the next run without
+silently advancing past an unverified record. Item failures still prevent the BFF from advancing
+the candidate.
+
+The execution deadline is enforced before network calls and around every listing, download and
+object-upload chunk; socket timeout alone is not treated as a wall-clock deadline. A run also has
+a hard total audio-byte budget. Each declared audio `Content-Length` is reserved before the first
+body byte is read and remains charged even if download, MIME or WAV validation later fails, so
+invalid items cannot bypass the budget.
+
+After all pages finish, the job writes a canonical, content-addressed
+`auris-flow-audio-import-manifest-v1`. The signed completion contains the manifest descriptor,
+per-item source metadata and exact version/ETag object binding, all storage descriptors (including
+the manifest ETag), batch status and
+`total/succeeded/skipped/failed/next_cursor_candidate` metrics. A completed empty window and a
+completed batch whose individual downloads all failed are both operationally successful
+completions: `batch_status` remains the business result so the BFF can materialize zero items or
+the concrete failures. Listing, pagination, credential, manifest or storage-control failures send
+a failed completion instead.
+
+Platform credentials are resolved only inside the code location. Prefer a secret-mounted JSON
+file configured by `AURIS_PLATFORM_CREDENTIAL_BINDINGS_FILE`:
+
+```json
+{
+  "secret://platform/recordings-reader": {
+    "tenant_id": "aurora_auto",
+    "project_id": "sales_qa",
+    "platform_connection_id": "platform_connection_001",
+    "platform_tenant_ref": "external_tenant_001",
+    "base_url": "https://recordings.example.com",
+    "headers": {
+      "Authorization": "Bearer <secret>"
+    }
+  }
+}
+```
+
+Allowed header names are `Authorization`, `X-API-Key`, and `X-Auth-Token`. As a simpler bearer-only
+fallback is intentionally unsupported: a header-only token cannot prove its tenant, project,
+platform-connection and origin binding. The opaque reference is used only as an exact JSON key and
+is never interpolated into a filesystem path.
 
 The code location signs an exact `GET ?versionId=...` against the allowlisted MinIO/S3 bucket,
 streams the response, checks the returned version ID/length/type, and recomputes SHA-256. It then
@@ -51,6 +127,22 @@ flows. It does not claim to perform ASR, embedding, evaluation, or other semanti
 The job reports either success or failure to
 `/api/v1/runs/{run_id}/external-completion-receipts`. Its canonical HMAC message is kept under an
 independent contract test against the BFF verifier.
+
+Audio import also reports executor-owned stages to
+`/api/v1/runs/{run_id}/external-progress-receipts`: `downloading` immediately before the first
+audio fetch and `verifying` after item processing but before the manifest write. Progress uses the
+same scoped HMAC/keyring/replay protection as completion, with a stable
+`dagster-progress:{dagster_run_id}:{stage}` idempotency key. Dagster cannot set the BFF-owned
+`queued`, `listing`, `materializing`, `completed`, or `failed` stages.
+
+`downloading` is a registration barrier: source download cannot begin until the BFF has verified,
+persisted and acknowledged that signed stage receipt. Only the explicit transient conflict codes
+`AUDIO_IMPORT_PROGRESS_DISPATCH_BINDING_MISSING`,
+`AUDIO_IMPORT_PROGRESS_BATCH_NOT_RUNNING`, and `IDEMPOTENCY_REQUEST_IN_PROGRESS` are retryable.
+They use exponential `0.5/1/2/4s` (4-second capped) backoff through the immutable execution
+deadline; every retry keeps the body and idempotency key stable but uses a fresh timestamp and
+nonce. All other HTTP 409 conflicts fail immediately. `verifying` retains the bounded five-attempt
+delivery policy.
 
 - The completion receipt ID and business idempotency key are stable for a Dagster run.
 - Every network attempt uses a fresh timestamp and nonce, so transport retries remain idempotent

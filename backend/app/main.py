@@ -7,7 +7,6 @@ import math
 import os
 import re
 import time
-import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from http.client import HTTPException
@@ -35,6 +34,7 @@ from app.api.routers import (
     generic,
     hotwords,
     human_review,
+    imports,
     insights,
     label_closed_loop,
     label_fact_sets,
@@ -50,6 +50,7 @@ from app.api.routers import (
     scene_profiles,
     task_runs,
     traces,
+    workspace_context,
 )
 from app.core.auth import get_auth_provider
 from app.core.config import _csv_items, get_settings, is_production_environment
@@ -62,6 +63,12 @@ from app.core.observability import annotate_current_span, configure_observabilit
 from app.core.oidc import OIDCError
 from app.core.oidc_transaction import clear_authorization_transaction_cookie
 from app.core.rate_limit import build_rate_limiter
+from app.core.request_identifiers import (
+    is_safe_request_identifier,
+    safe_idempotency_key_for_response,
+    sanitized_request_id,
+    server_generated_public_id,
+)
 from app.schemas import ApiErrorEnvelope
 from app.services.adapters import object_storage_client_for_provider
 
@@ -114,10 +121,14 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
     responses={
+        413: {
+            "model": ApiErrorEnvelope,
+            "description": "请求体超过服务端允许的上限",
+        },
         422: {
             "model": ApiErrorEnvelope,
             "description": "请求路径、查询、请求头或请求体校验失败",
-        }
+        },
     },
 )
 app.state.rate_limiter = build_rate_limiter(settings)
@@ -154,14 +165,93 @@ def apply_security_headers(response: Response) -> None:
         )
 
 
+def _request_body_too_large() -> ApiError:
+    return ApiError(
+        "REQUEST_BODY_TOO_LARGE",
+        "请求体超过服务端允许的上限",
+        413,
+        details=[{"max_bytes": settings.max_request_body_bytes}],
+    )
+
+
+def _invalid_idempotency_key(*, duplicate: bool) -> ApiError:
+    return ApiError(
+        "VALIDATION_ERROR",
+        "请求参数校验失败",
+        422,
+        details=[
+            {
+                "field": "header.Idempotency-Key",
+                "message": (
+                    "Idempotency-Key 不能重复"
+                    if duplicate
+                    else "Idempotency-Key 必须是 1–128 个受限 ASCII 字符"
+                ),
+                "code": "header_duplicate" if duplicate else "string_pattern_mismatch",
+            }
+        ],
+    )
+
+
+def _single_request_id_header(request: Request) -> str | None:
+    values = request.headers.getlist("X-Request-Id")
+    return values[0] if len(values) == 1 else None
+
+
+async def _preload_bounded_request_body(request: Request) -> None:
+    """Bound both declared and streamed request bodies before handlers parse them."""
+
+    declared_values = request.headers.getlist("Content-Length")
+    transfer_encoding_values = request.headers.getlist("Transfer-Encoding")
+    if len(declared_values) > 1 or len(transfer_encoding_values) > 1:
+        raise ApiError(
+            "REQUEST_FRAMING_AMBIGUOUS",
+            "请求包含重复的消息分帧头",
+            400,
+        )
+    declared = declared_values[0] if declared_values else None
+    transfer_encoding = transfer_encoding_values[0] if transfer_encoding_values else None
+    if declared is not None and transfer_encoding is not None:
+        raise ApiError(
+            "REQUEST_FRAMING_AMBIGUOUS",
+            "请求不能同时包含 Content-Length 和 Transfer-Encoding",
+            400,
+        )
+    if declared is not None:
+        if not declared.isascii() or not declared.isdecimal():
+            raise ApiError("CONTENT_LENGTH_INVALID", "Content-Length 格式无效", 400)
+        declared_length = int(declared)
+        if declared_length > settings.max_request_body_bytes:
+            raise _request_body_too_large()
+        if declared_length == 0:
+            return
+    elif transfer_encoding is None and request.method in {
+        "GET",
+        "HEAD",
+        "OPTIONS",
+    }:
+        return
+
+    chunks: list[bytes] = []
+    total = 0
+    async for chunk in request.stream():
+        total += len(chunk)
+        if total > settings.max_request_body_bytes:
+            raise _request_body_too_large()
+        chunks.append(chunk)
+    # Starlette reuses this cached body when call_next constructs the downstream
+    # request, so chunked requests cannot bypass the streaming byte budget.
+    request._body = b"".join(chunks)
+
+
 @app.middleware("http")
 async def request_logging_middleware(
     request: Request,
     call_next: RequestResponseEndpoint,
 ) -> Response:
-    request.state.trace_id = f"trace_{uuid.uuid4().hex}"
+    request.state.trace_id = server_generated_public_id("trace", suffix_length=32)
     request.state.server_trace_initialized = True
-    request.state.request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+    request.state.request_id = sanitized_request_id(_single_request_id_header(request))
     annotate_current_span(
         business_trace_id=request.state.trace_id,
         request_id=request.state.request_id,
@@ -179,13 +269,39 @@ async def request_logging_middleware(
         )
     response: Response | None = None
     rate_limit_decision = None
-    if settings.rate_limit_per_minute > 0 and request.url.path not in {
-        "/healthz",
-        "/readyz",
-        "/metrics",
-        "/docs",
-        "/openapi.json",
-    }:
+    idempotency_values = request.headers.getlist("Idempotency-Key")
+    if idempotency_values and (
+        len(idempotency_values) != 1 or not is_safe_request_identifier(idempotency_values[0])
+    ):
+        duplicate = len(idempotency_values) != 1
+        api_error = _invalid_idempotency_key(duplicate=duplicate)
+        log_event(
+            logger,
+            "http.request.rejected",
+            level=logging.WARNING,
+            method=request.method,
+            path=request.url.path,
+            status_code=api_error.status_code,
+            error_code=api_error.code,
+            request_id=request.state.request_id,
+            trace_id=request.state.trace_id,
+        )
+        response = JSONResponse(
+            status_code=api_error.status_code,
+            content=error_payload(request, api_error),
+        )
+    if (
+        response is None
+        and settings.rate_limit_per_minute > 0
+        and request.url.path
+        not in {
+            "/healthz",
+            "/readyz",
+            "/metrics",
+            "/docs",
+            "/openapi.json",
+        }
+    ):
         # Authentication runs downstream. Using an unverified bearer token here would let
         # callers rotate invalid tokens to obtain a fresh rate-limit bucket every request.
         actor_source = (request.client.host if request.client else None) or "unknown"
@@ -230,6 +346,25 @@ async def request_logging_middleware(
                 status_code=api_error.status_code,
                 content=error_payload(request, api_error),
                 headers={"Retry-After": str(rate_limit_decision.reset_after_seconds)},
+            )
+    if response is None:
+        try:
+            await _preload_bounded_request_body(request)
+        except ApiError as exc:
+            log_event(
+                logger,
+                "http.request.rejected",
+                level=logging.WARNING,
+                method=request.method,
+                path=request.url.path,
+                status_code=exc.status_code,
+                error_code=exc.code,
+                request_id=request.state.request_id,
+                trace_id=request.state.trace_id,
+            )
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content=error_payload(request, exc),
             )
     if response is None:
         try:
@@ -293,12 +428,18 @@ async def request_logging_middleware(
 def error_payload(request: Request, exc: ApiError) -> dict:
     trace_id = getattr(request.state, "trace_id", None)
     if not trace_id:
-        trace_id = f"trace_{uuid.uuid4().hex}"
+        trace_id = server_generated_public_id("trace", suffix_length=32)
         request.state.trace_id = trace_id
     request_id = getattr(request.state, "request_id", None)
     if not request_id:
-        request_id = request.headers.get("X-Request-Id") or str(uuid.uuid4())
+        request_id = sanitized_request_id(_single_request_id_header(request))
         request.state.request_id = request_id
+    idempotency_values = request.headers.getlist("Idempotency-Key")
+    idempotency_key = (
+        safe_idempotency_key_for_response(idempotency_values[0])
+        if len(idempotency_values) == 1
+        else None
+    )
     return {
         "error": {
             "code": exc.code,
@@ -308,7 +449,7 @@ def error_payload(request: Request, exc: ApiError) -> dict:
             "retryable": exc.retryable,
             "trace_id": trace_id,
             "request_id": request_id,
-            "idempotency_key": request.headers.get("Idempotency-Key"),
+            "idempotency_key": idempotency_key,
         }
     }
 
@@ -582,13 +723,13 @@ def readyz() -> JSONResponse:
         if strict_mode:
             checks = {"auth"}
             if is_production_environment(settings.app_env):
-                checks.update({"dagster", "observability"})
+                checks.add("dagster")
             if configured and configured != "auto":
                 checks.update(item.strip() for item in configured.split(",") if item.strip())
                 return checks
             automatic = {"auth", "database", "redis", "object_storage", "qdrant"}
             if is_production_environment(settings.app_env):
-                automatic.update({"dagster", "observability"})
+                automatic.add("dagster")
             return automatic
         if configured and configured != "auto":
             return {item.strip() for item in configured.split(",") if item.strip()}
@@ -763,6 +904,8 @@ for router in [
     prompt_candidate_reviews.router,
     prompt_release.router,
     traces.router,
+    workspace_context.router,
+    imports.router,
     generic.router,
 ]:
     app.include_router(router, prefix=settings.api_prefix)
@@ -800,19 +943,21 @@ def _openapi_with_completion_hmac_security() -> dict[str, Any]:
             },
         }
     )
-    operation = document["paths"][
-        f"{settings.api_prefix}/runs/{{id}}/external-completion-receipts"
-    ]["post"]
-    operation["security"] = [
-        {
-            "aurisCompletionSignature": [],
-            "aurisCompletionKeyId": [],
-        },
-        {
-            "aurisCompletionSignature": [],
-            "aurisCompletionLegacyKeyId": [],
-        },
-    ]
+    for receipt_path in (
+        "external-completion-receipts",
+        "external-progress-receipts",
+    ):
+        operation = document["paths"][f"{settings.api_prefix}/runs/{{id}}/{receipt_path}"]["post"]
+        operation["security"] = [
+            {
+                "aurisCompletionSignature": [],
+                "aurisCompletionKeyId": [],
+            },
+            {
+                "aurisCompletionSignature": [],
+                "aurisCompletionLegacyKeyId": [],
+            },
+        ]
     return document
 
 

@@ -113,6 +113,11 @@ RESOURCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyType(
 # cannot accidentally expose a new runtime projection collection.
 TRACE_REFERENCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyType(
     {
+        "browser_auth_sessions": ResourceReadPolicy(
+            "sensitive",
+            ("project_admin",),
+        ),
+        "import_batches": ResourceReadPolicy("standard"),
         "label_recompute_runs": ResourceReadPolicy(
             "sensitive",
             ("project_admin", "model_engineer"),
@@ -120,6 +125,10 @@ TRACE_REFERENCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyTy
         "oidc_identities": ResourceReadPolicy(
             "sensitive",
             ("project_admin",),
+        ),
+        "qdrant_rebuild_plans": ResourceReadPolicy(
+            "sensitive",
+            ("project_admin", "asset_manager"),
         ),
     }
 )
@@ -175,6 +184,7 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "badcase": "work_items",
         "badcase_candidate": "work_items",
         "boundary_sync": "conversation_boundaries",
+        "browser_auth_session": "browser_auth_sessions",
         "calibration_assignment": "work_items",
         "calibration_item": "work_items",
         "calibration_round": "work_items",
@@ -224,6 +234,8 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "insight_metric_aggregation": "insight_reports",
         "insight_report": "insight_reports",
         "insight_report_metric_binding": "insight_reports",
+        "import_batch": "import_batches",
+        "import_batch_item": "import_batches",
         "knowledge_build": "knowledge_indexes",
         "knowledge_effect": "knowledge_effects",
         "knowledge_index": "knowledge_indexes",
@@ -288,6 +300,7 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "prompt_regression": "eval_datasets",
         "provider_test": "settings",
         "quality_appeal": "work_items",
+        "qdrant_rebuild_plan": "qdrant_rebuild_plans",
         "recording": "recordings",
         "release_bundle_head": "task_versions",
         "release_bundle_head_event": "task_versions",

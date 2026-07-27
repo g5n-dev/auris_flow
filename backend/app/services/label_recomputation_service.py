@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
+from app.core.request_identifiers import public_id_from_hex
 from app.models import (
     AuditLog,
     LabelAggregate,
@@ -62,7 +63,11 @@ def _iso(value: datetime) -> str:
 
 
 def _id(prefix: str, document: Any) -> str:
-    return f"{prefix}_{strict_canonical_sha256(document)[:24]}"
+    return public_id_from_hex(
+        prefix,
+        strict_canonical_sha256(document),
+        suffix_length=24,
+    )
 
 
 def _request_hash(

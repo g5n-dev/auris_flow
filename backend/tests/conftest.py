@@ -20,6 +20,7 @@ os.environ["COMPLETION_RECEIPT_SIGNATURE_ID"] = "auris-test-completion"
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.core.database import SessionLocal, engine  # noqa: E402
+from app.core.secrets import SecretFileSettingsSource  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models import Base  # noqa: E402
 from app.services.resource_service import load_seed_file, seed_database  # noqa: E402
@@ -81,3 +82,27 @@ def auth_headers() -> dict[str, str]:
         "X-Project-Id": "sales_qa",
         "X-Request-Id": "pytest-request",
     }
+
+
+@pytest.fixture
+def allow_inline_production_settings_for_policy_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Isolate cross-field model checks from the separately tested source policy."""
+
+    original = SecretFileSettingsSource._has_nonempty_inline_value
+
+    def ignore_initializer_values(
+        source: SecretFileSettingsSource,
+        field_name: str,
+    ) -> bool:
+        init_values = source.settings_sources_data.get("InitSettingsSource", {})
+        if field_name in init_values:
+            return False
+        return original(source, field_name)
+
+    monkeypatch.setattr(
+        SecretFileSettingsSource,
+        "_has_nonempty_inline_value",
+        ignore_initializer_values,
+    )

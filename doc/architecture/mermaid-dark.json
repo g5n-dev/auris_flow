@@ -1,0 +1,26 @@
+{
+  "theme": "base",
+  "securityLevel": "strict",
+  "htmlLabels": false,
+  "themeCSS": ".edgeLabel text { fill: #E6EDF7 !important; }",
+  "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif",
+  "themeVariables": {
+    "background": "#0B1220",
+    "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif",
+    "fontSize": "15px",
+    "textColor": "#E6EDF7",
+    "primaryTextColor": "#10203C",
+    "lineColor": "#94A3B8",
+    "clusterBkg": "#111C2F",
+    "clusterBorder": "#3B4A63",
+    "titleColor": "#F8FAFC",
+    "edgeLabelBackground": "#111C2F"
+  },
+  "flowchart": {
+    "htmlLabels": false,
+    "curve": "basis",
+    "nodeSpacing": 34,
+    "rankSpacing": 58,
+    "diagramPadding": 20
+  }
+}

@@ -209,6 +209,46 @@ class ExternalRunCompletionReceiptRequest(RunCompletionReceiptRequest):
         return value
 
 
+class ExternalRunProgressReceiptRequest(BaseModel):
+    """Signed progress contract for the allowlisted Dagster audio-import run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    adapter: Literal["dagster"]
+    source: Literal["dagster"]
+    progress_receipt_id: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_:-]{0,255}$",
+    )
+    tenant_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+    )
+    project_id: str = Field(
+        min_length=1,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$",
+    )
+    task_run_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+    )
+    external_id: str = Field(
+        min_length=1,
+        max_length=256,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,255}$",
+    )
+    import_batch_id: str = Field(
+        min_length=1,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+    )
+    stage: Literal["downloading", "verifying"]
+
+
 HumanReviewDecision = Literal[
     "accepted",
     "approved",

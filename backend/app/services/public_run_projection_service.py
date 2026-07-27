@@ -173,10 +173,24 @@ _PUBLIC_PHONE_LIKE_SHA256_FIELDS = frozenset(
         "content_sha256",
         "decision_sha256",
         "executed_task_version_binding_sha256",
+        "expected_executed_bundle_sha256",
+        "experiment_design_sha256",
+        "experiment_subject_key_sha256",
+        "experiment_variant_diff_sha256",
         "request_sha256",
         "result_manifest_sha256",
+        "scene_profile_snapshot_sha256",
+        "task_version_behavior_sha256",
+        "task_version_binding_sha256",
     }
 )
+_EXPERIMENT_COMPLETION_PHONE_LIKE_SHA256_FIELDS = frozenset(
+    {
+        "completion_receipt_sha256",
+        "design_sha256",
+    }
+)
+_EXPERIMENT_COMPLETION_CONTEXT_FINGERPRINT = json_key_fingerprint("experiment_completion")
 _STABLE_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9_]{2,127}$")
 _PUBLIC_STORAGE_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _PUBLIC_STORAGE_ROLE_ALIASES = {
@@ -554,15 +568,17 @@ def _is_safe_phone_like_sha256(
     value: str,
     *,
     field_name: str,
+    parent_context_fingerprint: str | None,
     redacted: str,
 ) -> bool:
     """Keep a canonical SHA-256 stable when digits resemble a phone number."""
 
     normalized = re.sub(r"[^a-z0-9]+", "_", normalize_json_key(field_name)).strip("_")
-    if (
-        normalized not in _PUBLIC_PHONE_LIKE_SHA256_FIELDS
-        or _SHA256_PATTERN.fullmatch(value) is None
-    ):
+    field_is_server_issued = normalized in _PUBLIC_PHONE_LIKE_SHA256_FIELDS or (
+        parent_context_fingerprint == _EXPERIMENT_COMPLETION_CONTEXT_FINGERPRINT
+        and normalized in _EXPERIMENT_COMPLETION_PHONE_LIKE_SHA256_FIELDS
+    )
+    if not field_is_server_issued or _SHA256_PATTERN.fullmatch(value) is None:
         return False
     if "[REDACTED_SECRET]" in redacted:
         return False
@@ -580,7 +596,12 @@ def _is_safe_phone_like_sha256(
     )
 
 
-def sanitize_public_run_string(value: str, *, field_name: str) -> str:
+def sanitize_public_run_string(
+    value: str,
+    *,
+    field_name: str,
+    parent_context_fingerprint: str | None = None,
+) -> str:
     visible_value = _visible_string(value)
     security_value = visible_value.translate(_CONFUSABLE_TRANSLATION)
     normalized_value = security_value.casefold()
@@ -610,6 +631,7 @@ def sanitize_public_run_string(value: str, *, field_name: str) -> str:
         if _is_safe_phone_like_sha256(
             sanitized,
             field_name=field_name,
+            parent_context_fingerprint=parent_context_fingerprint,
             redacted=redacted,
         ):
             return sanitized
@@ -811,7 +833,11 @@ def _project_value(
         if normalize_json_key(field_name) in {"href", "route"}:
             navigation_path = project_public_navigation_path(value, field_name=field_name)
             return navigation_path if navigation_path is not None else _OMITTED
-        return sanitize_public_run_string(value, field_name=field_name)
+        return sanitize_public_run_string(
+            value,
+            field_name=field_name,
+            parent_context_fingerprint=parent_context_fingerprint,
+        )
     if isinstance(value, (bytes, bytearray)):
         return _OMITTED
     if value is None or isinstance(value, (bool, int)):

@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.domain.label_mapping import sha256_document
 from app.models import (
     LabelFactSet,
@@ -419,7 +420,12 @@ def lock_label_metric_run_scope(
                 details=[{"metric_key": metric_key or None}],
             )
         materialize_request = LabelMetricResultMaterializeRequest(
-            metric_result_id=f"scope-lock-{sha256_document([metric_key])[:24]}",
+            metric_result_id=public_id_from_hex(
+                "scope-lock",
+                sha256_document([metric_key]),
+                suffix_length=24,
+                separator="-",
+            ),
             metric_key=metric_key,
             metric_family=metric_family,
             value=0,
@@ -670,7 +676,7 @@ def materialize_label_metric_result(
     )
     session.add(metric)
     session.flush()
-    metric_scope_id = f"lms_{scope_sha256[:24]}"
+    metric_scope_id = public_id_from_hex("lms", scope_sha256, suffix_length=24)
     scope = MetricResultLabelScope(
         metric_scope_id=metric_scope_id,
         tenant_id=ctx.tenant_id,

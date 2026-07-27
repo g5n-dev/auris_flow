@@ -410,7 +410,7 @@ def test_oidc_bearer_cannot_cross_tenant_even_with_project_membership() -> None:
     assert captured.value.status_code == 404
 
 
-def test_existing_session_is_rejected_when_identity_project_binding_changes() -> None:
+def test_identity_default_project_change_does_not_retarget_an_existing_session() -> None:
     issued = _issue()
     _add_authorized_secondary_project()
     with SessionLocal.begin() as session:
@@ -418,11 +418,10 @@ def test_existing_session_is_rejected_when_identity_project_binding_changes() ->
         assert identity is not None
         identity.project_id = "sales_qa_secondary"
 
-    with pytest.raises(ApiError) as captured:
-        _authenticate(issued.raw_token)
+    actor = _authenticate(issued.raw_token)
 
-    assert captured.value.code == "AUTH_SCOPE_REJECTED"
-    assert captured.value.status_code == 404
+    assert actor.project_ids == ("sales_qa",)
+    assert actor.roles == ("annotator", "review_arbitrator")
 
 
 def test_expired_revoked_unknown_and_cross_project_sessions_fail_closed() -> None:

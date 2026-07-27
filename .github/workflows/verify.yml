@@ -8,8 +8,6 @@ on:
   push:
     branches:
       - main
-      - master
-      - "codex/open-source-v1-candidate"
       - "release/**"
     tags:
       - "v*"
@@ -24,87 +22,236 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  group: verify-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AURIS_RELEASE_CHECK: "0"
+  AURIS_RUN_E2E: "0"
+
 jobs:
-  clean-clone-reproducibility:
-    name: Clean clone reproducibility
+  policy:
+    name: Static and policy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install locked backend environment
+        run: |
+          python -m pip install "uv==0.10.0"
+          uv sync --locked --all-extras --project backend
+      - name: Run static and repository policy gates
+        env:
+          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
+        run: bash scripts/verify_static.sh
+
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-24.04
+    # The coverage-instrumented suite takes about 35 minutes on hosted runners.
+    # Keep enough headroom for JUnit upload and runner cleanup.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - name: Install locked backend environment
+        run: |
+          python -m pip install "uv==0.10.0"
+          uv sync --locked --all-extras --project backend
+      - name: Run backend tests and smoke
+        env:
+          AURIS_JUNIT_DIR: ${{ github.workspace }}/build/ci-results
+          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
+        run: bash scripts/verify_backend.sh
+      - name: Upload backend test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: backend-test-report-${{ github.sha }}
+          path: build/ci-results/
+          if-no-files-found: warn
+          retention-days: 14
+
+  production-tests:
+    name: Production policy tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
-
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - name: Install locked backend environment
+        run: |
+          python -m pip install "uv==0.10.0"
+          uv sync --locked --all-extras --project backend
+      - name: Run production policy tests
+        env:
+          AURIS_JUNIT_DIR: ${{ github.workspace }}/build/ci-results
+          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
+        run: bash scripts/verify_production_tests.sh
+      - name: Upload production test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          node-version: "22"
+          name: production-test-report-${{ github.sha }}
+          path: build/ci-results/
+          if-no-files-found: warn
+          retention-days: 14
 
+  dagster:
+    name: Dagster tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
       - name: Install pinned uv
         run: python -m pip install "uv==0.10.0"
-
-      - name: Restore clean-clone download caches
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
-        with:
-          path: ${{ runner.temp }}/auris-flow-clean-clone-cache
-          key: clean-clone-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/uv.lock', 'production/dagster/uv.lock', 'prototype/auris-flow-ui/package-lock.json') }}
-          restore-keys: |
-            clean-clone-${{ runner.os }}-${{ runner.arch }}-
-
-      - name: Test the clean-clone gate harness
-        run: python scripts/tests/test_verify_clean_clone.py
-
-      - name: Rebuild and verify the committed tree from a clean clone
+      - name: Run Dagster package gates
         env:
-          AURIS_CLEAN_CLONE_CACHE_DIR: ${{ runner.temp }}/auris-flow-clean-clone-cache
-        run: bash scripts/verify_clean_clone.sh
+          AURIS_JUNIT_DIR: ${{ github.workspace }}/build/ci-results
+        run: bash scripts/verify_dagster_tests.sh
+      - name: Upload Dagster test report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dagster-test-report-${{ github.sha }}
+          path: build/ci-results/
+          if-no-files-found: warn
+          retention-days: 14
 
-  verify:
-    needs: clean-clone-reproducibility
+  frontend:
+    name: Frontend architecture and UI
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    env:
-      AURIS_RELEASE_CHECK: "0"
-      AURIS_RUN_E2E: "0"
-
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
-          fetch-depth: 0
           persist-credentials: false
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
-        with:
-          python-version: "3.12"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
           cache-dependency-path: prototype/auris-flow-ui/package-lock.json
+      - name: Install locked frontend dependencies
+        run: npm ci --ignore-scripts --prefix prototype/auris-flow-ui
+      - name: Install Playwright browser
+        working-directory: prototype/auris-flow-ui
+        run: npx playwright install chromium --with-deps
+      - name: Run frontend gates
+        run: bash scripts/verify_frontend.sh
+      - name: Upload frontend diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frontend-diagnostics-${{ github.sha }}
+          path: |
+            prototype/auris-flow-ui/test-results/
+            prototype/auris-flow-ui/playwright-report/
+          if-no-files-found: warn
+          retention-days: 14
 
-      - name: Install locked development dependencies
-        run: |
-          python -m pip install "uv==0.10.0"
-          uv sync --locked --all-extras --project backend
-          npm ci --ignore-scripts --prefix prototype/auris-flow-ui
-
-      - name: Verify the mergeable development baseline
+  clean-clone-reproducibility:
+    name: Clean source proof
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+      - name: Install pinned uv
+        run: python -m pip install "uv==0.10.0"
+      - name: Restore clean-source download caches
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/auris-flow-clean-clone-cache
+          key: clean-source-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('backend/uv.lock', 'production/dagster/uv.lock', 'prototype/auris-flow-ui/package-lock.json') }}
+          restore-keys: |
+            clean-source-${{ runner.os }}-${{ runner.arch }}-
+      - name: Test the clean-source harness
+        run: python scripts/tests/test_verify_clean_clone.py
+      - name: Rebuild the committed tree from Git objects
         env:
-          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
-        run: bash scripts/verify_fast.sh
+          AURIS_CLEAN_CLONE_CACHE_DIR: ${{ runner.temp }}/auris-flow-clean-clone-cache
+        run: bash scripts/verify_clean_clone.sh
+      - name: Upload clean-source evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: clean-source-evidence-${{ github.sha }}
+          path: build/release-evidence/clean-clone.json
+          if-no-files-found: warn
+          retention-days: 14
+
+  verify:
+    name: Verify
+    if: always()
+    needs:
+      - policy
+      - backend
+      - production-tests
+      - dagster
+      - frontend
+      - clean-clone-reproducibility
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Require every verification shard
+        env:
+          POLICY_RESULT: ${{ needs.policy.result }}
+          BACKEND_RESULT: ${{ needs.backend.result }}
+          PRODUCTION_RESULT: ${{ needs.production-tests.result }}
+          DAGSTER_RESULT: ${{ needs.dagster.result }}
+          FRONTEND_RESULT: ${{ needs.frontend.result }}
+          CLEAN_SOURCE_RESULT: ${{ needs.clean-clone-reproducibility.result }}
+        run: |
+          for result in \
+            "${POLICY_RESULT}" \
+            "${BACKEND_RESULT}" \
+            "${PRODUCTION_RESULT}" \
+            "${DAGSTER_RESULT}" \
+            "${FRONTEND_RESULT}" \
+            "${CLEAN_SOURCE_RESULT}"; do
+            if [ "${result}" != "success" ]; then
+              echo "Verification shard did not succeed: ${result}" >&2
+              exit 1
+            fi
+          done
 
   release-verify:
+    name: Release runtime verification
     if: >-
-      github.event_name == 'release' ||
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && inputs.release_check)
+      success() &&
+      (
+        github.event_name == 'release' ||
+        startsWith(github.ref, 'refs/tags/v') ||
+        (github.event_name == 'workflow_dispatch' && inputs.release_check)
+      )
     needs: verify
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -115,62 +262,51 @@ jobs:
       AURIS_RELEASE_CHECK: "1"
       AURIS_RUN_E2E: "1"
       AURIS_VISUAL_RUNTIME: "container"
-
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
           persist-credentials: false
-
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.12"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
           cache: "npm"
           cache-dependency-path: prototype/auris-flow-ui/package-lock.json
-
       # oras-project/setup-oras v1.2.3
       - uses: oras-project/setup-oras@8d34698a59f5ffe24821f0b48ab62a3de8b64b20
         with:
           version: "1.2.3"
-
       # docker/login-action v3.4.0
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-
       # sigstore/cosign-installer v3.9.2
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159
         with:
           cosign-release: "v2.5.3"
-
-      - name: Install locked Python dependencies
+      - name: Install locked project dependencies
         run: |
           python -m pip install "uv==0.10.0"
           uv sync --locked --all-extras --project backend
           uv sync --locked --all-extras --project production/dagster
-
-      - name: Install frontend dependencies
-        run: npm ci --prefix prototype/auris-flow-ui
-
+          npm ci --prefix prototype/auris-flow-ui
       - name: Install Playwright browser
         working-directory: prototype/auris-flow-ui
         run: npx playwright install chromium --with-deps
-
       - name: Verify strict pre-image release gates
         env:
           PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
         run: bash scripts/verify_release.sh --pre-image
-
       - name: Upload release supply-chain evidence
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: auris-flow-release-evidence-${{ github.sha }}
           path: build/release-evidence/
-          if-no-files-found: error
+          if-no-files-found: warn
           retention-days: 30

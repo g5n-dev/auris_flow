@@ -213,14 +213,10 @@ export function useDataWorkspace({
       : "当前数据对象未绑定可验证的目标资产，项目级导出保持禁用";
 
   const operations = createDataOperations({
-    activeTab,
     aggregateFilters,
     aggregationOrder,
     dataAction,
     dataExportRun,
-    isRelationView,
-    canImportConnector,
-    connectorImportBlockedReason,
     canExportData,
     dataExportBlockedReason,
     sceneProfileLock,

@@ -104,6 +104,6 @@ SEV-1/2 在 5 个工作日内完成无责 postmortem，记录根因、探测差�
 
 ## 桌面演练
 
-每季度和每个正式 RC 至少演练一次：跨租户疑似读取、OIDC/JWKS key compromise、callback replay、
+每季度和每个候选提交至少演练一次：跨租户疑似读取、OIDC/JWKS key compromise、callback replay、
 供应链镜像异常和宿主机/backup 恢复。记录发现到确认、遏制、轮换、恢复、通知的耗时，以及本
 Runbook 中无法执行的步骤；未解决的 SEV-1/2 演练缺口是 release blocker。

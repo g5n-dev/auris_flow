@@ -4,7 +4,7 @@
 
 本 Runbook 覆盖单机 Compose 基线中的 OIDC JWKS、外部 callback、Dagster completion receipt、
 数据库/Redis/对象存储/Qdrant/embedding、Grafana 和 TLS。当前仍是 `v1.0.0` 候选，所有流程须先在
-隔离 RC 环境演练。
+隔离的无标签 staging 环境演练。
 
 - 所有新 secret 由 CSPRNG 或企业 secret manager 生成，至少 32 个随机字节；不在工单、聊天、
   shell history、命令行参数、Git、镜像或日志中传值。

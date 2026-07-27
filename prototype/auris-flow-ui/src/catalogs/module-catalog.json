@@ -64,7 +64,7 @@
     "tenants": {
       "eyebrow": "平台管理 / 多租户隔离",
       "title": "租户管理",
-      "scope": "资源配额、成员权限、ASR 数据接入、全局审计",
+      "scope": "资源配额、成员权限、平台音频接入、全局审计",
       "tabs": [
         {
           "id": "overview",
@@ -80,7 +80,7 @@
         },
         {
           "id": "asr",
-          "label": "ASR 接入"
+          "label": "音频接入"
         },
         {
           "id": "quota",
@@ -105,7 +105,7 @@
           "tone": "blue"
         },
         {
-          "label": "ASR 接入",
+          "label": "音频接入",
           "value": "6",
           "delta": "2 待授权",
           "tone": "green"
@@ -752,7 +752,7 @@
       "exportName": "运营首页处理闭环报表"
     },
     "tenants": {
-      "searchPlaceholder": "搜索租户、成员、项目、ASR 接入、审计事件",
+      "searchPlaceholder": "搜索租户、成员、项目、音频接入、审计事件",
       "search": [
         {
           "label": "极光汽车",
@@ -760,8 +760,8 @@
           "route": "tenants"
         },
         {
-          "label": "ASR 增量拉取",
-          "meta": "火山 ASR / 5 分钟 sensor / 41 成功",
+          "label": "平台音频拉取",
+          "meta": "录音 URL API / 手动拉取 / 41 成功",
           "route": "tenants"
         },
         {
@@ -805,10 +805,10 @@
           "detail": "创建隔离边界，不自动造业务数据"
         },
         {
-          "action": "配置 ASR 接入",
+          "action": "配置音频接入",
           "target": "租户授权",
           "route": "tenants",
-          "detail": "登记外部 ASR 拉取凭证、游标、输出资产和审计范围"
+          "detail": "绑定平台连接、credential_ref、录音 URL API、游标和输出资产"
         },
         {
           "action": "调整配额",

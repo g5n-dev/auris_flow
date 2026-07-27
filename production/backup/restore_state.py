@@ -452,6 +452,17 @@ def _key_id(public_der: bytes) -> str:
     return f"ed25519-sha256:{hashlib.sha256(public_der).hexdigest()}"
 
 
+def _write_private_bytes(path: Path, payload: bytes) -> None:
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+
+
 @contextmanager
 def _validated_key_pair(
     private_raw: str | Path,
@@ -465,10 +476,8 @@ def _validated_key_pair(
         root = Path(temporary)
         private_key = root / "private.pem"
         public_key = root / "public.pem"
-        private_key.write_bytes(private_payload)
-        public_key.write_bytes(public_payload)
-        private_key.chmod(0o600)
-        public_key.chmod(0o600)
+        _write_private_bytes(private_key, private_payload)
+        _write_private_bytes(public_key, public_payload)
         private_public = _public_der(private_key, private=True)
         trusted_public = _public_der(public_key, private=False)
         if not hmac.compare_digest(private_public, trusted_public):
@@ -506,8 +515,8 @@ def _openssl_sign(payload: bytes, private_key: Path) -> bytes:
         root = Path(temporary)
         payload_path = root / "statement.json"
         signature_path = root / "signature.bin"
-        payload_path.write_bytes(payload)
-        payload_path.chmod(0o600)
+        _write_private_bytes(payload_path, payload)
+        _write_private_bytes(signature_path, b"")
         _run_openssl(
             [
                 "pkeyutl",
@@ -534,10 +543,8 @@ def _openssl_verify(payload: bytes, signature: bytes, public_key: Path) -> None:
         root = Path(temporary)
         payload_path = root / "statement.json"
         signature_path = root / "signature.bin"
-        payload_path.write_bytes(payload)
-        signature_path.write_bytes(signature)
-        payload_path.chmod(0o600)
-        signature_path.chmod(0o600)
+        _write_private_bytes(payload_path, payload)
+        _write_private_bytes(signature_path, signature)
         _run_openssl(
             [
                 "pkeyutl",
@@ -585,8 +592,7 @@ def _verify_complete_attestation(
     public_payload = _key_bytes(public_raw, private=False)
     with tempfile.TemporaryDirectory(prefix="auris-restore-public-key.") as temporary:
         public_key = Path(temporary) / "public.pem"
-        public_key.write_bytes(public_payload)
-        public_key.chmod(0o600)
+        _write_private_bytes(public_key, public_payload)
         _verify_complete_attestation_with_key(document, public_key)
 
 

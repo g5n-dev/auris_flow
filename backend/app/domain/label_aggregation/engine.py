@@ -36,6 +36,10 @@ SOURCE_PRIORITY: dict[SourceType, int] = {
 }
 
 _PROBABILITY_EPSILON = 1e-12
+_PUBLIC_IDENTIFIER_HEX_TO_ALPHA = str.maketrans(
+    "0123456789abcdef",
+    "abcdefghijklmnop",
+)
 
 
 def normalize_text(value: str) -> str:
@@ -55,6 +59,12 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _sha256(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
+
+
+def _public_id_from_hex(prefix: str, digest: str, *, suffix_length: int) -> str:
+    """Keep the domain pure while making deterministic public IDs PII-safe."""
+
+    return f"{prefix}_{digest[:suffix_length].translate(_PUBLIC_IDENTIFIER_HEX_TO_ALPHA)}"
 
 
 def _clamp_probability(value: float) -> float:
@@ -231,7 +241,11 @@ class LabelAggregationEngine:
             "label_id": definition.label_id,
             "policy_hash": self._policy_hash,
         }
-        aggregate_id = f"agg_{_sha256(identity_payload)[:24]}"
+        aggregate_id = _public_id_from_hex(
+            "agg",
+            _sha256(identity_payload),
+            suffix_length=24,
+        )
         aggregate_payload = {
             **identity_payload,
             "aggregate_id": aggregate_id,

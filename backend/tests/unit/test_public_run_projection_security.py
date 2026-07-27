@@ -280,9 +280,34 @@ def test_public_projection_continues_to_redact_ordinary_phone_values() -> None:
     }
 
 
+def test_public_projection_preserves_server_issued_experiment_sha256_values() -> None:
+    digest = "a13800138000b" + ("c" * 51)
+    source = {
+        "experiment_design_sha256": digest,
+        "experiment_subject_key_sha256": digest,
+        "experiment_variant_diff_sha256": digest,
+        "task_version_behavior_sha256": digest,
+        "task_version_binding_sha256": digest,
+        "expected_executed_bundle_sha256": digest,
+        "scene_profile_snapshot_sha256": digest,
+        "experiment_completion": {
+            "design_sha256": digest,
+            "completion_receipt_sha256": digest,
+        },
+    }
+
+    assert public_run_projection(source) == source
+
+
 @pytest.mark.parametrize(
     "field_name",
-    ("note_sha256", "customer_sha256", "private_key_sha256"),
+    (
+        "note_sha256",
+        "customer_sha256",
+        "private_key_sha256",
+        "design_sha256",
+        "completion_receipt_sha256",
+    ),
 )
 def test_public_projection_does_not_trust_arbitrary_sha256_field_names(
     field_name: str,
@@ -293,6 +318,29 @@ def test_public_projection_does_not_trust_arbitrary_sha256_field_names(
 
     assert "13800138000" not in projection[field_name]
     assert "[REDACTED_PHONE]" in projection[field_name]
+
+
+@pytest.mark.parametrize(
+    "invalid_digest",
+    (
+        "a13800138000b" + ("c" * 50),
+        "A13800138000B" + ("C" * 51),
+    ),
+)
+def test_experiment_completion_rejects_noncanonical_sha256_values(
+    invalid_digest: str,
+) -> None:
+    projection = public_run_projection(
+        {
+            "experiment_completion": {
+                "completion_receipt_sha256": invalid_digest,
+            }
+        }
+    )
+
+    projected_digest = projection["experiment_completion"]["completion_receipt_sha256"]
+    assert "13800138000" not in projected_digest
+    assert "[REDACTED_PHONE]" in projected_digest
 
 
 def test_public_projection_identifier_arrays_omit_hosts_and_never_restore_secrets() -> None:

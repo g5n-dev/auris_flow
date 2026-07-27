@@ -5,19 +5,22 @@ export function ContextSelect({
   value,
   active,
   locked,
+  disabled,
   onClick
 }: {
   label: string;
   value: string;
   active?: boolean;
   locked?: boolean;
+  disabled?: boolean;
   onClick?: () => void;
 }) {
   return (
     <button
       className={[active ? "context-select active" : "context-select", locked ? "locked" : ""].filter(Boolean).join(" ")}
       aria-expanded={locked ? undefined : active}
-      title={locked ? "租户是全局隔离边界，点击进入租户管理" : undefined}
+      title={locked ? "租户为身份隔离边界，当前会话只读" : undefined}
+      disabled={disabled}
       onClick={onClick}
     >
       <span>{label}</span>

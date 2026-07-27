@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from http.client import BadStatusLine, IncompleteRead
 from urllib.parse import quote
@@ -98,7 +99,6 @@ def test_readyz_production_alias_is_strict_by_default(client, monkeypatch):
         "dagster",
         "database",
         "object_storage",
-        "observability",
         "qdrant",
         "redis",
     ]
@@ -120,9 +120,30 @@ def test_readyz_production_cannot_omit_dagster_from_explicit_dependencies(
         "auth",
         "dagster",
         "database",
-        "observability",
     ]
     assert response.json()["data"]["missing_required"]["dagster"] == "not_ready"
+
+
+def test_readyz_production_reports_observability_without_making_it_a_default_dependency(
+    client,
+    monkeypatch,
+):
+    monkeypatch.setattr(settings, "app_env", "prod")
+    monkeypatch.setattr(settings, "auth_provider", "test")
+    monkeypatch.setattr(settings, "dependency_check_mode", "strict")
+    monkeypatch.setattr(settings, "required_dependency_checks", "database")
+    monkeypatch.setattr(app.state.observability, "enabled", False)
+    monkeypatch.setattr(app.state.observability, "error_code", "collector_unavailable")
+    monkeypatch.setattr("app.main.get_auth_provider", lambda: object())
+    monkeypatch.setattr("app.main.probe_dagster_workspace", lambda _url: "ok")
+
+    response = client.get("/readyz")
+
+    assert response.status_code == 200
+    body = response.json()["data"]
+    assert body["checks"]["observability"] == "not_ready"
+    assert body["required_checks"] == ["auth", "dagster", "database"]
+    assert body["missing_required"] == {}
 
 
 def test_readyz_production_requires_reachable_oidc_discovery(client, monkeypatch):
@@ -1752,7 +1773,10 @@ def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers)
     assert arbitrated.status_code == 201
     assert arbitrated.json()["data"]["status"] == "enrolled"
     assert arbitrated.json()["data"]["quality_gate"]["reviewer_role_present"] is True
-    assert arbitrated.json()["data"]["embedding_ref"]["status"] == "pending_qdrant_upsert"
+    assert (
+        arbitrated.json()["data"]["embedding_ref"]["status"] == "dedicated_vector_provider_required"
+    )
+    assert arbitrated.json()["data"]["embedding_ref"]["indexing_enabled"] is False
     with SessionLocal() as session:
         arbitrated_projection = session.get(VoiceprintEnrollment, "vp_a1001_enrollment_arbitrated")
         assert arbitrated_projection is not None
@@ -3376,6 +3400,10 @@ def test_labeling_evaluation_insight_closed_loop_contract(client, auth_headers):
     assert feedback_data["eval_run_id"] == eval_run_id
     assert feedback_data["run_type"] == "eval_feedback"
     assert feedback_data["feedback_task_id"].startswith(f"feedback_{eval_run_id}_")
+    assert re.fullmatch(
+        rf"feedback_{re.escape(eval_run_id)}_[a-p]{{10}}",
+        feedback_data["feedback_task_id"],
+    )
     assert feedback_data["eval_run_trace_id"] == eval_trace_id
     assert {"type": "feedback_task", "id": feedback_data["feedback_task_id"]} in feedback_data[
         "affected_objects"
@@ -3450,6 +3478,7 @@ def test_labeling_evaluation_insight_closed_loop_contract(client, auth_headers):
     assert materialization["source_run_id"] == metric_run_id
     metric_result_ids = materialization["metric_result_ids"]
     assert len(metric_result_ids) == len(metric_keys)
+    assert all(re.fullmatch(r"metric_[a-p]{24}", item) for item in metric_result_ids)
 
     insight_report = client.post(
         "/api/v1/insights/reports",

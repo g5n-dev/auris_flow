@@ -39,7 +39,7 @@ function sessionDuration(startedAt: string, endedAt: string) {
 }
 
 export function projectDataAggregationItems(projectionItems: unknown[] | undefined): DataProjectionResult {
-  if (!projectionItems?.length || projectionItems.some((group) => !isRecordValue(group))) {
+  if (!Array.isArray(projectionItems) || projectionItems.some((group) => !isRecordValue(group))) {
     return { items: [], blockedReason: DATA_PROJECTION_SCHEMA_BLOCKED_REASON };
   }
 
@@ -95,7 +95,5 @@ export function projectDataAggregationItems(projectionItems: unknown[] | undefin
     }
   }
 
-  return rows.length
-    ? { items: rows, blockedReason: "" }
-    : { items: [], blockedReason: DATA_PROJECTION_SCHEMA_BLOCKED_REASON };
+  return { items: rows, blockedReason: "" };
 }

@@ -2,13 +2,14 @@
 
 ## 当前状态
 
-Auris Flow 尚未发布正式版本。当前树是 `v1.0.0` 候选实现；在项目所有者完成许可权利主体签字、
-`v1.0.0-rc.1` 真实发布演练、外部干净安装和所有 release gate 前，不存在受支持的 `v1.0.0`，
-也不存在从旧正式版本升级的既成承诺。
+Auris Flow 尚未发布正式版本。当前树是 `v1.0.0` 候选实现；在精确提交完成私有发行审批、
+无标签 staging 演练、外部干净安装和所有 release gate 前，不存在受支持的 `v1.0.0`，也不存在
+从旧正式版本升级的既成承诺。
 
-仓库根目录的 `VERSION` 是稳定基础版本的唯一真相源。正式 tag `vX.Y.Z` 与候选 tag
-`vX.Y.Z-rc.N` 必须映射到同一 `X.Y.Z`；公共业务 API 前缀固定为 `/api/v{MAJOR}`，其 major
-必须与 `VERSION` 的 MAJOR 一致。
+仓库根目录的 `VERSION` 是稳定基础版本的唯一真相源。当前首发流程不创建公开 RC tag；完成
+无标签 staging 后才创建最终 `vX.Y.Z` annotated tag。若内部工具解析 RC 形式，
+`vX.Y.Z-rc.N` 必须映射到同一 `X.Y.Z`，但公开发行 workflow 仍会拒绝 RC tag。公共业务 API
+前缀固定为 `/api/v{MAJOR}`，其 major 必须与 `VERSION` 的 MAJOR 一致。
 
 ## SemVer 与发行通道
 
@@ -17,7 +18,8 @@ Auris Flow 尚未发布正式版本。当前树是 `v1.0.0` 候选实现；在�
 - `MAJOR`：公开 API、数据库/数据语义或生产配置出现不能由兼容窗口吸收的破坏性变化。
 - `MINOR`：向后兼容的新 API、新资源或可选配置；允许先扩展 schema，不允许提前删除旧读写路径。
 - `PATCH`：保持 API、配置与数据语义兼容的修复。
-- `vX.Y.Z-rc.N`：候选版本，只用于安装、升级、回滚、安全与恢复验收，不承诺生产支持。
+- 无标签 staging：只用于安装、升级、回滚、安全与恢复验收，不承诺生产支持，也不进入公开
+  Release 列表。
 
 release 的源码、镜像 digest、SBOM、签名、checksum、`NOTICE`、迁移说明和 release notes 必须来自
 同一 commit。生产安装引用 digest；可读 tag 只是辅助标识，禁止 `latest`。

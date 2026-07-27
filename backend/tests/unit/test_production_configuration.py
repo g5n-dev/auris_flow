@@ -8,6 +8,8 @@ from pydantic import ValidationError
 
 from app.core.config import Settings
 
+pytestmark = pytest.mark.usefixtures("allow_inline_production_settings_for_policy_tests")
+
 CALLBACK_ACTIVE_KEY_ID = "callback-2026-07"
 CALLBACK_KEY_MATERIAL = "callback-production-key-material-2026-07-A!"
 CALLBACK_KEY_BINDINGS = json.dumps(
@@ -111,6 +113,12 @@ def test_local_environment_may_explicitly_use_multiple_bff_processes() -> None:
     )
 
     assert configured.web_concurrency == 2
+
+
+@pytest.mark.parametrize("value", [16 * 1024 - 1, 8 * 1024 * 1024 + 1])
+def test_request_body_limit_configuration_is_bounded(value: int) -> None:
+    with pytest.raises(ValidationError, match="MAX_REQUEST_BODY_BYTES"):
+        Settings(_env_file=None, max_request_body_bytes=value)
 
 
 @pytest.mark.parametrize(

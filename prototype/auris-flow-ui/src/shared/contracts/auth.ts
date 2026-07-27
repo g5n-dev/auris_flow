@@ -13,6 +13,13 @@ export type AuthUser = {
   authToken: string;
   expiresAt: string;
   provider?: string;
+  projectMemberships: AuthProjectMembership[];
+};
+
+export type AuthProjectMembership = {
+  project_id: string;
+  project_name: string;
+  roles: string[];
 };
 
 export type AuthSessionUser = {
@@ -28,6 +35,7 @@ export type AuthSessionUser = {
   project_name: string;
   provider?: string;
   csrf_token?: string;
+  project_memberships: AuthProjectMembership[];
 };
 
 export type AuthSession = {
@@ -43,4 +51,9 @@ export type AuthLogoutReceipt = {
   status: "revoked";
   session_id: string;
   revoked_at: string;
+};
+
+export type AuthSessionScopeTransition = AuthSessionUser & {
+  previous_project_id: string;
+  current_project_id: string;
 };

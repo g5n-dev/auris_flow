@@ -12,6 +12,8 @@ from app.core.config import Settings
 from app.services import adapters as adapter_module
 from app.services.adapters import RealExternalCallbackClient
 
+pytestmark = pytest.mark.usefixtures("allow_inline_production_settings_for_policy_tests")
+
 SECURE_PRODUCTION_SETTINGS = {
     "database_url": f"mysql+pymysql://auris:{'M' * 48}@mysql:3306/auris_flow",
     "redis_url": f"redis://:{'R' * 48}@redis:6379/0",
@@ -325,6 +327,9 @@ def test_callback_payload_uses_shared_redaction_before_signing(
     }
     assert payload_template["customer_phone"] == "13800138000"
     assert result.details["request_sha256"] == hashlib.sha256(captured["body"]).hexdigest()
+    assert captured["headers"]["X-Auris-Delivery-Id"] == result.details["delivery_id"]
+    assert result.details["delivery_id"].startswith("callback_delivery_")
+    assert result.details["delivery_id"] != result.details["callback_receipt_id"]
 
 
 @pytest.mark.parametrize(
@@ -365,18 +370,17 @@ def test_reconcile_rejects_receipt_that_only_self_attests_mismatched_scope(
 ) -> None:
     client = _production_client()
     payload = _payload()
-    expected_id = (
-        "callback_receipt_"
-        + hashlib.sha256(payload["idempotency_key"].encode("utf-8")).hexdigest()[:16]
-    )
+    delivery_id = client._delivery_id(payload)
+    remote_receipt_id = "callback_receipt_remote_scope_test"
 
     def forged_receipt(
-        _target: Any,
+        target: Any,
         *,
         method: str,
         **_kwargs: Any,
     ) -> dict[str, Any]:
         assert method == "GET"
+        assert target.url.endswith(f"/receipts/by-delivery/{delivery_id}")
         return {
             "status_code": 200,
             "headers": {},
@@ -384,7 +388,9 @@ def test_reconcile_rejects_receipt_that_only_self_attests_mismatched_scope(
                 {
                     "status": "ok",
                     "data": {
-                        "callback_receipt_id": expected_id,
+                        "delivery_id": delivery_id,
+                        "callback_receipt_id": remote_receipt_id,
+                        "receipt_url": (f"https://{CALLBACK_HOST}/receipts/{remote_receipt_id}"),
                         "tenant_id": "forged_tenant",
                         "project_id": payload["project_id"],
                         "trace_id": payload["trace_id"],

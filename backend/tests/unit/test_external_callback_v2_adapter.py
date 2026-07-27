@@ -110,6 +110,7 @@ def test_real_callback_binds_v2_headers_to_the_exact_http_request() -> None:
     assert headers["X-Auris-Nonce"] == NONCE
     assert headers["X-Auris-Signature"].startswith("v2=")
     assert headers["X-Auris-Signature-Mode"] == "hmac-sha256-v2"
+    assert headers["X-Auris-Delivery-Id"] == result.details["delivery_id"]
     assert "X-Auris-Signature-Id" not in headers
     assert result.details["signature_key_id"] == KEY_ID
     assert "signature_id" not in result.details

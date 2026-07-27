@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import public_id_from_hex
 from app.models import (
     AssetLineageEdge,
     AssetMaterialization,
@@ -27,8 +28,8 @@ MAX_MATERIALIZATION_STORAGE_OBJECTS = 16
 
 
 def _scoped_id(prefix: str, tenant_id: str, project_id: str, key: str) -> str:
-    digest = hashlib.sha1(f"{tenant_id}|{project_id}|{key}".encode()).hexdigest()[:20]
-    return f"{prefix}_{digest}"
+    digest = hashlib.sha256(f"{tenant_id}|{project_id}|{key}".encode()).hexdigest()
+    return public_id_from_hex(prefix, digest, suffix_length=20)
 
 
 def data_asset_id(ctx: RequestContext, asset_key: str) -> str:

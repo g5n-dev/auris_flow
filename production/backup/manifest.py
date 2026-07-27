@@ -1455,13 +1455,20 @@ def _verify_trusted_backup(
         os.close(root_fd)
 
 
+def _write_json_stdout(payload: Mapping[str, Any]) -> None:
+    """Write verified CLI data without treating it as an application log record."""
+    encoded = (json.dumps(payload, sort_keys=True) + "\n").encode("utf-8")
+    sys.stdout.buffer.write(encoded)
+    sys.stdout.buffer.flush()
+
+
 def verify_manifest(args: argparse.Namespace) -> int:
     _document, summary, _statement = _verify_trusted_backup(
         args.root,
         args.public_key,
         _verification_budgets(),
     )
-    print(json.dumps(summary, sort_keys=True))
+    _write_json_stdout(summary)
     return 0
 
 
@@ -1471,25 +1478,22 @@ def inspect_manifest(args: argparse.Namespace) -> int:
         args.public_key,
         _verification_budgets(),
     )
-    print(
-        json.dumps(
-            {
-                "backup_id": document["backup_id"],
-                "created_at_utc": document["created_at_utc"],
-                "git_commit": document["source"]["git_commit"],
-                "release_version": document["source"]["release_version"],
-                "release_metadata": document["source"]["release_metadata"],
-                "release_metadata_sha256": document["source"][
-                    "release_metadata_sha256"
-                ],
-                "running_images": document["source"]["running_images"],
-                "running_images_sha256": document["source"]["running_images_sha256"],
-                "manifest_sha256": signature["manifest_sha256"],
-                "signing_key_id": signature["key_id"],
-                "restore_attestation_key_id": document["restore_attestation"]["key_id"],
-            },
-            sort_keys=True,
-        )
+    _write_json_stdout(
+        {
+            "backup_id": document["backup_id"],
+            "created_at_utc": document["created_at_utc"],
+            "git_commit": document["source"]["git_commit"],
+            "release_version": document["source"]["release_version"],
+            "release_metadata": document["source"]["release_metadata"],
+            "release_metadata_sha256": document["source"][
+                "release_metadata_sha256"
+            ],
+            "running_images": document["source"]["running_images"],
+            "running_images_sha256": document["source"]["running_images_sha256"],
+            "manifest_sha256": signature["manifest_sha256"],
+            "signing_key_id": signature["key_id"],
+            "restore_attestation_key_id": document["restore_attestation"]["key_id"],
+        }
     )
     return 0
 
@@ -1498,14 +1502,14 @@ def verify_key_pair(args: argparse.Namespace) -> int:
     _private_key, _public_key, key_id = _validated_key_pair(
         args.private_key, args.public_key
     )
-    print(json.dumps({"algorithm": SIGNATURE_ALGORITHM, "key_id": key_id}))
+    _write_json_stdout({"algorithm": SIGNATURE_ALGORITHM, "key_id": key_id})
     return 0
 
 
 def public_key_identity(args: argparse.Namespace) -> int:
     public_key = _key_file(args.public_key, private=False)
     key_id = _key_id(_ed25519_public_der(public_key, private=False))
-    print(json.dumps({"algorithm": SIGNATURE_ALGORITHM, "key_id": key_id}))
+    _write_json_stdout({"algorithm": SIGNATURE_ALGORITHM, "key_id": key_id})
     return 0
 
 

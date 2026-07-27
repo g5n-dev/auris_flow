@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 
 from sqlalchemy import select
 
@@ -584,6 +585,7 @@ def test_matching_modified_reviews_materialize_child_without_approving_parent(cl
         assert len(child.content_sha256) == 64
         assert child_candidate is not None and child_candidate.status == "candidate"
         child_task_id = child_candidate.payload["review_task_id"]
+        assert re.fullmatch(r"hrt_[a-p]{24}", child_task_id)
         child_task = session.get(HumanReviewTask, child_task_id)
         assert child_task is not None and child_task.status == "pending"
         assert child_task.payload["review_mode"] == "double-blind"

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import uuid
 from typing import Any
 
 from sqlalchemy import select
@@ -9,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
+from app.core.request_identifiers import server_generated_public_id
 from app.models import LabelAggregate
 from app.schemas.label_closed_loop import HumanReviewDecisionBatchRequest
 from app.services.audit_service import record_audit
@@ -37,7 +37,7 @@ def apply_human_review_decision_batch(
     ctx: RequestContext,
     body: HumanReviewDecisionBatchRequest,
 ) -> dict[str, Any]:
-    batch_id = f"hrb_{uuid.uuid4().hex[:24]}"
+    batch_id = server_generated_public_id("hrb", suffix_length=24)
     cohort: tuple[str, str, str] | None = None
     results: list[dict[str, Any]] = []
 

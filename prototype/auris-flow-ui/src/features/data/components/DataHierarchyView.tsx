@@ -15,7 +15,13 @@ import { formatSessionConfidence } from "../dataTruthModel";
 import type { DataAggregateKey } from "../types";
 import type { DataWorkspace } from "../useDataWorkspace";
 
-export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
+export function DataHierarchyView({
+  workspace,
+  openConnectorImport
+}: {
+  workspace: DataWorkspace;
+  openConnectorImport: () => void;
+}) {
   const {
     aggregateFilterInputs,
     aggregateFilters,
@@ -33,7 +39,6 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
     moveAggregate,
     openAggregateFilterMenu,
     openAssetsFromDataAsset,
-    openConnectorImport,
     openListeningFromDataAsset,
     pendingDataAssetCount,
     selectedAsset,
@@ -216,7 +221,7 @@ export function DataHierarchyView({ workspace }: { workspace: DataWorkspace }) {
                 <span>清除筛选，或打开任务配置接入数据源并运行一次导入任务。</span>
                 <button type="button" onClick={openConnectorImport}>
                   <Plus size={14} />
-                  打开连接器画布
+                  新建音频导入配置
                 </button>
               </div>
             ) : groupItems(visibleDataAssets, aggregationOrder[0]).map(([levelOne, levelOneItems]) => {

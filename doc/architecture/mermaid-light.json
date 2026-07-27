@@ -1,0 +1,24 @@
+{
+  "theme": "base",
+  "securityLevel": "strict",
+  "htmlLabels": false,
+  "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif",
+  "themeVariables": {
+    "background": "#FFFFFF",
+    "fontFamily": "-apple-system, BlinkMacSystemFont, Segoe UI, Noto Sans CJK SC, PingFang SC, Microsoft YaHei, sans-serif",
+    "fontSize": "15px",
+    "primaryTextColor": "#10203C",
+    "lineColor": "#64748B",
+    "clusterBkg": "#F8FAFC",
+    "clusterBorder": "#CBD5E1",
+    "titleColor": "#10203C",
+    "edgeLabelBackground": "#FFFFFF"
+  },
+  "flowchart": {
+    "htmlLabels": false,
+    "curve": "basis",
+    "nodeSpacing": 34,
+    "rankSpacing": 58,
+    "diagramPadding": 20
+  }
+}

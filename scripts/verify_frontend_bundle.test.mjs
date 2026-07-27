@@ -246,7 +246,11 @@ test("release verifier has a closed evidence contract and no local candidate ove
   );
   assert.match(
     verifyWorkflow,
-    /verify:[\s\S]*?AURIS_RELEASE_CHECK:\s*"0"[\s\S]*?verify_fast\.sh/
+    /frontend:[\s\S]*?verify_frontend\.sh/
+  );
+  assert.match(
+    verifyWorkflow,
+    /verify:[\s\S]*?name:\s*Verify[\s\S]*?if:\s*always\(\)[\s\S]*?clean-clone-reproducibility/
   );
   assert.match(
     verifyWorkflow,

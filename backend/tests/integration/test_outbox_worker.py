@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
@@ -1216,7 +1217,7 @@ def test_real_knowledge_recall_filters_stale_dispatch_when_current_version_exist
     assert stale_point_id not in observed["payload"]["_authorized_point_ids"]
 
 
-def test_outbox_worker_indexes_approved_voiceprint_enrollment(client, auth_headers):
+def test_outbox_worker_rejects_voiceprint_text_embedding_fallback(client, auth_headers):
     response = client.post(
         "/api/v1/voiceprint-enrollments",
         json={
@@ -1250,7 +1251,10 @@ def test_outbox_worker_indexes_approved_voiceprint_enrollment(client, auth_heade
     assert response.status_code == 201
     trace_id = response.json()["meta"]["trace_id"]
     assert response.json()["data"]["status"] == "enrolled"
-    assert response.json()["data"]["embedding_ref"]["status"] == "pending_qdrant_upsert"
+    embedding_ref = response.json()["data"]["embedding_ref"]
+    assert embedding_ref["status"] == "dedicated_vector_provider_required"
+    assert embedding_ref["indexing_enabled"] is False
+    assert embedding_ref["blocked_reason"] == "dedicated_voiceprint_vector_provider_required"
     assert process_once() == 1
 
     with SessionLocal() as session:
@@ -1268,19 +1272,18 @@ def test_outbox_worker_indexes_approved_voiceprint_enrollment(client, auth_heade
             .order_by(OutboxEvent.event_id.desc())
         )
         assert event is not None
-        assert event.status == "processed"
+        assert event.status == "dead_letter"
+        assert event.delivery_state == "failed"
         dispatch = event.payload["adapter_dispatch"]
-        assert dispatch["adapter"] == "qdrant"
+        assert dispatch["adapter"] == "qdrant_policy"
+        assert dispatch["operation"] == "reject_voiceprint_vector_write"
+        assert dispatch["status"] == "failed"
+        assert dispatch["error_code"] == "VOICEPRINT_VECTOR_PROVIDER_UNSUPPORTED"
+        assert dispatch["retryable"] is False
         details = dispatch["details"]
         assert details["collection"] == "voiceprint_embeddings"
-        assert details["point_ids"][0].startswith("qdrant_point_")
-        qdrant_payload = details["qdrant_payload"]
-        assert qdrant_payload["tenant_id"] == "aurora_auto"
-        assert qdrant_payload["project_id"] == "sales_qa"
-        assert qdrant_payload["trace_id"] == trace_id
-        assert qdrant_payload["voiceprint_id"] == "VP-WORKER-QDRANT"
-        assert qdrant_payload["source_type"] == "voiceprint_enrollment"
-        assert qdrant_payload["business_ref"]["sample_count"] == 2
+        assert details["indexed"] is False
+        assert details["text_embedding_forbidden"] is True
 
     trace = client.get(f"/api/v1/traces/{trace_id}", headers=auth_headers)
     assert trace.status_code == 200
@@ -2393,6 +2396,8 @@ def test_dead_letter_task_run_can_create_retry_run(client, auth_headers):
     )
     assert response.status_code == 202
     failed_run_id = response.json()["data"]["run_id"]
+    assert re.fullmatch(r"task_run_[a-p]{12}", failed_run_id)
+    assert "[REDACTED_PHONE]" not in response.text
 
     assert process_once() == 1
     with SessionLocal() as session:
@@ -2444,6 +2449,8 @@ def test_dead_letter_task_run_can_create_retry_run(client, auth_headers):
     retry_body = retry.json()
     retry_run_id = retry_body["data"]["run_id"]
     assert retry_run_id != failed_run_id
+    assert re.fullmatch(r"task_run_[a-p]{12}", retry_run_id)
+    assert "[REDACTED_PHONE]" not in retry.text
     assert retry_body["data"]["status"] == "pending"
     assert retry_body["data"]["retry_of_run_id"] == failed_run_id
     assert retry_body["data"]["retry_of_trace_id"] == response.json()["data"]["trace_id"]

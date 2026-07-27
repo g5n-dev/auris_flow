@@ -167,6 +167,19 @@ test("顶层 Object 绑定时 fail-closed", () => {
   assert.equal(result.code, source);
 });
 
+test("无 marker 的普通导入 helper 即使重复原生标签调用也保持 fail-closed", () => {
+  const rows = Array.from({ length: 24 }, (_, index) =>
+    `makeNode('${index % 2 ? "div" : "span"}', { kind: 'record', children: '${index}' })`
+  ).join(",");
+  const source = [
+    'import { makeNode } from "./ordinary-helper.js";',
+    `const output = [${rows}];`
+  ].join("\n");
+  const result = compact(source);
+  assert.equal(result.changed, false);
+  assert.equal(result.code, source);
+});
+
 test("Brotli 自适应选择保持 JSX 运行语义并记录真实成本", () => {
   const rows = Array.from({ length: 32 }, (_, index) =>
     `j('article', { title: 'row-${index}', children: j('span', { children: '${index}' }) }, 'key-${index}')`

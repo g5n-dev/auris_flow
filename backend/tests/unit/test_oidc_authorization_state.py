@@ -121,7 +121,7 @@ def test_authorization_state_is_bound_to_the_initiating_browser_without_cross_cl
         assert consumed.state_sha256
 
 
-def test_same_browser_has_at_most_one_pending_authorization_transaction() -> None:
+def test_same_binding_has_at_most_one_pending_authorization_transaction() -> None:
     now = datetime.now(UTC)
     with SessionLocal.begin() as session:
         store_authorization_state(

@@ -2,8 +2,8 @@
 
 > **发行状态：`v1.0.0` 候选，尚未发布。** 本目录已经包含单机 Linux Compose、真实
 > Dagster、OIDC/PKCE、语义 embedding 接口、OTel Collector、Prometheus、Alertmanager、Tempo、Grafana
-> 及备份恢复工具，但这不等于已完成正式生产发行。项目所有者尚未完成许可权利主体签字，
-> `v1.0.0-rc.1` 的真实发布演练与外部干净安装也尚未完成。当前不得把 `:dev` 镜像或本页步骤
+> 及备份恢复工具，但这不等于已完成正式生产发行。精确提交的私有发行审批、无标签 staging
+> 演练与外部干净安装尚未完成。当前不得把 `:dev` 镜像或本页步骤
 > 描述为已获生产支持的正式版本。
 
 ## 支持边界
@@ -19,7 +19,7 @@ Release Checklist 完成验收。Dagster 是内部执行引擎，不作为产品
 
 ## 主机、网络与容量
 
-候选支持矩阵如下；正式版本必须以 RC 验收记录为准：
+候选支持矩阵如下；正式版本必须以无标签 staging 验收记录为准：
 
 - 64 位 Linux，内核 5.15 或更新；不把 Docker Desktop、macOS 或 Windows 作为生产环境。
 - Docker Engine 26+、Docker Compose plugin 2.27+、Git、OpenSSL、curl，以及可校时的 UTC/NTP。
@@ -43,8 +43,8 @@ Prometheus 30 天的配置保留期重新测算；修改保留期后必须重新
 `NOTICE`、迁移说明和 release notes。禁止使用 `latest`，也不要把 `.env.example` 中的 `:dev`
 当作正式镜像。
 
-在正式 `v1.0.0-rc.1` 制品出现前，可以从当前 checkout 构建**验收环境**，但必须明确标记为
-candidate evaluation。正式 release 的部署 tar 以根目录 `README.md` 为唯一安装入口，其中
+在正式 `v1.0.0` 制品出现前，可以从当前 checkout 构建**无标签验收环境**，但必须明确标记为
+staging evaluation，且不得创建公开 RC tag。正式 release 的部署 tar 以根目录 `README.md` 为唯一安装入口，其中
 `production/compose.yaml` 已把全部镜像固定到 digest，并由
 `production/release-metadata.json`、其独立 `production/release-metadata.sigstore.json`、外层
 `SHA256SUMS` 与 checksum Sigstore bundle 共同绑定；不存在额外的镜像环境覆盖文件。metadata
@@ -109,6 +109,28 @@ file 的 `0444` 只为 Compose 的非 root Alertmanager mount 提供只读访问
   `AURIS_AUDIO_INFERENCE_ENDPOINT`：endpoint 必须是无凭据/query/fragment 的 HTTPS URL；Provider
   和模型必须与 BFF 生成的服务端执行策略一致。把真实 Provider 签发的 bearer token 只写入
   `production/secrets/audio_inference_api_token`，覆盖初始化脚本生成的随机占位凭据并恢复 `0444`。
+- `production/secrets/platform_credential_bindings`：初始化值为 `{}`。每个
+  `credential_ref` 必须精确绑定六个键：
+  `tenant_id`、`project_id`、`platform_connection_id`、`platform_tenant_ref`、
+  `base_url` 与 `headers`，不允许缺键或额外键。例如：
+
+  ```json
+  {
+    "secret://platform/recordings-reader": {
+      "tenant_id": "aurora_auto",
+      "project_id": "sales_qa",
+      "platform_connection_id": "platform_connection_001",
+      "platform_tenant_ref": "external_tenant_001",
+      "base_url": "https://recordings.example.com",
+      "headers": {
+        "Authorization": "Bearer <secret>"
+      }
+    }
+  }
+  ```
+
+  文件只挂载给 BFF 与 `dagster-code`；前端只保存不透明引用，禁止保存明文凭证。若录音 URL
+  使用独立 CDN，用 `AURIS_PLATFORM_AUDIO_ALLOWED_HOSTS` 配置精确主机列表，禁止 `*`。
 - `AURIS_INTERNAL_SUBNET` 与 `AURIS_EDGE_INTERNAL_IP`：两者必须匹配且不得与宿主机/VPN 网段冲突；
   修改后必须重新渲染 Compose 并执行生产策略门禁。
 - 所有应用和上游镜像引用；正式版本必须是发布清单给出的 digest。
@@ -180,8 +202,11 @@ Compose、`auris_migration` 身份重新执行完整迁移循环并检查 `SHOW 
 `accessTokenLifespan` 推导出的 Keycloak Logout Token 配置。
 
 BFF 验证 issuer、audience、签名、过期时间和 JWKS，并把 `(issuer, subject)` 映射到已预置的
-内部用户、tenant、project 与角色。**未知身份不会自动成为管理员，也不会自动创建租户。** 参考
-Keycloak 的首次干净安装会导入固定 subject `9d1c5cc4-e661-4af6-8a6f-7402d2555c35` 的
+内部用户、tenant、project 与角色。**未知身份不会自动成为管理员，也不会自动创建租户。** 目标
+IdP 必须签发 JWT access token，并通过 `typ=at+jwt`、payload `typ=Bearer/access` 或
+`token_use=access` 明确令牌用途；用途不明确的 JWT 和 ID token 不会被当作 API bearer 接受。
+接入外部 IdP 时应先在隔离环境验证这一标准化 claim 映射。参考 Keycloak 的首次干净安装会导入固定
+subject `9d1c5cc4-e661-4af6-8a6f-7402d2555c35` 的
 `bootstrap-operator`，其随机初始密码只写入
 `production/secrets/keycloak_bootstrap_operator_password` 并以 Docker secret 注入，不在 realm
 模板、Compose 环境或日志中出现。该凭据是 temporary，首次登录必须改密。
@@ -284,9 +309,10 @@ curl --fail --silent --show-error https://auris.example.com/readyz
 ```
 
 公开 `/healthz` 只证明 edge 进程存活，不证明依赖可用。公开 `/readyz` 精确反代 BFF 的严格
-readiness，在生产检查 auth、MySQL、Redis、MinIO、Qdrant、真实 Dagster、应用 exporter 与后台
-OTel→Collector→Tempo 深探针，任一强依赖失败返回 503；MinIO 必须以配置凭据签名访问目标 bucket，
-Qdrant 必须返回 2xx。不要在负载均衡器上用
+readiness；默认生产强依赖精确为 auth、MySQL、Redis、MinIO、Qdrant 与真实 Dagster，任一失败
+返回 503。可观测性状态仍在响应中报告并可由运维显式加入
+`REQUIRED_DEPENDENCY_CHECKS`，但默认不让监控栈故障级联停止业务进程。MinIO 必须以配置凭据签名
+访问目标 bucket，Qdrant 必须返回 2xx。不要在负载均衡器上用
 `/healthz` 代替它。OIDC discovery/JWKS 的真实登录另行验收。
 edge 对公开 `/readyz` 使用独立的每 IP 限流和 singleflight 缓存：200 最多缓存 5 秒、503 最多缓存
 1 秒，cache lock 等待与失效接管均为 6 秒，避免慢探针触发并发穿透。该位置固定清空
@@ -303,17 +329,16 @@ edge 对公开 `/readyz` 使用独立的每 IP 限流和 singleflight 缓存：2
 单个 Docker volume 的独占容量；详细口径见[运维 Runbook](../doc/runbooks/operations.md)。
 Prometheus 把所有 firing/resolved 告警发送给内部 Alertmanager；Alertmanager 仅从 Docker secret
 读取通用 HTTPS webhook URL，不把地址写入配置或进程参数。固定配置/合成规则验证只能证明路由契约，
-真实通知送达、值班确认和 resolved 关闭仍必须在外部 staging/RC 演练中留证。
+真实通知送达、值班确认和 resolved 关闭仍必须在外部无标签 staging 演练中留证。
 `observability-health` 是仅位于内部网络的后台深探针：除无重定向、限长检查 Collector health
 extension、Tempo/Prometheus/Alertmanager readiness 与 node-exporter 指标外，它还强制导出无敏感
 字段的 marker，等待 Collector batch，并从 Tempo 按 trace ID 读回；自身 `/ready` 只返回带新鲜度
-上限的缓存状态。BFF、Worker 和 Dagster code location 都等待该探针健康；BFF 严格 `/readyz` 另以
-singleflight/短 TTL 导出自身 marker，再通过内部 `/traces/{trace_id}` 精确校验同一 trace 的
-service name、span name 和 trace ID 已进入 Tempo；新 marker 只允许 10 秒传播窗口，公开请求不会
-逐次放大 Tempo 查询。BFF marker 每 10 秒轮换，最近成功证明最多保留 20 秒，因此计入 edge 缓存
-后的最坏陈旧窗口不超过 25 秒。它解决
-Compose 运行门禁，但 Prometheus/Alertmanager 完全离线时仍需宿主机之外的 watchdog 才能可靠
-告警，RC 必须保存该外部回执。
+上限的缓存状态。BFF、Worker 和 Dagster code location 不等待该探针启动；BFF 仍以
+singleflight/短 TTL 导出自身 marker，并通过内部 `/traces/{trace_id}` 精确校验同一 trace 的
+service name、span name 和 trace ID 已进入 Tempo。新 marker 只允许 10 秒传播窗口，最近成功证明
+最多保留 20 秒；该结果用于遥测诊断和独立告警，只有运维显式把 `observability` 加入强依赖时才会
+影响 `/readyz`。Prometheus/Alertmanager 完全离线时仍需宿主机之外的 watchdog 才能可靠告警，
+无标签 staging 必须保存该外部回执。
 
 BFF、Worker 与 `dagster-code` 分别使用固定 OTel service name，并仅向内部
 `otel-collector:4318` 发送 OTLP/HTTP。BFF 提交真实 Dagster run 时会通过内部 run config 传递完整
@@ -342,7 +367,7 @@ Provider 放在能够访问该对象存储的受信网络内，并为它配置�
 
 `production-path` 内的 HTTPS 音频服务只是 `reference_protocol_only=true`、
 `model_quality_certified=false` 的协议夹具，用于启动配置、TLS 和闭合请求/响应合同回归；它不是 ASR
-模型，也不证明准确率、时延、容量或供应商 SLA。正式 RC 仍必须用计划采用的真实 Provider 完成音频
+模型，也不证明准确率、时延、容量或供应商 SLA。无标签 staging 仍必须用计划采用的真实 Provider 完成音频
 输入校验→HTTPS 推理→版本化结果 manifest→签名 completion 的外部 Linux E2E 并留证。completion
 目前仍与 compute 同步投递；独立、可恢复的 callback dispatcher 仍是后续可靠性缺口。
 

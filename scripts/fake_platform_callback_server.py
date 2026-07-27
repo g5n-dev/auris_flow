@@ -29,6 +29,13 @@ from app.core.callback_signature import (  # noqa: E402
 )
 
 
+def _delivery_id(idempotency_key: str) -> str:
+    digest = hashlib.sha256(
+        f"auris-callback-delivery-v1\x00{idempotency_key}".encode()
+    ).hexdigest()
+    return f"callback_delivery_{digest[:32]}"
+
+
 class CallbackState:
     def __init__(
         self,
@@ -52,10 +59,12 @@ class CallbackState:
         self.receipt_log = receipt_log
         self.base_url = base_url.rstrip("/")
         self.receipts: dict[str, dict[str, Any]] = {}
+        self.receipts_by_delivery: dict[str, str] = {}
         self._idempotency: dict[str, CallbackIdempotencyBinding] = {}
         self._nonce_expirations: dict[tuple[str, str], int] = {}
         self._lock = threading.RLock()
         self.clock = clock or time.time
+        self.drop_next_response_after_persist = False
 
     def claim(self, *, key_id: str, nonce: str, expires_at: int) -> bool:
         """Atomically claim a nonce across concurrent fake receiver threads."""
@@ -76,6 +85,11 @@ class CallbackState:
     def receipt(self, receipt_id: str) -> dict[str, Any] | None:
         with self._lock:
             return self.receipts.get(receipt_id)
+
+    def receipt_for_delivery(self, delivery_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            receipt_id = self.receipts_by_delivery.get(delivery_id)
+            return self.receipts.get(receipt_id) if receipt_id else None
 
     def accept_idempotent_receipt(
         self,
@@ -100,6 +114,7 @@ class CallbackState:
                 return outcome, self.receipts[receipt_id]
             self._idempotency[idempotency_key] = candidate
             self.receipts[receipt_id] = receipt
+            self.receipts_by_delivery[str(receipt["delivery_id"])] = receipt_id
             if self.receipt_log:
                 self.receipt_log.parent.mkdir(parents=True, exist_ok=True)
                 with self.receipt_log.open("a", encoding="utf-8") as handle:
@@ -148,6 +163,14 @@ class CallbackHandler(BaseHTTPRequestHandler):
         if parsed.path in {"/", "/healthz"}:
             _send_json(self, 200, {"status": "ok", "service": "fake-platform-callback"})
             return
+        if parsed.path.startswith("/receipts/by-delivery/"):
+            delivery_id = parsed.path.removeprefix("/receipts/by-delivery/")
+            receipt = self.state.receipt_for_delivery(delivery_id)
+            if not receipt:
+                _send_json(self, 404, {"status": "error", "error": "receipt_not_found"})
+                return
+            _send_json(self, 200, {"status": "ok", "data": receipt})
+            return
         if parsed.path.startswith("/receipts/"):
             receipt_id = parsed.path.rsplit("/", 1)[-1]
             receipt = self.state.receipt(receipt_id)
@@ -175,6 +198,8 @@ class CallbackHandler(BaseHTTPRequestHandler):
         tenant_id = _header(self, "X-Auris-Tenant-Id")
         project_id = _header(self, "X-Auris-Project-Id")
         idempotency_key = _header(self, "X-Auris-Idempotency-Key")
+        expected_delivery_id = _delivery_id(idempotency_key)
+        delivery_id = _header(self, "X-Auris-Delivery-Id") or expected_delivery_id
         try:
             if signature_version != "v2" or signature_mode != "hmac-sha256-v2":
                 raise CallbackSignatureError("CALLBACK_SIGNATURE_INVALID")
@@ -224,17 +249,24 @@ class CallbackHandler(BaseHTTPRequestHandler):
         ):
             _send_json(self, 400, {"status": "error", "error": "signed_scope_mismatch"})
             return
+        if delivery_id != expected_delivery_id:
+            _send_json(self, 400, {"status": "error", "error": "delivery_id_mismatch"})
+            return
         run_id = str(_header(self, "X-Auris-Run-Id") or payload.get("run_id") or "")
         trace_id = str(
             _header(self, "X-Auris-Trace-Id") or payload.get("trace_id") or ""
         )
-        receipt_id = f"callback_receipt_{hashlib.sha256(idempotency_key.encode()).hexdigest()[:16]}"
+        receipt_digest = hashlib.sha256(
+            f"remote-receipt-v1\x00{idempotency_key}".encode()
+        ).hexdigest()
+        receipt_id = f"callback_receipt_remote_{receipt_digest[:24]}"
         receipt_url = f"{self.state.base_url}/receipts/{quote(receipt_id, safe='')}"
         remote_trace_hash = hashlib.sha256((trace_id or run_id).encode()).hexdigest()
         remote_trace_id = f"remote_trace_{remote_trace_hash[:12]}"
         response_payload: dict[str, Any] = {
             "status": "ok",
             "data": {
+                "delivery_id": delivery_id,
                 "callback_receipt_id": receipt_id,
                 "remote_trace_id": remote_trace_id,
                 "receipt_url": receipt_url,
@@ -243,7 +275,9 @@ class CallbackHandler(BaseHTTPRequestHandler):
         }
         response_sha256 = hashlib.sha256(_json_bytes(response_payload)).hexdigest()
         receipt = {
+            "delivery_id": delivery_id,
             "callback_receipt_id": receipt_id,
+            "receipt_url": receipt_url,
             "path": parsed.path,
             "method": "POST",
             "received_at": datetime.now(UTC).isoformat(),
@@ -282,6 +316,16 @@ class CallbackHandler(BaseHTTPRequestHandler):
             )
             return
         response_payload["data"]["request_sha256"] = receipt["request_sha256"]
+        response_payload["data"]["callback_receipt_id"] = receipt["callback_receipt_id"]
+        response_payload["data"]["delivery_id"] = receipt["delivery_id"]
+        response_payload["data"]["receipt_url"] = receipt["receipt_url"]
+        response_payload["data"]["remote_trace_id"] = receipt["remote_trace_id"]
+        with self.state._lock:
+            drop_response = self.state.drop_next_response_after_persist
+            self.state.drop_next_response_after_persist = False
+        if drop_response:
+            self.close_connection = True
+            return
         _send_json(self, 202, response_payload)
 
 

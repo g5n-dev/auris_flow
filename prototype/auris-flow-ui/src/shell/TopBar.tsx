@@ -14,10 +14,12 @@ export function TopBar({
   lang,
   setLang,
   activeModule,
-  setActiveModule,
   currentUser,
   context,
-  setContext,
+  contextOptions,
+  contextState,
+  contextError,
+  onContextValueChange,
   backendStatus,
   onOpenAccountSettings,
   onLogout,
@@ -28,68 +30,31 @@ export function TopBar({
   lang: Lang;
   setLang: (lang: Lang) => void;
   activeModule: ModuleKey;
-  setActiveModule: (module: ModuleKey) => void;
   currentUser: AuthUser;
   context: TopbarContextState;
-  setContext: (updater: TopbarContextState | ((current: TopbarContextState) => TopbarContextState)) => void;
+  contextOptions: Record<TopbarCoreContextKey, TopbarContextOption[]>;
+  contextState: "idle" | "loading" | "ready" | "error" | "switching";
+  contextError: string;
+  onContextValueChange: (
+    key: TopbarCoreContextKey,
+    option: TopbarContextOption
+  ) => Promise<void>;
   backendStatus: BackendStatus;
   onOpenAccountSettings: () => void;
   onLogout: () => void;
   logoutPending: boolean;
 }) {
-  const contextOptions: Record<TopbarCoreContextKey, { label: string; options: TopbarContextOption[] }> = {
-    tenant: {
-      label: "租户",
-      options: [
-        { value: "极光汽车", meta: "12 项目 / 运行中 9" },
-        { value: "北区经销集团", meta: "7 项目 / 2 异常" },
-        { value: "华东体验中心", meta: "试运行 / 4 项目" }
-      ]
-    },
-    project: {
-      label: "项目",
-      options: [
-        { value: "销售话术质检", meta: "汽车门店 / 当前主项目" },
-        { value: "试驾流程分析", meta: "试驾单据 / 评测中" },
-        { value: "门店接待洞察", meta: "同门店多设备分析" }
-      ]
-    },
-    store: {
-      label: "门店",
-      options: [
-        { value: "极光中心店", meta: "北京 / 今日 2,846 音频" },
-        { value: "北京 SKP 店", meta: "报价冲突样本 15" },
-        { value: "静安体验店", meta: "上海 / 低置信 8" }
-      ]
-    },
-    date: {
-      label: "日期",
-      options: [
-        { value: "2025-05-26", meta: "当前证据日 / 128 会话" },
-        { value: "2025-05-25", meta: "已完成 / 可回放" },
-        { value: "2025-05-24", meta: "可回填 / 标签 v1.8.3" }
-      ]
-    },
-    model: {
-      label: "模型版本",
-      options: [
-        { value: "v2.3.1", meta: "生产主线 / ASR + Diar" },
-        { value: "v2.4-fast", meta: "候选 / 影子评测" },
-        { value: "v2.2-stable", meta: "回滚基线" }
-      ]
-    },
-    label: {
-      label: "标签版本",
-      options: [
-        { value: "v1.8.4", meta: "生产标签体系" },
-        { value: "v1.9.0-rc2", meta: "候选 / AB实验" },
-        { value: "v1.8.3", meta: "历史可回滚" }
-      ]
-    }
+  const contextLabels: Record<TopbarCoreContextKey, string> = {
+    tenant: "租户",
+    project: "项目",
+    store: "门店",
+    date: "日期",
+    model: "模型版本",
+    label: "标签版本"
   };
   const [openPanel, setOpenPanel] = useState<TopbarPanelKey | null>(null);
   const [topbarFeedback, setTopbarFeedback] = useState("租户已锁定，项目、门店和版本跟随当前租户");
-  const contextKeys: TopbarVisibleContextKey[] = ["project", "store", "model", "label"];
+  const contextKeys: TopbarVisibleContextKey[] = ["project", "store", "date", "model", "label"];
   const moduleContextHints: Record<ModuleKey, string> = {
     home: "运营首页按锁定租户聚合项目、待处理和异常资产",
     tenants: "租户管理用于浏览和治理边界，不在顶部直接切换工作租户",
@@ -104,15 +69,29 @@ export function TopBar({
     assets: "资产目录按 tenant_id + project_id 隔离，避免跨租户引用",
     settings: "系统设置只调整当前工作租户可用的策略与审计规则"
   };
-  const setContextValue = (key: TopbarCoreContextKey, value: string, meta: string) => {
-    setContext((current) => ({ ...current, [key]: value }));
-    setTopbarFeedback(`${contextOptions[key].label}已切换：${value} · ${meta}，租户仍锁定为 ${context.tenant}`);
-    setOpenPanel(null);
+  const setContextValue = async (key: TopbarCoreContextKey, option: TopbarContextOption) => {
+    setTopbarFeedback(
+      key === "project"
+        ? `正在安全切换项目：${option.value}`
+        : `正在应用${contextLabels[key]}：${option.value}`
+    );
+    try {
+      await onContextValueChange(key, option);
+      setTopbarFeedback(
+        `${contextLabels[key]}已切换：${option.value} · ${option.meta}，租户仍锁定为 ${context.tenant}`
+      );
+      setOpenPanel(null);
+    } catch (error) {
+      setTopbarFeedback(
+        error instanceof Error
+          ? `${contextLabels[key]}切换失败：${error.message}`
+          : `${contextLabels[key]}切换失败，请重试`
+      );
+    }
   };
   const focusTenantBoundary = () => {
     setOpenPanel(null);
-    setTopbarFeedback(`租户锁定为 ${context.tenant}。如需切换工作边界，请在租户管理中完成授权切换。`);
-    setActiveModule("tenants");
+    setTopbarFeedback(`租户为身份隔离边界，当前会话锁定为 ${context.tenant}，不能在工作台内切换。`);
   };
   const lockArcoLightTheme = () => {
     if (theme !== "light") setTheme("light");
@@ -146,19 +125,31 @@ export function TopBar({
   const renderContextPanel = (key: TopbarCoreContextKey) => (
     <div className="topbar-popover context" role="menu">
       <div className="topbar-popover-head">
-        <span>{contextOptions[key].label}</span>
-        <strong>{topbarFeedback}</strong>
+        <span>{contextLabels[key]}</span>
+        <strong>{contextError || topbarFeedback}</strong>
       </div>
-      {contextOptions[key].options.map((option) => (
+      {contextOptions[key].length === 0 && (
+        <div className="topbar-qa-row" role="status">
+          <span>{contextState === "loading" ? "正在读取 BFF" : "当前范围无可用选项"}</span>
+          <strong>未使用本地 fixture</strong>
+        </div>
+      )}
+      {contextOptions[key].map((option) => (
         <button
-          key={option.value}
+          key={option.id}
           type="button"
-          className={context[key] === option.value ? "selected" : ""}
-          onClick={() => setContextValue(key, option.value, option.meta)}
+          className={
+            (key === "project" ? context[key] === option.value : context[key] === option.id)
+              ? "selected"
+              : ""
+          }
+          disabled={contextState === "switching"}
+          onClick={() => void setContextValue(key, option)}
         >
           <strong>{option.value}</strong>
           <span>{option.meta}</span>
-          {context[key] === option.value && <Check size={14} />}
+          {(key === "project" ? context[key] === option.value : context[key] === option.id)
+            && <Check size={14} />}
         </button>
       ))}
     </div>
@@ -240,9 +231,16 @@ export function TopBar({
       {contextKeys.map((key) => (
         <div key={key} className="topbar-control" data-topbar-panel-owner={key}>
           <ContextSelect
-            label={contextOptions[key].label}
-            value={context[key]}
+            label={contextLabels[key]}
+            value={
+              contextOptions[key].find((option) =>
+                key === "project"
+                  ? option.value === context[key]
+                  : option.id === context[key]
+              )?.value || context[key] || "未选择"
+            }
             active={openPanel === key}
+            disabled={contextState === "loading" || contextState === "switching"}
             onClick={() => setOpenPanel((current) => (current === key ? null : key))}
           />
           {openPanel === key && renderContextPanel(key)}

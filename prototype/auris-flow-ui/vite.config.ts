@@ -44,6 +44,10 @@ export default defineConfig({
     rollupOptions: {
       output: {
         manualChunks(id) {
+          if (
+            id === "\0auris-react-jsx-runtime" ||
+            id.endsWith("/react/cjs/react-jsx-runtime.production.min.js")
+          ) return "_auris-react-jsx-runtime";
           const sourcePath = id.startsWith(`${import.meta.dirname}/`)
             ? id.slice(import.meta.dirname.length + 1)
             : "";
