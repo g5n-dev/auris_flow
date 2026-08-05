@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import stat
 import subprocess
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -39,6 +40,9 @@ def test_audio_fixture_is_deterministic_valid_and_identity_stable() -> None:
     assert [record["updated_at"] for record in records] == sorted(
         record["updated_at"] for record in records
     )
+    assert fixture_records() == records
+    first_updated_at = datetime.fromisoformat(str(records[0]["updated_at"]))
+    assert datetime.now(UTC) - timedelta(minutes=10) < first_updated_at <= datetime.now(UTC)
 
     digests: set[str] = set()
     for index in range(1, 4):

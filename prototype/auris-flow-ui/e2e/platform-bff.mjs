@@ -36,6 +36,12 @@ const audioImportTimeoutMs = Math.max(
   30_000,
   Number(process.env.AURIS_E2E_AUDIO_IMPORT_TIMEOUT_MS || 180_000)
 );
+const configuredUiAuthenticationTimeoutMs = Number(
+  process.env.AURIS_E2E_UI_AUTHENTICATION_TIMEOUT_MS || 30_000
+);
+const uiAuthenticationTimeoutMs = Number.isFinite(configuredUiAuthenticationTimeoutMs)
+  ? Math.max(10_000, configuredUiAuthenticationTimeoutMs)
+  : 30_000;
 const audioImportFixture = {
   baseUrl: String(process.env.AURIS_E2E_AUDIO_IMPORT_BASE_URL || "").trim(),
   credentialRef: String(process.env.AURIS_E2E_AUDIO_IMPORT_CREDENTIAL_REF || "").trim(),
@@ -791,27 +797,42 @@ async function loginThroughUi(
   email,
   { expectedHomeProjectionStatus = 200, homeMode = "production" } = {}
 ) {
+  const emailInput = page.locator('input[autocomplete="email"]');
+  const passwordInput = page.locator('input[autocomplete="current-password"]');
+  const submitButton = page.locator("button.auth-submit");
+
+  await emailInput.fill(email);
+  await passwordInput.fill("auris-demo");
+  await submitButton.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
+  assert(await submitButton.isEnabled(), "login submit must be enabled before response observers start", {
+    email,
+    url: page.url()
+  });
+
   const responsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/v1/auth/dev-login" &&
       response.request().method() === "POST",
-    { timeout: 10000 }
+    { timeout: uiAuthenticationTimeoutMs }
   );
   const projectionPromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/v1/insights/ops-summary" &&
       response.request().method() === "GET",
-    { timeout: 10000 }
+    { timeout: uiAuthenticationTimeoutMs }
   );
-  await page.locator('input[autocomplete="email"]').fill(email);
-  await page.locator('input[autocomplete="current-password"]').fill("auris-demo");
-  await page.locator("button.auth-submit").click();
-  const response = await responsePromise;
+  const [response, projectionResponse] = await Promise.all([
+    responsePromise,
+    projectionPromise,
+    submitButton.click({ timeout: uiAuthenticationTimeoutMs })
+  ]);
   const json = await response.json().catch(() => ({}));
   assert(response.status() === 200, `server login failed for ${email}`, json);
   assert(json?.data?.access_token?.startsWith("auris.v1."), "login must return a signed session", json);
-  await page.locator(".sidebar-user-main").waitFor({ state: "visible", timeout: 10000 });
-  const projectionResponse = await projectionPromise;
+  await page.locator(".sidebar-user-main").waitFor({
+    state: "visible",
+    timeout: uiAuthenticationTimeoutMs
+  });
   assert(
     projectionResponse.status() === expectedHomeProjectionStatus,
     "login must enforce the role-specific home projection boundary",

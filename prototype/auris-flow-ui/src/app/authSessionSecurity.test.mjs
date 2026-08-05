@@ -57,6 +57,14 @@ test("cookie restore, OIDC redirect, CSRF and credential rules are explicit", as
   assert.match(platformBffSource, /anonymousSessionProbeFailure/);
   assert.match(platformBffSource, /loginThroughUi\(reviewerPage, email, \{ homeMode: "demo" \}\)/);
   assert.match(platformBffSource, /homeMode === "demo" \? "mock" : "bff"/);
+  const loginHelper = platformBffSource.slice(
+    platformBffSource.indexOf("async function loginThroughUi"),
+    platformBffSource.indexOf("async function verifyAuthSessionRestore")
+  );
+  assert.ok(loginHelper.indexOf("await emailInput.fill(email)") < loginHelper.indexOf("page.waitForResponse"));
+  assert.ok(loginHelper.indexOf("await passwordInput.fill") < loginHelper.indexOf("page.waitForResponse"));
+  assert.match(loginHelper, /Promise\.all\(\[\s*responsePromise,\s*projectionPromise,\s*submitButton\.click/);
+  assert.match(loginHelper, /timeout: uiAuthenticationTimeoutMs/);
   assert.doesNotMatch(
     platformBffSource,
     /assert\(\s*(?:grantRequestHeaders|requestHeaders|submissionHeaders)\.authorization\s*&&|(?:grantRequestHeaders|requestHeaders|submissionHeaders|headers\(\))\.authorization\s*===\s*`Bearer/
