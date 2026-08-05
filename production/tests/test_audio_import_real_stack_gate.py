@@ -42,7 +42,11 @@ def test_audio_fixture_is_deterministic_valid_and_identity_stable() -> None:
     )
     assert fixture_records() == records
     first_updated_at = datetime.fromisoformat(str(records[0]["updated_at"]))
-    assert datetime.now(UTC) - timedelta(minutes=10) < first_updated_at <= datetime.now(UTC)
+    assert (
+        datetime.now(UTC) - timedelta(minutes=10)
+        < first_updated_at
+        <= datetime.now(UTC)
+    )
 
     digests: set[str] = set()
     for index in range(1, 4):
