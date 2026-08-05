@@ -63,6 +63,7 @@ test("cookie restore, OIDC redirect, CSRF and credential rules are explicit", as
   );
   assert.ok(loginHelper.indexOf("await emailInput.fill(email)") < loginHelper.indexOf("page.waitForResponse"));
   assert.ok(loginHelper.indexOf("await passwordInput.fill") < loginHelper.indexOf("page.waitForResponse"));
+  assert.match(loginHelper, /emailInput\.waitFor\(\{ state: "visible", timeout: uiShellTimeoutMs \}\)/);
   assert.match(loginHelper, /Promise\.all\(\[\s*responsePromise,\s*projectionPromise,\s*submitButton\.click/);
   assert.match(loginHelper, /timeout: uiAuthenticationTimeoutMs/);
   assert.doesNotMatch(

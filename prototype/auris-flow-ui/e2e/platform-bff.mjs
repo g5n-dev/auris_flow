@@ -42,6 +42,12 @@ const configuredUiAuthenticationTimeoutMs = Number(
 const uiAuthenticationTimeoutMs = Number.isFinite(configuredUiAuthenticationTimeoutMs)
   ? Math.max(10_000, configuredUiAuthenticationTimeoutMs)
   : 30_000;
+const configuredUiShellTimeoutMs = Number(
+  process.env.AURIS_E2E_UI_SHELL_TIMEOUT_MS || 120_000
+);
+const uiShellTimeoutMs = Number.isFinite(configuredUiShellTimeoutMs)
+  ? Math.max(30_000, configuredUiShellTimeoutMs)
+  : 120_000;
 const audioImportFixture = {
   baseUrl: String(process.env.AURIS_E2E_AUDIO_IMPORT_BASE_URL || "").trim(),
   credentialRef: String(process.env.AURIS_E2E_AUDIO_IMPORT_CREDENTIAL_REF || "").trim(),
@@ -801,8 +807,9 @@ async function loginThroughUi(
   const passwordInput = page.locator('input[autocomplete="current-password"]');
   const submitButton = page.locator("button.auth-submit");
 
-  await emailInput.fill(email);
-  await passwordInput.fill("auris-demo");
+  await emailInput.waitFor({ state: "visible", timeout: uiShellTimeoutMs });
+  await emailInput.fill(email, { timeout: uiAuthenticationTimeoutMs });
+  await passwordInput.fill("auris-demo", { timeout: uiAuthenticationTimeoutMs });
   await submitButton.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
   assert(await submitButton.isEnabled(), "login submit must be enabled before response observers start", {
     email,
