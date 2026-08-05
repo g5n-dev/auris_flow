@@ -42,7 +42,13 @@ const replacements = [
   ["rec_SH_A012_20250526_091500", "DEMO-REC-001"],
   ["SH-JINGAN-001", "DEMO-LOCATION-02"],
   ["u_sales_a", "demo_person_01"],
-  ["北京区域 / 极光中心店", "地点 A"],
+  ["北京区域 / SKP 店", "演示地点 B 区"],
+  ["上海区域 / 静安体验店", "演示地点 C 区"],
+  ["广州区域 / 天河店", "演示地点 D 区"],
+  ["北京区域 / 极光中心店", "演示地点 A 区"],
+  ["北京 SKP 店", "演示地点 B 区"],
+  ["上海静安店", "演示地点 C 区"],
+  ["广州天河店", "演示地点 D 区"],
   ["门店、员工、报价事件、试驾事件、报价单的数据契约与关联", "空间、时间、事件、人物与单据的数据契约和关联"],
   ["分区、门店、人群、模型版本", "空间、时间、事件、人物与模型版本"],
   ["区域 / 门店 / 设备", "地点 / 设备"],
@@ -55,8 +61,8 @@ const replacements = [
   ["S20250526-000131", "DEMO-S02"],
   ["汽车门店销售质检", "演示音频质检场景"],
   ["销售话术质检", "演示音频质检"],
-  ["北京区域", "地点组 A"],
-  ["极光中心店", "地点 01"],
+  ["北京区域", "演示地点 A 区"],
+  ["极光中心店", "演示地点 A 区"],
   ["极光汽车", "演示租户"],
   ["task_sales_quality", "demo_audio_quality"],
   ["auto-sales-quality", "demo-audio-quality"],
@@ -68,6 +74,10 @@ const replacements = [
   ["陈先生", "示例人物 B"],
   ["销售A", "示例人物 A"],
   ["销售B", "示例人物 C"],
+  ["本店员工", "当前地点人物"],
+  ["到店", "到访"],
+  ["同店", "同地点"],
+  ["店内", "地点内"],
   ["A-1001", "DEMO-A1"],
   ["B-2001", "DEMO-B1"],
   ["Hall-Mic", "DEMO-MIC"],
@@ -102,6 +112,7 @@ const blockedScreenshotTerms = [
   "u_sales_a",
   "rec_SH_A012",
   "门店",
+  "店",
   "task_sales_quality",
   "2025-05-26"
 ];
@@ -235,7 +246,17 @@ try {
     const screenshotText = await page.locator("body").innerText();
     const exposed = blockedScreenshotTerms.filter((term) => screenshotText.includes(term));
     if (exposed.length) {
-      throw new Error(`${capture.file} 仍暴露未标记的演示标识：${exposed.join(", ")}`);
+      const exposedLines = screenshotText
+        .split("\n")
+        .filter((line) => exposed.some((term) => line.includes(term)))
+        .slice(0, 5);
+      throw new Error(
+        `${capture.file} 仍暴露未标记的演示标识：${exposed.join(", ")}；` +
+        `位置：${exposedLines.join(" | ")}`
+      );
+    }
+    if (!screenshotText.includes("演示地点 A 区")) {
+      throw new Error(`${capture.file} 缺少统一的合成地点`);
     }
     if (!screenshotText.includes("全量合成数据 · 非客户数据")) {
       throw new Error(`${capture.file} 缺少合成演示数据标识`);
