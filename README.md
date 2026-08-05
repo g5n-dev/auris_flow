@@ -5,7 +5,7 @@
 ### 让每一条业务洞察，都能回到它的音频证据
 
 面向音频质检、标注、评测与洞察的可追溯工作台。<br>
-一条链路连接音频、转写、标签、模型、任务、人和最终业务结论。
+一条链路以空间、时间、事件和人物为上下文，连接音频、转写、标签、模型、任务和最终业务结论。
 
 <p>
   <a href="https://github.com/g5n-dev/auris_flow/actions/workflows/verify.yml">
@@ -46,22 +46,24 @@
 
 ## 操作导览：从导入到人工决定
 
+> 以下界面按“空间 → 时间 → 事件 → 人物”组织数据；空间维度中的地点以及租户、项目、音频、单据、金额、时间和指标均为程序生成的合成演示数据，不对应任何真实客户或业务记录。
+
 ### 1. 新建音频导入配置
 
-![数据资产中的音频资产、连接器导入、聚合层级与播放入口](doc/assets/screenshots/audio-data-assets.png)
+![数据资产中的音频资产、连接器导入、空间时间事件人物聚合与播放入口](doc/assets/screenshots/audio-data-assets.png)
 
 1. 打开 **数据资产 → 音频资产**。
-2. 点击 **连接器导入**，选择已有平台连接。
-3. 填写音频 URL API、凭证引用、分页方式和字段映射。
+2. 点击 **连接器导入**，选择已有平台连接及地点范围。
+3. 填写音频 URL API、凭证引用、分页方式、首次时间窗口和字段映射。
 4. 完成连通测试与三条记录预览，再保存并发布配置。
 
 **完成标志：** 页面回读已发布任务版本，并允许执行“立即拉取”。
 
 ### 2. 发布任务版本并立即拉取
 
-![任务配置中的平台接入、智能处理、人审策略与版本发布](doc/assets/screenshots/workflow-configuration.png)
+![任务配置中的地点范围、时间窗口、平台接入、智能处理与版本发布](doc/assets/screenshots/workflow-configuration.png)
 
-1. 在任务配置中确认平台范围、目标音频资产和后续处理策略。
+1. 在任务配置中确认地点范围、时间窗口、目标音频资产和后续处理策略。
 2. 校验配置并发布不可变任务版本。
 3. 点击 **立即拉取**，查看读取清单、下载音频、校验入库和生成会话阶段。
 4. 完成后查看成功数、重复跳过数、失败项和新音频会话。
@@ -79,7 +81,7 @@
 
 **完成标志：** 决定、受影响对象、下一通任务和根 Trace 均由 BFF 回读一致。
 
-> 截图来自可重复的视觉回归运行场景，使用脱敏演示数据；权威业务状态仍以 BFF 回读为准。
+> 截图用于说明操作路径；权威业务状态仍以 BFF 回读为准。
 
 ---
 
@@ -87,10 +89,10 @@
 
 ## 从音频到行动，不丢失上下文
 
-传统音频质检系统把音频、转写、标签、评测和报表拆成互不相干的页面。Auris Flow 把它们建模为同一条证据链：每次运行、人工判断、版本变更和业务结论都绑定 `tenant_id`、`project_id` 与 `trace_id`。
+传统音频质检系统把音频、转写、标签、评测和报表拆成互不相干的页面。Auris Flow 以“空间 → 时间 → 事件 → 人物”组织业务上下文，并把它们建模为同一条证据链：每次运行、人工判断、版本变更和业务结论都绑定 `tenant_id`、`project_id` 与 `trace_id`。
 
-- **进入系统**：连接器、批次、音频资产。保留对象身份与内容哈希。
-- **形成证据**：转写、说话人、片段、人工标注。派生结果全程可追溯。
+- **进入系统**：连接器、批次、音频资产。冻结地点范围和时间窗口，保留对象身份与内容哈希。
+- **形成证据**：事件、人物、转写、说话人、片段和人工标注。派生结果全程可追溯。
 - **做出判断**：标签版本、评测集、校准、复核。规则、模型与人保持版本绑定。
 - **推动行动**：洞察报告、实验、发布、回滚。结果可回到证据和执行记录。
 
@@ -324,18 +326,6 @@ PYTHON="$PWD/backend/.venv/bin/python" bash scripts/verify_fast.sh
 | BFF → Outbox → Dagster → 回写 | `bash scripts/verify_product_dagster_path.sh` |
 | 镜像前发行门禁 | `bash scripts/verify_release.sh --pre-image` |
 | 签名发行证据聚合 | 使用最终 tag workflow 产出的 recovery JSON、Sigstore sidecar 与同一签名 deployment，设置 `AURIS_BACKUP_RESTORE_EVIDENCE`、`AURIS_BACKUP_RESTORE_EVIDENCE_SIGSTORE_BUNDLE`、`AURIS_RELEASE_BUNDLE_ROOT`、`AURIS_RELEASE_TAG` 后运行 `bash scripts/verify_release.sh`；仍须满足 `RELEASE_CHECKLIST.md` 中独立的 `rebuild-required`、外部无标签 staging 安装与私有发行审批 |
-
-<details>
-<summary><strong>为什么“真实栈通过”不等于“真实 Dagster 通过”</strong></summary>
-
-`scripts/verify_real_stack.sh` 的 Dagster 端点由 `scripts/fake_dagster_graphql_server.py` 提供，用来
-验证开发协议、对象存储、Qdrant 与故障恢复；它不能替代 `bash scripts/verify_real_dagster.sh`。
-
-后者启动生产 Compose 的真实 Dagster，并验证 `SAFE_TERMINATE` 取消语义。该证明仍只覆盖
-**Dagster 引擎层**；产品级 BFF、Outbox、状态回写与签名 callback 由
-`bash scripts/verify_product_dagster_path.sh` 独立验收。
-
-</details>
 
 <details>
 <summary><strong>为什么本地全绿仍不能直接发布</strong></summary>
