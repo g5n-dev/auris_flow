@@ -64,7 +64,7 @@
     "@types/react-dom": "^19.2.3",
     "axe-core": "^4.12.1",
     "playwright": "^1.61.1",
-    "postcss": "^8.5.23",
+    "postcss": "^8.5.25",
     "typescript": "^5.6.3"
   }
 }
