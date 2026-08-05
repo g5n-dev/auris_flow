@@ -147,6 +147,14 @@ def test_real_stack_gate_cannot_be_skipped() -> None:
     assert "is not allowed by this gate" in result.stderr
 
 
+def test_browser_gate_builds_derived_assets_before_vite_launch() -> None:
+    source = BROWSER_GATE_DRIVER.read_text(encoding="utf-8")
+    assets_build = 'npm --prefix "${UI_ROOT}" run assets:build'
+
+    assert source.count(assets_build) == 1
+    assert source.index(assets_build) < source.index("exec env \\\n")
+
+
 def test_browser_gate_pins_vite_development_runtime() -> None:
     source = BROWSER_GATE_DRIVER.read_text(encoding="utf-8")
     vite_launch = source[

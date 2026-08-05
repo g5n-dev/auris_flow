@@ -97,6 +97,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# The production catalogs and sanitized fixture projections are derived assets
+# excluded from git. Build them explicitly because this gate launches the Vite
+# binary directly and therefore does not execute package.json's predev hook.
+npm --prefix "${UI_ROOT}" run assets:build
+
 (
   cd "${UI_ROOT}"
   exec env \
