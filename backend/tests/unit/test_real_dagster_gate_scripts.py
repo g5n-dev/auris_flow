@@ -698,9 +698,7 @@ def test_readiness_and_internal_gate_contract_distinguish_real_dagster_from_prot
     gate_doc = (ROOT / "production" / "tests" / "production-path-gate.md").read_text(
         encoding="utf-8"
     )
-    real_dagster_gate = (ROOT / "scripts" / "verify_real_dagster.sh").read_text(
-        encoding="utf-8"
-    )
+    real_dagster_gate = (ROOT / "scripts" / "verify_real_dagster.sh").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for path in (
