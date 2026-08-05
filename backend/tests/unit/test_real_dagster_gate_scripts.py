@@ -693,8 +693,12 @@ def test_release_gate_runs_real_dagster_and_rejects_skip_before_work() -> None:
     assert "AURIS_SKIP_REAL_DAGSTER=1 is not allowed" in result.stderr
 
 
-def test_readiness_and_readme_distinguish_real_dagster_from_protocol_fake() -> None:
+def test_readiness_and_internal_gate_contract_distinguish_real_dagster_from_protocol_fake() -> None:
     readiness = (ROOT / "scripts" / "check_platform_readiness.py").read_text(encoding="utf-8")
+    gate_doc = (ROOT / "production" / "tests" / "production-path-gate.md").read_text(
+        encoding="utf-8"
+    )
+    real_dagster_gate = (ROOT / "scripts" / "verify_real_dagster.sh").read_text(encoding="utf-8")
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
     for path in (
@@ -706,10 +710,13 @@ def test_readiness_and_readme_distinguish_real_dagster_from_protocol_fake() -> N
         assert path in readiness
     assert "bash scripts/verify_real_dagster.sh" in readiness
     assert "AURIS_SKIP_REAL_DAGSTER=1 is not allowed" in readiness
-    assert "scripts/fake_dagster_graphql_server.py" in readme
-    assert "bash scripts/verify_real_dagster.sh" in readme
-    assert "SAFE_TERMINATE" in readme
-    assert "Dagster 引擎层" in readme
+    assert "`verify_real_stack.sh`" in gate_doc
+    assert "`verify_real_dagster.sh`" in gate_doc
+    assert "`verify_product_dagster_path.sh`" in gate_doc
+    assert "真实 Dagster" in gate_doc
+    assert "SAFE_TERMINATE" in real_dagster_gate
+    assert "scripts/fake_dagster_graphql_server.py" not in readme
+    assert "为什么“真实栈通过”不等于“真实 Dagster 通过”" not in readme
 
 
 def test_local_process_dagster_proof_is_explicitly_non_release() -> None:

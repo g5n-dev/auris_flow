@@ -47,6 +47,7 @@
     "e2e:bff:check": "node scripts/check-platform-bff-result.mjs",
     "audit:auto": "bash ../../scripts/audit_ui.sh",
     "audit:capture": "node audit/capture-audit.mjs",
+    "readme:screenshots": "node scripts/capture-readme-screenshots.mjs",
     "audit:tabs": "node audit/tab-similarity.mjs",
     "audit:visual": "playwright test -c audit/visual-regression.config.mjs --workers=1",
     "audit:visual:update": "AURIS_UPDATE_VISUAL_BASELINE=1 bash ../../scripts/visual_regression.sh"
