@@ -16,6 +16,8 @@ from app.services.adapters import DispatchResult
 from app.services.run_service import transition_run
 from app.workers import outbox_worker
 
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
+
 
 def _create_task_run(client, auth_headers, *, key: str, max_attempts: int = 3) -> str:
     response = client.post(

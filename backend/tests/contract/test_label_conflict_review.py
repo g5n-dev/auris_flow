@@ -194,9 +194,15 @@ def test_terminal_human_review_resolves_label_policy_conflict(
     decision_root_trace_id = response.json()["meta"]["trace_id"]
     assert decision_root_trace_id != decision_trace_id
     decision_id = response_data["decision_id"]
-    assert {"type": "label_conflict", "id": created["conflict_id"]} in response_data[
-        "affected_objects"
-    ]
+    conflict_receipt = next(
+        item
+        for item in response_data["affected_objects"]
+        if item["type"] == "label_conflict" and item["id"] == created["conflict_id"]
+    )
+    assert conflict_receipt["readback_url"] == (
+        f"/api/v1/human-review-decisions/{decision_id}/affected-objects/"
+        f"label_conflict/{created['conflict_id']}"
+    )
 
     with SessionLocal() as session:
         conflict = session.get(LabelConflict, created["conflict_id"])
@@ -236,9 +242,10 @@ def test_terminal_human_review_resolves_label_policy_conflict(
         assert before["trace_id"] == created["source_trace_id"]
         assert after["status"] == "resolved"
         assert after["payload"]["review_decision_id"] == decision_id
-        assert {"type": "label_conflict", "id": created["conflict_id"]} in decision.payload[
-            "affected_objects"
-        ]
+        assert any(
+            item["type"] == "label_conflict" and item["id"] == created["conflict_id"]
+            for item in decision.payload["affected_objects"]
+        )
 
         assert audit is not None
         assert audit.before_json["status"] == "detected"

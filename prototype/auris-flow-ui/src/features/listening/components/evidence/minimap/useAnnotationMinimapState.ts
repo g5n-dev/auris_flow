@@ -7,6 +7,9 @@ import { useRef, useState } from "react";
 
 export function useAnnotationMinimapState(props: AnnotationMinimapProps) {
   const {
+  audioSessionId,
+  boundaryId,
+  onReviewChange,
   selectedWindow,
   setSelectedWindow,
   activeTrack,
@@ -110,7 +113,7 @@ export function useAnnotationMinimapState(props: AnnotationMinimapProps) {
       )
     );
 
-  return { selectedWindow, setSelectedWindow, activeTrack, setActiveTrack, hiddenTracks, setHiddenTracks, openListeningMode, mode, setMode, collapsed, setCollapsed, employeeOrder, setEmployeeOrder, draggedEmployee, setDraggedEmployee, dragOverEmployee, setDragOverEmployee, selectedSliceId, setSelectedSliceId, sliceDecisions, setSliceDecisions, extensionDrafts, setExtensionDrafts, extensionSourceExpanded, setExtensionSourceExpanded, selectedExtensionId, setSelectedExtensionId, extensionLocks, setExtensionLocks, boundaryPreview, setBoundaryPreview, syncState, setSyncState, sessionBoundary, setSessionBoundary, boundaryDrag, setBoundaryDrag, extensionDrag, setExtensionDrag, boundaryConfirmed, setBoundaryConfirmed, employeeDragClickGuard, stitchStripRef, modalBoundaryStripRef, extensionDragRef, boundaryDragVisibleExtensionIdsRef, boundaryDragAxisRef, visibleEmployees, setVisibleEmployees, layers, setLayers, eventAssociationsImported, setEventAssociationsImported, activeAssociation, setActiveAssociation, associationEdits, setAssociationEdits };
+  return { audioSessionId, boundaryId, onReviewChange, selectedWindow, setSelectedWindow, activeTrack, setActiveTrack, hiddenTracks, setHiddenTracks, openListeningMode, mode, setMode, collapsed, setCollapsed, employeeOrder, setEmployeeOrder, draggedEmployee, setDraggedEmployee, dragOverEmployee, setDragOverEmployee, selectedSliceId, setSelectedSliceId, sliceDecisions, setSliceDecisions, extensionDrafts, setExtensionDrafts, extensionSourceExpanded, setExtensionSourceExpanded, selectedExtensionId, setSelectedExtensionId, extensionLocks, setExtensionLocks, boundaryPreview, setBoundaryPreview, syncState, setSyncState, sessionBoundary, setSessionBoundary, boundaryDrag, setBoundaryDrag, extensionDrag, setExtensionDrag, boundaryConfirmed, setBoundaryConfirmed, employeeDragClickGuard, stitchStripRef, modalBoundaryStripRef, extensionDragRef, boundaryDragVisibleExtensionIdsRef, boundaryDragAxisRef, visibleEmployees, setVisibleEmployees, layers, setLayers, eventAssociationsImported, setEventAssociationsImported, activeAssociation, setActiveAssociation, associationEdits, setAssociationEdits };
 }
 
 export type AnnotationMinimapState = ReturnType<typeof useAnnotationMinimapState>;

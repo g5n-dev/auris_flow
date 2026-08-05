@@ -10,10 +10,29 @@ from pathlib import Path
 from typing import Any
 
 PLATFORM_NETWORK = "audio-import-gate-platform"
-PLATFORM_MEMBERS = frozenset({"audio-import-platform", "bff", "dagster-code"})
+PLATFORM_MEMBERS = frozenset(
+    {
+        "audio-import-platform",
+        "audio-import-inference",
+        "bff",
+        "dagster-code",
+    }
+)
 PLATFORM_SUBNET = "93.184.216.0/29"
 PLATFORM_ADDRESS = "93.184.216.2"
 PLATFORM_HOSTNAME = "recordings.audio-import-gate.test"
+INFERENCE_HOSTNAME = "audio-inference.audio-import-gate.test"
+INFERENCE_ENDPOINT = f"https://{INFERENCE_HOSTNAME}:8443/v1/audio-intelligence"
+SHARED_STORAGE_ENVIRONMENT = {
+    "AURIS_OBJECT_STORAGE_ADAPTER": "real",
+    "OBJECT_STORAGE_PROVIDER": "minio",
+    "OBJECT_STORAGE_ENDPOINT": "http://minio:9000",
+    "OBJECT_STORAGE_BUCKET": "auris-flow",
+    "OBJECT_STORAGE_REGION": "us-east-1",
+    "OBJECT_STORAGE_ALLOWED_BUCKETS": "auris-flow",
+    "OBJECT_STORAGE_ACCESS_KEY_FILE": "/run/secrets/object_storage_access_key",
+    "OBJECT_STORAGE_SECRET_KEY_FILE": "/run/secrets/object_storage_secret_key",
+}
 
 
 class GateTopologyError(RuntimeError):
@@ -52,13 +71,46 @@ def _volume_targets(service: dict[str, Any]) -> set[str]:
     return targets
 
 
+def _validate_shared_storage_scope(
+    bff_environment: dict[str, Any],
+    worker_environment: dict[str, Any],
+) -> None:
+    for label, environment in (
+        ("BFF", bff_environment),
+        ("outbox worker", worker_environment),
+    ):
+        mismatches = {
+            name: {"expected": expected, "actual": environment.get(name)}
+            for name, expected in SHARED_STORAGE_ENVIRONMENT.items()
+            if environment.get(name) != expected
+        }
+        if mismatches:
+            raise GateTopologyError(
+                f"{label} real audio-import storage scope is incomplete: {mismatches}"
+            )
+    drift = {
+        name: {
+            "bff": bff_environment.get(name),
+            "worker": worker_environment.get(name),
+        }
+        for name in SHARED_STORAGE_ENVIRONMENT
+        if bff_environment.get(name) != worker_environment.get(name)
+    }
+    if drift:
+        raise GateTopologyError(
+            f"BFF and outbox worker audio-import storage scopes drift: {drift}"
+        )
+
+
 def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
     services = _mapping(document.get("services"), "services")
     networks = _mapping(document.get("networks"), "networks")
     required_services = {
         "audio-import-gate-secrets-augment",
         "audio-import-gate-pki-init",
+        "audio-import-gate-platform-connection-seed",
         "audio-import-platform",
+        "audio-import-inference",
         "minio",
         "minio-bootstrap",
         "dagster-code",
@@ -132,6 +184,51 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
     }:
         raise GateTopologyError("platform fixture mounts exceed its TLS-only boundary")
 
+    inference = _mapping(
+        services["audio-import-inference"],
+        "audio inference fixture",
+    )
+    inference_network_binding = _mapping(
+        _mapping(
+            inference.get("networks"),
+            "audio inference fixture networks",
+        ).get(PLATFORM_NETWORK),
+        "audio inference fixture network binding",
+    )
+    if (
+        inference_network_binding.get("aliases") != [INFERENCE_HOSTNAME]
+        or inference.get("ports")
+        or inference.get("read_only") is not True
+        or set(inference.get("cap_drop") or []) != {"ALL"}
+    ):
+        raise GateTopologyError("HTTPS audio inference fixture exposure is invalid")
+    inference_environment = _mapping(
+        inference.get("environment"),
+        "audio inference fixture environment",
+    )
+    required_inference_environment = {
+        "PYTHONPATH": "/app",
+        "AURIS_GATE_CERT_FILE": "/run/audio-import-gate-tls/server.pem",
+        "AURIS_GATE_KEY_FILE": "/run/audio-import-gate-tls/server-key.pem",
+        "AURIS_GATE_CONTROL_SECRET_FILE": ("/run/secrets/audio_inference_gate_control"),
+        "AUDIO_INFERENCE_API_TOKEN_FILE": ("/run/secrets/audio_inference_api_token"),
+        "AUDIO_INFERENCE_PROVIDER": "audio_intelligence_default",
+        "AUDIO_INFERENCE_MODEL": "audio-v2.3.1",
+    }
+    if any(
+        inference_environment.get(name) != value
+        for name, value in required_inference_environment.items()
+    ):
+        raise GateTopologyError("audio inference fixture contract is incomplete")
+    inference_targets = _volume_targets(inference)
+    if not {
+        "/opt/auris-gate/production_gate_support.py",
+        "/run/secrets",
+        "/run/audio-import-gate-ca",
+        "/run/audio-import-gate-tls",
+    }.issubset(inference_targets):
+        raise GateTopologyError("audio inference fixture lacks TLS or secret mounts")
+
     pki = _mapping(services["audio-import-gate-pki-init"], "PKI initializer")
     if (
         pki.get("network_mode") != "none"
@@ -151,6 +248,23 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
     ):
         raise GateTopologyError("audio import gate secret initializer is not isolated")
 
+    platform_connection_seed = _mapping(
+        services["audio-import-gate-platform-connection-seed"],
+        "platform connection seed",
+    )
+    seed_command = platform_connection_seed.get("command")
+    if (
+        platform_connection_seed.get("read_only") is not True
+        or set(platform_connection_seed.get("cap_drop") or []) != {"ALL"}
+        or platform_connection_seed.get("ports")
+        or _service_networks(platform_connection_seed) != {"internal"}
+        or not isinstance(seed_command, list)
+        or "/opt/auris-gate/audio_import_gate_seed.py" not in seed_command
+        or _volume_targets(platform_connection_seed)
+        != {"/opt/auris-gate/audio_import_gate_seed.py", "/run/secrets"}
+    ):
+        raise GateTopologyError("platform connection gate seed boundary is invalid")
+
     minio = _mapping(services["minio"], "MinIO")
     if minio.get("ports") or "/run/secrets" not in _volume_targets(minio):
         raise GateTopologyError(
@@ -164,12 +278,7 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
     bff_environment = _mapping(bff.get("environment"), "BFF environment")
     required_bff_environment = {
         "AURIS_DAGSTER_EXECUTION_MODE": "control-plane-acknowledgement",
-        "AURIS_OBJECT_STORAGE_ADAPTER": "real",
-        "OBJECT_STORAGE_PROVIDER": "minio",
-        "OBJECT_STORAGE_ENDPOINT": "http://minio:9000",
-        "OBJECT_STORAGE_BUCKET": "auris-flow",
-        "OBJECT_STORAGE_ACCESS_KEY_FILE": "/run/secrets/object_storage_access_key",
-        "OBJECT_STORAGE_SECRET_KEY_FILE": "/run/secrets/object_storage_secret_key",
+        **SHARED_STORAGE_ENVIRONMENT,
         "PLATFORM_CREDENTIAL_BINDINGS_FILE": (
             "/run/secrets/platform_credential_bindings"
         ),
@@ -185,6 +294,15 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
         raise GateTopologyError("BFF real audio-import environment is incomplete")
     if _service_networks(bff) != {"internal", "app-egress", PLATFORM_NETWORK}:
         raise GateTopologyError("BFF network scope is invalid for the gate")
+    bff_dependencies = _mapping(bff.get("depends_on"), "BFF dependencies")
+    platform_seed_dependency = _mapping(
+        bff_dependencies.get("audio-import-gate-platform-connection-seed"),
+        "BFF platform connection seed dependency",
+    )
+    if platform_seed_dependency.get("condition") != "service_completed_successfully":
+        raise GateTopologyError(
+            "BFF must wait for the strong platform connection gate seed"
+        )
     if "/run/audio-import-gate-tls" in _volume_targets(bff):
         raise GateTopologyError("BFF must never receive the platform TLS private key")
 
@@ -193,13 +311,18 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
         worker.get("environment"),
         "outbox worker environment",
     )
-    if (
-        worker_environment.get("AURIS_DAGSTER_EXECUTION_MODE")
-        != "control-plane-acknowledgement"
+    required_worker_environment = {
+        "AURIS_DAGSTER_EXECUTION_MODE": "control-plane-acknowledgement",
+        **SHARED_STORAGE_ENVIRONMENT,
+    }
+    if any(
+        worker_environment.get(name) != value
+        for name, value in required_worker_environment.items()
     ):
         raise GateTopologyError(
-            "outbox worker must submit the production audio-import job"
+            "outbox worker must share the frozen audio-import execution and storage scope"
         )
+    _validate_shared_storage_scope(bff_environment, worker_environment)
 
     dagster = _mapping(services["dagster-code"], "Dagster code")
     dagster_environment = _mapping(
@@ -215,6 +338,7 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
         "AURIS_AUDIO_OBJECT_STORAGE_PROVIDER": "minio",
         "AURIS_AUDIO_OBJECT_STORAGE_ENDPOINT": "http://minio:9000",
         "AURIS_AUDIO_OBJECT_STORAGE_ALLOWED_BUCKETS": "auris-flow",
+        "AURIS_AUDIO_INFERENCE_ENDPOINT": INFERENCE_ENDPOINT,
         "SSL_CERT_FILE": "/run/audio-import-gate-ca/ca.pem",
     }
     if any(
@@ -245,7 +369,9 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
     rendered = json.dumps(
         {
             "platform": platform,
+            "inference": inference,
             "bff": bff,
+            "worker": worker,
             "dagster": dagster,
             "verifier": verifier,
         },
@@ -268,6 +394,8 @@ def validate_topology(document: dict[str, Any]) -> dict[str, Any]:
         "platform_members": sorted(observed_members),
         "platform_address": PLATFORM_ADDRESS,
         "platform_hostname": PLATFORM_HOSTNAME,
+        "inference_hostname": INFERENCE_HOSTNAME,
+        "inference_endpoint": INFERENCE_ENDPOINT,
         "object_storage_adapter": bff_environment["AURIS_OBJECT_STORAGE_ADAPTER"],
         "object_storage_provider": bff_environment["OBJECT_STORAGE_PROVIDER"],
         "dagster_callback": dagster_environment["AURIS_BFF_INTERNAL_URL"],

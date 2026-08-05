@@ -14,6 +14,7 @@ from urllib.parse import unquote
 from fastapi import Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from sqlalchemy.sql.elements import ColumnElement
 
 from app.core.context import RequestContext
 from app.core.errors import ApiError
@@ -24,11 +25,13 @@ from app.models import (
     AudioRecording,
     Badcase,
     EvalDatasetVersion,
+    EvidencePack,
     HotwordMetricSnapshot,
     HotwordPack,
     HotwordPackVersion,
     HotwordVersionItem,
     JsonResource,
+    PlatformConnection,
     Project,
     ProjectSceneProfileBinding,
     RunRecord,
@@ -152,6 +155,7 @@ def list_resources(
     status: str | None = None,
     limit: int = 50,
     cursor: int | str | None = 0,
+    predicates: tuple[ColumnElement[bool], ...] = (),
 ) -> list[JsonResource]:
     require_resource_read(ctx, collection)
     read_scope = resource_read_scope(ctx, collection)
@@ -163,6 +167,7 @@ def list_resources(
         cursor=decode_cursor(cursor),
         limit=limit,
         read_scope=read_scope,
+        predicates=predicates,
     )
 
 
@@ -174,11 +179,18 @@ def list_resource_data(
     status: str | None = None,
     limit: int = 50,
     cursor: int | str | None = 0,
+    predicates: tuple[ColumnElement[bool], ...] = (),
 ) -> list[dict[str, Any]]:
     return [
         resource.data
         for resource in list_resources(
-            session, ctx, collection, status=status, limit=limit, cursor=cursor
+            session,
+            ctx,
+            collection,
+            status=status,
+            limit=limit,
+            cursor=cursor,
+            predicates=predicates,
         )
     ]
 
@@ -190,6 +202,7 @@ def list_resource_page(
     page: dict[str, str | int | None],
     *,
     status: str | None = None,
+    predicates: tuple[ColumnElement[bool], ...] = (),
 ) -> ResourcePage:
     require_resource_read(ctx, collection)
     read_scope = resource_read_scope(ctx, collection)
@@ -204,6 +217,7 @@ def list_resource_page(
         cursor=cursor_id,
         limit=limit + 1,
         read_scope=read_scope,
+        predicates=predicates,
     )
     visible = resources[:limit]
     next_cursor = encode_cursor(visible[-1].id) if len(resources) > limit and visible else None
@@ -215,6 +229,7 @@ def list_resource_page(
             collection=collection,
             status=status,
             read_scope=read_scope,
+            predicates=predicates,
         ),
         limit=limit,
         next_cursor=next_cursor,
@@ -960,6 +975,117 @@ def seed_database(session: Session, seed: dict[str, Any]) -> None:
                     payload=storage_payload,
                 )
             )
+
+    for connector in seed.get("connectors", []):
+        connector_type = connector.get("type") or connector.get("source_type")
+        if connector_type not in {"platform_auth", "platform_connection"}:
+            continue
+        connection_id = str(connector.get("platform_connection_id") or connector["connector_id"])
+        connection_status = str(connector.get("status") or "draft")
+        session.merge(
+            PlatformConnection(
+                platform_connection_id=connection_id,
+                tenant_id=ctx.tenant_id,
+                project_id=ctx.project_id,
+                external_tenant_ref=str(connector["external_tenant_ref"]),
+                name=str(connector["name"]),
+                provider_type=str(connector.get("provider_type") or "generic_http"),
+                auth_mode=str(connector["auth_mode"]),
+                origin=str(connector["origin"]).rstrip("/"),
+                credential_ref=str(connector["credential_ref"]),
+                store_refs=list(connector.get("store_refs") or []),
+                test_path=str(connector.get("test_path") or "/"),
+                status="active"
+                if connection_status in {"active", "success"}
+                else connection_status,
+                resource_version=int(connector.get("resource_version") or 1),
+                last_test_status=connector.get("last_test_status"),
+                last_tested_at=(
+                    datetime.fromisoformat(str(connector["last_tested_at"]))
+                    if connector.get("last_tested_at")
+                    else None
+                ),
+                root_trace_id=str(
+                    connector.get("root_trace_id") or connector.get("trace_id") or ctx.trace_id
+                ),
+                current_trace_id=str(
+                    connector.get("current_trace_id") or connector.get("trace_id") or ctx.trace_id
+                ),
+            )
+        )
+    session.flush()
+
+    session_recording_ids = {
+        str(item["audio_session_id"]): str(item["recording_id"])
+        for item in seed["audio_evidence"]["audio_sessions"]
+    }
+    recording_storage_ids = {
+        str(item["recording_id"]): str(item["storage_object_id"]) for item in seeded_recordings
+    }
+    for item in seed["audio_evidence"]["evidence_packs"]:
+        evidence_pack_id = str(item["evidence_pack_id"])
+        audio_session_id = str(item["audio_session_id"])
+        recording_id = session_recording_ids[audio_session_id]
+        storage_object_id = recording_storage_ids[recording_id]
+        root_trace_id = str(item.get("trace_id") or ctx.trace_id)
+        audio_sha256 = hashlib.sha256(f"legacy-seed-audio:{recording_id}".encode()).hexdigest()
+        segments_sha256 = hashlib.sha256(f"legacy-seed-asr:{evidence_pack_id}".encode()).hexdigest()
+        evidence_document = {
+            "schema_version": "audio-evidence-pack/1",
+            "tenant_id": ctx.tenant_id,
+            "project_id": ctx.project_id,
+            "audio_session_id": audio_session_id,
+            "recording_id": recording_id,
+            "storage_object": {
+                "storage_object_id": storage_object_id,
+                "version_id": "legacy-seed-reference-v1",
+                "content_sha256": audio_sha256,
+            },
+            "asr_result": {
+                "asr_result_id": f"seed:asr:{evidence_pack_id}",
+                "version": "legacy-seed-v1",
+                "segments_sha256": segments_sha256,
+            },
+            "time_window": {
+                "start_ms": int(item["window_start_ms"]),
+                "end_ms": int(item["window_end_ms"]),
+            },
+            "source_run_id": "seed:legacy-evidence-import",
+            "root_trace_id": root_trace_id,
+            "legacy_metadata": {"title": item.get("title")},
+        }
+        evidence_sha256 = hashlib.sha256(
+            json.dumps(
+                evidence_document,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        session.merge(
+            EvidencePack(
+                evidence_pack_id=evidence_pack_id,
+                tenant_id=ctx.tenant_id,
+                project_id=ctx.project_id,
+                audio_session_id=audio_session_id,
+                recording_id=recording_id,
+                storage_object_id=storage_object_id,
+                storage_object_version="legacy-seed-reference-v1",
+                audio_sha256=audio_sha256,
+                asr_result_id=f"seed:asr:{evidence_pack_id}",
+                asr_result_version="legacy-seed-v1",
+                window_start_ms=int(item["window_start_ms"]),
+                window_end_ms=int(item["window_end_ms"]),
+                evidence_sha256=evidence_sha256,
+                status="superseded",
+                source_run_id="seed:legacy-evidence-import",
+                resource_version=1,
+                root_trace_id=root_trace_id,
+                current_trace_id=root_trace_id,
+                payload=evidence_document,
+            )
+        )
+    session.flush()
 
     collection_specs: list[tuple[str, str, list[dict[str, Any]]]] = [
         ("stores", "store_id", seed["context"]["stores"]),

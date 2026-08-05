@@ -1,108 +1,185 @@
-import { getAudioSession, getHumanReviewTask, listAudioSessions, listHumanReviewTasks } from "../../../api/client";
-import type { HumanReviewTask } from "../../../api/client";
+import { createUserIntentIdempotencyKey } from "../../../api/client";
 import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
-import { backendId, isRecordValue, recordList } from "../../../shared/runtime/records";
-import { backendReviewSample, emptyReviewSample, reviewSamples } from "../fixtures/reviewSamples";
+import {
+  emptyReviewSample,
+  reviewQueueKeyForLabel,
+  reviewSamples
+} from "../fixtures/reviewSamples";
 import type { ReviewSample } from "../fixtures/reviewSamples";
+import { loadListeningQueueFacts } from "./listeningQueueLoader";
 import type { ListeningState } from "./useListeningState";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+
+type EmptyReadState = "empty" | "complete";
 
 export function useListeningReadModel(context: ListeningState) {
-  const { activeModule, activeSampleId, backendReviewSamples, currentUser, listeningReadRetry, setActiveChip, setActiveQueue, setActiveSampleId, setAgentState, setBackendReviewSamples, setListeningReadDetail, setListeningReadState, setMarkState, setPanelTab, setSelectedAssetKey, setSelectedDataAssetId, setSelectedWindow, topbarContext } = context;
-  useEffect(() => {
-      if (LABEL_DEMO_MODE || !currentUser || activeModule !== "listening") return;
-      let cancelled = false;
-      setListeningReadState("loading");
-      setListeningReadDetail("正在读取 HumanReviewTask 队列并关联 AudioSession、EvidencePack 与 ASR 轨道。 ");
+  const {
+    activeModule,
+    activeSampleId,
+    backendReviewSamples,
+    currentUser,
+    focus,
+    listeningReadRetry,
+    setActiveChip,
+    setActiveQueue,
+    setActiveSampleId,
+    setAgentState,
+    setBackendReviewSamples,
+    setListeningReadDetail,
+    setListeningReadState,
+    setLowConfidence,
+    setMarkState,
+    setPanelTab,
+    setReviewChanges,
+    setReviewDecisionIdempotencyKey,
+    setSelectedAssetKey,
+    setSelectedDataAssetId,
+    setSelectedWindow,
+    topbarContext
+  } = context;
+  const refreshGeneration = useRef(0);
 
-      const loadListeningFacts = async () => {
-        try {
-          const [taskResponse, sessionResponse] = await Promise.all([
-            listHumanReviewTasks({ limit: 50 }),
-            listAudioSessions({ limit: 20 })
-          ]);
-          const tasks = taskResponse.data.items.filter((task) => backendId(task, "id", "review_task_id"));
-          const sessionIds = Array.from(
-            new Set(
-              sessionResponse.data.items
-                .map((session) => backendId(session, "audio_session_id", "id"))
-                .filter(Boolean)
-            )
-          );
-          const [taskDetails, sessionDetails] = await Promise.all([
-            Promise.all(tasks.map(async (task) => {
-              const taskId = backendId(task, "id", "review_task_id");
-              const detail = await getHumanReviewTask(taskId);
-              return { ...task, ...detail.data, id: taskId } as HumanReviewTask;
-            })),
-            Promise.all(sessionIds.map(async (sessionId) => (await getAudioSession(sessionId)).data))
-          ]);
-          if (cancelled) return;
-          const samples = taskDetails.flatMap((task, index) => {
-            const taskEvidence = isRecordValue(task.evidence_pack) ? task.evidence_pack : {};
-            const evidencePackId = backendId(taskEvidence, "evidence_pack_id", "id") || backendId(task, "evidence_pack_id");
-            const directSessionId = backendId(task, "audio_session_id") || backendId(taskEvidence, "audio_session_id");
-            const session = sessionDetails.find((candidate) => {
-              const candidateId = backendId(candidate, "audio_session_id", "id");
-              if (directSessionId && candidateId === directSessionId) return true;
-              return recordList(candidate.evidence_packs).some(
-                (pack) => backendId(pack, "evidence_pack_id", "id") === evidencePackId
-              );
-            });
-            return session ? [backendReviewSample(task, session, index)] : [];
-          }).map((sample, _index, all) => ({ ...sample, progressTotal: all.length }));
-          setBackendReviewSamples(samples);
-          if (samples.length === 0) {
-            setListeningReadState("empty");
-            setListeningReadDetail(
-              tasks.length === 0
-                ? "当前租户/项目没有可读的 HumanReviewTask；未回退本地样本。"
-                : `${tasks.length} 个 HumanReviewTask 未关联到可读 AudioSession/EvidencePack，已阻断错误展示。`
-            );
-            return;
-          }
-          setActiveSampleId(samples[0].id);
-          setActiveQueue(samples[0].queue);
-          setActiveChip(samples[0].queue);
-          setSelectedDataAssetId(samples[0].dataAssetId);
-          setSelectedAssetKey(samples[0].assetKey);
-          setListeningReadState("ready");
-          setListeningReadDetail(
-            `已从 BFF 读取 ${samples.length} 个复核对象、${sessionDetails.length} 个音频会话；写操作后将回读同一任务。`
-          );
-        } catch (error) {
-          if (cancelled) return;
-          setBackendReviewSamples([]);
-          setListeningReadState("error");
-          setListeningReadDetail(error instanceof Error ? error.message : "调听权威事实读取失败");
+  const applyActiveSample = useCallback((sample: ReviewSample) => {
+    setActiveSampleId(sample.id);
+    setSelectedDataAssetId(sample.dataAssetId);
+    setSelectedAssetKey(sample.assetKey);
+    setActiveQueue(sample.queue);
+    setActiveChip(sample.queue);
+    setSelectedWindow(sample.window);
+    setAgentState("pending");
+    setMarkState("none");
+    setLowConfidence(false);
+    setReviewChanges([]);
+    setReviewDecisionIdempotencyKey(
+      createUserIntentIdempotencyKey(`human_review_decision_${sample.reviewTaskId ?? sample.id}`)
+    );
+    setPanelTab("agent");
+  }, [
+    setActiveChip,
+    setActiveQueue,
+    setActiveSampleId,
+    setAgentState,
+    setLowConfidence,
+    setMarkState,
+    setPanelTab,
+    setReviewChanges,
+    setReviewDecisionIdempotencyKey,
+    setSelectedAssetKey,
+    setSelectedDataAssetId,
+    setSelectedWindow
+  ]);
+
+  const refreshPendingReviewQueue = useCallback(async (
+    queueKey?: string,
+    emptyReadState: EmptyReadState = "empty"
+  ): Promise<ReviewSample[]> => {
+    const generation = ++refreshGeneration.current;
+    if (LABEL_DEMO_MODE) {
+      const requestedDemoQueueKey = queueKey
+        ? reviewQueueKeyForLabel(queueKey)
+        : "";
+      const samples = queueKey
+        ? reviewSamples.filter(
+            (sample) =>
+              reviewQueueKeyForLabel(sample.queueKey ?? sample.queue)
+              === requestedDemoQueueKey
+          )
+        : reviewSamples;
+      if (samples[0]) applyActiveSample(samples[0]);
+      return samples;
+    }
+
+    setListeningReadState("loading");
+    setListeningReadDetail(
+      queueKey
+        ? `正在从 BFF 重新读取 ${queueKey} 的 pending HumanReviewTask。`
+        : "正在读取 pending HumanReviewTask 并关联 AudioSession 与 EvidencePack。"
+    );
+    try {
+      const loaded = await loadListeningQueueFacts(queueKey, focus);
+      if (generation !== refreshGeneration.current) return [];
+      const { requestedAudioSessionId, requestedReviewTaskId, samples } = loaded;
+      setBackendReviewSamples(samples);
+      if (samples.length === 0 && loaded.taskCount > 0) {
+        throw new Error(
+          `${loaded.taskCount} 个 pending HumanReviewTask 未关联到可读 AudioSession/EvidencePack，不能宣称队列已完成。`
+        );
+      }
+      if (samples.length === 0) {
+        if (emptyReadState === "complete") {
+          setListeningReadState("complete");
+        } else {
+          setListeningReadState("empty");
         }
-      };
-      void loadListeningFacts();
-      return () => {
-        cancelled = true;
-      };
-    }, [activeModule, currentUser?.userId, listeningReadRetry, topbarContext.project, topbarContext.tenant]);
+        setListeningReadDetail(
+          queueKey
+            ? `${queueKey} 当前没有 pending HumanReviewTask。`
+            : "当前租户/项目没有 pending HumanReviewTask；未回退本地样本。"
+        );
+        return [];
+      }
+
+      applyActiveSample(samples[0]);
+      setListeningReadState("ready");
+      setListeningReadDetail(
+        requestedAudioSessionId
+          ? `已按 audio_session_id${requestedReviewTaskId ? " / review_task_id / root_trace_id" : ""} 从 BFF 精确回读 ${requestedAudioSessionId}；不会被 pending 队列首项覆盖。`
+          : `已从 BFF 读取 ${samples.length} 个 pending 复核对象、${loaded.sessionCount} 个音频会话；决定提交后会逐对象写后回读。`
+      );
+      return samples;
+    } catch (error) {
+      if (generation !== refreshGeneration.current) return [];
+      setBackendReviewSamples([]);
+      setListeningReadState("error");
+      setListeningReadDetail(
+        error instanceof Error ? error.message : "调听权威事实读取失败"
+      );
+      throw error;
+    }
+  }, [
+    applyActiveSample,
+    focus?.module,
+    focus?.objectId,
+    focus?.objectKind,
+    focus?.reviewTaskId,
+    focus?.rootTraceId,
+    setBackendReviewSamples,
+    setListeningReadDetail,
+    setListeningReadState,
+    topbarContext.project,
+    topbarContext.tenant
+  ]);
+
+  useEffect(() => {
+    if (LABEL_DEMO_MODE || !currentUser || activeModule !== "listening") return;
+    void refreshPendingReviewQueue().catch(() => undefined);
+  }, [
+    activeModule,
+    currentUser?.userId,
+    listeningReadRetry,
+    refreshPendingReviewQueue,
+    topbarContext.project,
+    topbarContext.tenant
+  ]);
 
   const reviewSamplePool = LABEL_DEMO_MODE ? reviewSamples : backendReviewSamples;
-
   const activeSample = useMemo(
-      () => reviewSamplePool.find((sample) => sample.id === activeSampleId) ?? reviewSamplePool[0] ?? emptyReviewSample,
-      [activeSampleId, reviewSamplePool]
-    );
+    () =>
+      reviewSamplePool.find((sample) => sample.id === activeSampleId) ??
+      reviewSamplePool[0] ??
+      emptyReviewSample,
+    [activeSampleId, reviewSamplePool]
+  );
 
-  const selectReviewSample = (sample: ReviewSample) => {
-      setActiveSampleId(sample.id);
-      setSelectedDataAssetId(sample.dataAssetId);
-      setSelectedAssetKey(sample.assetKey);
-      setActiveQueue(sample.queue);
-      setActiveChip(sample.queue);
-      setSelectedWindow(sample.window);
-      setAgentState("pending");
-      setMarkState("none");
-      setPanelTab("agent");
-    };
+  const selectReviewSample = (sample: ReviewSample) => applyActiveSample(sample);
 
-  return { ...context, reviewSamplePool, activeSample, selectReviewSample };
+  return {
+    ...context,
+    reviewSamplePool,
+    activeSample,
+    selectReviewSample,
+    refreshPendingReviewQueue
+  };
 }
 
 export type ListeningReadModel = ReturnType<typeof useListeningReadModel>;

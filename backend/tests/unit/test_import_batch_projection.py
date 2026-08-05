@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 
-from app.models import ImportBatch
-from app.services.import_batch_service import import_batch_payload
+from app.models import ImportBatch, ImportBatchItem
+from app.services.import_batch_service import (
+    import_batch_item_payload,
+    import_batch_payload,
+)
 
 
 def _batch(*, status: str, payload: dict[str, object]) -> ImportBatch:
@@ -31,6 +34,15 @@ def test_partial_batch_without_items_has_public_retry_reason() -> None:
 
     assert projected["error_code"] == "AUDIO_IMPORT_BATCH_PARTIAL"
     assert projected["reason"] == "导入批次部分失败；成功项已保留，可重试失败项。"
+    assert projected["retryable"] is True
+    assert projected["recovery_suggestion"]
+    assert projected["retry_lineage"] == {
+        "source_task_run_id": None,
+        "source_import_batch_id": None,
+        "root_task_run_id": "task_run_partial",
+        "root_import_batch_id": "import_batch_partial",
+        "attempt": 1,
+    }
 
 
 def test_batch_failure_projection_redacts_url_and_credential_material() -> None:
@@ -54,3 +66,40 @@ def test_batch_failure_projection_redacts_url_and_credential_material() -> None:
     assert "projection-secret-canary" not in serialized
     assert "Authorization" not in serialized
     assert "Bearer" not in serialized
+
+
+def test_import_item_failure_projection_uses_safe_code_recovery_and_lineage() -> None:
+    item = ImportBatchItem(
+        import_item_id="import_item_retry_002",
+        tenant_id="tenant_projection",
+        project_id="project_projection",
+        import_batch_id="import_batch_retry_002",
+        external_record_id="recording-safe-002",
+        status="failed",
+        error_code="INTERNAL_S3_EXCEPTION_WITH_BUCKET",
+        root_trace_id="trace_retry_002",
+        trace_id="trace_retry_002",
+        payload={
+            "retry_lineage": {
+                "source_import_batch_id": "import_batch_original",
+                "source_import_item_id": "import_item_original",
+                "root_import_batch_id": "import_batch_original",
+                "root_import_item_id": "import_item_original",
+                "attempt": 2,
+            }
+        },
+    )
+
+    projected = import_batch_item_payload(item)
+
+    assert projected["error_code"] == "AUDIO_IMPORT_ITEM_FAILED"
+    assert projected["retryable"] is False
+    assert projected["recovery_suggestion"]
+    assert projected["retry_lineage"] == {
+        "source_import_batch_id": "import_batch_original",
+        "source_import_item_id": "import_item_original",
+        "root_import_batch_id": "import_batch_original",
+        "root_import_item_id": "import_item_original",
+        "attempt": 2,
+    }
+    assert "INTERNAL_S3" not in json.dumps(projected)

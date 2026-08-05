@@ -12,8 +12,10 @@ import { useState, type CSSProperties } from "react";
 
 import type { ModuleDeepLink, ModuleKey } from "../../shared/contracts/navigation";
 import { withDeepLinkOrigin } from "../../shared/runtime/deepLinks";
+import { LABEL_DEMO_MODE } from "../../shared/runtime/demoMode";
 import { PanelHeader } from "../../shared/ui/PanelHeader";
 import { homeModuleEntrypoints } from "./entrypoints";
+import { buildHomeTruthSummary } from "./homeTruthSummary";
 import {
   homeAlerts,
   homeCatalogData,
@@ -31,18 +33,32 @@ export type HomeModuleProps = {
   setActiveModule: (module: ModuleKey) => void;
   navigateToTarget: (target: ModuleDeepLink) => void;
   activeTab: string;
+  projectionData?: unknown;
+  projectionTraceId?: string;
 };
 
 export function HomeModule({
   setActiveModule,
   navigateToTarget,
-  activeTab
+  activeTab,
+  projectionData,
+  projectionTraceId
 }: HomeModuleProps) {
   const [selectedModuleKey, setSelectedModuleKey] = useState<ModuleKey>("listening");
   const [activeRunTrendKey, setActiveRunTrendKey] = useState<HomeRunTrendKey>("health");
   const [activeRunTrendPoint, setActiveRunTrendPoint] = useState(homeRunTrendLabels.length - 1);
   const selectedModule = homeModuleEntrypoints.find((module) => module.key === selectedModuleKey) ?? homeModuleEntrypoints[1];
   const SelectedIcon = selectedModule.icon;
+  const businessSummary = buildHomeTruthSummary(
+    LABEL_DEMO_MODE
+      ? {
+          running_count: 9,
+          pending_count: 317,
+          model_anomaly_count: 3,
+          sessions: [{ audio_session_id: "DEMO-AF-128" }]
+        }
+      : projectionData
+  );
   const openHomeTarget = (target: ModuleDeepLink, originLabel: string, objectLabel?: string) =>
     navigateToTarget(withDeepLinkOrigin(target, originLabel, "home", objectLabel));
   const targetForAgentTask = (taskTitle: string): ModuleDeepLink => {
@@ -278,6 +294,56 @@ export function HomeModule({
     </section>
   );
 
+  const renderBusinessSummary = () => (
+    <section className="module-panel home-signal-panel home-business-summary" data-testid="home-business-summary">
+      <PanelHeader
+        title="业务运行摘要"
+        subtitle={LABEL_DEMO_MODE ? "DEMO fixture · 仅用于交互演示" : "来自 BFF ops-summary 的当前租户与项目读模型"}
+        icon={<Activity size={16} />}
+      />
+      <div className="home-signal-grid">
+        {businessSummary.map((card) => (
+          <button
+            key={card.key}
+            type="button"
+            className={`home-signal-card ${card.tone}`}
+            onClick={() => setActiveModule(card.route)}
+          >
+            <span>{card.label}</span>
+            <strong>{card.value}</strong>
+            <em>{card.detail}</em>
+            <i />
+          </button>
+        ))}
+      </div>
+      {!LABEL_DEMO_MODE && (
+        <small>
+          业务状态以 BFF 回读为准；服务技术就绪不代表业务任务成功。
+          {projectionTraceId ? ` · trace ${projectionTraceId}` : ""}
+        </small>
+      )}
+    </section>
+  );
+
+  if (!LABEL_DEMO_MODE) {
+    return (
+      <div className="module-grid home-dashboard-grid home-default-grid">
+        {renderBusinessSummary()}
+        <details className="home-secondary-details">
+          <summary>运行明细与技术状态</summary>
+          <section className="module-panel home-status-panel">
+            <PanelHeader
+              title="二级运行与技术详情"
+              subtitle="当前 ops-summary 未提供热力图和节点级运行读模型"
+              icon={<ShieldCheck size={16} />}
+            />
+            <p>尚未接入的运行细节不会使用本地 fixture 补齐；请进入对应业务模块查看真实任务、失败项和最新导入。</p>
+          </section>
+        </details>
+      </div>
+    );
+  }
+
   if (activeTab === "tasks") {
     return (
       <div className="module-grid home-dashboard-grid home-tab-tasks">
@@ -314,17 +380,21 @@ export function HomeModule({
 
   return (
     <div className="module-grid home-dashboard-grid home-default-grid">
-      <HomeRunDashboard
-        activeRunTrendKey={activeRunTrendKey}
-        activeRunTrendPoint={activeRunTrendPoint}
-        setActiveRunTrendKey={setActiveRunTrendKey}
-        setActiveRunTrendPoint={setActiveRunTrendPoint}
-        setActiveModule={setActiveModule}
-      />
-      {renderAgentPanel()}
-      {renderEvidencePanel()}
-      {renderStatusPanel()}
-      {renderSignalPanel()}
+      {renderBusinessSummary()}
+      <details className="home-secondary-details">
+        <summary>展开运行明细、热力图与技术健康度（DEMO）</summary>
+        <HomeRunDashboard
+          activeRunTrendKey={activeRunTrendKey}
+          activeRunTrendPoint={activeRunTrendPoint}
+          setActiveRunTrendKey={setActiveRunTrendKey}
+          setActiveRunTrendPoint={setActiveRunTrendPoint}
+          setActiveModule={setActiveModule}
+        />
+        {renderAgentPanel()}
+        {renderEvidencePanel()}
+        {renderStatusPanel()}
+        {renderSignalPanel()}
+      </details>
     </div>
   );
 }

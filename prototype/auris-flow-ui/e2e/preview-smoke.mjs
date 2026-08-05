@@ -780,18 +780,21 @@ try {
     });
     const recoverySignalCursor = chunkFailureSignals.length;
     await failurePage.unroute(knowledgeRouteMatcher);
-    await reloadButton.click();
-    await failurePage.getByText("运营首页", { exact: true }).waitFor({ state: "visible", timeout: 10000 });
-    await assertNoVisibleLazyFailure(failurePage, "知识库恢复后的首页");
-    await assertNoVisibleLazyFallback(failurePage, "知识库恢复后的首页");
     const recoveredKnowledgeApi = failurePage.waitForResponse(
       (response) =>
         new URL(response.url()).pathname === "/api/v1/knowledge-sources" &&
         response.request().method() === "GET",
       { timeout: 10000 }
     );
-    await openKnowledge(failurePage);
+    await reloadButton.click();
     await failurePage.getByTestId("knowledge-module-root").waitFor({ state: "visible", timeout: 10000 });
+    assert(
+      new URL(failurePage.url()).searchParams.get("module") === "knowledge",
+      "知识库 chunk 恢复后未保留 URL 模块状态",
+      { url: failurePage.url() }
+    );
+    await assertNoVisibleLazyFailure(failurePage, "知识库原位恢复后");
+    await assertNoVisibleLazyFallback(failurePage, "知识库原位恢复后");
     const knowledgeResponse = await recoveredKnowledgeApi;
     assert(knowledgeResponse.status() === 200, "知识库恢复后数据接口未成功", {
       status: knowledgeResponse.status()

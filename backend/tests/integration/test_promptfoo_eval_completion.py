@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from app.core.database import SessionLocal
 from app.models import (
     LabelAggregationPolicyVersion,
@@ -25,6 +27,8 @@ from app.services.promptfoo_eval_adapter import (
     serialize_promptfoo_result_artifact,
 )
 from app.workers.outbox_worker import process_aggregate_events
+
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
 
 TENANT_ID = "aurora_auto"
 PROJECT_ID = "sales_qa"
@@ -414,9 +418,14 @@ def test_promptfoo_artifact_completes_real_dispatched_eval_and_materializes_fact
         json=completion_payload,
         headers=_headers(auth_headers, "promptfoo-complete-eval-run"),
     )
-    assert completed.status_code == 200, completed.text
-    assert completed.json()["data"]["status"] == "success"
-    assert completed.json()["data"]["label_eval_result"]["status"] == "passed"
+    assert completed.status_code == 202, completed.text
+    assert completed.json()["data"]["status"] == "completion_pending"
+    assert completed.json()["data"]["receipt_state"] == "materializing"
+    assert process_aggregate_events([EVAL_RUN_ID]) == 1
+    completed_readback = client.get(f"/api/v1/runs/{EVAL_RUN_ID}", headers=auth_headers)
+    assert completed_readback.status_code == 200, completed_readback.text
+    assert completed_readback.json()["data"]["status"] == "success"
+    assert completed_readback.json()["data"]["label_eval_result"]["status"] == "passed"
 
     with SessionLocal() as session:
         fact = session.query(LabelEvalResult).filter_by(eval_run_id=EVAL_RUN_ID).one()

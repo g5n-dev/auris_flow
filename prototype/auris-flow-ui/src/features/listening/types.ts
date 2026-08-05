@@ -1,4 +1,5 @@
 import type { AuthUser } from "../../shared/contracts/auth";
+import type { BackendAffectedObjectRef } from "../../api/client";
 import type { ModuleDeepLink, ModuleKey } from "../../shared/contracts/navigation";
 import type { TopbarContextState } from "../../shared/contracts/workspace";
 
@@ -46,6 +47,7 @@ export type AppealableReviewDecision = {
   reviewTaskId: string;
   evidenceRefs: string[];
   sampleTitle: string;
-  traceId?: string;
+  rootTraceId: string;
+  affectedObjects: BackendAffectedObjectRef[];
   idempotencyKey: string;
 };

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
@@ -25,6 +26,8 @@ from app.models import (
     RunRecord,
 )
 from app.workers.outbox_worker import process_aggregate_events
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 LABEL_VERSION_ID = "label_v1_9_0_rc2"
 POLICY_VERSION_ID = "lap_contract_v1"

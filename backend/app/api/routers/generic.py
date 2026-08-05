@@ -63,6 +63,7 @@ from app.services.idempotency_service import (
 )
 from app.services.knowledge_recall_service import recall_knowledge_index
 from app.services.outbox_service import enqueue_event
+from app.services.platform_connection_service import reject_plaintext_credentials
 from app.services.public_run_projection_service import public_run_projection
 from app.services.release_gate_service import (
     decide_release_gate,
@@ -76,12 +77,12 @@ from app.services.resource_service import (
     page_limit,
     patch_idempotent_json_resource,
     status_counts,
-    upsert_idempotent_json_resource,
 )
 from app.services.run_service import (
     complete_run_from_receipt,
     create_run,
     get_run,
+    list_run_page,
     retry_run,
 )
 from app.services.scene_profile_service import bind_active_scene_profile_lock
@@ -237,6 +238,7 @@ def prepare_connector_payload(
     *,
     existing_payload: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    reject_plaintext_credentials(payload)
     prepared = bind_active_scene_profile_lock(session, ctx, payload)
     platform_audio_payload = prepare_platform_audio_connector_payload(
         session,
@@ -1247,54 +1249,6 @@ async def patch_connectors_by_id(id: str, request: Request, session: SessionDep,
     )
 
 
-@router.get("/platform-connections")
-def get_platform_connections(
-    session: SessionDep, ctx: ContextDep, page: PaginationDep
-) -> dict[str, Any]:
-    resource_page = list_resource_page(session, ctx, "connectors", page)
-    items = [
-        {
-            "platform_connection_id": str(item.get("connector_id") or item.get("id") or ""),
-            "name": item.get("name"),
-            "status": item.get("status"),
-            "auth_mode": item.get("auth_mode"),
-        }
-        for item in resource_page.items
-        if (item.get("type") or item.get("source_type")) in {"platform_auth", "platform_connection"}
-    ]
-    return collection_envelope(
-        items,
-        ctx,
-        total=resource_page.total,
-        limit=resource_page.limit,
-        next_cursor=resource_page.next_cursor,
-    )
-
-
-@router.post("/platform-connections/{connection_id}/session", status_code=201)
-async def post_platform_connection_session(
-    connection_id: str, request: Request, session: SessionDep, ctx: ContextDep
-):
-    body = await request.json()
-    session_ref = f"platform_session:{connection_id}:{ctx.request_id}"
-    return await upsert_idempotent_json_resource(
-        session,
-        ctx,
-        request,
-        "platform_sessions",
-        session_ref,
-        status="success",
-        operation="platform_sessions.create",
-        status_code=201,
-        extra_data={
-            "connection_id": connection_id,
-            "session_ref": session_ref,
-            "expires_in": 3600,
-            "scope": body.get("scope", "current_project"),
-        },
-    )
-
-
 @router.get("/data-sources/{source_id}/records")
 def get_data_source_records(source_id: str, session: SessionDep, ctx: ContextDep):
     records = [
@@ -1609,22 +1563,35 @@ async def post_settings_provider_tests(request: Request, session: SessionDep, ct
 
 
 @router.get("/output-sinks/platform-callbacks")
-def get_platform_callbacks(ctx: ContextDep):
-    return collection_envelope(
-        [
-            {
-                "id": "callback_001",
-                "status": "pending",
-                "target": "crm_reception_order",
-                "trace_id": ctx.trace_id,
-            }
-        ],
+def get_platform_callbacks(
+    session: SessionDep,
+    ctx: ContextDep,
+    page: PaginationDep,
+    status: str | None = None,
+):
+    run_page = list_run_page(
+        session,
         ctx,
+        page,
+        run_type="external_callback",
+        status=status,
+    )
+    return collection_envelope(
+        run_page.items,
+        ctx,
+        total=run_page.total,
+        limit=run_page.limit,
+        next_cursor=run_page.next_cursor,
     )
 
 
 @router.post("/output-sinks/platform-callbacks", status_code=202)
-async def post_platform_callbacks(request: Request, session: SessionDep, ctx: ContextDep):
+async def post_platform_callbacks(
+    request: Request,
+    _body: ExternalCallbackRequest,
+    session: SessionDep,
+    ctx: ContextDep,
+):
     require_any_role(
         ctx, ("project_admin", "asset_manager"), "output_sinks.platform_callbacks.create"
     )
@@ -1642,7 +1609,12 @@ async def post_platform_callbacks(request: Request, session: SessionDep, ctx: Co
     )
 
 
-@router.post("/output-sinks/platform-callbacks/{id}/completion-receipts")
+@router.post(
+    "/output-sinks/platform-callbacks/{id}/completion-receipts",
+    responses={
+        202: {"model": RunCompletionReceiptPendingResponse},
+    },
+)
 async def post_platform_callbacks_by_id_completion_receipts(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
 ):
@@ -1652,7 +1624,12 @@ async def post_platform_callbacks_by_id_completion_receipts(
     return await complete_run_from_receipt(session, ctx, request, id, body)
 
 
-@router.post("/runs/{id}/completion-receipts")
+@router.post(
+    "/runs/{id}/completion-receipts",
+    responses={
+        202: {"model": RunCompletionReceiptPendingResponse},
+    },
+)
 async def post_runs_by_id_completion_receipts(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
 ):

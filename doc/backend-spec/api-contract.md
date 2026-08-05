@@ -267,7 +267,7 @@ X-Request-Id: req_01J...
 
 | API | 用途 | 最低字段 |
 | --- | --- | --- |
-| `GET /api/v1/traces/{trace_id}` | 查询一次请求、运行、模型调用、外部回写或资产生成链路的领域投影 | `trace_id`、`spans[]`；span 仅含领域运行/状态、错误码、重试状态和对象关联 |
+| `GET /api/v1/traces/{trace_id}` | 查询一次请求、运行、模型调用、外部回写或资产生成链路的领域投影 | `trace_id`、稳定有序且无悬挂端点的 `nodes[]/edges[]`、兼容的 `spans[]`；节点覆盖音频导入、对象、录音、会话、智能结果、证据、人审与平台回执，所有结果严格限定当前 tenant/project |
 
 该公开 Trace 投影对项目管理员、系统角色和普通获准角色执行同一字段收口，不因角色提升而返回
 adapter、operation、remote ID、dispatch 幂等键、request hash、adapter dispatch 或任意 dispatch
@@ -487,9 +487,13 @@ PATCH /api/v1/{resources}/{id}
 | API | 用途 | 最低字段 |
 | --- | --- | --- |
 | `GET /api/v1/connectors` | 连接器配置列表 | `id`、`type`、`name`、`status`、`auth_mode`、`last_sync_at`、`owner` |
-| `POST /api/v1/connectors` | 创建连接器配置 | `type`、`name`、`base_url`、`auth_mode`、`secret_ref`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`trace_id`；服务端必须校验当前项目 production 绑定并写入权威快照，调用方提供的任一锁字段不一致时返回稳定 409 |
-| `PATCH /api/v1/connectors/{id}` | 更新连接器配置 | `changed_fields`、`secret_ref`、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`audit_log_id`、`trace_id`；每次更新重新校验并捕获当前项目权威 Scene 快照 |
-| `POST /api/v1/platform-connections/{connection_id}/session` | 生成外部平台会话引用 | `session_id`、`access_token_ref`、`tenant_scope[]`、`expires_at`、`trace_id` |
+| `POST /api/v1/connectors` | 创建连接器配置 | `type`、`name`、`base_url`、`auth_mode`、`credential_ref`（仅允许服务端 `secret://` 引用）、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`trace_id`；递归拒绝 `password/token/secret/api_key/authorization` 等明文字段，服务端必须校验当前项目 production 绑定并写入权威快照，调用方提供的任一锁字段不一致时返回稳定 409 |
+| `PATCH /api/v1/connectors/{id}` | 更新连接器配置 | `changed_fields`、`credential_ref`（仅允许服务端 `secret://` 引用）、`scene_profile_id`、`scene_profile_version_id`、`scene_profile_snapshot_sha256`、`status`、`audit_log_id`、`trace_id`；每次更新重新校验并捕获当前项目权威 Scene 快照 |
+| `POST /api/v1/platform-connections` | 创建租户/项目隔离的平台连接强资源 | `platform_connection_id`、`external_tenant_ref`、`provider_type`、`auth_mode`、HTTPS `origin`、`credential_ref`、`store_refs[]`、`resource_version`、`root_trace_id`；递归拒绝明文凭证 |
+| `GET /api/v1/platform-connections` | 分页读取当前租户/项目的平台连接 | `items[]`、`total`、`limit`、`next_cursor` |
+| `GET /api/v1/platform-connections/{platform_connection_id}` | 回读平台连接强资源 | 状态、资源版本、最近测试状态与时间、根 Trace；不返回明文凭证 |
+| `POST /api/v1/platform-connections/{platform_connection_id}/connection-tests` | 使用服务端 `credential_ref` 执行真实连通性测试 | 公共写操作回执、`readback_url`、`affected_objects[]`、`next_actions[]` |
+| `POST /api/v1/platform-connections/{platform_connection_id}/session` | 已废弃，浏览器不得创建外部平台会话 | 固定返回 `410 PLATFORM_SESSION_ENDPOINT_DEPRECATED`，改用 `credential_ref` 和连接测试 |
 | `GET /api/v1/data-sources/{source_id}/records` | 读取租户、员工、门店等主数据 | `resource_id`、`tenant_id`、`store_id`、`display_name`、`cursor`、`raw_payload_ref` |
 | `POST /api/v1/audio-ingest/recordings` | 接入录音 URL 或原始音频引用 | `recording_id`、`audio_url_ref`、`device_id`、`started_at`、`duration_ms`、`asset_key` |
 | `GET /api/v1/authenticated-events` | 读取接待、报价、试驾、风险事件 | `event_id`、`event_type`、`occurred_at`、`employee_id`、`recording_id`、`risk_hint` |
@@ -506,6 +510,9 @@ PATCH /api/v1/{resources}/{id}
 | `POST /api/v1/task-runs` | 手动运行、定时运行、事件触发或回填运行 | `task_run_id`、`task_version_id`、`trigger`、`run_key`、`status`、`partition_key`、`trace_id` |
 | `GET /api/v1/task-runs` | 运行记录列表 | `id`、`task_version_id`、`status`、`trigger`、`started_at`、`finished_at`、`retry_count` |
 | `GET /api/v1/task-runs/{id}` | 执行引擎中立的运行详情 | `id`、`tenant_id`、`project_id`、`status`、`status_history[]`、`progress`、`error`、`asset_outputs[]`、`result_ref`、`next_actions[]`、`trace_id` |
+| `GET /api/v1/import-batches` | 按连接、任务版本、目标资产和状态恢复最近导入批次 | `items[]`、`total`、`limit`、`next_cursor`；服务端倒序分页，`sessionStorage` 不能作为权威来源 |
+| `GET /api/v1/import-batches/{import_batch_id}` | 回读导入阶段、计数、游标与服务端重试链 | `queued/running/partial/succeeded/failed/cancelled`、业务阶段、成功/跳过/失败数、`root_trace_id`、`retry_lineage.source/root/attempt`、`recovery_suggestion`、`retryable` |
+| `GET /api/v1/import-batches/{import_batch_id}/items` | 分页读取批次明细并可按状态筛选 | 外部记录 ID、结果、安全业务错误码、精确对象版本、`audio_session_id`、`root_trace_id`、逐项 `retry_lineage`、`recovery_suggestion`、`retryable` |
 | `POST /api/v1/task-runs/{id}/retries` | 失败或死信运行的人工重试，创建新的运行记录 | `retry_run_id`、`retry_of_run_id`、`retry_of_event_id`、`retry_of_trace_id`、`status`、`trace_id` |
 | `POST /api/v1/task-runs/{id}/cancellations` | 创建独立取消控制运行；未分发任务本地取消，已提交任务使用底层执行引擎的安全终止语义 | `run_id`、`run_type=task_run_cancellation`、`source_run_id`、`control_action=cancel`、`status`、`trace_id` |
 | `POST /api/v1/task-runs/{id}/status-syncs` | 创建独立状态同步控制运行；从内部可信 binding 收敛领域状态 | `run_id`、`run_type=task_run_status_sync`、`source_run_id`、`control_action=status_sync`、`status`、`trace_id` |
@@ -615,7 +622,7 @@ launch 最终提交到达，会先以 `pending_binding` 持久化；绑定不一
 | `GET /api/v1/evidence-packs/{id}` | 查看证据包详情和导出引用 | `id`、`audio_session_id`、`window`、`evidence_refs[]`、`export_refs[]`、`trace_id` |
 | `GET /api/v1/human-review-tasks` | 调听复核队列 | `id`、`queue`、`status`、`priority`、`sample_ref`、`evidence_ref`、`asset_key` |
 | `GET /api/v1/human-review-tasks/{id}` | 人审任务详情 | `id`、`title`、`detail`、`evidence_refs[]`、`candidate_result`、`decision_history[]` |
-| `POST /api/v1/human-review-tasks/{id}/decisions` | 接受、修改、拒绝、升级仲裁，并同步写回候选标签、事件关联和证据包 | `decision`、`decision_id`、`affected_objects`、`status`、`trace_id` |
+| `POST /api/v1/human-review-tasks/{id}/decisions` | 接受、修改、拒绝、升级仲裁，并同步写回候选标签、事件关联和证据包 | 公共回执含 `resource_type/resource_id`、`decision_id`、根/动作 Trace、`readback_url(s)`、`affected_objects[]`、服务端下一待办；前端必须完成逐对象回读后才可推进 |
 
 调听边界规则：
 

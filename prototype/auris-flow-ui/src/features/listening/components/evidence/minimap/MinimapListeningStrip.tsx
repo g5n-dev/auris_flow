@@ -3,7 +3,7 @@ import type { AnnotationMinimapController } from "./conversationBoundaryActions"
 import { Check, Headphones, SkipBack, SkipForward } from "lucide-react";
 
 export function MinimapListeningStrip({ controller }: { controller: AnnotationMinimapController }) {
-  const { boundaryAxisEnd, boundaryAxisStart, boundaryConfirmed, boundaryDrag, boundaryEndPct, boundaryStartPct, boundaryWindowWidth, confirmSessionBoundary, extensionDrafts, finishBoundaryDrag, mergedSliceCount, nudgeBoundary, openListeningMode, selectExtensionCandidate, selectedExtensionId, selectedSliceId, sessionBoundary, sessionRangeText, setSelectedSliceId, setSelectedWindow, sliceDecisions, startBoundaryDrag, stitchStripRef, stitchSummary, syncState, updateBoundaryFromPointer, visibleExtensionRanges } = controller;
+  const { boundaryAxisEnd, boundaryAxisStart, boundaryConfirmed, boundaryDrag, boundaryEndPct, boundaryId, boundaryStartPct, boundaryWindowWidth, confirmSessionBoundary, extensionDrafts, finishBoundaryDrag, mergedSliceCount, nudgeBoundary, openListeningMode, selectExtensionCandidate, selectedExtensionId, selectedSliceId, sessionBoundary, sessionRangeText, setSelectedSliceId, setSelectedWindow, sliceDecisions, startBoundaryDrag, stitchStripRef, stitchSummary, syncState, updateBoundaryFromPointer, visibleExtensionRanges } = controller;
   return (
     <div className="mm-listen-strip" aria-label="Minimap 当前窗口调听">
                 <div className="mm-listen-meta">
@@ -141,10 +141,11 @@ export function MinimapListeningStrip({ controller }: { controller: AnnotationMi
                   <button
                     className={boundaryConfirmed ? "confirm-boundary done" : "confirm-boundary"}
                     onClick={() => void confirmSessionBoundary()}
-                    disabled={syncState === "saving"}
+                    disabled={!boundaryId || syncState === "saving"}
+                    title={!boundaryId ? "当前 HumanReviewTask 未绑定可修订的会话边界。" : "加入当前人审决定，提交后统一写入并回读。"}
                   >
                     <Check size={11} />
-                    {syncState === "saving" ? "保存中" : boundaryConfirmed ? "已保存" : "保存边界"}
+                    {syncState === "saving" ? "暂存中" : boundaryConfirmed ? "已加入决定" : "修订边界"}
                   </button>
                 </div>
               </div>

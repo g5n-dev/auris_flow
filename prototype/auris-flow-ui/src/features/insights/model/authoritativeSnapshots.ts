@@ -217,6 +217,54 @@ export function parseAuthoritativeMetricSnapshots(
   return result;
 }
 
+const nonEmptyEvidenceRefs = (value: unknown): boolean =>
+  Array.isArray(value) &&
+  value.length > 0 &&
+  value.every((item) => typeof item === "string" && Boolean(item.trim()));
+
+export function authoritativeInsightDisplayState(
+  snapshots: ReadonlyArray<InsightMetricSnapshot | JsonRecord>,
+  expectedMetricKeys: readonly string[]
+): { ready: boolean; reason: string | null } {
+  const byKey = new Map(
+    snapshots.map((snapshot) => [String(snapshot.metric_key ?? ""), snapshot as JsonRecord])
+  );
+  for (const metricKey of expectedMetricKeys) {
+    const snapshot = byKey.get(metricKey);
+    if (!snapshot) {
+      return { ready: false, reason: `缺少指标 ${metricKey} 的权威快照。` };
+    }
+    if (!nonEmptyEvidenceRefs(snapshot.evidence_refs)) {
+      return { ready: false, reason: `指标 ${metricKey} 缺少 evidence_refs。` };
+    }
+    const series = snapshot.comparable_series;
+    if (
+      !Array.isArray(series) ||
+      series.length < 2 ||
+      series.some((point) => {
+        const record = asRecord(point);
+        return !record ||
+          typeof record.metric_result_id !== "string" ||
+          !record.metric_result_id.trim() ||
+          !/^[0-9a-f]{64}$/i.test(String(record.scope_sha256 ?? "")) ||
+          !nonEmptyEvidenceRefs(record.evidence_refs);
+      })
+    ) {
+      return { ready: false, reason: `指标 ${metricKey} 缺少 comparable_series。` };
+    }
+    const comparison = asRecord(snapshot.comparison);
+    if (
+      comparison?.comparison_status !== "comparable" ||
+      comparison.continuous_trend_allowed !== true
+    ) {
+      return { ready: false, reason: `指标 ${metricKey} 尚不可比。` };
+    }
+  }
+  return expectedMetricKeys.length > 0
+    ? { ready: true, reason: null }
+    : { ready: false, reason: "当前范围没有需要展示的权威指标。" };
+}
+
 export function snapshotValuePresentation(snapshot: InsightMetricSnapshot): {
   value: number | null;
   unit: string;

@@ -31,7 +31,7 @@ test("只有显式绑定当前 projection items 的模块在同步后可声明 B
 
   assert.equal(resolveModuleContentSource({ moduleKey: "assets", projectionStatus: "synced", demoMode: false }), "bff");
   assert.equal(resolveModuleContentSource({ moduleKey: "data", projectionStatus: "synced", demoMode: false }), "bff");
-  assert.equal(resolveModuleContentSource({ moduleKey: "home", projectionStatus: "synced", demoMode: false }), "none");
+  assert.equal(resolveModuleContentSource({ moduleKey: "home", projectionStatus: "synced", demoMode: false }), "bff");
   assert.equal(resolveModuleContentSource({ moduleKey: "assets", projectionStatus: "empty", demoMode: false }), "none");
 });
 

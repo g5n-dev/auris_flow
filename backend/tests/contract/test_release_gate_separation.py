@@ -2,12 +2,16 @@ from __future__ import annotations
 
 from copy import deepcopy
 
+import pytest
+
 from app.core.auth import DevAuthProfile, issue_dev_auth_token
 from app.core.config import get_settings
 from app.core.database import SessionLocal
 from app.models import IdempotencyRecord, Project, User
 
 SECOND_ADMIN_ID = "u_annotator_001"
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 
 def _headers(

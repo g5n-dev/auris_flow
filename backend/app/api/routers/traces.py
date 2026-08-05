@@ -12,9 +12,14 @@ from app.models import (
     AgentRun,
     AssetLineageEdge,
     AssetMaterialization,
+    AudioRecording,
     AuditLog,
+    EvidencePack,
+    ExternalCallbackReceipt,
     HumanReviewDecision,
     HumanReviewTask,
+    ImportBatch,
+    ImportBatchItem,
     JsonResource,
     KnowledgeEffect,
     KnowledgeIndex,
@@ -25,8 +30,10 @@ from app.models import (
     ListeningAnnotation,
     OutboxDeliveryAttempt,
     OutboxEvent,
+    PlatformConnection,
     PromptVersionCandidate,
     RunRecord,
+    StorageObject,
     ToolCall,
     TraceRef,
     VoiceprintEnrollment,
@@ -38,6 +45,7 @@ from app.services.public_run_projection_service import (
 from app.services.read_policy_service import (
     can_read_human_review_task,
     can_read_resource_collection,
+    can_read_trace_reference_collection,
     readable_resource_collections,
     require_trace_read,
     trace_reference_ids,
@@ -57,6 +65,7 @@ PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
         "attempt_count",
         "attempt_id",
         "attempt_number",
+        "audio_intelligence_result_id",
         "audio_session_id",
         "available_at",
         "base_prompt_version",
@@ -65,6 +74,7 @@ PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
         "collection",
         "completed_at",
         "correlation_id",
+        "current_trace_id",
         "decision_id",
         "decision_type",
         "edge_id",
@@ -74,10 +84,13 @@ PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
         "event_id",
         "event_type",
         "evidence_pack_id",
+        "external_record_id",
         "gate_id",
         "hit_rate",
         "id",
         "index_id",
+        "import_batch_id",
+        "import_item_id",
         "knowledge_effect_id",
         "knowledge_gate_id",
         "knowledge_index_id",
@@ -87,17 +100,25 @@ PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
         "lineage_source",
         "materialization_id",
         "object_id",
+        "node_id",
+        "source_node_id",
+        "target_node_id",
+        "relation",
+        "queue",
         "parent_trace_id",
         "partition_key",
+        "platform_connection_id",
         "processed_at",
         "ref_role",
         "ref_id",
         "ref_type",
         "request_id",
+        "recording_id",
         "retry_after_seconds",
         "retryable",
         "review_task_id",
         "root_trace_id",
+        "asr_result_id",
         "run_id",
         "run_type",
         "score",
@@ -109,6 +130,7 @@ PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
         "source_type",
         "started_at",
         "status",
+        "storage_object_version",
         "target_asset_key",
         "tool_call_id",
         "trace_ref_id",
@@ -116,6 +138,30 @@ PUBLIC_TRACE_SCALAR_FIELDS = frozenset(
     }
 )
 PUBLIC_TRACE_ACTION_FIELDS = frozenset({"available_at", "key", "label", "route"})
+
+AUDIO_INTELLIGENCE_TRACE_COLLECTIONS = frozenset(
+    {
+        "asr_segments",
+        "audio_quality_reports",
+        "speaker_turns",
+        "vad_segments",
+        "voiceprint_samples",
+    }
+)
+
+TRACE_GRAPH_KIND_ORDER = {
+    "import_batch": 20,
+    "import_item": 30,
+    "storage_object": 40,
+    "audio_recording": 50,
+    "audio_session": 60,
+    "audio_intelligence_result": 80,
+    "asr_result": 80,
+    "evidence_pack": 90,
+    "human_review_task": 100,
+    "human_review_decision": 110,
+    "callback_receipt": 130,
+}
 
 
 def _public_trace_scalar(field: str, value: Any) -> Any:
@@ -223,6 +269,346 @@ def outbox_attempt_span(attempt: OutboxDeliveryAttempt) -> dict:
     }
 
 
+def _trace_node_id(kind: str, object_id: str) -> str:
+    return f"{kind}:{object_id}"
+
+
+def _run_graph_order(run_type: str) -> int:
+    if run_type == "task_run":
+        return 10
+    if run_type == "audio_intelligence":
+        return 70
+    if run_type in {"external_callback", "output_sink", "platform_callback"}:
+        return 120
+    return 15
+
+
+def _build_audio_vertical_trace_graph(
+    *,
+    runs: list[RunRecord],
+    import_batches: list[ImportBatch],
+    import_items: list[ImportBatchItem],
+    storage_objects: list[StorageObject],
+    recordings: list[AudioRecording],
+    resources: list[JsonResource],
+    evidence_packs: list[EvidencePack],
+    human_review_tasks: list[HumanReviewTask],
+    human_review_decisions: list[HumanReviewDecision],
+    callback_receipts: list[ExternalCallbackReceipt],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Build a deterministic, non-dangling business graph for one root trace."""
+
+    nodes_by_id: dict[str, dict[str, Any]] = {}
+    node_order: dict[str, int] = {}
+
+    def add_node(
+        kind: str,
+        object_id: str,
+        *,
+        node_key: str | None = None,
+        order: int | None = None,
+        **fields: Any,
+    ) -> str:
+        node_id = _trace_node_id(kind, node_key or object_id)
+        nodes_by_id[node_id] = {
+            "node_id": node_id,
+            "kind": kind,
+            "id": object_id,
+            **fields,
+        }
+        node_order[node_id] = order if order is not None else TRACE_GRAPH_KIND_ORDER.get(kind, 500)
+        return node_id
+
+    for run in runs:
+        add_node(
+            "run",
+            run.run_id,
+            order=_run_graph_order(run.run_type),
+            run_id=run.run_id,
+            run_type=run.run_type,
+            status=run.status,
+        )
+    for batch in import_batches:
+        add_node(
+            "import_batch",
+            batch.import_batch_id,
+            import_batch_id=batch.import_batch_id,
+            status=batch.status,
+            root_trace_id=batch.root_trace_id,
+        )
+    for item in import_items:
+        add_node(
+            "import_item",
+            item.import_item_id,
+            import_item_id=item.import_item_id,
+            import_batch_id=item.import_batch_id,
+            external_record_id=item.external_record_id,
+            audio_session_id=item.audio_session_id,
+            error_code=item.error_code,
+            storage_object_version=item.object_version,
+            status=item.status,
+        )
+    for storage_object in storage_objects:
+        add_node(
+            "storage_object",
+            storage_object.storage_object_id,
+            status=storage_object.status,
+            source_type=storage_object.source_type,
+            source_id=storage_object.source_id,
+        )
+    for recording in recordings:
+        add_node(
+            "audio_recording",
+            recording.recording_id,
+            recording_id=recording.recording_id,
+            audio_session_id=recording.payload.get("audio_session_id"),
+            status=recording.status,
+        )
+
+    graph_resources = [
+        resource
+        for resource in resources
+        if resource.collection == "audio_sessions"
+        or resource.collection in AUDIO_INTELLIGENCE_TRACE_COLLECTIONS
+    ]
+    for resource in graph_resources:
+        if resource.collection == "audio_sessions":
+            add_node(
+                "audio_session",
+                resource.resource_key,
+                audio_session_id=resource.resource_key,
+                recording_id=resource.data.get("recording_id"),
+                status=resource.status,
+            )
+            continue
+        kind = (
+            "asr_result" if resource.collection == "asr_segments" else ("audio_intelligence_result")
+        )
+        result_node_id = add_node(
+            kind,
+            resource.resource_key,
+            node_key=(
+                resource.resource_key
+                if kind == "asr_result"
+                else f"{resource.collection}:{resource.resource_key}"
+            ),
+            collection=resource.collection,
+            audio_session_id=resource.data.get("audio_session_id"),
+            recording_id=resource.data.get("recording_id"),
+            source_run_id=resource.data.get("source_run_id"),
+            status=resource.status,
+        )
+        result_id_field = (
+            "asr_result_id" if kind == "asr_result" else "audio_intelligence_result_id"
+        )
+        nodes_by_id[result_node_id][result_id_field] = resource.resource_key
+    for evidence in evidence_packs:
+        add_node(
+            "evidence_pack",
+            evidence.evidence_pack_id,
+            evidence_pack_id=evidence.evidence_pack_id,
+            audio_session_id=evidence.audio_session_id,
+            recording_id=evidence.recording_id,
+            asr_result_id=evidence.asr_result_id,
+            source_run_id=evidence.source_run_id,
+            storage_object_version=evidence.storage_object_version,
+            root_trace_id=evidence.root_trace_id,
+            current_trace_id=evidence.current_trace_id,
+            status=evidence.status,
+        )
+    for task in human_review_tasks:
+        add_node(
+            "human_review_task",
+            task.review_task_id,
+            review_task_id=task.review_task_id,
+            audio_session_id=task.payload.get("audio_session_id"),
+            evidence_pack_id=task.payload.get("evidence_pack_id"),
+            queue=task.payload.get("queue"),
+            status=task.status,
+        )
+    for decision in human_review_decisions:
+        add_node(
+            "human_review_decision",
+            decision.decision_id,
+            decision_id=decision.decision_id,
+            review_task_id=_decision_task_id(decision),
+            evidence_pack_id=decision.payload.get("evidence_pack_id"),
+            status=decision.status,
+        )
+    for receipt in callback_receipts:
+        add_node(
+            "callback_receipt",
+            receipt.callback_receipt_id,
+            status=receipt.status,
+            source_run_id=receipt.payload.get("run_id"),
+        )
+
+    edges_by_id: dict[str, dict[str, Any]] = {}
+
+    def add_edge(source_node_id: str, relation: str, target_node_id: str) -> None:
+        if source_node_id not in nodes_by_id or target_node_id not in nodes_by_id:
+            return
+        edge_id = f"{source_node_id}--{relation}--{target_node_id}"
+        edges_by_id[edge_id] = {
+            "edge_id": edge_id,
+            "source_node_id": source_node_id,
+            "target_node_id": target_node_id,
+            "relation": relation,
+        }
+
+    for batch in import_batches:
+        add_edge(
+            _trace_node_id("run", batch.task_run_id),
+            "created",
+            _trace_node_id("import_batch", batch.import_batch_id),
+        )
+    for item in import_items:
+        item_node_id = _trace_node_id("import_item", item.import_item_id)
+        add_edge(
+            _trace_node_id("import_batch", item.import_batch_id),
+            "contains",
+            item_node_id,
+        )
+        storage_object_id = item.payload.get("storage_object_id")
+        if isinstance(storage_object_id, str) and storage_object_id:
+            add_edge(
+                item_node_id,
+                "materialized",
+                _trace_node_id("storage_object", storage_object_id),
+            )
+    for recording in recordings:
+        recording_node_id = _trace_node_id("audio_recording", recording.recording_id)
+        storage_object_id = recording.payload.get("storage_object_id")
+        if isinstance(storage_object_id, str) and storage_object_id:
+            add_edge(
+                _trace_node_id("storage_object", storage_object_id),
+                "registered_as",
+                recording_node_id,
+            )
+        audio_session_id = recording.payload.get("audio_session_id")
+        if isinstance(audio_session_id, str) and audio_session_id:
+            add_edge(
+                recording_node_id,
+                "opened_as",
+                _trace_node_id("audio_session", audio_session_id),
+            )
+    for run in runs:
+        if run.run_type != "audio_intelligence":
+            continue
+        audio_session_id = run.payload.get("audio_session_id")
+        if isinstance(audio_session_id, str) and audio_session_id:
+            add_edge(
+                _trace_node_id("audio_session", audio_session_id),
+                "processed_by",
+                _trace_node_id("run", run.run_id),
+            )
+    for resource in graph_resources:
+        if resource.collection == "audio_sessions":
+            continue
+        kind = (
+            "asr_result" if resource.collection == "asr_segments" else ("audio_intelligence_result")
+        )
+        source_run_id = resource.data.get("source_run_id")
+        if isinstance(source_run_id, str) and source_run_id:
+            add_edge(
+                _trace_node_id("run", source_run_id),
+                "materialized",
+                _trace_node_id(
+                    kind,
+                    (
+                        resource.resource_key
+                        if kind == "asr_result"
+                        else f"{resource.collection}:{resource.resource_key}"
+                    ),
+                ),
+            )
+    for evidence in evidence_packs:
+        add_edge(
+            _trace_node_id("asr_result", evidence.asr_result_id),
+            "bound_into",
+            _trace_node_id("evidence_pack", evidence.evidence_pack_id),
+        )
+    for task in human_review_tasks:
+        evidence_pack_id = task.payload.get("evidence_pack_id")
+        if isinstance(evidence_pack_id, str) and evidence_pack_id:
+            add_edge(
+                _trace_node_id("evidence_pack", evidence_pack_id),
+                "queued_for",
+                _trace_node_id("human_review_task", task.review_task_id),
+            )
+    decisions_by_task_id: dict[str, HumanReviewDecision] = {}
+    decisions_by_evidence_id: dict[str, HumanReviewDecision] = {}
+    for decision in sorted(
+        human_review_decisions,
+        key=lambda item: item.decision_id,
+    ):
+        review_task_id = _decision_task_id(decision)
+        if review_task_id:
+            decisions_by_task_id.setdefault(review_task_id, decision)
+            add_edge(
+                _trace_node_id("human_review_task", review_task_id),
+                "decided_by",
+                _trace_node_id("human_review_decision", decision.decision_id),
+            )
+        evidence_pack_id = decision.payload.get("evidence_pack_id")
+        if isinstance(evidence_pack_id, str) and evidence_pack_id:
+            decisions_by_evidence_id.setdefault(evidence_pack_id, decision)
+    callback_run_types = {"external_callback", "output_sink", "platform_callback"}
+    for run in runs:
+        if run.run_type not in callback_run_types:
+            continue
+        decision_id = (
+            run.payload.get("decision_id")
+            or run.payload.get("review_decision_id")
+            or run.payload.get("human_review_decision_id")
+        )
+        callback_decision: HumanReviewDecision | None = next(
+            (item for item in human_review_decisions if item.decision_id == decision_id),
+            None,
+        )
+        if callback_decision is None:
+            review_task_id = run.payload.get("review_task_id")
+            if isinstance(review_task_id, str):
+                callback_decision = decisions_by_task_id.get(review_task_id)
+        if callback_decision is None:
+            evidence_pack_id = run.payload.get("evidence_pack_id")
+            if isinstance(evidence_pack_id, str):
+                callback_decision = decisions_by_evidence_id.get(evidence_pack_id)
+        if callback_decision is not None:
+            add_edge(
+                _trace_node_id("human_review_decision", callback_decision.decision_id),
+                "triggered",
+                _trace_node_id("run", run.run_id),
+            )
+    for receipt in callback_receipts:
+        source_run_id = receipt.payload.get("run_id")
+        if isinstance(source_run_id, str) and source_run_id:
+            add_edge(
+                _trace_node_id("run", source_run_id),
+                "received",
+                _trace_node_id("callback_receipt", receipt.callback_receipt_id),
+            )
+
+    nodes = sorted(
+        nodes_by_id.values(),
+        key=lambda node: (
+            node_order[node["node_id"]],
+            node["node_id"],
+        ),
+    )
+    node_position = {node["node_id"]: index for index, node in enumerate(nodes)}
+    edges = sorted(
+        edges_by_id.values(),
+        key=lambda edge: (
+            node_position[edge["source_node_id"]],
+            node_position[edge["target_node_id"]],
+            edge["relation"],
+            edge["edge_id"],
+        ),
+    )
+    return nodes, edges
+
+
 @router.get("/traces/{trace_id}")
 def get_traces_by_trace_id(
     trace_id: str,
@@ -261,10 +647,122 @@ def get_traces_by_trace_id(
     resources = list(
         session.scalars(
             select(JsonResource).where(
-                JsonResource.trace_id == trace_id,
+                or_(
+                    JsonResource.trace_id == trace_id,
+                    JsonResource.data["root_trace_id"].as_string() == trace_id,
+                ),
                 JsonResource.tenant_id == ctx.tenant_id,
                 JsonResource.project_id == ctx.project_id,
                 JsonResource.collection.in_(readable_collections),
+            )
+        )
+    )
+    platform_connections = (
+        list(
+            session.scalars(
+                select(PlatformConnection).where(
+                    or_(
+                        PlatformConnection.root_trace_id == trace_id,
+                        PlatformConnection.current_trace_id == trace_id,
+                    ),
+                    PlatformConnection.tenant_id == ctx.tenant_id,
+                    PlatformConnection.project_id == ctx.project_id,
+                )
+            )
+        )
+        if can_read_trace_reference_collection(ctx, "platform_connections")
+        else []
+    )
+    import_batches = list(
+        session.scalars(
+            select(ImportBatch).where(
+                or_(
+                    ImportBatch.root_trace_id == trace_id,
+                    ImportBatch.trace_id == trace_id,
+                ),
+                ImportBatch.tenant_id == ctx.tenant_id,
+                ImportBatch.project_id == ctx.project_id,
+            )
+        )
+    )
+    import_batch_ids = {batch.import_batch_id for batch in import_batches}
+    import_items = list(
+        session.scalars(
+            select(ImportBatchItem).where(
+                or_(
+                    ImportBatchItem.root_trace_id == trace_id,
+                    ImportBatchItem.trace_id == trace_id,
+                    ImportBatchItem.import_batch_id.in_(import_batch_ids),
+                ),
+                ImportBatchItem.tenant_id == ctx.tenant_id,
+                ImportBatchItem.project_id == ctx.project_id,
+            )
+        )
+    )
+    evidence_packs = (
+        list(
+            session.scalars(
+                select(EvidencePack).where(
+                    or_(
+                        EvidencePack.root_trace_id == trace_id,
+                        EvidencePack.current_trace_id == trace_id,
+                    ),
+                    EvidencePack.tenant_id == ctx.tenant_id,
+                    EvidencePack.project_id == ctx.project_id,
+                )
+            )
+        )
+        if can_read_resource_collection(ctx, "evidence_packs")
+        else []
+    )
+    linked_recording_ids = {evidence.recording_id for evidence in evidence_packs}
+    linked_recording_ids.update(
+        recording_id
+        for resource in resources
+        if resource.collection == "audio_sessions"
+        and isinstance(recording_id := resource.data.get("recording_id"), str)
+        and recording_id
+    )
+    recordings = list(
+        session.scalars(
+            select(AudioRecording).where(
+                or_(
+                    AudioRecording.trace_id == trace_id,
+                    AudioRecording.recording_id.in_(linked_recording_ids),
+                ),
+                AudioRecording.tenant_id == ctx.tenant_id,
+                AudioRecording.project_id == ctx.project_id,
+            )
+        )
+    )
+    linked_storage_object_ids = {
+        storage_object_id
+        for item in import_items
+        if isinstance(
+            storage_object_id := item.payload.get("storage_object_id"),
+            str,
+        )
+        and storage_object_id
+    }
+    linked_storage_object_ids.update(evidence.storage_object_id for evidence in evidence_packs)
+    linked_storage_object_ids.update(
+        storage_object_id
+        for recording in recordings
+        if isinstance(
+            storage_object_id := recording.payload.get("storage_object_id"),
+            str,
+        )
+        and storage_object_id
+    )
+    storage_objects = list(
+        session.scalars(
+            select(StorageObject).where(
+                or_(
+                    StorageObject.trace_id == trace_id,
+                    StorageObject.storage_object_id.in_(linked_storage_object_ids),
+                ),
+                StorageObject.tenant_id == ctx.tenant_id,
+                StorageObject.project_id == ctx.project_id,
             )
         )
     )
@@ -344,7 +842,10 @@ def get_traces_by_trace_id(
         list(
             session.scalars(
                 select(HumanReviewTask).where(
-                    HumanReviewTask.trace_id == trace_id,
+                    or_(
+                        HumanReviewTask.trace_id == trace_id,
+                        HumanReviewTask.payload["root_trace_id"].as_string() == trace_id,
+                    ),
                     HumanReviewTask.tenant_id == ctx.tenant_id,
                     HumanReviewTask.project_id == ctx.project_id,
                 )
@@ -357,7 +858,10 @@ def get_traces_by_trace_id(
         list(
             session.scalars(
                 select(HumanReviewDecision).where(
-                    HumanReviewDecision.trace_id == trace_id,
+                    or_(
+                        HumanReviewDecision.trace_id == trace_id,
+                        HumanReviewDecision.payload["root_trace_id"].as_string() == trace_id,
+                    ),
                     HumanReviewDecision.tenant_id == ctx.tenant_id,
                     HumanReviewDecision.project_id == ctx.project_id,
                 )
@@ -614,8 +1118,30 @@ def get_traces_by_trace_id(
 
     audits = [audit for audit in audits if audit_is_visible(audit)]
     all_run_ids = {run.run_id for run in runs}
-    runs = [run for run in runs if trace_value_is_visible(run.payload)]
+    callback_run_types = {"external_callback", "output_sink", "platform_callback"}
+    runs = [
+        run
+        for run in runs
+        if trace_value_is_visible(run.payload)
+        and (
+            run.run_type not in callback_run_types
+            or trace_value_is_visible({"type": run.run_type, "id": run.run_id})
+        )
+    ]
     visible_run_ids = {run.run_id for run in runs}
+    callback_receipts = (
+        list(
+            session.scalars(
+                select(ExternalCallbackReceipt).where(
+                    ExternalCallbackReceipt.tenant_id == ctx.tenant_id,
+                    ExternalCallbackReceipt.project_id == ctx.project_id,
+                    ExternalCallbackReceipt.payload["run_id"].as_string().in_(visible_run_ids),
+                )
+            )
+        )
+        if visible_run_ids and can_read_resource_collection(ctx, "work_items")
+        else []
+    )
     materializations = [
         materialization
         for materialization in materializations
@@ -648,12 +1174,38 @@ def get_traces_by_trace_id(
         if decision.payload.get("agent_run_id") in visible_agent_run_ids
         and trace_value_is_visible(decision.payload)
     ]
+    graph_nodes, graph_edges = _build_audio_vertical_trace_graph(
+        runs=runs,
+        import_batches=import_batches,
+        import_items=import_items,
+        storage_objects=storage_objects,
+        recordings=recordings,
+        resources=resources,
+        evidence_packs=evidence_packs,
+        human_review_tasks=human_review_tasks,
+        human_review_decisions=human_review_decisions,
+        callback_receipts=callback_receipts,
+    )
     response = envelope(
         {
             "trace_id": trace_id,
             "tenant_id": ctx.tenant_id,
             "project_id": ctx.project_id,
+            "nodes": [_public_trace_span(node) for node in graph_nodes],
+            "edges": [_public_trace_span(edge) for edge in graph_edges],
             "spans": [
+                *[
+                    {
+                        "kind": "platform_connection",
+                        "id": connection.platform_connection_id,
+                        "platform_connection_id": connection.platform_connection_id,
+                        "status": connection.status,
+                        "object_id": connection.platform_connection_id,
+                        "root_trace_id": connection.root_trace_id,
+                        "current_trace_id": connection.current_trace_id,
+                    }
+                    for connection in platform_connections
+                ],
                 *[
                     {
                         "kind": "resource",

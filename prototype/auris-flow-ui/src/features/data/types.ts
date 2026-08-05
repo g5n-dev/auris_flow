@@ -1,7 +1,7 @@
 import type { BackendActionReceipt } from "../../api/client";
 import type { ComponentType } from "react";
 import type { DataAssetItem } from "../../shared/contracts/dataAssets";
-import type { ModuleKey } from "../../shared/contracts/navigation";
+import type { ModuleDeepLink, ModuleKey } from "../../shared/contracts/navigation";
 import type { WorkspaceProjectSceneBinding } from "../../shared/contracts/moduleWorkspaceGateway";
 import type { VoiceprintDataViewProps } from "../../shared/contracts/voiceprint";
 
@@ -10,6 +10,7 @@ export type DataAggregateKey = "space" | "time" | "event" | "person";
 export type DataModuleProps = {
   activeTab: string;
   setActiveModule: (module: ModuleKey) => void;
+  navigateToTarget: (target: ModuleDeepLink) => void;
   selectedAssetId: string;
   setSelectedAssetId: (id: string) => void;
   openListeningFromDataAsset: (asset: DataAssetItem) => void;

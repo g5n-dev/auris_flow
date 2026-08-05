@@ -30,6 +30,7 @@
 
 <p>
   <a href="#quickstart"><strong>5 分钟启动</strong></a>
+  · <a href="#screenshots">运行截图</a>
   · <a href="#tour">能力导览</a>
   · <a href="#architecture">系统架构</a>
   · <a href="#quality">验证门禁</a>
@@ -40,6 +41,47 @@
 <sub>Audio evidence · quality evaluation · governed AI workflows · explainable insight</sub>
 
 </div>
+
+<a id="screenshots"></a>
+
+## 运行界面
+
+<p align="center">
+  <img
+    src="doc/assets/screenshots/listening-evidence-review.png"
+    alt="Auris Flow 调听工作台：音频时间轴、证据审查、字段差异与人工决策"
+    width="100%"
+  >
+</p>
+
+<p align="center">
+  <sub>调听工作台：在同一上下文中完成音频播放、证据定位、人工决定与下一通处理。</sub>
+</p>
+
+<table>
+  <tr>
+    <td width="50%">
+      <img
+        src="doc/assets/screenshots/audio-data-assets.png"
+        alt="Auris Flow 数据资产：音频资产、连接器导入、聚合层级与播放入口"
+        width="100%"
+      >
+    </td>
+    <td width="50%">
+      <img
+        src="doc/assets/screenshots/workflow-configuration.png"
+        alt="Auris Flow 任务配置：平台接入、智能处理、实验、人审与版本发布"
+        width="100%"
+      >
+    </td>
+  </tr>
+  <tr>
+    <td align="center"><sub>数据资产：连接器导入、SceneProfile、资产聚合与播放入口。</sub></td>
+    <td align="center"><sub>任务配置：平台接入、智能处理、实验、人审与发布闭环。</sub></td>
+  </tr>
+</table>
+
+> 截图来自可重复的视觉回归运行场景，使用脱敏演示数据；权威业务状态仍以 BFF 回读为准。
 
 ---
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import event, func, select, update
 
 from app.core.database import SessionLocal, engine
@@ -12,6 +13,8 @@ from app.services.run_service import transition_run
 from app.services.task_run_monitor_service import monitor_task_runs_once
 from app.workers import outbox_worker
 from app.workers.outbox_worker import process_aggregate_events
+
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
 
 
 def _create_task_run(client, auth_headers, *, key: str) -> str:

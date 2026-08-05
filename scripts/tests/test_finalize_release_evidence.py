@@ -595,6 +595,222 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
                 "verified_at": TIMESTAMP,
             },
         )
+        audio_items = [
+            {
+                "audio_session_id": f"audio-session-{index}",
+                "external_record_id": f"audio-import-gate-00{index}",
+                "object_version": f"version-{index}",
+                "status": "succeeded",
+            }
+            for index in range(1, 4)
+        ]
+        audio_objects = [
+            {
+                "content_sha256": SHA256,
+                "etag": "manifest-etag",
+                "object_version_id": "manifest-version",
+                "provider": "minio",
+                "role": "manifest",
+                "storage_object_id": "audio-manifest-object",
+            },
+            *[
+                {
+                    "content_sha256": SHA256,
+                    "etag": f"audio-etag-{index}",
+                    "object_version_id": f"version-{index}",
+                    "provider": "minio",
+                    "role": "raw_audio",
+                    "storage_object_id": f"audio-object-{index}",
+                }
+                for index in range(1, 4)
+            ],
+        ]
+        _write_json(
+            self.evidence / "audio-import-real-stack-gate.json",
+            {
+                "adapters": {
+                    "dagster": "real",
+                    "object_storage": "real",
+                    "platform_source": "https",
+                },
+                "connector": {
+                    "connection_test": "success",
+                    "connector_id": "connector-audio-import",
+                    "connector_version": "1",
+                    "mapping_valid": True,
+                    "preview_count": 3,
+                },
+                "execution_environment": "compose",
+                "import_batch": {
+                    "current_stage": "completed",
+                    "cursor_after": "cursor-3",
+                    "failed": 0,
+                    "import_batch_id": "import-batch-audio",
+                    "items": audio_items,
+                    "skipped": 0,
+                    "status": "succeeded",
+                    "succeeded": 3,
+                    "total": 3,
+                },
+                "minio_objects": audio_objects,
+                "playback": [
+                    {
+                        "audio_session_id": f"audio-session-{index}",
+                        "content_length": 1024,
+                        "content_sha256": SHA256,
+                        "external_record_id": f"audio-import-gate-00{index}",
+                        "range_verified": True,
+                        "storage_object_id": f"audio-object-{index}",
+                    }
+                    for index in range(1, 4)
+                ],
+                "schema_version": "auris.audio-import-real-stack-gate.v1",
+                "scope": {
+                    "project_id": "sales_qa",
+                    "tenant_id": "aurora_auto",
+                },
+                "signed_completion": {
+                    "key_id": "dagster-v1",
+                    "processing_state": "completed",
+                    "receipt_id": "audio-import-receipt",
+                    "signature_mode": "hmac-sha256",
+                    "source": "dagster",
+                },
+                "materialization_boundary": {
+                    "delivery_state": "confirmed",
+                    "event_id": 42,
+                    "event_type": "execution.materialization.requested",
+                    "status": "completed",
+                    "status_transitions": [
+                        {"from": "submitted", "to": "completion_pending"},
+                        {"from": "completion_pending", "to": "success"},
+                    ],
+                },
+                "source_commit": SOURCE_COMMIT,
+                "source_tree_dirty": False,
+                "status": "ok",
+                "task_run": {
+                    "dagster_job_name": "auris_flow_audio_import_v1",
+                    "dagster_run_id": "dagster-audio-import",
+                    "dagster_status": "SUCCESS",
+                    "execution_mode": "production",
+                    "root_trace_id": "trace-audio-import",
+                    "run_id": "task-run-audio-import",
+                    "status": "success",
+                },
+                "task_version": {
+                    "execution_contract": "auris-flow-audio-import-v1",
+                    "status": "published",
+                    "task_version_id": "task-version-audio-import",
+                },
+                "verified_at": TIMESTAMP,
+            },
+        )
+        _write_json(
+            self.evidence / "audio-import-browser-e2e.json",
+            {
+                "audioImportClosedLoop": {
+                    "audioSessionId": "audio-session-1",
+                    "connectorId": "connector-audio-import",
+                    "connectorTraceId": "connector-trace-audio-import",
+                    "connectorWriteCount": 1,
+                    "duplicates": 0,
+                    "executionMode": "production",
+                    "failed": 0,
+                    "id": "connector-audio-import",
+                    "importBatchId": "import-batch-audio",
+                    "legacyPlatformSyncRequests": 0,
+                    "pageRefreshRecovered": True,
+                    "platformConnectionId": "conn_platform_auth",
+                    "playbackGrantStatus": 201,
+                    "playbackStatus": 206,
+                    "playbackUiBound": True,
+                    "playbackRangeVerified": True,
+                    "previewCount": 3,
+                    "rootTraceId": "trace-audio-import",
+                    "rootTraceReadable": True,
+                    "sceneProfileId": "scene-profile-sales",
+                    "sceneProfileSnapshotSha256": SHA256,
+                    "sceneProfileVersionId": "scene-profile-sales-v1",
+                    "status": "succeeded",
+                    "succeeded": 3,
+                    "targetAssetKey": "auris/audio/raw_recordings",
+                    "taskRunId": "task-run-audio-import",
+                    "taskVersionId": "task-version-audio-import",
+                    "total": 3,
+                    "traceId": "connector-trace-audio-import",
+                },
+                "audioIntelligenceReviewClosedLoop": {
+                    "affectedObjectsReadBack": True,
+                    "asrResultId": (
+                        "audio-session-1:asr:audio-intelligence-audio-import"
+                    ),
+                    "audioSessionId": "audio-session-1",
+                    "audioSha256": SHA256,
+                    "decisionCurrentTraceId": "trace-audio-review-action",
+                    "evidencePackId": "evidence-audio-import",
+                    "evidenceReadbackMatched": True,
+                    "evidenceSha256": SHA256,
+                    "evidenceStatus": "ready",
+                    "intelligenceRunId": "audio-intelligence-audio-import",
+                    "intelligenceRunStatus": "success",
+                    "nextReviewTaskId": None,
+                    "noSeedSwitch": True,
+                    "queueEmpty": True,
+                    "reviewDecision": "modified",
+                    "reviewDecisionId": "decision-audio-import",
+                    "reviewQueue": "audio_evidence_review",
+                    "reviewStatus": "success",
+                    "reviewTaskId": "review-audio-import",
+                    "rootTraceId": "trace-audio-import",
+                    "storageObjectVersion": "version-1",
+                    "taskReadbackMatched": True,
+                    "traceEdgeCount": 8,
+                    "traceNodeKinds": [
+                        "run",
+                        "import_batch",
+                        "audio_session",
+                        "asr_result",
+                        "evidence_pack",
+                        "human_review_task",
+                        "human_review_decision",
+                    ],
+                    "traceRootMatched": True,
+                },
+                "baseUrl": "http://127.0.0.1:8000",
+                "completedAt": TIMESTAMP,
+                "consoleErrors": [],
+                "executionProfile": {
+                    "dagster": "real",
+                    "inferenceProvider": "https",
+                    "objectStorage": "real",
+                    "platformSource": "https",
+                    "realStack": True,
+                    "uiEvidencePolicy": "browser-clicks-and-bff-readback",
+                },
+                "failedResponses": [],
+                "mode": "audio-import-only",
+                "pageErrors": [],
+                "requestFailures": [],
+                "runId": "browser-audio-import",
+                "schema_version": "auris.audio-import-browser-e2e.v2",
+                "source_commit": SOURCE_COMMIT,
+                "source_tree_dirty": False,
+                "stage": "completed",
+                "startedAt": TIMESTAMP,
+                "status": "ok",
+                "tenantAudioImportPull": {
+                    "executionMode": "production",
+                    "id": "task-run-tenant-pull",
+                    "importBatchId": "import-batch-tenant-pull",
+                    "legacyPlatformSyncRequests": 0,
+                    "status": "queued",
+                    "taskRunId": "task-run-tenant-pull",
+                    "taskVersionId": "task-version-audio-import",
+                    "traceId": "trace-tenant-pull",
+                },
+            },
+        )
         _write_json(
             self.evidence / "production-path-gate.json",
             {
@@ -813,6 +1029,8 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
         self.assertIn("frontend-bundle.json", paths)
         self.assertIn("product-dagster-gate.json", paths)
         self.assertIn("production-path-gate.json", paths)
+        self.assertIn("audio-import-real-stack-gate.json", paths)
+        self.assertIn("audio-import-browser-e2e.json", paths)
         self.assertEqual(len(paths), result["artifact_count"])
 
     def test_frontend_bundle_evidence_and_dual_signed_lock_are_mandatory(self) -> None:
@@ -1252,6 +1470,59 @@ class FinalReleaseEvidenceTests(unittest.TestCase):
             '{"dependencies":["tampered"]}\n', encoding="utf-8"
         )
         with self.assertRaisesRegex(self.module.EvidenceError, "sha256"):
+            self._finalize()
+
+    def test_rejects_dirty_or_non_real_audio_import_evidence(self) -> None:
+        stack_path = self.evidence / "audio-import-real-stack-gate.json"
+        stack_payload = json.loads(stack_path.read_text(encoding="utf-8"))
+        stack_payload["source_tree_dirty"] = True
+        _write_json(stack_path, stack_payload)
+        with self.assertRaisesRegex(self.module.EvidenceError, "clean source tree"):
+            self._finalize()
+
+        self._write_valid_fixture()
+        browser_path = self.evidence / "audio-import-browser-e2e.json"
+        browser_payload = json.loads(browser_path.read_text(encoding="utf-8"))
+        browser_payload["executionProfile"]["dagster"] = "local"
+        _write_json(browser_path, browser_payload)
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "browser execution profile",
+        ):
+            self._finalize()
+
+    def test_rejects_incomplete_audio_import_materialization_or_playback(self) -> None:
+        stack_path = self.evidence / "audio-import-real-stack-gate.json"
+        stack_payload = json.loads(stack_path.read_text(encoding="utf-8"))
+        stack_payload["import_batch"]["failed"] = 1
+        _write_json(stack_path, stack_payload)
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "materialized ImportBatch proof",
+        ):
+            self._finalize()
+
+        self._write_valid_fixture()
+        stack_payload = json.loads(stack_path.read_text(encoding="utf-8"))
+        stack_payload["playback"][0]["content_sha256"] = "b" * 64
+        _write_json(stack_path, stack_payload)
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "does not match the MinIO object",
+        ):
+            self._finalize()
+
+        self._write_valid_fixture()
+        browser_path = self.evidence / "audio-import-browser-e2e.json"
+        browser_payload = json.loads(browser_path.read_text(encoding="utf-8"))
+        browser_payload["audioIntelligenceReviewClosedLoop"][
+            "evidenceReadbackMatched"
+        ] = False
+        _write_json(browser_path, browser_payload)
+        with self.assertRaisesRegex(
+            self.module.EvidenceError,
+            "post-import intelligence/review/trace proof",
+        ):
             self._finalize()
 
     def test_rejects_minimal_self_report_and_source_input_drift(self) -> None:

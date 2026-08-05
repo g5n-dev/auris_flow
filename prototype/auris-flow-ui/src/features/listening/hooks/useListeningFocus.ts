@@ -23,6 +23,8 @@ export function useListeningFocus(context: ListeningPresentation) {
       if (target.module !== "listening") return null;
       const sample = target.objectKind === "dataAsset" && target.objectId
         ? reviewSamplePool.find((item) => item.dataAssetId === target.objectId)
+        : target.objectKind === "audioSession" && target.objectId
+          ? reviewSamplePool.find((item) => item.sessionId === target.objectId)
         : target.objectKind === "reviewSample" && target.objectId
           ? reviewSamplePool.find((item) => item.id === target.objectId)
           : undefined;
@@ -57,7 +59,11 @@ export function useListeningFocus(context: ListeningPresentation) {
     if (listeningReadState === "idle" || listeningReadState === "loading") return;
     const sample = focus.objectKind === "reviewSample" && focus.objectId
       ? reviewSamplePool.find((item) => item.id === focus.objectId)
-      : reviewSamplePool[0];
+      : focus.objectKind === "audioSession" && focus.objectId
+        ? reviewSamplePool.find((item) => item.sessionId === focus.objectId)
+        : focus.objectId
+          ? undefined
+          : reviewSamplePool[0];
     if (!sample) {
       appliedFocusRef.current = focus;
       setListeningNotice({
@@ -70,8 +76,19 @@ export function useListeningFocus(context: ListeningPresentation) {
     appliedFocusRef.current = focus;
     selectReviewSample(sample);
     setSelectedWindow(focus.window ?? sample.window);
-    setMode(focus.focusMode === "matrix" ? "matrix" : "evidence");
-    setListeningScope("segment");
+    const isReviewIntent = Boolean(focus.reviewTaskId);
+    setMode(
+      focus.objectKind === "audioSession" && !isReviewIntent
+        ? "simple"
+        : focus.focusMode === "matrix"
+          ? "matrix"
+          : "evidence"
+    );
+    setListeningScope(
+      focus.objectKind === "audioSession" && !isReviewIntent
+        ? "conversation"
+        : "segment"
+    );
     setListeningNotice({
       status: "success",
       title: `已定位${focus.title ?? sample.queueTitle}`,

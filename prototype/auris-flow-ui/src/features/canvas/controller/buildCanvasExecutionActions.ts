@@ -4,13 +4,21 @@ import type { ExecutionState } from "../types";
 import type { CanvasReleaseActions } from "./buildCanvasReleaseActions";
 
 export function buildCanvasExecutionActions(scope: CanvasActionScope & CanvasDraftModelActions & CanvasReleaseActions) {
-  const { activeFlowStage, activeIntent, activeMappingSuggestions, activeSchedule, activeSchedulePartitionKey, activeScheduleRunTags, activeTriggerMeta, currentUser, dagsterRunDraft, draftState, experimentMode, markTaskVersionPublished, pendingMappingCount, persistTaskDraft, publishTaskVersion, pushRunHistory, recoveredTaskVersion, rememberTaskVersionId, savedTaskVersionId, scheduleMode, selectedCanvasVariant, selectedTaskType, setActiveTab, setCanvasAction, setCanvasNotice, setDagsterRunDraft, setDraftState, setDrawerTab, setExecutionState, setNodeLibraryOpen, setRecoveredTaskVersion, setSelectedMappingId, setSelectedNodeId, setTaskReleaseGate, shortTrace, taskDraftValidation, taskReleaseGate, trustedMappingCount } = scope;
+  const { activeFlowStage, activeIntent, activeMappingSuggestions, activeSchedule, activeSchedulePartitionKey, activeScheduleRunTags, activeTriggerMeta, currentUser, dagsterRunDraft, demoMode, draftState, experimentMode, markTaskVersionPublished, pendingMappingCount, persistTaskDraft, publishTaskVersion, pushRunHistory, recoveredTaskVersion, rememberTaskVersionId, savedTaskVersionId, scheduleMode, selectedCanvasVariant, selectedTaskType, setActiveTab, setCanvasAction, setCanvasNotice, setDagsterRunDraft, setDraftState, setDrawerTab, setExecutionState, setNodeLibraryOpen, setRecoveredTaskVersion, setSelectedMappingId, setSelectedNodeId, setTaskReleaseGate, shortTrace, taskDraftValidation, taskReleaseGate, trustedMappingCount } = scope;
   const updateExecutionState = (nextState: ExecutionState) => {
       setExecutionState(nextState);
       setDrawerTab("plan");
     };
 
   const generateMappingSuggestions = () => {
+      if (!demoMode) {
+        setCanvasNotice({
+          status: "error",
+          title: "映射建议执行器未配置",
+          detail: "生产模式不会从本地 fixture 生成映射建议；请等待专用 executor 与写后回读接入。"
+        });
+        return;
+      }
       setCanvasAction("mapping");
       setCanvasNotice({
         status: "pending",
@@ -22,15 +30,13 @@ export function buildCanvasExecutionActions(scope: CanvasActionScope & CanvasDra
       setSelectedNodeId("ai");
       setDrawerTab("mapping");
       setNodeLibraryOpen(false);
-      window.setTimeout(() => {
-        setCanvasAction(null);
-        setCanvasNotice({
-          status: "success",
-          title: "映射建议已生成",
-          detail: `${trustedMappingCount} 条高置信建议可一键应用，${pendingMappingCount} 条仍需人工确认。`
-        });
-        pushRunHistory("MappingSuggestion · AI 映射助手", "建议已生成");
-      }, 520);
+      setCanvasAction(null);
+      setCanvasNotice({
+        status: "success",
+        title: "DEMO：映射建议已生成",
+        detail: `${trustedMappingCount} 条高置信建议可一键应用，${pendingMappingCount} 条仍需人工确认；结果仅来自演示 fixture。`
+      });
+      pushRunHistory("DEMO MappingSuggestion · AI 映射助手", "演示建议已生成");
     };
 
   const openScheduleSettings = () => {
@@ -99,21 +105,12 @@ export function buildCanvasExecutionActions(scope: CanvasActionScope & CanvasDra
         pushRunHistory("CompatibilityCheck · 发布门禁", `失败：${taskDraftValidation.blockers.map((item) => item.label).join(" / ")}`);
         return;
       }
-      setCanvasAction("validate");
-        setCanvasNotice({
-          status: "pending",
-          title: "正在校验兼容性",
-          detail: "检查任务定义、资产选择、分区、运行请求、事件监听和回填计划兼容性。"
-        });
-      window.setTimeout(() => {
-        setCanvasAction(null);
-        setCanvasNotice({
-          status: "success",
-          title: "兼容性校验通过",
-          detail: `当前任务版本通过校验；${taskDraftValidation.summary}。如有未保存改动，发布或运行前会先写入 BFF 草稿。`
-        });
-        pushRunHistory("CompatibilityCheck · 发布门禁", "通过");
-      }, 620);
+      setCanvasNotice({
+        status: "idle",
+        title: "本地契约检查通过",
+        detail: `${taskDraftValidation.summary}；这只是当前表单的确定性检查，发布仍需服务端门禁和写后回读。`
+      });
+      pushRunHistory("LocalContractCheck · 表单门禁", "本地检查通过 / 未创建生产回执");
     };
 
   const saveTaskDraft = async () => {

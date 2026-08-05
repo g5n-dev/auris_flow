@@ -6,6 +6,8 @@ import json
 from datetime import UTC, datetime
 from time import monotonic, sleep
 
+import pytest
+
 from app.core.auth import DevAuthProfile, issue_dev_auth_token
 from app.core.completion_signature import completion_signature_message
 from app.core.config import get_settings
@@ -24,6 +26,8 @@ from app.workers.outbox_worker import process_aggregate_events
 
 TEST_COMPLETION_HMAC_VALUE = "auris-test-completion-secret-32chars-minimum"
 TEST_COMPLETION_KEY_ID = "auris-test-completion"
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 
 def _headers(auth_headers: dict[str, str], key: str) -> dict[str, str]:

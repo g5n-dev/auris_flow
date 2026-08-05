@@ -137,47 +137,47 @@
     {
       "key": "platform-login-adapter",
       "category": "平台数据同步抽取",
-      "title": "平台登录适配器",
-      "description": "统一承载后台平台服务地址、账户名、密码登录和 Session Token。",
+      "title": "平台连接引用",
+      "description": "绑定已创建的平台连接和 credential_ref，由服务端测试连接并在执行时解析凭证。",
       "adapterKind": "认证连接器",
-      "authMode": "账户名 + 密码 / session token",
+      "authMode": "credential_ref（服务端密钥解析）",
       "method": "POST",
-      "endpoint": "/api/v1/platform-connections/{connection_id}/session",
+      "endpoint": "/api/v1/platform-connections/{connection_id}/connection-tests",
       "dagsterDefinition": "SourceAsset",
       "defaultOpPrefix": "load",
       "defaultIoManager": "platform_auth_io_manager",
       "outputSchema": [
-        "account_id",
-        "user_name",
-        "access_token",
+        "platform_connection_id",
+        "credential_ref",
         "tenant_scope",
-        "expires_at"
+        "store_scope",
+        "last_tested_at"
       ],
       "outputContract": {
         "assetKey": "auris/sources/platform_session",
-        "displayName": "平台会话资产",
+        "displayName": "平台连接验证资产",
         "kind": "外部数据源",
-        "description": "只保存会话引用、授权范围和过期时间；明文凭证留在 Secret/连接器配置中。",
-        "api": "POST /api/v1/platform-connections/{connection_id}/session",
+        "description": "只保存平台连接、凭证引用、授权范围和测试结果；浏览器不创建 Session，也不接触明文凭证。",
+        "api": "POST /api/v1/platform-connections/{connection_id}/connection-tests",
         "partition": "tenant_id × connection_id",
-        "materialization": "AssetObservation + session_ref",
+        "materialization": "AssetObservation + platform_connection_ref",
         "upstream": [
           "platform_connection",
-          "secret_ref"
+          "credential_ref"
         ],
         "aggregateKeys": [
           "tenant_id",
           "connection_id",
-          "session_id"
+          "platform_connection_id"
         ],
         "schema": [
           [
             "identity",
-            "account_ref, user_ref"
+            "platform_connection_id, provider_type"
           ],
           [
-            "auth",
-            "access_token_ref, refresh_token_ref, expires_at"
+            "binding",
+            "credential_ref, auth_mode, connection_status"
           ],
           [
             "scope",
@@ -185,7 +185,7 @@
           ],
           [
             "trace",
-            "connection_id, observed_at, trace_id"
+            "connection_id, last_tested_at, trace_id"
           ]
         ]
       },
@@ -193,12 +193,12 @@
       "x": 72,
       "y": 470,
       "node": {
-        "name": "平台登录适配器",
+        "name": "平台连接引用",
         "icon": "Database",
         "status": "待配置",
         "metaA": "POST",
-        "metaB": "/platform-connections/session",
-        "role": "账号登录 / 连接配置",
+        "metaB": "/platform-connections/{id}/connection-tests",
+        "role": "连接绑定 / 服务端验证",
         "confidence": 96,
         "intentKeys": [
           "entity",
@@ -206,14 +206,14 @@
         ],
         "tags": [
           "Auth",
-          "Session",
+          "CredentialRef",
           "Connector"
         ]
       },
       "context": {
         "type": "输入引用",
-        "relation": "当前任务引用后台平台账号登录配置，拿到后续租户、员工、音频 URL 和事件接口所需 Session。",
-        "impact": "只在当前任务草稿中绑定服务地址、账户名和凭证引用，不修改全局账号或保存明文密码。",
+        "relation": "当前任务引用强类型平台连接；执行器按 credential_ref 获取授权，浏览器不生成或保存平台 Session。",
+        "impact": "只在当前任务草稿中绑定平台连接、租户/门店范围和凭证引用，不修改全局连接或保存明文凭证。",
         "version": "InputBinding 草稿",
         "usedBy": [
           "多平台证据数据流",
@@ -223,15 +223,15 @@
         "fields": [
           [
             "接口",
-            "POST /api/v1/platform-connections/{connection_id}/session"
+            "POST /api/v1/platform-connections/{connection_id}/connection-tests"
           ],
           [
             "认证",
-            "credential_ref + secret_ref"
+            "platform_connection_id + credential_ref"
           ],
           [
             "输入角色",
-            "账号登录 / 连接配置"
+            "平台连接 / 服务端验证"
           ],
           [
             "可选上下文",
@@ -254,7 +254,7 @@
       "title": "REST Source 接口",
       "description": "适配租户、员工、门店、组织等列表接口，按 schema 输出主数据。",
       "adapterKind": "REST 数据源",
-      "authMode": "Bearer Session / Cookie Session",
+      "authMode": "平台连接 + credential_ref",
       "method": "GET",
       "endpoint": "/api/v1/data-sources/{source_id}/records",
       "dagsterDefinition": "SourceAsset",
@@ -326,7 +326,7 @@
       },
       "context": {
         "type": "输入引用",
-        "relation": "当前任务用登录 Session 调用任意 REST 列表接口，可落到租户、员工、门店或组织主数据。",
+        "relation": "当前任务由服务端按平台连接和 credential_ref 调用 REST 列表接口，可落到租户、员工、门店或组织主数据。",
         "impact": "只新增当前任务的数据源引用和字段映射，不修改源系统。",
         "version": "InputBinding 草稿",
         "usedBy": [
@@ -341,7 +341,7 @@
           ],
           [
             "认证",
-            "platform_session.access_token"
+            "platform_connection_id + credential_ref"
           ],
           [
             "输入角色",
@@ -364,7 +364,7 @@
       "title": "音频 URL 同步接口",
       "description": "兼容平台音频 URL、AIZJ URL 同步和原始音频同步。",
       "adapterKind": "音频引用源",
-      "authMode": "Bearer Session / tenant_config_id",
+      "authMode": "平台连接 + credential_ref",
       "method": "POST",
       "endpoint": "/api/v1/audio-ingest/recordings",
       "dagsterDefinition": "SourceAsset",
@@ -452,7 +452,7 @@
           ],
           [
             "认证",
-            "platform_session.access_token / tenant_config_id"
+            "platform_connection_id + credential_ref"
           ],
           [
             "输入角色",
@@ -475,7 +475,7 @@
       "title": "认证事件接口",
       "description": "携带认证上下文拉取接待、报价、试驾、风险或修正事件。",
       "adapterKind": "认证事件源",
-      "authMode": "Bearer Session / tenant_config_id",
+      "authMode": "平台连接 + credential_ref",
       "method": "GET",
       "endpoint": "/api/v1/authenticated-events",
       "dagsterDefinition": "SourceAsset",
@@ -564,7 +564,7 @@
           ],
           [
             "认证",
-            "platform_session.access_token / tenant_config_id"
+            "platform_connection_id + credential_ref"
           ],
           [
             "输入角色",
@@ -584,8 +584,10 @@
     {
       "key": "aizj-sync-job",
       "category": "平台数据同步抽取",
-      "title": "平台数据同步抽取",
-      "description": "从平台同步全量、增量、URL、原始音频或修正数据，形成输入资产。",
+      "title": "旧平台同步（DEMO 兼容）",
+      "description": "仅保留历史 DEMO 配置；生产必须从数据资产页发布音频导入配置并创建 TaskRun。",
+      "productionDisabled": true,
+      "disabledReason": "旧 /platform-sync-jobs 仅为兼容接口；生产请使用已发布音频导入 TaskVersion，通过 POST /api/v1/task-runs 执行。",
       "adapterKind": "平台同步抽取",
       "authMode": "tenant_config_id + project_id",
       "method": "POST",
@@ -1764,19 +1766,19 @@
     ],
     "apiContracts": [
       {
-        "name": "平台会话",
+        "name": "平台连接测试",
         "method": "POST",
-        "path": "/api/v1/platform-sessions",
-        "auth": "凭证引用 + 租户配置",
-        "request": "tenant_config_id, account_ref, password_secret_ref",
-        "response": "session_id, access_token_ref, tenant_scope, expires_at",
-        "dagster": "外部数据源 auris/sources/platform_session"
+        "path": "/api/v1/platform-connections/{platform_connection_id}/connection-tests",
+        "auth": "项目管理员 + credential_ref",
+        "request": "platform_connection_id",
+        "response": "status, tested_at, root_trace_id, readback_url",
+        "dagster": "冻结平台连接引用，不向浏览器返回 Session 或 Token"
       },
       {
         "name": "租户门店",
         "method": "GET",
         "path": "/api/v1/platform-tenants?tenant_config_id=tc_aurora",
-        "auth": "Bearer platform_session",
+        "auth": "服务端按 platform_connection_id 解析 credential_ref",
         "request": "tenant_config_id, cursor, updated_after",
         "response": "tenant_id, store_id, org_path, status",
         "dagster": "外部数据源 auris/sources/tenant_list"
@@ -1785,7 +1787,7 @@
         "name": "员工工牌",
         "method": "GET",
         "path": "/api/v1/platform-employees?tenant_id=aurora",
-        "auth": "Bearer platform_session",
+        "auth": "服务端按 platform_connection_id 解析 credential_ref",
         "request": "tenant_id, store_id, role, cursor",
         "response": "employee_id, badge_id, store_id, role",
         "dagster": "外部数据源 auris/sources/employee_list"
@@ -1794,7 +1796,7 @@
         "name": "录音地址",
         "method": "GET",
         "path": "/api/v1/audio-recording-urls?started_at[after]=2025-05-26T00:00:00%2B08:00",
-        "auth": "Bearer platform_session",
+        "auth": "服务端按 platform_connection_id 解析 credential_ref",
         "request": "store_id, started_at[after], limit",
         "response": "recording_id, audio_url_ref, device_id, started_at, duration",
         "dagster": "外部数据源 auris/sources/audio_url_index"
@@ -1803,7 +1805,7 @@
         "name": "认证事件",
         "method": "GET",
         "path": "/api/v1/authenticated-events?event_time[after]=2025-05-26T00:00:00%2B08:00",
-        "auth": "Bearer platform_session",
+        "auth": "服务端按 platform_connection_id 解析 credential_ref",
         "request": "tenant_id, store_id, event_type, event_time[after]",
         "response": "event_id, event_type, employee_id, recording_id, risk_hint",
         "dagster": "外部数据源 auris/sources/authenticated_events"
@@ -1865,7 +1867,7 @@
     "scenarioPolicies": [
       [
         "Token 过期",
-        "刷新 platform_session；刷新失败则阻断运行并生成配置复核任务。"
+        "服务端重新解析 credential_ref 并测试连接；失败则阻断运行并生成配置复核任务。"
       ],
       [
         "事件有但录音缺失",

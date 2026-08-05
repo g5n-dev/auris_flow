@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Query, Request
 
-from app.api.deps import ContextDep, SessionDep
+from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
 from app.schemas import parse_payload
@@ -28,7 +28,8 @@ from app.services.import_batch_service import (
     get_import_batch,
     import_batch_item_payload,
     import_batch_payload,
-    list_import_batch_items,
+    list_import_batch_items_page,
+    list_import_batches,
 )
 from app.services.outbox_service import enqueue_event
 from app.services.resource_service import get_resource
@@ -214,6 +215,47 @@ async def post_connector_record_previews(
     )
 
 
+@router.get("/import-batches")
+def get_import_batches(
+    session: SessionDep,
+    ctx: ContextDep,
+    page: PaginationDep,
+    connector_id: Annotated[
+        str | None,
+        Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"),
+    ] = None,
+    task_version_id: Annotated[
+        str | None,
+        Query(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]*$"),
+    ] = None,
+    target_asset_key: Annotated[
+        str | None,
+        Query(min_length=1, max_length=512),
+    ] = None,
+    status: Annotated[
+        Literal["queued", "running", "partial", "succeeded", "failed", "cancelled"] | None,
+        Query(),
+    ] = None,
+) -> dict[str, Any]:
+    batches, total, next_cursor = list_import_batches(
+        session,
+        ctx,
+        connector_id=connector_id,
+        task_version_id=task_version_id,
+        target_asset_key=target_asset_key,
+        status=status,
+        cursor=page.get("cursor"),
+        limit=int(page.get("limit") or 50),
+    )
+    return collection_envelope(
+        [import_batch_payload(batch) for batch in batches],
+        ctx,
+        total=total,
+        limit=int(page.get("limit") or 50),
+        next_cursor=next_cursor,
+    )
+
+
 @router.get("/import-batches/{import_batch_id}")
 def get_import_batches_by_id(
     import_batch_id: str,
@@ -231,9 +273,25 @@ def get_import_batch_items(
     import_batch_id: str,
     session: SessionDep,
     ctx: ContextDep,
+    page: PaginationDep,
+    status: Annotated[
+        Literal["queued", "running", "succeeded", "skipped", "failed"] | None,
+        Query(),
+    ] = None,
 ) -> dict[str, Any]:
-    items = [
-        import_batch_item_payload(item)
-        for item in list_import_batch_items(session, ctx, import_batch_id)
-    ]
-    return collection_envelope(items, ctx, total=len(items), limit=len(items))
+    rows, total, next_cursor = list_import_batch_items_page(
+        session,
+        ctx,
+        import_batch_id,
+        status=status,
+        cursor=page.get("cursor"),
+        limit=int(page.get("limit") or 50),
+    )
+    items = [import_batch_item_payload(item) for item in rows]
+    return collection_envelope(
+        items,
+        ctx,
+        total=total,
+        limit=int(page.get("limit") or 50),
+        next_cursor=next_cursor,
+    )

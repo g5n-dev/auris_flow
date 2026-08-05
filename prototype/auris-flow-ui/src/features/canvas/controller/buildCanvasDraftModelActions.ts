@@ -7,6 +7,18 @@ import type { CanvasConfiguredNodeActions } from "./buildCanvasConfiguredNodeAct
 
 export function buildCanvasDraftModelActions(scope: CanvasActionScope & CanvasConfiguredNodeActions) {
   const { activeFlowStage, activeIntent, activeIntentKey, activePartitionKey, activeRunKey, activeSchedule, activeSchedulePartitionKey, activeScheduleRunTags, addConfiguredNode, addedNodes, asrExecutionMode, asrHotwordVersionId, availableExperimentMetrics, dagsterRunDraft, declaredTaskTypeId, demoMode, displayExecutionDefinition, draftOutputContract, experimentMode, hotwordPackVersionOptions, markTaskDraftDirty, metricDraftState, nodeDraft, openOutputSinkTemplate, pushRunHistory, rememberTaskVersionId, sceneBinding, sceneManifest, scheduleMode, selectedCanvasVariant, selectedExperimentMetric, selectedHotwordPackVersion, selectedTaskType, selectedTemplate, setActiveTab, setAddedNodes, setAsrExecutionMode, setAsrHotwordVersionId, setBackfillConfirmed, setCanvasNotice, setDrawerTab, setExecutionState, setMetricDraftState, setNodeDraft, setNodeLibraryOpen, setScheduleMode, setSelectedExperimentMetricKey, setSelectedNodeId, taskDagVisibleNodes } = scope;
+  const metricDraftActionsDisabledReason = demoMode
+    ? ""
+    : "指标草稿、观测和发布闸门尚未接入专用 BFF 执行契约；生产模式禁止由本地状态制造成功结果。";
+  const blockUnconfiguredMetricAction = () => {
+    if (!metricDraftActionsDisabledReason) return false;
+    setCanvasNotice({
+      status: "error",
+      title: "指标动作暂不可用",
+      detail: metricDraftActionsDisabledReason
+    });
+    return true;
+  };
   const updateAsrExecutionMode = (mode: "production" | "shadow") => {
       setAsrExecutionMode(mode);
       markTaskDraftDirty();
@@ -174,6 +186,7 @@ export function buildCanvasDraftModelActions(scope: CanvasActionScope & CanvasCo
     };
 
   const generateExperimentMetricDraft = () => {
+      if (blockUnconfiguredMetricAction()) return;
       const releaseMetricKey = sceneManifest?.release_requirements[0]?.metric_key;
       const generatedMetric = availableExperimentMetrics.find((metric) => metric.key === releaseMetricKey)
         ?? availableExperimentMetrics[0]
@@ -191,6 +204,7 @@ export function buildCanvasDraftModelActions(scope: CanvasActionScope & CanvasCo
     };
 
   const addMetricToObservation = () => {
+      if (blockUnconfiguredMetricAction()) return;
       setMetricDraftState("已加入观测");
       markTaskDraftDirty();
       setDrawerTab("plan");
@@ -203,6 +217,7 @@ export function buildCanvasDraftModelActions(scope: CanvasActionScope & CanvasCo
     };
 
   const saveMetricAsReleaseGate = () => {
+      if (blockUnconfiguredMetricAction()) return;
       setMetricDraftState("发布闸门");
       markTaskDraftDirty();
       setDrawerTab("plan");
@@ -215,6 +230,7 @@ export function buildCanvasDraftModelActions(scope: CanvasActionScope & CanvasCo
     };
 
   const refreshMetricObservation = () => {
+      if (blockUnconfiguredMetricAction()) return;
       setMetricDraftState((current) => (current === "AI草稿" ? "已加入观测" : current));
       setCanvasNotice({
         status: "success",
@@ -267,6 +283,7 @@ export function buildCanvasDraftModelActions(scope: CanvasActionScope & CanvasCo
     changeScheduleMode,
     confirmBackfillGate,
     selectExperimentMetric,
+    metricDraftActionsDisabledReason,
     generateExperimentMetricDraft,
     addMetricToObservation,
     saveMetricAsReleaseGate,

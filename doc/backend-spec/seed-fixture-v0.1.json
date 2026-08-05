@@ -189,9 +189,18 @@
       "connector_id": "conn_platform_auth",
       "type": "platform_auth",
       "name": "平台登录适配器",
-      "status": "success",
+      "status": "active",
+      "provider_type": "generic_http",
       "auth_mode": "session_token",
-      "secret_ref": "secret_ref_platform_auth_local"
+      "origin": "https://recordings.example.test",
+      "credential_ref": "secret://platform/audio-reader",
+      "external_tenant_ref": "tenant-ext-001",
+      "store_refs": [
+        "BJ-AURORA-001"
+      ],
+      "test_path": "/v1/recordings",
+      "resource_version": 1,
+      "root_trace_id": "trace_platform_connection_seed"
     },
     {
       "connector_id": "conn_audio_url",
@@ -199,7 +208,7 @@
       "name": "音频 URL 同步接口",
       "status": "success",
       "auth_mode": "signed_url",
-      "secret_ref": "secret_ref_audio_url_local"
+      "credential_ref": "secret://platform/audio-url-reader"
     }
   ],
   "tasking": {

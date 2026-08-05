@@ -28,6 +28,8 @@ from app.core.response import collection_envelope, envelope
 from app.models import (
     AsrAnnotationCorrection,
     AudioRecording,
+    EvidencePack,
+    JsonResource,
     ListeningAnnotation,
     StorageObject,
 )
@@ -48,6 +50,7 @@ from app.services.asr_annotation_correction_service import (
     ASR_CORRECTION_WRITE_ROLES,
     record_asr_annotation_correction,
 )
+from app.services.audio_evidence_review_service import assemble_scoped_evidence_pack
 from app.services.audio_intelligence_service import audio_intelligence_output_assets
 from app.services.audio_object_verification import (
     MAX_WAV_PROBE_BYTES,
@@ -65,6 +68,10 @@ from app.services.audio_review_projection_service import (
 )
 from app.services.audio_task_binding_service import resolve_audio_hotword_task_binding
 from app.services.audit_service import record_audit
+from app.services.execution_contract_registry import (
+    ExecutionContractNotConfiguredError,
+    execution_contract_registry,
+)
 from app.services.hotword_service import get_hotword_version, validate_hotword_execution
 from app.services.idempotency_service import (
     replay_or_conflict,
@@ -84,6 +91,7 @@ from app.services.resource_service import (
     get_resource,
     list_resource_data,
     list_resource_page,
+    list_resources,
     patch_idempotent_json_resource,
     status_counts,
     upsert_idempotent_json_resource,
@@ -97,6 +105,7 @@ logger = get_logger("audio_sessions")
 
 SYNTHETIC_WAV_DATA_SIZE = 32_000
 SYNTHETIC_WAV_HEADER_SIZE = 44
+_AUDIO_SESSION_RELATION_PAGE_SIZE = 200
 
 MANUAL_LABEL_DRAFT_WRITE_ROLES = (
     "project_admin",
@@ -465,14 +474,57 @@ def _voiceprint_qdrant_payload(
 def _runtime_audio_items(
     session: SessionDep, ctx: ContextDep, collection: str, audio_session_id: str
 ) -> list[dict]:
-    items = [
-        item
-        for item in list_resource_data(session, ctx, collection)
-        if item.get("audio_session_id") == audio_session_id
-    ]
+    items = _audio_session_json_items(session, ctx, collection, audio_session_id)
     return sorted(
         items, key=lambda item: (0 if item.get("source_run_id") else 1, item.get("id", ""))
     )
+
+
+def _audio_session_json_items(
+    session: SessionDep,
+    ctx: ContextDep,
+    collection: str,
+    audio_session_id: str,
+) -> list[dict[str, Any]]:
+    predicate = JsonResource.data["audio_session_id"].as_string() == audio_session_id
+    cursor = 0
+    items: list[dict[str, Any]] = []
+    while True:
+        page = list_resources(
+            session,
+            ctx,
+            collection,
+            limit=_AUDIO_SESSION_RELATION_PAGE_SIZE,
+            cursor=cursor,
+            predicates=(predicate,),
+        )
+        items.extend(dict(resource.data) for resource in page)
+        if len(page) < _AUDIO_SESSION_RELATION_PAGE_SIZE:
+            return items
+        next_cursor = page[-1].id
+        if next_cursor <= cursor:
+            raise RuntimeError("audio session relation cursor did not advance")
+        cursor = next_cursor
+
+
+def _evidence_packs_for_session(
+    session: SessionDep,
+    ctx: ContextDep,
+    audio_session_id: str,
+) -> list[dict[str, Any]]:
+    evidence_ids = session.scalars(
+        select(EvidencePack.evidence_pack_id)
+        .where(
+            EvidencePack.tenant_id == ctx.tenant_id,
+            EvidencePack.project_id == ctx.project_id,
+            EvidencePack.audio_session_id == audio_session_id,
+        )
+        .order_by(EvidencePack.created_at, EvidencePack.evidence_pack_id)
+    )
+    return [
+        assemble_scoped_evidence_pack(session, ctx, evidence_pack_id)
+        for evidence_pack_id in evidence_ids
+    ]
 
 
 def _recording_for_session(
@@ -493,14 +545,20 @@ def _recording_for_session(
     )
     recording = dict(strong_recording.payload) if strong_recording else None
     if recording is None:
-        recording = next(
-            (
-                item
-                for item in list_resource_data(session, ctx, "recordings")
-                if item.get("recording_id") == recording_id
-            ),
-            None,
-        )
+        try:
+            recording_resource = get_resource(
+                session,
+                ctx,
+                "recordings",
+                str(recording_id or ""),
+            )
+        except ApiError as exc:
+            if exc.code != "NOT_FOUND":
+                raise
+        else:
+            candidate = dict(recording_resource.data)
+            if candidate.get("recording_id") == recording_id:
+                recording = candidate
     if not recording:
         raise ApiError("RECORDING_NOT_FOUND", "当前会话没有可调听的录音对象", 404)
     storage_object = _storage_object_for_recording(session, ctx, str(recording_id or ""))
@@ -2188,31 +2246,25 @@ def get_audio_sessions_by_id(id: str, session: SessionDep, ctx: ContextDep):
     data = dict(session_resource.data)
     related = {
         "recording": _recording_for_session(session, ctx, id),
-        "boundaries": [
-            item
-            for item in list_resource_data(session, ctx, "conversation_boundaries")
-            if item.get("audio_session_id") == id
-        ],
-        "evidence_packs": [
-            item
-            for item in list_resource_data(session, ctx, "evidence_packs")
-            if item.get("audio_session_id") == id
-        ],
+        "boundaries": _audio_session_json_items(
+            session,
+            ctx,
+            "conversation_boundaries",
+            id,
+        ),
+        "evidence_packs": _evidence_packs_for_session(session, ctx, id),
         "asr_segments": _runtime_audio_items(session, ctx, "asr_segments", id),
         "vad_segments": _runtime_audio_items(session, ctx, "vad_segments", id),
         "speaker_turns": _runtime_audio_items(session, ctx, "speaker_turns", id),
         "voiceprint_samples": _runtime_audio_items(session, ctx, "voiceprint_samples", id),
         "audio_quality_reports": _runtime_audio_items(session, ctx, "audio_quality_reports", id),
-        "event_links": [
-            item
-            for item in list_resource_data(session, ctx, "event_links")
-            if item.get("audio_session_id") == id
-        ],
-        "listening_annotations": [
-            item
-            for item in list_resource_data(session, ctx, "listening_annotations", limit=200)
-            if item.get("audio_session_id") == id
-        ],
+        "event_links": _audio_session_json_items(session, ctx, "event_links", id),
+        "listening_annotations": _audio_session_json_items(
+            session,
+            ctx,
+            "listening_annotations",
+            id,
+        ),
     }
     data.update(related)
     return envelope(data, ctx)
@@ -2221,11 +2273,7 @@ def get_audio_sessions_by_id(id: str, session: SessionDep, ctx: ContextDep):
 @router.get("/audio-sessions/{id}/annotations")
 def get_audio_sessions_by_id_annotations(id: str, session: SessionDep, ctx: ContextDep):
     get_resource(session, ctx, "audio_sessions", id)
-    items = [
-        item
-        for item in list_resource_data(session, ctx, "listening_annotations", limit=200)
-        if item.get("audio_session_id") == id
-    ]
+    items = _audio_session_json_items(session, ctx, "listening_annotations", id)
     return collection_envelope(
         sorted(items, key=lambda item: str(item.get("id") or "")),
         ctx,
@@ -2615,8 +2663,11 @@ async def post_audio_sessions_by_id_intelligence_runs(
     capabilities = list(dict.fromkeys(body.capabilities))
     output_assets = audio_intelligence_output_assets(capabilities)
     non_production = body.execution_mode in {"shadow", "diagnostic"}
+    session_root_trace_id = session_data.get("root_trace_id") or session_data.get("trace_id")
     root_trace_id = (
-        str(task_binding["root_trace_id"])
+        str(session_root_trace_id)
+        if isinstance(session_root_trace_id, str) and session_root_trace_id
+        else str(task_binding["root_trace_id"])
         if task_binding is not None
         else get_hotword_version(session, ctx, effective_hotword_version_id).root_trace_id
         if effective_hotword_version_id
@@ -2959,6 +3010,26 @@ async def patch_data_aggregation_views_by_id(
 async def patch_conversation_boundaries_by_id(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
 ):
+    try:
+        execution_contract_registry.resolve(
+            event_type="conversation_boundary.sync_requested",
+            run_type="boundary_sync",
+            payload={"execution_mode": "production"},
+        )
+    except ExecutionContractNotConfiguredError as exc:
+        raise ApiError(
+            exc.code,
+            "会话边界同步尚未配置生产执行器，当前修改未保存",
+            409,
+            details=[
+                {
+                    "event_type": exc.event_type,
+                    "run_type": exc.run_type,
+                    "requested_contract": exc.requested_contract,
+                }
+            ],
+            retryable=False,
+        ) from exc
     patched = await patch_idempotent_json_resource(
         session,
         ctx,

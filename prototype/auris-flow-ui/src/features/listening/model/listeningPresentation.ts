@@ -2,6 +2,7 @@ import { reviewQueueMockData } from "../fixtures/evidenceFixtures";
 import { getReviewQueueMock } from "../fixtures/reviewSamples";
 import type { ReviewDecisionActions } from "../hooks/reviewDecisionActions";
 import type { ListeningScope, ListeningToolMode, Mode } from "../types";
+import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
 import { useMemo } from "react";
 
 export function buildListeningPresentation(context: ReviewDecisionActions) {
@@ -36,20 +37,27 @@ export function buildListeningPresentation(context: ReviewDecisionActions) {
   const toggleListeningTool = (tool: ListeningToolMode) => {
       setListeningTool((current) => (current === tool ? null : tool));
       if (tool === "rerun") {
+        if (!LABEL_DEMO_MODE) {
+          setListeningTool(null);
+          setListeningNotice({
+            status: "error",
+            title: "生产模式暂不可重跑",
+            detail: "当前页面尚未接入受控 TaskRun 重跑接口；已阻断本地计时器伪造成功状态。"
+          });
+          return;
+        }
         setListeningRunState("pending");
         setListeningNotice({
           status: "pending",
-          title: "证据链重跑已排队",
-          detail: `${activeReviewSummary.refreshJob} 正在重跑当前样本的转写、串音、标签和单据比对。`
+          title: "DEMO：证据链重跑预览",
+          detail: `${activeReviewSummary.refreshJob} 仅更新本地演示状态，不创建生产 TaskRun。`
         });
-        window.setTimeout(() => {
-          setListeningRunState("success");
-          setListeningNotice({
-            status: "success",
-            title: "证据链重跑完成",
-            detail: `${activeSample.sessionId} 已生成新的证据快照，当前页面已保留人工标记和队列上下文。`
-          });
-        }, 760);
+        setListeningRunState("success");
+        setListeningNotice({
+          status: "success",
+          title: "DEMO：证据预览已更新",
+          detail: `${activeSample.sessionId} 仅更新本地演示快照，未写入 BFF。`
+        });
         return;
       }
       setListeningNotice({

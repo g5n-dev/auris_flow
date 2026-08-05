@@ -115,8 +115,28 @@ class RunCompletionReceiptPendingData(_ClosedPublicModel):
     run_id: str
     status: PublicRunStatus
     completion_receipt_id: str
-    receipt_state: Literal["pending_binding", "pending_cancellation_resolution"]
+    receipt_state: Literal[
+        "pending_binding",
+        "pending_cancellation_resolution",
+        "materializing",
+    ]
     trace_id: str
+    business_status: Literal["materializing"] | None = None
+    business_completion_required: bool | None = None
+    import_batch_id: str | None = None
+    resource_type: str | None = None
+    resource_id: str | None = None
+    root_trace_id: str | None = None
+    current_trace_id: str | None = None
+    readback_url: (
+        Annotated[
+            str,
+            Field(pattern=r"^/api/v1/runs/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"),
+        ]
+        | None
+    ) = None
+    affected_objects: list[dict[str, JsonValue]] | None = None
+    next_actions: list[PublicRunNextAction] | None = None
 
 
 class RunCompletionReceiptPendingResponse(PublicRunEnvelope[RunCompletionReceiptPendingData]):

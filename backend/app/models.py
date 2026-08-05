@@ -272,6 +272,60 @@ class AuthSession(Base, TimestampMixin):
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class PlatformConnection(Base, TimestampMixin):
+    __tablename__ = "platform_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "platform_connection_id",
+            name="uq_platform_connections_scope_id",
+        ),
+        CheckConstraint(
+            "status IN ('draft', 'active', 'disabled', 'error', 'needs_reconfiguration')",
+            name="ck_platform_connections_status",
+        ),
+        CheckConstraint(
+            "last_test_status IS NULL OR last_test_status IN ('success', 'failed')",
+            name="ck_platform_connections_last_test_status",
+        ),
+        CheckConstraint(
+            "resource_version > 0",
+            name="ck_platform_connections_resource_version",
+        ),
+        Index(
+            "ix_platform_connections_scope_status_created",
+            "tenant_id",
+            "project_id",
+            "status",
+            "created_at",
+        ),
+    )
+
+    platform_connection_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), index=True, nullable=False)
+    external_tenant_ref: Mapped[str] = mapped_column(String(256), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    provider_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    auth_mode: Mapped[str] = mapped_column(String(64), nullable=False)
+    origin: Mapped[str] = mapped_column(String(2048), nullable=False)
+    credential_ref: Mapped[str] = mapped_column(String(512), nullable=False)
+    store_refs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    test_path: Mapped[str] = mapped_column(String(1024), nullable=False, default="/")
+    status: Mapped[str] = mapped_column(String(32), index=True, nullable=False, default="draft")
+    resource_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    last_test_status: Mapped[str | None] = mapped_column(String(16))
+    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    root_trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    current_trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+
+
 class JsonResource(Base, TimestampMixin):
     __tablename__ = "json_resources"
     __table_args__ = (
@@ -3995,6 +4049,77 @@ class ReleaseBundleHeadEvent(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class EvidencePack(Base, TimestampMixin):
+    __tablename__ = "evidence_packs"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "evidence_pack_id",
+            name="uq_evidence_packs_scope_id",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "project_id",
+            "evidence_sha256",
+            name="uq_evidence_packs_scope_hash",
+        ),
+        CheckConstraint(
+            "status IN ('ready', 'superseded')",
+            name="ck_evidence_packs_status",
+        ),
+        CheckConstraint(
+            "LENGTH(audio_sha256) = 64 AND LENGTH(evidence_sha256) = 64",
+            name="ck_evidence_packs_hashes",
+        ),
+        CheckConstraint(
+            "window_start_ms >= 0 AND window_end_ms > window_start_ms",
+            name="ck_evidence_packs_window",
+        ),
+        CheckConstraint(
+            "resource_version > 0",
+            name="ck_evidence_packs_resource_version",
+        ),
+        Index(
+            "ix_evidence_packs_scope_audio_session",
+            "tenant_id",
+            "project_id",
+            "audio_session_id",
+        ),
+        Index(
+            "ix_evidence_packs_scope_recording",
+            "tenant_id",
+            "project_id",
+            "recording_id",
+        ),
+    )
+
+    evidence_pack_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    project_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    audio_session_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    recording_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    storage_object_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    storage_object_version: Mapped[str] = mapped_column(String(512), nullable=False)
+    audio_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    asr_result_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    asr_result_version: Mapped[str] = mapped_column(String(128), nullable=False)
+    window_start_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    window_end_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    evidence_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="ready")
+    source_run_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    resource_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
+    root_trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    current_trace_id: Mapped[str] = mapped_column(String(128), index=True, nullable=False)
+    payload: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
 
 
 class HumanReviewTask(Base, TimestampMixin):

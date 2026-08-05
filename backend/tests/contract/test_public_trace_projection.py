@@ -14,8 +14,10 @@ from app.core.json_keys import json_key_fingerprint, normalize_json_key
 from app.models import (
     AgentRun,
     AuditLog,
+    JsonResource,
     OutboxDeliveryAttempt,
     OutboxEvent,
+    PlatformConnection,
     PromptVersionCandidate,
     RunRecord,
     ToolCall,
@@ -334,6 +336,174 @@ def test_trace_projection_hides_recursive_execution_evidence_for_every_role(
             persisted_audit.after_json["adapter_dispatch"]["remote_id"]
             == "remote-canary-must-stay-in-db"
         )
+
+
+def test_platform_integration_trace_readback_is_scoped_role_gated_and_redacted(
+    client,
+    auth_headers,
+) -> None:
+    trace_id = "trace_platform_integration_safe_readback"
+    connection_id = "platform_connection_trace_scoped"
+    output_sink_id = "output_sink_trace_scoped"
+    callback_run_id = "callback_trace_scoped"
+    credential_canary = "secret://platform/trace-credential-canary"
+    origin_canary = "https://trace-origin-canary.example.test"
+    sink_target_canary = "https://trace-callback-target-canary.example.test"
+    with SessionLocal.begin() as session:
+        session.add_all(
+            [
+                PlatformConnection(
+                    platform_connection_id=connection_id,
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    external_tenant_ref="trace-external-tenant-canary",
+                    name="Trace scoped platform",
+                    provider_type="generic_http",
+                    auth_mode="bearer",
+                    origin=origin_canary,
+                    credential_ref=credential_canary,
+                    store_refs=["trace-store-canary"],
+                    test_path="/v1/recordings",
+                    status="active",
+                    resource_version=2,
+                    last_test_status="success",
+                    root_trace_id=trace_id,
+                    current_trace_id=trace_id,
+                ),
+                PlatformConnection(
+                    platform_connection_id="platform_connection_trace_other_tenant",
+                    tenant_id="other_tenant",
+                    project_id="sales_qa",
+                    external_tenant_ref="other-tenant",
+                    name="Other tenant",
+                    provider_type="generic_http",
+                    auth_mode="bearer",
+                    origin="https://other-tenant.example.test",
+                    credential_ref="secret://platform/other-tenant",
+                    store_refs=[],
+                    test_path="/",
+                    status="active",
+                    resource_version=1,
+                    root_trace_id=trace_id,
+                    current_trace_id=trace_id,
+                ),
+                PlatformConnection(
+                    platform_connection_id="platform_connection_trace_other_project",
+                    tenant_id="aurora_auto",
+                    project_id="other_project",
+                    external_tenant_ref="other-project",
+                    name="Other project",
+                    provider_type="generic_http",
+                    auth_mode="bearer",
+                    origin="https://other-project.example.test",
+                    credential_ref="secret://platform/other-project",
+                    store_refs=[],
+                    test_path="/",
+                    status="active",
+                    resource_version=1,
+                    root_trace_id=trace_id,
+                    current_trace_id=trace_id,
+                ),
+                JsonResource(
+                    collection="output_sinks",
+                    resource_key=output_sink_id,
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    status="active",
+                    trace_id=trace_id,
+                    data={
+                        "id": output_sink_id,
+                        "type": "platform_callback",
+                        "target": sink_target_canary,
+                        "credential_ref": credential_canary,
+                        "root_trace_id": trace_id,
+                    },
+                ),
+                RunRecord(
+                    run_id=callback_run_id,
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    run_type="external_callback",
+                    status="pending",
+                    trace_id=trace_id,
+                    payload={
+                        "status": "pending",
+                        "root_trace_id": trace_id,
+                        "affected_objects": [
+                            {"type": "output_sink", "id": output_sink_id},
+                        ],
+                    },
+                ),
+                AuditLog(
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    actor_id="u_admin_001",
+                    action="platform_connection.created",
+                    object_type="platform_connection",
+                    object_id=connection_id,
+                    result="success",
+                    trace_id=trace_id,
+                    after_json={
+                        "credential_ref": credential_canary,
+                        "origin": origin_canary,
+                    },
+                ),
+                OutboxEvent(
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    event_type="platform_connection.created",
+                    aggregate_type="platform_connection",
+                    aggregate_id=connection_id,
+                    status="pending",
+                    payload={
+                        "trace_id": trace_id,
+                        "platform_connection_id": connection_id,
+                    },
+                    dispatch_idempotency_key="platform-trace-safe-readback",
+                ),
+            ]
+        )
+
+    admin = client.get(f"/api/v1/traces/{trace_id}", headers=auth_headers)
+    asset_manager = client.get(
+        f"/api/v1/traces/{trace_id}",
+        headers={**auth_headers, "Authorization": f"Bearer {_asset_manager_only_token()}"},
+    )
+    model = client.get(
+        f"/api/v1/traces/{trace_id}",
+        headers={**auth_headers, "Authorization": "Bearer model-token"},
+    )
+
+    for response in (admin, asset_manager, model):
+        assert response.status_code == 200, response.text
+        assert "platform_connection_trace_other_tenant" not in response.text
+        assert "platform_connection_trace_other_project" not in response.text
+        for canary in (credential_canary, origin_canary, sink_target_canary):
+            assert canary not in response.text
+
+    for response in (admin, asset_manager):
+        spans = response.json()["data"]["spans"]
+        assert {
+            "kind": "platform_connection",
+            "id": connection_id,
+            "platform_connection_id": connection_id,
+            "status": "active",
+            "object_id": connection_id,
+            "root_trace_id": trace_id,
+            "current_trace_id": trace_id,
+        } in spans
+        assert any(
+            span.get("kind") == "resource"
+            and span.get("collection") == "output_sinks"
+            and span.get("id") == output_sink_id
+            for span in spans
+        )
+        assert any(
+            span.get("kind") == "run" and span.get("id") == callback_run_id for span in spans
+        )
+
+    for hidden_id in (connection_id, output_sink_id, callback_run_id):
+        assert hidden_id not in model.text
 
 
 def test_trace_prompt_candidates_reuse_sensitive_collection_policy_and_scope(

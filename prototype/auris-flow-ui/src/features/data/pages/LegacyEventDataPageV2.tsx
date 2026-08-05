@@ -16,6 +16,7 @@ import type { DataAssetItem } from "../../../shared/contracts/dataAssets";
 import { formatSessionConfidence } from "../dataTruthModel";
 import type { OperationNotice } from "../../../shared/contracts/operations";
 import { eventLinks } from "../../../shared/fixtures/eventLinks";
+import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
 
 export function LegacyEventDataPageV2({
   dataAssets,
@@ -50,26 +51,35 @@ export function LegacyEventDataPageV2({
 
   const markEventReviewed = () => {
     if (!selectedEvent) return;
+    if (!LABEL_DEMO_MODE) {
+      setNotice({
+        status: "error",
+        title: "生产事件复核暂不可用",
+        detail: "当前旧版事件页未接入写后回读接口，已阻断本地保存。"
+      });
+      return;
+    }
     setNotice({
       status: "success",
-      title: "事件复核记录已保存",
-      detail: `${selectedEvent.id} 已记录为人工确认，后续会写入 ${selectedEvent.assetKey} 的审计链路。`
+      title: "DEMO：事件复核预览已更新",
+      detail: `${selectedEvent.id} 只更新本地演示状态，未写入 BFF。`
     });
   };
 
   const exportEventPack = () => {
-    setNotice({
-      status: "pending",
-      title: "正在生成事件资产包",
-      detail: `${visibleEvents.length} 个事件会携带 wav、标签、单据和血缘引用。`
-    });
-    window.setTimeout(() => {
+    if (!LABEL_DEMO_MODE) {
       setNotice({
-        status: "success",
-        title: "事件资产包已生成",
-        detail: `EXP-EVENT-${visibleEvents.length || "EMPTY"} 已进入导出审批，原始音频仍按租户权限受控。`
+        status: "error",
+        title: "生产事件导出暂不可用",
+        detail: "当前旧版事件页未接入导出 Run 与制品回读，已阻断本地假导出。"
       });
-    }, 560);
+      return;
+    }
+    setNotice({
+      status: "success",
+      title: "DEMO：事件资产包预览已生成",
+      detail: `${visibleEvents.length} 个事件只形成本地演示预览，未创建导出 Run。`
+    });
   };
 
   return (
@@ -89,7 +99,12 @@ export function LegacyEventDataPageV2({
             <Plus size={15} />
             连接器导入
           </button>
-          <button type="button" onClick={exportEventPack}>
+          <button
+            type="button"
+            disabled={!LABEL_DEMO_MODE}
+            title={!LABEL_DEMO_MODE ? "未接入导出 Run 与制品回读，生产模式禁用。" : "DEMO：生成事件资产包预览"}
+            onClick={exportEventPack}
+          >
             <Download size={15} />
             导出事件包
           </button>
@@ -191,7 +206,12 @@ export function LegacyEventDataPageV2({
                 <BookOpen size={14} />
                 查看血缘
               </button>
-              <button type="button" onClick={markEventReviewed}>
+              <button
+                type="button"
+                disabled={!LABEL_DEMO_MODE}
+                title={!LABEL_DEMO_MODE ? "未接入复核写后回读，生产模式禁用。" : "DEMO：更新本地复核预览"}
+                onClick={markEventReviewed}
+              >
                 <ShieldCheck size={14} />
                 保存复核记录
               </button>

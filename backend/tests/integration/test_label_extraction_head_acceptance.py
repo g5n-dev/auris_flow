@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import json
 
+import pytest
+
 from app.core.context import RequestContext
 from app.core.database import SessionLocal
 from app.models import (
@@ -20,6 +22,8 @@ from tests.contract.test_label_closed_loop_api import (
     _create_policy,
     _seed_extraction_prompt,
 )
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 
 def _sha(value: object) -> str:

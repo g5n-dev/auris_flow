@@ -103,6 +103,24 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "get",
             "AssetLineageEdge",
         ): 1,
+        # Audio intelligence run IDs include tenant/project and the frozen
+        # object version. A primary-key hit is accepted only after the loaded
+        # RunRecord matches tenant, project, run type, session and input object.
+        (
+            "services/audio_session_orchestration_service.py",
+            "schedule_intelligence_for_materialized_audio_session",
+            "get",
+            "RunRecord",
+        ): 1,
+        # Evidence/review IDs are derived from the frozen result. Both loaded
+        # rows are rejected unless their persisted tenant/project and evidence
+        # binding match the source intelligence RunRecord.
+        (
+            "services/audio_evidence_review_service.py",
+            "_existing_outputs",
+            "get",
+            "HumanReviewTask",
+        ): 1,
         # Progress receipts lock one TaskRun through an explicit run + tenant +
         # project predicate before accepting any executor-provided identifiers.
         (
@@ -183,6 +201,23 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "get",
             "AssetMaterialization",
         ): 1,
+        # Decision readback is scoped in SQL and then applies the existing
+        # human-review assignment visibility policy to the owning task.
+        (
+            "services/human_review_readback_service.py",
+            "_scoped_decision",
+            "select",
+            "HumanReviewDecision",
+        ): 1,
+        # Platform callback readback is constrained by tenant, project and the
+        # dedicated external_callback run type before its decision binding is
+        # checked by the caller.
+        (
+            "services/human_review_readback_service.py",
+            "_resolve_affected_resource",
+            "select",
+            "RunRecord",
+        ): 1,
         (
             "services/hotword_rollback_service.py",
             "_assert_no_active_rollback",
@@ -198,6 +233,14 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
         (
             "services/insight_closure_service.py",
             "_load_report_metric_results",
+            "select",
+            "RunRecord",
+        ): 1,
+        # Retry lineage can only load a task run from the same tenant/project;
+        # the paired ImportBatch and execution contract are validated too.
+        (
+            "services/import_batch_service.py",
+            "_batch_retry_lineage",
             "select",
             "RunRecord",
         ): 1,
@@ -367,6 +410,14 @@ SENSITIVE_SQL_ACCESS_INVENTORY: Counter[SensitiveSqlAccess] = Counter(
             "services/release_gate_service.py",
             "decide_release_gate",
             "select",
+            "RunRecord",
+        ): 1,
+        # Callback IDs include tenant/project, decision and sink. A primary-key
+        # hit is reused only after all scope and decision/sink bindings match.
+        (
+            "services/review_callback_service.py",
+            "create_review_platform_callbacks",
+            "get",
             "RunRecord",
         ): 1,
         ("services/run_service.py", "complete_run_from_receipt", "select", "RunRecord"): 1,
@@ -745,3 +796,100 @@ def test_audio_import_sensitive_sql_scope_guards_are_explicit() -> None:
         "lineage.project_id != record.project_id",
     ):
         assert required_scope_check in materialize
+
+
+def test_audio_vertical_sensitive_sql_scope_guards_are_explicit() -> None:
+    def function_source(relative_path: str, function_name: str) -> str:
+        path = APP_ROOT / relative_path
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        function = next(
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+            and node.name == function_name
+        )
+        return ast.unparse(function)
+
+    retry_lineage = function_source(
+        "services/import_batch_service.py",
+        "_batch_retry_lineage",
+    )
+    for required_scope_check in (
+        "RunRecord.run_id == source_run_id",
+        "RunRecord.tenant_id == record.tenant_id",
+        "RunRecord.project_id == record.project_id",
+        "RunRecord.run_type == 'task_run'",
+        "ImportBatch.task_run_id == source_run_id",
+        "ImportBatch.tenant_id == record.tenant_id",
+        "ImportBatch.project_id == record.project_id",
+        "source_record.payload.get('execution_contract') != 'auris-flow-audio-import-v1'",
+    ):
+        assert required_scope_check in retry_lineage
+
+    scoped_decision = function_source(
+        "services/human_review_readback_service.py",
+        "_scoped_decision",
+    )
+    for required_scope_check in (
+        "HumanReviewDecision.decision_id == decision_id",
+        "HumanReviewDecision.tenant_id == ctx.tenant_id",
+        "HumanReviewDecision.project_id == ctx.project_id",
+        "JsonResource.collection == 'human_review_tasks'",
+        "JsonResource.resource_key == decision.review_task_id",
+        "JsonResource.tenant_id == ctx.tenant_id",
+        "JsonResource.project_id == ctx.project_id",
+        "can_read_human_review_task(dict(task.data), ctx)",
+    ):
+        assert required_scope_check in scoped_decision
+
+    affected_resource = function_source(
+        "services/human_review_readback_service.py",
+        "_resolve_affected_resource",
+    )
+    for required_scope_check in (
+        "RunRecord.run_id == object_id",
+        "RunRecord.tenant_id == ctx.tenant_id",
+        "RunRecord.project_id == ctx.project_id",
+        "RunRecord.run_type == 'external_callback'",
+    ):
+        assert required_scope_check in affected_resource
+
+    existing_outputs = function_source(
+        "services/audio_evidence_review_service.py",
+        "_existing_outputs",
+    )
+    for required_loaded_row_guard in (
+        "evidence.tenant_id != record.tenant_id",
+        "evidence.project_id != record.project_id",
+        "task.tenant_id != record.tenant_id",
+        "task.project_id != record.project_id",
+        "evidence.evidence_sha256 != evidence_sha256",
+        "task.payload.get('evidence_pack_id') != evidence_pack_id",
+    ):
+        assert required_loaded_row_guard in existing_outputs
+
+    review_callbacks = function_source(
+        "services/review_callback_service.py",
+        "create_review_platform_callbacks",
+    )
+    for required_loaded_row_guard in (
+        "existing.tenant_id != ctx.tenant_id",
+        "existing.project_id != ctx.project_id",
+        "existing.run_type != 'external_callback'",
+        "existing.payload.get('source_review_decision_id') != decision_id",
+        "existing.payload.get('output_sink_id') != output_sink_id",
+    ):
+        assert required_loaded_row_guard in review_callbacks
+
+    schedule_intelligence = function_source(
+        "services/audio_session_orchestration_service.py",
+        "schedule_intelligence_for_materialized_audio_session",
+    )
+    for required_loaded_row_guard in (
+        "existing.tenant_id != rooted_ctx.tenant_id",
+        "existing.project_id != rooted_ctx.project_id",
+        "existing.run_type != 'audio_intelligence'",
+        "existing.payload.get('audio_session_id') != audio_session_id",
+        "existing.payload.get('input_object') != input_object",
+    ):
+        assert required_loaded_row_guard in schedule_intelligence

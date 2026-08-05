@@ -2,6 +2,7 @@ import type { Dispatch, SetStateAction } from "react";
 
 import { createBackendAction } from "../../api/client";
 import type { OperationNotice } from "../../shared/contracts/operations";
+import { LABEL_DEMO_MODE } from "../../shared/runtime/demoMode";
 import type {
   SettingConfigRow,
   SettingDraftRecord,
@@ -95,15 +96,22 @@ export function createSettingsDraftActions(input: SettingsDraftActionsInput) {
       return;
     }
     if (status === "校验中") {
-      window.setTimeout(() => {
-        input.setSettingsAction(null);
+      input.setSettingsAction(null);
+      if (LABEL_DEMO_MODE) {
         input.setSettingDraft((current) => current && current.name === input.selectedSetting.name ? { ...current, status: "待发布" } : current);
         input.setSettingsNotice({
           status: "success",
-          title: "配置校验通过",
-          detail: `${input.selectedSetting.name} 的权限、资产影响和回滚点已校验，等待提交发布。`
+          title: "DEMO：配置校验通过",
+          detail: `${input.selectedSetting.name} 仅完成演示态校验；该结果不是生产发布依据。`
         });
-      }, 760);
+      } else {
+        input.setSettingDraft((current) => current && current.name === input.selectedSetting.name ? { ...current, status: "草稿" } : current);
+        input.setSettingsNotice({
+          status: "error",
+          title: "配置校验执行器未配置",
+          detail: "草稿已写入 BFF，但生产校验未执行；请等待专用 executor 接入（EXECUTION_CONTRACT_NOT_CONFIGURED）。"
+        });
+      }
     } else {
       input.setSettingsAction(null);
     }

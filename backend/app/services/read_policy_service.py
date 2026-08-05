@@ -31,6 +31,11 @@ VOICEPRINT_SENSITIVE_READ_ROLES = (
     "review_arbitrator",
 )
 
+PLATFORM_INTEGRATION_READ_ROLES = (
+    "project_admin",
+    "asset_manager",
+)
+
 
 @dataclass(frozen=True)
 class ResourceReadPolicy:
@@ -78,6 +83,10 @@ RESOURCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyType(
             ("project_admin", "model_engineer", "review_arbitrator"),
         ),
         "listening_annotations": ResourceReadPolicy("standard"),
+        "output_sinks": ResourceReadPolicy(
+            "sensitive",
+            PLATFORM_INTEGRATION_READ_ROLES,
+        ),
         "platform_sessions": ResourceReadPolicy(
             "sensitive",
             ("project_admin", "asset_manager"),
@@ -125,6 +134,14 @@ TRACE_REFERENCE_READ_POLICIES: Mapping[str, ResourceReadPolicy] = MappingProxyTy
         "oidc_identities": ResourceReadPolicy(
             "sensitive",
             ("project_admin",),
+        ),
+        "platform_callbacks": ResourceReadPolicy(
+            "sensitive",
+            PLATFORM_INTEGRATION_READ_ROLES,
+        ),
+        "platform_connections": ResourceReadPolicy(
+            "sensitive",
+            PLATFORM_INTEGRATION_READ_ROLES,
         ),
         "qdrant_rebuild_plans": ResourceReadPolicy(
             "sensitive",
@@ -174,6 +191,7 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "asset_backfill": "data_assets",
         "asset_check_retry": "data_assets",
         "asr_segment": "asr_segments",
+        "asr_result": "asr_segments",
         "asr_annotation_correction": "listening_annotations",
         "audio_ingest": "audio_sessions",
         "audio_intelligence": "audio_sessions",
@@ -209,7 +227,7 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "evidence_pack": "evidence_packs",
         "event_link": "event_links",
         "export": "data_assets",
-        "external_callback": "work_items",
+        "external_callback": "platform_callbacks",
         "feedback_task": "work_items",
         "feedback_example": "label_aggregates",
         "gold_set_version": "work_items",
@@ -284,7 +302,10 @@ TRACE_REFERENCE_COLLECTION_ALIASES: Mapping[str, str] = MappingProxyType(
         "metric_snapshot": "settings",
         "model_capability": "settings",
         "open_trace": "work_items",
+        "output_sink": "output_sinks",
         "platform_auth": "platform_sessions",
+        "platform_callback": "platform_callbacks",
+        "platform_connection": "platform_connections",
         "platform_session": "platform_sessions",
         "platform_sync": "work_items",
         "project": "work_items",
@@ -372,6 +393,9 @@ TRACE_REFERENCE_KEY_COLLECTIONS: Mapping[str, str] = MappingProxyType(
         "voiceprint_sample_id": "voiceprint_samples",
         "voiceprint_embedding_ref": "voiceprint_samples",
         "prompt_candidate_id": "prompt_version_candidates",
+        "asr_result_id": "asr_segments",
+        "output_sink_id": "output_sinks",
+        "platform_connection_id": "platform_connections",
     }
 )
 
@@ -546,6 +570,14 @@ def trace_reference_collection(value: object) -> str | None:
     return TRACE_REFERENCE_COLLECTION_ALIASES.get(normalized)
 
 
+def can_read_trace_reference_collection(ctx: RequestContext, collection: str) -> bool:
+    """Return a fail-closed role decision for JSON and strong trace subjects."""
+    policy = RESOURCE_READ_POLICIES.get(collection) or TRACE_REFERENCE_READ_POLICIES.get(collection)
+    if policy is None:
+        return False
+    return "system" in ctx.roles or not policy.roles or bool(set(ctx.roles) & set(policy.roles))
+
+
 def trace_reference_is_visible(
     value: object,
     ctx: RequestContext,
@@ -708,10 +740,7 @@ def _trace_collection_reference_is_visible(
     visible_review_task_ids: set[str] | frozenset[str],
     visible_review_decision_ids: set[str] | frozenset[str],
 ) -> bool:
-    policy = RESOURCE_READ_POLICIES.get(collection) or TRACE_REFERENCE_READ_POLICIES.get(collection)
-    if policy is None or (
-        "system" not in ctx.roles and policy.roles and not set(ctx.roles).intersection(policy.roles)
-    ):
+    if not can_read_trace_reference_collection(ctx, collection):
         return False
     if collection == "human_review_tasks":
         return bool(reference_id and reference_id in visible_review_task_ids)

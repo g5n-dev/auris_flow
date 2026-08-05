@@ -8,6 +8,8 @@ from sqlalchemy import delete
 from app.core.database import SessionLocal
 from app.models import ProjectSceneProfileBinding
 
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
+
 
 def _production_scene_lock(client, auth_headers: dict[str, str]) -> dict[str, str]:
     response = client.get(

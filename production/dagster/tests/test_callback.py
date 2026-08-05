@@ -101,6 +101,42 @@ def test_callback_matches_bff_hmac_contract_and_never_sends_keyring(
     assert request.get_header("X-auris-signature") == f"sha256={expected_signature}"
 
 
+def test_completion_callback_accepts_materializing_ack_without_claiming_business_success(
+    scope: AurisRunContext,
+    keyring_file: Path,
+) -> None:
+    def open_request(request: Request, *, timeout: float) -> FakeResponse:
+        del request, timeout
+        # urllib treats every 2xx response, including the BFF's 202
+        # completion_pending acknowledgement, as a normal response.
+        return FakeResponse(
+            {
+                "data": {
+                    "status": "completion_pending",
+                    "business_status": "materializing",
+                    "receipt_state": "materializing",
+                }
+            }
+        )
+
+    client = CompletionCallbackClient(
+        base_url="http://bff:8000",
+        keyring_path=keyring_file,
+        opener=open_request,
+    )
+    response = client.post(
+        scope,
+        dagster_run_id="dg-run-materializing",
+        status="success",
+    )
+
+    assert response["data"] == {
+        "status": "completion_pending",
+        "business_status": "materializing",
+        "receipt_state": "materializing",
+    }
+
+
 def test_callback_retry_keeps_business_idempotency_but_rotates_nonce(
     scope: AurisRunContext,
     keyring_file: Path,

@@ -789,7 +789,7 @@
 
 .tenant-empty-state span {
   max-width: 520px;
-  color: #86909c;
+  color: #4e5969;
   font-size: 12px;
   line-height: 1.5;
 }
@@ -846,7 +846,7 @@
 
 .operation-toast.is-success {
   border-color: #aff0b5;
-  color: #00b42a;
+  color: #0b6b2e;
   background: #f0fff3;
 }
 
@@ -1032,7 +1032,7 @@
 }
 
 .deep-link-source-bar em {
-  color: #86909c;
+  color: #4e5969;
   font-size: 12px;
   font-style: normal;
 }

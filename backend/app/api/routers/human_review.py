@@ -3,15 +3,22 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Request
+from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
 
 from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.errors import ApiError
 from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
+from app.models import JsonResource
 from app.schemas import HumanReviewDecisionRequest, parse_payload
 from app.schemas.label_closed_loop import HumanReviewDecisionBatchRequest
+from app.services.audio_evidence_review_service import assemble_scoped_evidence_pack
 from app.services.human_review_batch_service import apply_human_review_decision_batch
+from app.services.human_review_readback_service import (
+    get_human_review_affected_object_readback,
+    get_human_review_decision_readback,
+)
 from app.services.human_review_service import (
     apply_human_review_decision,
     get_human_review_task_for_update,
@@ -26,7 +33,7 @@ from app.services.read_policy_service import can_read_human_review_task
 from app.services.resource_service import (
     create_idempotent_json_resource,
     get_resource,
-    list_resource_data,
+    list_resource_page,
     status_counts,
 )
 
@@ -43,6 +50,19 @@ CLOSED_LOOP_TARGET_TYPES = frozenset(
     }
 )
 
+AUDIO_EVIDENCE_MATERIALIZER_TARGET_TYPES = frozenset(
+    {
+        "evidence_pack",
+        "evidence_packs",
+        "conversation_boundary",
+        "conversation_boundaries",
+        "event_link",
+        "event_links",
+        "label_candidate",
+        "label_candidates",
+    }
+)
+
 
 def _closed_loop_target_types(payload: object) -> set[str]:
     if not isinstance(payload, dict):
@@ -56,6 +76,28 @@ def _closed_loop_target_types(payload: object) -> set[str]:
         for target in targets
         if isinstance(target, dict) and str(target.get("type") or "") in CLOSED_LOOP_TARGET_TYPES
     }
+
+
+def _client_audio_evidence_bindings(payload: object) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+    bindings: set[str] = set()
+    if "evidence_pack_id" in payload:
+        bindings.add("evidence_pack_id")
+    if payload.get("queue") == "audio_evidence_review":
+        bindings.add("queue")
+    targets = [
+        *(payload.get("target_refs") or []),
+        *(payload.get("affected_objects") or []),
+    ]
+    bindings.update(
+        f"target:{target_type}"
+        for target in targets
+        if isinstance(target, dict)
+        and (target_type := str(target.get("type") or ""))
+        in AUDIO_EVIDENCE_MATERIALIZER_TARGET_TYPES
+    )
+    return sorted(bindings)
 
 
 @router.post("/human-review-decision-batches")
@@ -87,30 +129,21 @@ async def post_human_review_decision_batches(
     return response
 
 
-@router.post("/evidence-packs", status_code=201)
+@router.post("/evidence-packs", status_code=409, deprecated=True)
 async def post_evidence_packs(
     request: Request, session: SessionDep, ctx: ContextDep
 ) -> dict[str, Any]:
-    return await create_idempotent_json_resource(
-        session,
-        ctx,
-        request,
-        "evidence_packs",
-        key_prefix="evidence_pack",
-        status="pending",
+    del request, session, ctx
+    raise ApiError(
+        "EVIDENCE_PACK_MATERIALIZER_REQUIRED",
+        "EvidencePack 只能由受控音频智能结果物化，禁止客户端直接创建或覆盖",
+        409,
     )
 
 
 @router.get("/evidence-packs/{id}")
 def get_evidence_packs_by_id(id: str, session: SessionDep, ctx: ContextDep) -> dict[str, Any]:
-    data = dict(get_resource(session, ctx, "evidence_packs", id).data)
-    candidates = [
-        item
-        for item in list_resource_data(session, ctx, "label_candidates")
-        if item.get("evidence_pack_id") == id
-    ]
-    data["label_candidates"] = candidates
-    return envelope(data, ctx)
+    return envelope(assemble_scoped_evidence_pack(session, ctx, id), ctx)
 
 
 @router.get("/human-review-tasks")
@@ -121,13 +154,39 @@ def get_human_review_tasks(
     queue: str | None = None,
     status: str | None = None,
 ) -> dict[str, Any]:
-    items = list_resource_data(
-        session, ctx, "human_review_tasks", status=status, limit=int(page["limit"] or 50)
+    normalized_queue = queue.strip() if isinstance(queue, str) else None
+    if normalized_queue is not None and (
+        not normalized_queue
+        or len(normalized_queue) > 128
+        or any(ord(character) < 0x20 for character in normalized_queue)
+    ):
+        raise ApiError("HUMAN_REVIEW_QUEUE_INVALID", "人审队列筛选值无效", 422)
+    predicates = (
+        (func.coalesce(JsonResource.data["queue"].as_string(), "") == normalized_queue,)
+        if normalized_queue
+        else ()
     )
-    if queue:
-        items = [item for item in items if item.get("queue") == queue]
-    items = [item for item in items if can_read_human_review_task(item, ctx)]
-    return collection_envelope(items, ctx, meta={"status_counts": status_counts(items)})
+    result = list_resource_page(
+        session,
+        ctx,
+        "human_review_tasks",
+        page,
+        status=status,
+        predicates=predicates,
+    )
+    # resource_read_scope already applies the assignment policy in SQL. Keep
+    # this defense-in-depth filter so future policy changes remain fail-closed.
+    items = [item for item in result.items if can_read_human_review_task(item, ctx)]
+    return collection_envelope(
+        items,
+        ctx,
+        meta={
+            "total": result.total,
+            "limit": result.limit,
+            "next_cursor": result.next_cursor,
+            "status_counts": status_counts(items),
+        },
+    )
 
 
 @router.post("/human-review-tasks", status_code=201)
@@ -135,6 +194,14 @@ async def post_human_review_tasks(
     request: Request, session: SessionDep, ctx: ContextDep
 ) -> dict[str, Any]:
     payload = await request.json()
+    audio_bindings = _client_audio_evidence_bindings(payload)
+    if audio_bindings:
+        raise ApiError(
+            "AUDIO_EVIDENCE_MATERIALIZER_REQUIRED",
+            "音频 EvidencePack 与受控人审目标只能由服务端物化器绑定",
+            409,
+            details=[{"bindings": audio_bindings}],
+        )
     closed_loop_types = sorted(_closed_loop_target_types(payload))
     if closed_loop_types:
         raise ApiError(
@@ -161,8 +228,40 @@ def get_human_review_tasks_by_id(id: str, session: SessionDep, ctx: ContextDep) 
         raise ApiError("HUMAN_REVIEW_TASK_FORBIDDEN", "当前用户无权读取该人审任务", 403)
     evidence_id = task.get("evidence_pack_id")
     if evidence_id:
-        task["evidence_pack"] = get_resource(session, ctx, "evidence_packs", evidence_id).data
+        task["evidence_pack"] = assemble_scoped_evidence_pack(session, ctx, str(evidence_id))
     return envelope(task, ctx)
+
+
+@router.get("/human-review-decisions/{decision_id}")
+def get_human_review_decisions_by_id(
+    decision_id: str,
+    session: SessionDep,
+    ctx: ContextDep,
+) -> dict[str, Any]:
+    return envelope(
+        get_human_review_decision_readback(session, ctx, decision_id),
+        ctx,
+    )
+
+
+@router.get("/human-review-decisions/{decision_id}/affected-objects/{object_type}/{object_id}")
+def get_human_review_decision_affected_object(
+    decision_id: str,
+    object_type: str,
+    object_id: str,
+    session: SessionDep,
+    ctx: ContextDep,
+) -> dict[str, Any]:
+    return envelope(
+        get_human_review_affected_object_readback(
+            session,
+            ctx,
+            decision_id=decision_id,
+            object_type=object_type,
+            object_id=object_id,
+        ),
+        ctx,
+    )
 
 
 @router.post("/human-review-tasks/{id}/decisions")

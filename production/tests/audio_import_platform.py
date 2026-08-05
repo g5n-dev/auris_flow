@@ -23,6 +23,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 PLATFORM_HOSTNAME = "recordings.audio-import-gate.test"
+INFERENCE_HOSTNAME = "audio-inference.audio-import-gate.test"
 PLATFORM_PORT = 8443
 PLATFORM_ORIGIN = f"https://{PLATFORM_HOSTNAME}:{PLATFORM_PORT}"
 PLATFORM_BEARER_TOKEN = "audio-import-gate-fixture-auth"
@@ -153,7 +154,12 @@ def initialize_pki(ca_dir: Path, tls_dir: Path) -> None:
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=2))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(PLATFORM_HOSTNAME)]),
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName(PLATFORM_HOSTNAME),
+                    x509.DNSName(INFERENCE_HOSTNAME),
+                ]
+            ),
             critical=False,
         )
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)

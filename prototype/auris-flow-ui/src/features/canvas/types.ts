@@ -186,6 +186,8 @@ export type CanvasNodeTemplate = {
   category: "平台数据同步抽取" | "智能处理流水线" | "平台处理结果推送" | "人工与控制";
   title: string;
   description: string;
+  productionDisabled?: boolean;
+  disabledReason?: string;
   adapterKind?: string;
   authMode?: string;
   method?: string;

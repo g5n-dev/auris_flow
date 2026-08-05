@@ -55,16 +55,31 @@ export function AudioImportSessionPanel({
     if (audio && !audio.paused) return audio.pause();
     setPlaybackPending(true);
     try {
+      if (!audio) throw new Error("播放器尚未就绪");
       const nextUrl = playbackUrl
         || (await createAudioPlaybackGrant(audioSessionId)).data.playback_url;
       if (!nextUrl) throw new Error("播放授权无可用地址");
-      setPlaybackUrl(nextUrl);
-      window.requestAnimationFrame(() => void audioRef.current?.play().catch((error) => {
+      if (!playbackUrl) {
+        audio.src = nextUrl;
+        setPlaybackUrl(nextUrl);
+        audio.load();
+      }
+      try {
+        await audio.play();
+      } catch (error) {
         setPlaying(false);
-        setDetail(error instanceof Error ? error.message : "音频播放失败");
-      }));
+        setDetail(
+          error instanceof Error
+            ? `录音已加载，浏览器未开始播放：${error.message}`
+            : "录音已加载，请再次点击播放。"
+        );
+      }
     } catch (error) {
+      audio?.pause();
+      audio?.removeAttribute("src");
+      audio?.load();
       setPlaybackUrl("");
+      setPlaying(false);
       setDetail(error instanceof Error ? error.message : "播放授权失败");
     } finally {
       setPlaybackPending(false);

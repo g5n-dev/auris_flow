@@ -62,6 +62,18 @@ def _items(response: dict[str, Any], label: str) -> list[dict[str, Any]]:
     return raw_items
 
 
+def _order_by_expected_external_identity(
+    items: list[dict[str, Any]],
+) -> list[dict[str, Any]] | None:
+    actual = [item.get("external_record_id") for item in items]
+    if len(actual) != len(EXPECTED_EXTERNAL_IDS) or set(actual) != set(
+        EXPECTED_EXTERNAL_IDS
+    ):
+        return None
+    by_external_id = {str(item["external_record_id"]): item for item in items}
+    return [by_external_id[external_id] for external_id in EXPECTED_EXTERNAL_IDS]
+
+
 class BFFClient:
     def __init__(self, base_url: str, *, deadline: float) -> None:
         self.base_url = base_url.rstrip("/")
@@ -349,7 +361,7 @@ def _database_proof(
     from sqlalchemy import select
 
     from app.core.database import SessionLocal
-    from app.models import RunCompletionReceipt, RunRecord, StorageObject
+    from app.models import OutboxEvent, RunCompletionReceipt, RunRecord, StorageObject
 
     with SessionLocal() as session:
         run = session.scalar(
@@ -366,6 +378,14 @@ def _database_proof(
                 RunCompletionReceipt.project_id == SCOPE[1],
             )
         )
+        materialization_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+                OutboxEvent.tenant_id == SCOPE[0],
+                OutboxEvent.project_id == SCOPE[1],
+            )
+        )
         objects = list(
             session.scalars(
                 select(StorageObject)
@@ -378,9 +398,9 @@ def _database_proof(
                 .order_by(StorageObject.storage_object_id)
             )
         )
-    if run is None or receipt is None:
+    if run is None or receipt is None or materialization_event is None:
         raise GateFailure(
-            "TaskRun or signed completion receipt database proof is missing"
+            "TaskRun, signed completion receipt, or materialization boundary proof is missing"
         )
     payload = _mapping(run.payload, "persisted TaskRun payload")
     dispatch = _mapping(payload.get("dispatch"), "persisted Dagster dispatch")
@@ -413,6 +433,36 @@ def _database_proof(
         or receipt.completed_at is None
     ):
         raise GateFailure("signed Dagster completion receipt proof is invalid")
+    history = payload.get("status_history")
+    transitions = {
+        (str(item.get("from")), str(item.get("to")))
+        for item in (history if isinstance(history, list) else [])
+        if isinstance(item, dict)
+    }
+    materialization = _mapping(
+        payload.get("materialization"),
+        "persisted asynchronous materialization state",
+    )
+    if (
+        ("submitted", "completion_pending") not in transitions
+        and ("running", "completion_pending") not in transitions
+    ) or (
+        "completion_pending",
+        "success",
+    ) not in transitions:
+        raise GateFailure(
+            "TaskRun did not preserve the completion_pending business window"
+        )
+    if (
+        payload.get("completion_mode") != "async_materialization"
+        or materialization.get("status") != "completed"
+        or materialization_event.status != "processed"
+        or materialization_event.delivery_state != "confirmed"
+        or materialization_event.processed_at is None
+        or str(materialization_event.payload.get("completion_receipt_id"))
+        != receipt.completion_receipt_id
+    ):
+        raise GateFailure("asynchronous materialization outbox proof is invalid")
     if len(objects) != 4:
         raise GateFailure(
             "audio import did not register three WAV objects and one manifest"
@@ -464,6 +514,17 @@ def _database_proof(
             "signature_mode": receipt.signature_mode,
             "key_id": receipt.signature_key_id,
             "processing_state": receipt.processing_state,
+        },
+        "materialization_boundary": {
+            "event_id": materialization_event.event_id,
+            "event_type": materialization_event.event_type,
+            "delivery_state": materialization_event.delivery_state,
+            "status": materialization.get("status"),
+            "status_transitions": [
+                {"from": source, "to": target}
+                for source, target in sorted(transitions)
+                if target in {"completion_pending", "success"}
+            ],
         },
         "storage_objects": object_evidence,
     }
@@ -694,12 +755,12 @@ def run_gate(
         client.json("GET", f"/api/v1/import-batches/{batch_id}/items"),
         "import batch",
     )
-    if [
-        item.get("external_record_id") for item in batch_items
-    ] != EXPECTED_EXTERNAL_IDS:
+    ordered_batch_items = _order_by_expected_external_identity(batch_items)
+    if ordered_batch_items is None:
         raise GateFailure(
             "ImportBatch items do not preserve external recording identities"
         )
+    batch_items = ordered_batch_items
     if any(
         item.get("status") != "succeeded"
         or item.get("error_code") is not None
@@ -868,6 +929,7 @@ def run_gate(
             ],
         },
         "signed_completion": database_proof["signed_completion"],
+        "materialization_boundary": database_proof["materialization_boundary"],
         "minio_objects": database_proof["storage_objects"],
         "playback": playback_evidence,
     }

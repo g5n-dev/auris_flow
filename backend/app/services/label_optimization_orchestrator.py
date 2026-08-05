@@ -28,6 +28,9 @@ from app.models import (
     RunRecord,
 )
 from app.services.audit_service import record_audit
+from app.services.execution_contract_registry import (
+    preflight_production_execution_contract,
+)
 from app.services.outbox_service import enqueue_event
 from app.services.public_run_projection_service import public_run_projection
 
@@ -482,6 +485,10 @@ def execute_trigger_scan(
     request_data: dict[str, Any],
     now: datetime | None = None,
 ) -> dict[str, Any]:
+    preflight_production_execution_contract(
+        event_type="agent_run.requested",
+        run_type="label_optimization",
+    )
     utc_now = _aware_utc(now or datetime.now(UTC))
     if utc_now is None:  # pragma: no cover
         raise ValueError("now is required")

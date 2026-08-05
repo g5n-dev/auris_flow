@@ -19,6 +19,8 @@ from app.models import (
     StorageObject,
 )
 
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
+
 
 def _headers(
     auth_headers: dict[str, str],

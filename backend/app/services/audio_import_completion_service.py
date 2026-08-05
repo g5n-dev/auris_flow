@@ -25,6 +25,10 @@ from app.models import (
 )
 from app.services.audit_service import record_audit
 from app.services.connector_import_service import advance_connector_sync_cursor
+from app.services.import_batch_service import (
+    import_batch_payload,
+    import_item_retry_lineage,
+)
 from app.services.outbox_service import enqueue_event
 from app.services.resource_service import upsert_resource
 
@@ -346,14 +350,15 @@ def _upsert_import_item(
                 409,
             )
         return existing
+    import_item_id = _stable_id(
+        "import_item",
+        record.tenant_id,
+        record.project_id,
+        batch.import_batch_id,
+        external_record_id,
+    )
     item = ImportBatchItem(
-        import_item_id=_stable_id(
-            "import_item",
-            record.tenant_id,
-            record.project_id,
-            batch.import_batch_id,
-            external_record_id,
-        ),
+        import_item_id=import_item_id,
         tenant_id=record.tenant_id,
         project_id=record.project_id,
         import_batch_id=batch.import_batch_id,
@@ -364,7 +369,16 @@ def _upsert_import_item(
         audio_session_id=audio_session_id,
         root_trace_id=batch.root_trace_id,
         trace_id=record.trace_id,
-        payload=payload,
+        payload={
+            **payload,
+            "retry_lineage": import_item_retry_lineage(
+                session,
+                record=record,
+                batch=batch,
+                import_item_id=import_item_id,
+                external_record_id=external_record_id,
+            ),
+        },
     )
     session.add(item)
     return item
@@ -520,6 +534,7 @@ def _materialize_succeeded_item(
         "root_trace_id": root_trace_id,
         "trace_id": root_trace_id,
         "source": "platform_audio_import",
+        "intelligence_status": "awaiting_schedule",
     }
     upsert_resource(
         session,
@@ -617,6 +632,30 @@ def _materialize_succeeded_item(
                 },
             )
         )
+    materialized_ctx = replace(
+        ctx,
+        trace_id=root_trace_id,
+        parent_trace_id=(ctx.trace_id if ctx.trace_id != root_trace_id else ctx.parent_trace_id),
+        correlation_id=root_trace_id,
+    )
+    enqueue_event(
+        session,
+        materialized_ctx,
+        event_type="audio_session.materialized",
+        aggregate_type="audio_session",
+        aggregate_id=audio_session_id,
+        payload={
+            "audio_session_id": audio_session_id,
+            "recording_id": recording_id,
+            "storage_object_id": storage_object.storage_object_id,
+            "storage_object_version": storage_object.payload.get("object_version_id"),
+            "audio_sha256": storage_object.content_sha256,
+            "import_batch_id": batch.import_batch_id,
+            "platform_connection_id": platform_connection_id,
+            "root_trace_id": root_trace_id,
+            "trace_id": root_trace_id,
+        },
+    )
     return recording_id, audio_session_id, source_record_id, False
 
 
@@ -666,19 +705,8 @@ def _materialize_non_success_source_record(
 
 def _public_batch(batch: ImportBatch, *, audio_session_ids: list[str]) -> dict[str, Any]:
     return {
-        "import_batch_id": batch.import_batch_id,
-        "task_run_id": batch.task_run_id,
-        "status": batch.status,
-        "current_stage": batch.current_stage,
-        "total_items": batch.total_items,
-        "succeeded_items": batch.succeeded_items,
-        "skipped_items": batch.skipped_items,
-        "failed_items": batch.failed_items,
-        "cursor_before": batch.cursor_before,
-        "cursor_after": batch.cursor_after,
+        **import_batch_payload(batch),
         "audio_session_ids": audio_session_ids,
-        "root_trace_id": batch.root_trace_id,
-        "trace_id": batch.trace_id,
     }
 
 

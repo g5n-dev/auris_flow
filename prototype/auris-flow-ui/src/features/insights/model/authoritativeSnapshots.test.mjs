@@ -36,6 +36,58 @@ const metric = (key = "quoteConsistency", id = `metric-${key}`) => ({
   }
 });
 
+const completeMetric = (key = "quoteConsistency", id = `metric-${key}`) => ({
+  ...metric(key, id),
+  evidence_refs: ["evidence://audio/session-1", "evidence://document/quote-1"],
+  comparable_series: [
+    {
+      metric_result_id: `${id}-baseline`,
+      value: 83.1,
+      scope_sha256: hash("5"),
+      evidence_refs: ["evidence://audio/session-0"]
+    },
+    {
+      metric_result_id: id,
+      value: 86.2,
+      scope_sha256: hash("2"),
+      evidence_refs: ["evidence://audio/session-1"]
+    }
+  ],
+  comparison: {
+    comparison_status: "comparable",
+    reason_codes: [],
+    comparison_sha256: hash("4"),
+    continuous_trend_allowed: true
+  }
+});
+
+test("权威洞察展示必须同时具备完整快照、可比序列和证据引用", async () => {
+  const { authoritativeInsightDisplayState } = await loadModel();
+  assert.deepEqual(
+    authoritativeInsightDisplayState([completeMetric()], ["quoteConsistency"]),
+    { ready: true, reason: null }
+  );
+
+  const missingEvidence = completeMetric();
+  delete missingEvidence.evidence_refs;
+  assert.deepEqual(
+    authoritativeInsightDisplayState([missingEvidence], ["quoteConsistency"]),
+    { ready: false, reason: "指标 quoteConsistency 缺少 evidence_refs。" }
+  );
+
+  const missingSeries = completeMetric();
+  delete missingSeries.comparable_series;
+  assert.deepEqual(
+    authoritativeInsightDisplayState([missingSeries], ["quoteConsistency"]),
+    { ready: false, reason: "指标 quoteConsistency 缺少 comparable_series。" }
+  );
+
+  assert.deepEqual(
+    authoritativeInsightDisplayState([completeMetric()], ["quoteConsistency", "riskReverseScore"]),
+    { ready: false, reason: "缺少指标 riskReverseScore 的权威快照。" }
+  );
+});
+
 test("BFF current 快照的 value/unit/sample 来自同一物化对象，重复即阻断", async () => {
   const { parseAuthoritativeMetricSnapshots, snapshotValuePresentation } = await loadModel();
   const snapshot = parseAuthoritativeMetricSnapshots([metric()])[0];

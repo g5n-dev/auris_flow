@@ -206,6 +206,8 @@ CORE_EVIDENCE = frozenset(
         "real-dagster-gate.json",
         "product-dagster-gate.json",
         "production-path-gate.json",
+        "audio-import-real-stack-gate.json",
+        "audio-import-browser-e2e.json",
         "backup-restore-gate.json",
         "backup-restore-gate.sigstore.json",
         "evidence-manifest.json",
@@ -1725,6 +1727,568 @@ def _validate_real_stack(payload: dict[str, Any], *, source_commit: str) -> None
         raise EvidenceError(f"{filename} fallback rejection proof is invalid")
 
 
+def _validate_audio_import_real_stack(
+    payload: dict[str, Any], *, source_commit: str
+) -> None:
+    filename = "audio-import-real-stack-gate.json"
+    _require_exact_fields(
+        payload,
+        filename=filename,
+        fields=frozenset(
+            {
+                "schema_version",
+                "status",
+                "source_commit",
+                "source_tree_dirty",
+                "verified_at",
+                "execution_environment",
+                "scope",
+                "adapters",
+                "connector",
+                "task_version",
+                "task_run",
+                "import_batch",
+                "signed_completion",
+                "materialization_boundary",
+                "minio_objects",
+                "playback",
+            }
+        ),
+    )
+    _require_common(
+        payload,
+        filename=filename,
+        schema_version="auris.audio-import-real-stack-gate.v1",
+        source_commit=source_commit,
+    )
+    if payload.get("source_tree_dirty") is not False:
+        raise EvidenceError(f"{filename} must be bound to a clean source tree")
+    _require_timestamp(payload.get("verified_at"), label=filename)
+    if (
+        payload.get("execution_environment") != "compose"
+        or payload.get("scope")
+        != {"tenant_id": "aurora_auto", "project_id": "sales_qa"}
+        or payload.get("adapters")
+        != {
+            "dagster": "real",
+            "object_storage": "real",
+            "platform_source": "https",
+        }
+    ):
+        raise EvidenceError(f"{filename} real execution profile is invalid")
+
+    connector = payload.get("connector")
+    if (
+        not isinstance(connector, dict)
+        or set(connector)
+        != {
+            "connector_id",
+            "connector_version",
+            "connection_test",
+            "preview_count",
+            "mapping_valid",
+        }
+        or not _nonempty_text(connector.get("connector_id"))
+        or connector.get("connector_version") != "1"
+        or connector.get("connection_test") != "success"
+        or connector.get("preview_count") != 3
+        or connector.get("mapping_valid") is not True
+    ):
+        raise EvidenceError(f"{filename} connector proof is invalid")
+
+    task_version = payload.get("task_version")
+    if (
+        not isinstance(task_version, dict)
+        or set(task_version) != {"task_version_id", "status", "execution_contract"}
+        or not _nonempty_text(task_version.get("task_version_id"))
+        or task_version.get("status") != "published"
+        or task_version.get("execution_contract") != "auris-flow-audio-import-v1"
+    ):
+        raise EvidenceError(f"{filename} immutable TaskVersion proof is invalid")
+
+    task_run = payload.get("task_run")
+    if (
+        not isinstance(task_run, dict)
+        or set(task_run)
+        != {
+            "run_id",
+            "status",
+            "execution_mode",
+            "root_trace_id",
+            "dagster_run_id",
+            "dagster_job_name",
+            "dagster_status",
+        }
+        or task_run.get("status") != "success"
+        or task_run.get("execution_mode") != "production"
+        or task_run.get("dagster_job_name") != "auris_flow_audio_import_v1"
+        or task_run.get("dagster_status") != "SUCCESS"
+        or any(
+            not _nonempty_text(task_run.get(field))
+            for field in ("run_id", "root_trace_id", "dagster_run_id")
+        )
+    ):
+        raise EvidenceError(f"{filename} production TaskRun proof is invalid")
+
+    import_batch = payload.get("import_batch")
+    if (
+        not isinstance(import_batch, dict)
+        or set(import_batch)
+        != {
+            "import_batch_id",
+            "status",
+            "current_stage",
+            "total",
+            "succeeded",
+            "skipped",
+            "failed",
+            "cursor_after",
+            "items",
+        }
+        or not _nonempty_text(import_batch.get("import_batch_id"))
+        or import_batch.get("status") != "succeeded"
+        or import_batch.get("current_stage") != "completed"
+        or import_batch.get("total") != 3
+        or import_batch.get("succeeded") != 3
+        or import_batch.get("skipped") != 0
+        or import_batch.get("failed") != 0
+        or not _nonempty_text(import_batch.get("cursor_after"))
+    ):
+        raise EvidenceError(f"{filename} materialized ImportBatch proof is invalid")
+    items = import_batch.get("items")
+    expected_external_ids = {
+        "audio-import-gate-001",
+        "audio-import-gate-002",
+        "audio-import-gate-003",
+    }
+    if (
+        not isinstance(items, list)
+        or len(items) != 3
+        or any(
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "external_record_id",
+                "status",
+                "object_version",
+                "audio_session_id",
+            }
+            or item.get("status") != "succeeded"
+            or not _nonempty_text(item.get("object_version"))
+            or not _nonempty_text(item.get("audio_session_id"))
+            for item in items
+        )
+        or {item["external_record_id"] for item in items} != expected_external_ids
+        or len({item["object_version"] for item in items}) != 3
+        or len({item["audio_session_id"] for item in items}) != 3
+    ):
+        raise EvidenceError(f"{filename} ImportBatch item proof is invalid")
+
+    signed_completion = payload.get("signed_completion")
+    if (
+        not isinstance(signed_completion, dict)
+        or set(signed_completion)
+        != {
+            "receipt_id",
+            "source",
+            "signature_mode",
+            "key_id",
+            "processing_state",
+        }
+        or not _nonempty_text(signed_completion.get("receipt_id"))
+        or signed_completion.get("source") != "dagster"
+        or signed_completion.get("signature_mode") != "hmac-sha256"
+        or signed_completion.get("key_id") != "dagster-v1"
+        or signed_completion.get("processing_state") != "completed"
+    ):
+        raise EvidenceError(f"{filename} signed Dagster completion proof is invalid")
+
+    materialization_boundary = payload.get("materialization_boundary")
+    transitions = (
+        materialization_boundary.get("status_transitions")
+        if isinstance(materialization_boundary, dict)
+        else None
+    )
+    if (
+        not isinstance(materialization_boundary, dict)
+        or set(materialization_boundary)
+        != {
+            "event_id",
+            "event_type",
+            "delivery_state",
+            "status",
+            "status_transitions",
+        }
+        or not isinstance(materialization_boundary.get("event_id"), (int, str))
+        or materialization_boundary.get("event_type")
+        != "execution.materialization.requested"
+        or materialization_boundary.get("delivery_state") != "confirmed"
+        or materialization_boundary.get("status") != "completed"
+        or not isinstance(transitions, list)
+        or {"from": "completion_pending", "to": "success"} not in transitions
+        or not any(
+            transition in transitions
+            for transition in (
+                {"from": "submitted", "to": "completion_pending"},
+                {"from": "running", "to": "completion_pending"},
+            )
+        )
+    ):
+        raise EvidenceError(f"{filename} asynchronous materialization proof is invalid")
+
+    minio_objects = payload.get("minio_objects")
+    if (
+        not isinstance(minio_objects, list)
+        or len(minio_objects) != 4
+        or any(
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "storage_object_id",
+                "role",
+                "provider",
+                "content_sha256",
+                "object_version_id",
+                "etag",
+            }
+            or item.get("role") not in {"manifest", "raw_audio"}
+            or item.get("provider") != "minio"
+            or not _nonempty_text(item.get("storage_object_id"))
+            or not _nonempty_text(item.get("object_version_id"))
+            or not _nonempty_text(item.get("etag"))
+            for item in minio_objects
+        )
+        or [item["role"] for item in minio_objects].count("manifest") != 1
+        or [item["role"] for item in minio_objects].count("raw_audio") != 3
+        or len({item["storage_object_id"] for item in minio_objects}) != 4
+    ):
+        raise EvidenceError(f"{filename} MinIO object proof is invalid")
+    for item in minio_objects:
+        _require_sha256(
+            item.get("content_sha256"),
+            label=f"{filename} MinIO object content",
+        )
+
+    playback = payload.get("playback")
+    raw_audio_by_id = {
+        item["storage_object_id"]: item
+        for item in minio_objects
+        if item["role"] == "raw_audio"
+    }
+    session_ids = {item["audio_session_id"] for item in items}
+    if (
+        not isinstance(playback, list)
+        or len(playback) != 3
+        or any(
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "audio_session_id",
+                "external_record_id",
+                "storage_object_id",
+                "content_sha256",
+                "content_length",
+                "range_verified",
+            }
+            or item.get("audio_session_id") not in session_ids
+            or item.get("external_record_id") not in expected_external_ids
+            or item.get("storage_object_id") not in raw_audio_by_id
+            or item.get("range_verified") is not True
+            or not _positive_int(item.get("content_length"))
+            for item in playback
+        )
+        or {item["audio_session_id"] for item in playback} != session_ids
+        or {item["external_record_id"] for item in playback} != expected_external_ids
+    ):
+        raise EvidenceError(f"{filename} exact-version playback proof is invalid")
+    for item in playback:
+        _require_sha256(
+            item.get("content_sha256"),
+            label=f"{filename} playback content",
+        )
+        if (
+            item["content_sha256"]
+            != raw_audio_by_id[item["storage_object_id"]]["content_sha256"]
+        ):
+            raise EvidenceError(
+                f"{filename} playback content does not match the MinIO object"
+            )
+
+
+def _validate_audio_import_browser(
+    payload: dict[str, Any], *, source_commit: str
+) -> None:
+    filename = "audio-import-browser-e2e.json"
+    _require_exact_fields(
+        payload,
+        filename=filename,
+        fields=frozenset(
+            {
+                "schema_version",
+                "status",
+                "source_commit",
+                "source_tree_dirty",
+                "stage",
+                "mode",
+                "runId",
+                "baseUrl",
+                "startedAt",
+                "completedAt",
+                "executionProfile",
+                "audioImportClosedLoop",
+                "audioIntelligenceReviewClosedLoop",
+                "tenantAudioImportPull",
+                "consoleErrors",
+                "pageErrors",
+                "requestFailures",
+                "failedResponses",
+            }
+        ),
+    )
+    _require_common(
+        payload,
+        filename=filename,
+        schema_version="auris.audio-import-browser-e2e.v2",
+        source_commit=source_commit,
+    )
+    if payload.get("source_tree_dirty") is not False:
+        raise EvidenceError(f"{filename} must be bound to a clean source tree")
+    for field in ("startedAt", "completedAt"):
+        _require_timestamp(payload.get(field), label=f"{filename} {field}")
+    if (
+        payload.get("stage") != "completed"
+        or payload.get("mode") != "audio-import-only"
+        or not _nonempty_text(payload.get("runId"))
+        or not isinstance(payload.get("baseUrl"), str)
+        or re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}/?", payload["baseUrl"])
+        is None
+        or payload.get("executionProfile")
+        != {
+            "realStack": True,
+            "platformSource": "https",
+            "inferenceProvider": "https",
+            "dagster": "real",
+            "objectStorage": "real",
+            "uiEvidencePolicy": "browser-clicks-and-bff-readback",
+        }
+        or any(
+            payload.get(field) != []
+            for field in (
+                "consoleErrors",
+                "pageErrors",
+                "requestFailures",
+                "failedResponses",
+            )
+        )
+    ):
+        raise EvidenceError(f"{filename} browser execution profile is invalid")
+
+    flow = payload.get("audioImportClosedLoop")
+    flow_fields = {
+        "id",
+        "connectorId",
+        "connectorTraceId",
+        "platformConnectionId",
+        "taskVersionId",
+        "taskRunId",
+        "importBatchId",
+        "audioSessionId",
+        "rootTraceId",
+        "traceId",
+        "status",
+        "executionMode",
+        "targetAssetKey",
+        "previewCount",
+        "total",
+        "succeeded",
+        "duplicates",
+        "failed",
+        "playbackGrantStatus",
+        "playbackStatus",
+        "playbackUiBound",
+        "playbackRangeVerified",
+        "connectorWriteCount",
+        "pageRefreshRecovered",
+        "rootTraceReadable",
+        "legacyPlatformSyncRequests",
+        "sceneProfileId",
+        "sceneProfileVersionId",
+        "sceneProfileSnapshotSha256",
+    }
+    if (
+        not isinstance(flow, dict)
+        or set(flow) != flow_fields
+        or any(
+            not _nonempty_text(flow.get(field))
+            for field in (
+                "connectorId",
+                "connectorTraceId",
+                "taskVersionId",
+                "taskRunId",
+                "importBatchId",
+                "audioSessionId",
+                "rootTraceId",
+                "sceneProfileId",
+                "sceneProfileVersionId",
+            )
+        )
+        or flow.get("id") != flow.get("connectorId")
+        or flow.get("traceId") != flow.get("connectorTraceId")
+        or flow.get("platformConnectionId") != "conn_platform_auth"
+        or flow.get("status") != "succeeded"
+        or flow.get("executionMode") != "production"
+        or flow.get("targetAssetKey") != "auris/audio/raw_recordings"
+        or flow.get("previewCount") != 3
+        or flow.get("total") != 3
+        or flow.get("succeeded") != 3
+        or flow.get("duplicates") != 0
+        or flow.get("failed") != 0
+        or flow.get("playbackGrantStatus") != 201
+        or flow.get("playbackStatus") != 206
+        or flow.get("playbackUiBound") is not True
+        or flow.get("playbackRangeVerified") is not True
+        or not _positive_int(flow.get("connectorWriteCount"))
+        or flow.get("pageRefreshRecovered") is not True
+        or flow.get("rootTraceReadable") is not True
+        or flow.get("legacyPlatformSyncRequests") != 0
+    ):
+        raise EvidenceError(f"{filename} UI audio-import closed-loop proof is invalid")
+    _require_sha256(
+        flow.get("sceneProfileSnapshotSha256"),
+        label=f"{filename} SceneProfile snapshot",
+    )
+
+    vertical = payload.get("audioIntelligenceReviewClosedLoop")
+    vertical_fields = {
+        "audioSessionId",
+        "rootTraceId",
+        "intelligenceRunId",
+        "intelligenceRunStatus",
+        "evidencePackId",
+        "evidenceStatus",
+        "evidenceSha256",
+        "audioSha256",
+        "storageObjectVersion",
+        "asrResultId",
+        "reviewTaskId",
+        "reviewQueue",
+        "reviewDecisionId",
+        "reviewDecision",
+        "reviewStatus",
+        "decisionCurrentTraceId",
+        "taskReadbackMatched",
+        "evidenceReadbackMatched",
+        "affectedObjectsReadBack",
+        "nextReviewTaskId",
+        "queueEmpty",
+        "traceRootMatched",
+        "traceNodeKinds",
+        "traceEdgeCount",
+        "noSeedSwitch",
+    }
+    required_node_kinds = {
+        "run",
+        "import_batch",
+        "audio_session",
+        "asr_result",
+        "evidence_pack",
+        "human_review_task",
+        "human_review_decision",
+    }
+    if (
+        not isinstance(vertical, dict)
+        or set(vertical) != vertical_fields
+        or any(
+            not _nonempty_text(vertical.get(field))
+            for field in (
+                "audioSessionId",
+                "rootTraceId",
+                "intelligenceRunId",
+                "evidencePackId",
+                "storageObjectVersion",
+                "asrResultId",
+                "reviewTaskId",
+                "reviewDecisionId",
+                "decisionCurrentTraceId",
+            )
+        )
+        or vertical.get("audioSessionId") != flow.get("audioSessionId")
+        or vertical.get("rootTraceId") != flow.get("rootTraceId")
+        or vertical.get("intelligenceRunStatus") != "success"
+        or vertical.get("evidenceStatus") != "ready"
+        or vertical.get("reviewQueue") != "audio_evidence_review"
+        or vertical.get("reviewDecision") != "modified"
+        or vertical.get("reviewStatus") != "success"
+        or any(
+            vertical.get(field) is not True
+            for field in (
+                "taskReadbackMatched",
+                "evidenceReadbackMatched",
+                "affectedObjectsReadBack",
+                "traceRootMatched",
+                "noSeedSwitch",
+            )
+        )
+        or not isinstance(vertical.get("queueEmpty"), bool)
+        or (
+            vertical.get("queueEmpty") is True
+            and vertical.get("nextReviewTaskId") is not None
+        )
+        or (
+            vertical.get("queueEmpty") is False
+            and not _nonempty_text(vertical.get("nextReviewTaskId"))
+        )
+        or not isinstance(vertical.get("traceNodeKinds"), list)
+        or not required_node_kinds.issubset(set(vertical["traceNodeKinds"]))
+        or not _positive_int(vertical.get("traceEdgeCount"))
+        or vertical["traceEdgeCount"] < 6
+    ):
+        raise EvidenceError(
+            f"{filename} post-import intelligence/review/trace proof is invalid"
+        )
+    _require_sha256(
+        vertical.get("evidenceSha256"),
+        label=f"{filename} EvidencePack",
+    )
+    _require_sha256(
+        vertical.get("audioSha256"),
+        label=f"{filename} reviewed audio",
+    )
+
+    tenant_pull = payload.get("tenantAudioImportPull")
+    if (
+        not isinstance(tenant_pull, dict)
+        or set(tenant_pull)
+        != {
+            "id",
+            "taskRunId",
+            "importBatchId",
+            "taskVersionId",
+            "traceId",
+            "status",
+            "executionMode",
+            "legacyPlatformSyncRequests",
+        }
+        or any(
+            not _nonempty_text(tenant_pull.get(field))
+            for field in (
+                "taskRunId",
+                "importBatchId",
+                "taskVersionId",
+                "traceId",
+                "status",
+            )
+        )
+        or tenant_pull.get("id") != tenant_pull.get("taskRunId")
+        or tenant_pull.get("taskVersionId") != flow.get("taskVersionId")
+        or tenant_pull.get("taskRunId") == flow.get("taskRunId")
+        or tenant_pull.get("importBatchId") == flow.get("importBatchId")
+        or tenant_pull.get("executionMode") != "production"
+        or tenant_pull.get("legacyPlatformSyncRequests") != 0
+    ):
+        raise EvidenceError(f"{filename} tenant pull reuse proof is invalid")
+
+
 def _validate_dagster_daemons(value: object, *, label: str) -> None:
     if not isinstance(value, list) or not value:
         raise EvidenceError(f"{label} daemon proof is missing")
@@ -2513,6 +3077,24 @@ def _validate_core_evidence(
         production_path,
         source_commit=source_commit,
         repository_root=repository_root,
+    )
+
+    audio_import_stack, raw = _load_json_object(
+        evidence_dir / "audio-import-real-stack-gate.json"
+    )
+    verified_bytes["audio-import-real-stack-gate.json"] = raw
+    _validate_audio_import_real_stack(
+        audio_import_stack,
+        source_commit=source_commit,
+    )
+
+    audio_import_browser, raw = _load_json_object(
+        evidence_dir / "audio-import-browser-e2e.json"
+    )
+    verified_bytes["audio-import-browser-e2e.json"] = raw
+    _validate_audio_import_browser(
+        audio_import_browser,
+        source_commit=source_commit,
     )
 
     backup_restore, raw = _load_json_object(evidence_dir / "backup-restore-gate.json")

@@ -101,6 +101,36 @@ def test_new_operational_trace_objects_use_least_privilege_policies() -> None:
         )
 
 
+def test_platform_integration_trace_objects_use_scoped_least_privilege_policies() -> None:
+    expected_collections = {
+        "platform_connection": "platform_connections",
+        "output_sink": "output_sinks",
+        "external_callback": "platform_callbacks",
+        "platform_callback": "platform_callbacks",
+        "asr_result": "asr_segments",
+    }
+    for object_type, collection in expected_collections.items():
+        assert trace_reference_collection(object_type) == collection
+
+    sensitive_references = (
+        {"type": "platform_connection", "id": "connection-hidden"},
+        {"type": "output_sink", "id": "sink-hidden"},
+        {"type": "platform_callback", "id": "callback-hidden"},
+        {"platform_connection_id": "connection-hidden-by-key"},
+        {"output_sink_id": "sink-hidden-by-key"},
+    )
+    for reference in sensitive_references:
+        for role in ("annotator", "model_engineer", "review_arbitrator"):
+            assert not trace_reference_is_visible(reference, _context(role))
+        for role in ("project_admin", "asset_manager", "system"):
+            assert trace_reference_is_visible(reference, _context(role))
+
+    assert trace_reference_is_visible(
+        {"type": "asr_result", "id": "asr-visible"},
+        _context("model_engineer"),
+    )
+
+
 def test_prompt_candidate_trace_objects_reuse_sensitive_collection_policy() -> None:
     for object_type in (
         "prompt_candidate",
@@ -483,6 +513,7 @@ def test_policy_registry_covers_runtime_projection_collections() -> None:
         "label_taxonomy_suggestions",
         "label_versions",
         "listening_annotations",
+        "output_sinks",
         "platform_sessions",
         "prompt_version_candidates",
         "recordings",

@@ -66,6 +66,16 @@ trap 都只对该项目执行 `down --volumes --remove-orphans`，不清理其�
 
 `AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE=1` 会被明确拒绝。
 
+## CI 与发布门禁
+
+- 修改音频导入、Dagster、对象存储或播放链相关路径的 Pull Request，会触发
+  `.github/workflows/audio-import-real-stack.yml`；
+- 该 workflow 每日夜间执行一次，并在 GitHub Release 发布时执行；
+- `scripts/verify_release.sh` 也会在生成供应链清单前直接执行本验收门；
+- 普通 `scripts/verify_all.sh` 不启动该重栈，开发者仍可运行快速验证；
+- CI、nightly 和 release 都不得设置
+  `AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE=1`，成功证据必须绑定当前 commit。
+
 ## 证据
 
 成功后写入：
@@ -77,7 +87,8 @@ trap 都只对该项目执行 `down --volumes --remove-orphans`，不清理其�
 `build/release-evidence/audio-import-browser-e2e.json`
 
 证据 schema 为 `auris.audio-import-real-stack-gate.v1`，包含连接器、TaskVersion、
-TaskRun、Dagster run、签名回执、ImportBatch、MinIO 精确对象版本和播放回读摘要。
+TaskRun、`completion_pending` 状态历史、异步 materialization outbox、Dagster run、
+签名回执、ImportBatch、MinIO 精确对象版本和播放回读摘要。
 浏览器证据 schema 为 `auris.audio-import-browser-e2e.v1`，包含 UI 创建的连接器、
 不可变 TaskVersion、production TaskRun、ImportBatch、新会话、刷新恢复、
 trace、201 播放授权、206 Range 播放和租户页复用结果。证据不包含平台凭证、

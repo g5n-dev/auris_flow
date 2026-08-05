@@ -284,7 +284,9 @@ def test_external_completion_receipt_contract_uses_explicit_request_and_response
     assert pending_data["properties"]["receipt_state"]["enum"] == [
         "pending_binding",
         "pending_cancellation_resolution",
+        "materializing",
     ]
+    assert pending_data["properties"]["business_status"]["enum"] == ["materializing"]
     pending_response = schemas["RunCompletionReceiptPendingResponse"]
     assert pending_response["additionalProperties"] is False
     assert set(pending_response["required"]) == {"data", "meta"}
@@ -437,6 +439,11 @@ def test_runtime_external_completion_receipt_contract_declares_request_and_both_
         "receipt_state",
         "trace_id",
     }
+    assert pending_data["properties"]["receipt_state"]["enum"] == [
+        "pending_binding",
+        "pending_cancellation_resolution",
+        "materializing",
+    ]
 
 
 def test_runtime_audio_intelligence_request_and_playback_range_contract_are_typed() -> None:

@@ -44,6 +44,9 @@ from app.schemas.hotwords import (
 from app.services.audio_intelligence_service import validate_scoped_storage_object_reference
 from app.services.audit_service import record_audit
 from app.services.eval_dataset_service import locked_eval_dataset_snapshot
+from app.services.execution_contract_registry import (
+    preflight_production_execution_contract,
+)
 from app.services.outbox_service import enqueue_event
 from app.services.resource_service import upsert_resource
 from app.services.run_service import get_run
@@ -1546,6 +1549,11 @@ def patch_hotword_version(
 ) -> dict[str, Any]:
     version = get_hotword_version(session, ctx, version_id, for_update=True)
     _assert_expected_version(body.expected_resource_version, version.resource_version, "热词包版本")
+    if body.status == "validating" and version.status != "validating":
+        preflight_production_execution_contract(
+            event_type="hotword_pack_version.build-requested",
+            run_type="hotword_build",
+        )
     before = _version_data(session, version)
     metadata_change = body.eval_run_id is not None and body.eval_run_id != version.eval_run_id
     if version.status not in VERSION_MUTABLE_STATUSES and metadata_change:
@@ -1790,6 +1798,10 @@ def create_hotword_eval_run(
     version_id: str,
     body: HotwordEvalRunRequest,
 ) -> dict[str, Any]:
+    preflight_production_execution_contract(
+        event_type="hotword_pack_version.eval-requested",
+        run_type="hotword_eval",
+    )
     version = get_hotword_version(session, ctx, version_id, for_update=True)
     _assert_expected_version(body.expected_resource_version, version.resource_version, "热词包版本")
     if version.status != "ready_for_eval":
@@ -2321,6 +2333,10 @@ def publish_hotword_version(
     version_id: str,
     body: HotwordPublishRequest,
 ) -> dict[str, Any]:
+    preflight_production_execution_contract(
+        event_type="hotword_pack_version.publish-requested",
+        run_type="hotword_publish",
+    )
     version = get_hotword_version(session, ctx, version_id, for_update=True)
     _assert_expected_version(body.expected_resource_version, version.resource_version, "热词包版本")
     if version.status != "approved":
@@ -3472,6 +3488,10 @@ def decide_badcase(
 def create_hotword_analysis_run(
     session: Session, ctx: RequestContext, payload: dict[str, Any]
 ) -> dict[str, Any]:
+    preflight_production_execution_contract(
+        event_type="hotword_analysis.requested",
+        run_type="hotword_analysis",
+    )
     version_id = payload.get("hotword_pack_version_id")
     root_trace_id = ctx.trace_id
     if isinstance(version_id, str) and version_id:

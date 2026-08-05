@@ -7,6 +7,7 @@ export function buildCanvasConfiguredNodeActions(scope: CanvasActionScope) {
     activeIntent,
     activeIntentKey,
     addedNodes,
+    demoMode,
     displayExecutionDefinition,
     draftOutputContract,
     markTaskDraftDirty,
@@ -23,6 +24,14 @@ export function buildCanvasConfiguredNodeActions(scope: CanvasActionScope) {
 
   const addConfiguredNode = () => {
     const template = selectedTemplate;
+    if (!demoMode && template.productionDisabled) {
+      setCanvasNotice({
+        status: "error",
+        title: "生产节点已阻断",
+        detail: template.disabledReason ?? "该兼容节点没有专用生产执行契约，不能加入生产任务版本。"
+      });
+      return;
+    }
     const sameTemplateCount = addedNodes.filter((node) => node.id.startsWith(template.key)).length + 1;
     const nextIndex = addedNodes.length;
     const nodeId = `${template.key}-${Date.now()}`;

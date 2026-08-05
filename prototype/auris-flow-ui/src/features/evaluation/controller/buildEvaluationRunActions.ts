@@ -9,6 +9,7 @@ import type { BackendActionReceipt } from "../../../api/client";
 import { createEvaluationFeedbackTask, createPlatformMutation } from "../../../api/client";
 import type { EvaluationCapabilityKey } from "../../../shared/contracts/evaluation";
 import { backendRunStatusLabel, operationStatusFromBackendRun } from "../../../shared/runtime/backendRunStatus";
+import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
 import type { EvaluationManualReviewItem } from "../types";
 
 type BuildEvaluationRunActionsScope = EvaluationModuleProps & EvaluationState & EvaluationSelection & EvaluationFocusRecovery & EvaluationContextActions & HotwordPollingActions & HotwordVersionRecovery;
@@ -63,6 +64,14 @@ export function buildEvaluationRunActions(activeEvalRun: BuildEvaluationRunActio
     };
 
   const runEvaluation = async () => {
+      if (!LABEL_DEMO_MODE) {
+        setEvaluationNotice({
+          status: "error",
+          title: "通用评测执行器未配置",
+          detail: "生产模式不会使用 generic job 或本地 fixture 生成评测成功；请等待专用 executor 接入。"
+        });
+        return;
+      }
       setEvaluationAction("run");
       setRunReceipt(`运行中：${selectedDataset.name} / ${modelVersion} / ${labelVersion}`);
       setEvaluationNotice({
@@ -93,6 +102,14 @@ export function buildEvaluationRunActions(activeEvalRun: BuildEvaluationRunActio
     };
 
   const decideManualReview = (status: EvaluationManualReviewItem["status"]) => {
+      if (!LABEL_DEMO_MODE) {
+        setEvaluationNotice({
+          status: "error",
+          title: "人工评测回写尚未接入",
+          detail: "生产模式不会修改本地评测数组；请从已接入 BFF 的人审队列提交决定。"
+        });
+        return;
+      }
       setManualReviews((current) => current.map((item) => (item.id === selectedManualReview.id ? { ...item, status } : item)));
       const feedback = `HR-${selectedManualReview.id} 已更新为「${status}」：${selectedManualReview.title}`;
       setFeedbackDraft(feedback);
@@ -105,6 +122,14 @@ export function buildEvaluationRunActions(activeEvalRun: BuildEvaluationRunActio
     };
 
   const saveDatasetDraft = () => {
+      if (!LABEL_DEMO_MODE) {
+        setEvaluationNotice({
+          status: "error",
+          title: "评测集草稿写入尚未接入",
+          detail: "当前生产 BFF 没有评测集草稿强资源，未保存本地成功状态。"
+        });
+        return;
+      }
       const detail = `${selectedDataset.name} 目标 ${datasetDraft.targetSize} 样本 / ${datasetDraft.owner} / ${datasetDraft.layer}`;
       pushRunRecord("评测集草稿已保存", detail);
       setEvaluationNotice({
@@ -115,6 +140,14 @@ export function buildEvaluationRunActions(activeEvalRun: BuildEvaluationRunActio
     };
 
   const createFeedbackTask = async () => {
+      if (!LABEL_DEMO_MODE) {
+        setEvaluationNotice({
+          status: "error",
+          title: "评测回流执行器未配置",
+          detail: "生产模式禁止通过通用执行器创建回流任务；请等待专用 executor 接入。"
+        });
+        return;
+      }
       setEvaluationAction("feedback");
       setEvaluationNotice({
         status: "pending",

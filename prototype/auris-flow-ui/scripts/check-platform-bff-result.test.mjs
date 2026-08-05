@@ -11,7 +11,7 @@ function focusedArtifact() {
   const completedAt = new Date();
   const startedAt = new Date(completedAt.getTime() - 1_000);
   return {
-    schema_version: "auris.audio-import-browser-e2e.v1",
+    schema_version: "auris.audio-import-browser-e2e.v2",
     status: "ok",
     stage: "completed",
     mode: "audio-import-only",
@@ -22,6 +22,7 @@ function focusedArtifact() {
     executionProfile: {
       realStack: true,
       platformSource: "https",
+      inferenceProvider: "https",
       dagster: "real",
       objectStorage: "real",
       uiEvidencePolicy: "browser-clicks-and-bff-readback"
@@ -44,14 +45,64 @@ function focusedArtifact() {
       failed: 0,
       playbackGrantStatus: 201,
       playbackStatus: 206,
+      playbackUiBound: true,
+      playbackRangeVerified: true,
       connectorWriteCount: 2,
       pageRefreshRecovered: true,
+      coldContextRecovered: true,
+      coldRecovery: {
+        sessionStorageLength: 0,
+        batchQuery:
+          "?target_asset_key=auris%2Faudio%2Fraw_recordings&connector_id=connector_001&task_version_id=task_version_audio_import_001",
+        status: "succeeded"
+      },
       rootTraceReadable: true,
       legacyPlatformSyncRequests: 0,
       targetAssetKey: "auris/audio/raw_recordings",
       sceneProfileId: "scene_auto_sales_quality",
       sceneProfileVersionId: "scenev_auto_sales_quality_v1",
       sceneProfileSnapshotSha256: "a".repeat(64)
+    },
+    audioIntelligenceReviewClosedLoop: {
+      audioSessionId: "audio_session_import_001",
+      rootTraceId: "trace_audio_import_root_001",
+      intelligenceRunId: "audio_intelligence_001",
+      intelligenceRunStatus: "success",
+      evidencePackId: "evidence_audio_001",
+      evidenceStatus: "ready",
+      evidenceSha256: "b".repeat(64),
+      audioSha256: "c".repeat(64),
+      storageObjectVersion: "minio-version-001",
+      asrResultId: "audio_session_import_001:asr:audio_intelligence_001",
+      reviewTaskId: "hrt_audio_001",
+      reviewQueue: "audio_evidence_review",
+      reviewDecisionId: "hrd_audio_001",
+      reviewDecision: "modified",
+      reviewStatus: "success",
+      decisionCurrentTraceId: "trace_review_action_001",
+      taskReadbackMatched: true,
+      evidenceReadbackMatched: true,
+      affectedObjectsReadBack: true,
+      affectedObjectReadbackCount: 6,
+      outputSinkBindings: 0,
+      callbackReadbacks: 0,
+      nextReviewTaskId: null,
+      queueEmpty: true,
+      traceRootMatched: true,
+      traceNodeKinds: [
+        "run",
+        "import_batch",
+        "import_item",
+        "storage_object",
+        "audio_recording",
+        "audio_session",
+        "asr_result",
+        "evidence_pack",
+        "human_review_task",
+        "human_review_decision"
+      ],
+      traceEdgeCount: 8,
+      noSeedSwitch: true
     },
     tenantAudioImportPull: {
       taskRunId: "task_run_audio_import_tenant_002",
@@ -111,6 +162,40 @@ for (const [name, mutate] of [
     "non-real Dagster profile",
     (artifact) => {
       artifact.executionProfile.dagster = "local";
+    }
+  ],
+  [
+    "missing post-import review readback",
+    (artifact) => {
+      artifact.audioIntelligenceReviewClosedLoop.evidenceReadbackMatched = false;
+    }
+  ],
+  [
+    "incomplete affected-object readback",
+    (artifact) => {
+      artifact.audioIntelligenceReviewClosedLoop.affectedObjectReadbackCount = 2;
+    }
+  ],
+  [
+    "missing strong import trace kind",
+    (artifact) => {
+      artifact.audioIntelligenceReviewClosedLoop.traceNodeKinds =
+        artifact.audioIntelligenceReviewClosedLoop.traceNodeKinds.filter(
+          (kind) => kind !== "storage_object"
+        );
+    }
+  ],
+  [
+    "missing bound callback receipt",
+    (artifact) => {
+      artifact.audioIntelligenceReviewClosedLoop.outputSinkBindings = 1;
+      artifact.audioIntelligenceReviewClosedLoop.callbackReadbacks = 1;
+    }
+  ],
+  [
+    "missing cold browser recovery",
+    (artifact) => {
+      artifact.audioImportClosedLoop.coldContextRecovered = false;
     }
   ]
 ]) {

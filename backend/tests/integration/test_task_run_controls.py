@@ -32,6 +32,7 @@ def _create_submitted_task_run(client, auth_headers, *, key: str) -> tuple[str, 
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": f"controls/{key}",
         },
         headers={**auth_headers, "Idempotency-Key": f"create-{key}"},
@@ -98,6 +99,7 @@ def test_task_run_uses_server_generated_id_and_control_columns(client, auth_head
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "controls/server-id",
         },
         headers={**auth_headers, "Idempotency-Key": "server-generated-run-id"},
@@ -998,6 +1000,7 @@ def test_signed_dagster_completion_is_durable_when_it_arrives_before_launch_fina
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "controls/early-receipt",
         },
         headers={**auth_headers, "Idempotency-Key": "create-early-receipt"},
@@ -1086,6 +1089,7 @@ def test_early_completion_external_id_mismatch_is_rejected_after_launch_binding(
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "controls/early-receipt-mismatch",
         },
         headers={**auth_headers, "Idempotency-Key": "create-early-receipt-mismatch"},

@@ -50,6 +50,26 @@ def _load_runtime_verifier() -> ModuleType:
     return module
 
 
+def test_gate_healthcheck_reads_a_fragmented_http_response_to_eof() -> None:
+    support = _load_gate_support()
+
+    class FragmentedTlsSocket:
+        def __init__(self) -> None:
+            self.fragments = [
+                b"HTTP/1.1 200 OK\r\nContent-Length: 30\r\n\r\n",
+                b'{"mode":"embedding",',
+                b'"status":"ok"}',
+                b"",
+            ]
+
+        def recv(self, _maximum: int) -> bytes:
+            return self.fragments.pop(0)
+
+    response = support._read_healthcheck_response(FragmentedTlsSocket())
+
+    assert response.endswith(b'{"mode":"embedding","status":"ok"}')
+
+
 def test_real_callback_client_reconciles_without_private_gate_control_header() -> None:
     """The real adapter signs POSTs, then reconciles with an ordinary same-origin GET."""
 
@@ -208,6 +228,7 @@ def _ready_gate_document() -> dict[str, object]:
                 "security_opt": ["no-new-privileges:true"],
                 "networks": ["internal"],
                 "environment": {
+                    "PYTHONPATH": "/app",
                     "AUDIO_INFERENCE_API_TOKEN_FILE": ("/run/secrets/audio_inference_api_token"),
                     "AUDIO_INFERENCE_PROVIDER": "audio_intelligence_default",
                     "AUDIO_INFERENCE_MODEL": "audio-v2.3.1",
@@ -219,6 +240,7 @@ def _ready_gate_document() -> dict[str, object]:
                 "cap_drop": ["ALL"],
                 "security_opt": ["no-new-privileges:true"],
                 "networks": ["production-gate-callback"],
+                "environment": {"PYTHONPATH": "/app"},
             },
             "production-path-verifier": {
                 "user": "10001:10001",

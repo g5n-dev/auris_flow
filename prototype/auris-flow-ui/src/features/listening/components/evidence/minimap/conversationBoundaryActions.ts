@@ -1,4 +1,3 @@
-import { saveConversationBoundary } from "../../../../../api/client";
 import { clamp } from "../../../../../shared/runtime/math";
 import { boundaryExtensionCandidates } from "../../../fixtures/boundaryFixtures";
 import type { StitchedWavSlice } from "../../../fixtures/boundaryFixtures";
@@ -7,7 +6,7 @@ import type { BoundaryExtensionActions } from "./boundaryExtensionActions";
 import type { PointerEvent as ReactPointerEvent } from "react";
 
 export function createConversationBoundaryActions(context: BoundaryExtensionActions) {
-  const { activeEdit, activeEvent, boundaryAxisDuration, boundaryAxisEnd, boundaryAxisStart, boundaryDrag, boundaryDragAxisRef, boundaryDragVisibleExtensionIdsRef, conversationDuration, employeeDragClickGuard, extensionDrafts, markSyncDirty, modalBoundaryStripRef, sessionBoundary, sessionClockAt, sessionRangeText, setAssociationEdits, setBoundaryConfirmed, setBoundaryDrag, setBoundaryPreview, setDragOverEmployee, setDraggedEmployee, setEmployeeOrder, setExtensionDrafts, setExtensionLocks, setSelectedExtensionId, setSelectedWindow, setSessionBoundary, setSliceDecisions, setSyncState, sliceDecisions, stitchStripRef, syncBoundaryExtensionOverlap, syncState, visibleExtensionRanges } = context;
+  const { activeEdit, activeEvent, audioSessionId, boundaryAxisDuration, boundaryAxisEnd, boundaryAxisStart, boundaryDrag, boundaryDragAxisRef, boundaryDragVisibleExtensionIdsRef, boundaryId, conversationDuration, employeeDragClickGuard, extensionDrafts, markSyncDirty, modalBoundaryStripRef, onReviewChange, sessionBoundary, sessionClockAt, sessionRangeText, setAssociationEdits, setBoundaryConfirmed, setBoundaryDrag, setBoundaryPreview, setDragOverEmployee, setDraggedEmployee, setEmployeeOrder, setExtensionDrafts, setExtensionLocks, setSelectedExtensionId, setSelectedWindow, setSessionBoundary, setSliceDecisions, setSyncState, sliceDecisions, stitchStripRef, syncBoundaryExtensionOverlap, syncState, visibleExtensionRanges } = context;
   const updateSessionBoundaryValue = (edge: "start" | "end", value: number) => {
       if (Number.isNaN(value)) return;
       const minWindowSeconds = 30;
@@ -176,32 +175,48 @@ export function createConversationBoundaryActions(context: BoundaryExtensionActi
 
   const confirmSessionBoundary = async () => {
       if (syncState === "saving") return;
+      if (!boundaryId) {
+        setBoundaryConfirmed(false);
+        setSyncState("error");
+        setBoundaryPreview({
+          kind: "slice",
+          id: "unbound-boundary",
+          clip: "source",
+          label: "当前任务未绑定会话边界",
+          windowText: "不能绕过 HumanReviewDecisionRequest 直接写入",
+          playing: false
+        });
+        return;
+      }
       setSyncState("saving");
       try {
-        const response = await saveConversationBoundary("boundary_s128_v1", {
-          audio_session_id: "S20250526-000128",
-          start_ms: Math.max(0, Math.round(sessionBoundary.start * 1000)),
-          end_ms: Math.max(0, Math.round(sessionBoundary.end * 1000)),
-          decision: "manual_confirmed",
-          merged_slice_ids: Object.entries(sliceDecisions)
-            .filter(([, decision]) => decision === "merged")
-            .map(([sliceId]) => sliceId),
-          split_slice_ids: Object.entries(sliceDecisions)
-            .filter(([, decision]) => decision === "split")
-            .map(([sliceId]) => sliceId),
-          extension_ids: Object.entries(extensionDrafts)
-            .filter(([, decision]) => decision === "merged")
-            .map(([candidateId]) => candidateId)
+        onReviewChange({
+          target_type: "conversation_boundary",
+          target_id: boundaryId,
+          fields: {
+            start_ms: Math.max(0, Math.round(sessionBoundary.start * 1000)),
+            end_ms: Math.max(0, Math.round(sessionBoundary.end * 1000)),
+            decision: "manual_confirmed",
+            merged_slice_ids: Object.entries(sliceDecisions)
+              .filter(([, decision]) => decision === "merged")
+              .map(([sliceId]) => sliceId),
+            split_slice_ids: Object.entries(sliceDecisions)
+              .filter(([, decision]) => decision === "split")
+              .map(([sliceId]) => sliceId),
+            extension_ids: Object.entries(extensionDrafts)
+              .filter(([, decision]) => decision === "merged")
+              .map(([candidateId]) => candidateId)
+          }
         });
         setBoundaryConfirmed(true);
         setSyncState("synced");
         setSelectedWindow(`${sessionClockAt(sessionBoundary.start).slice(0, 5)} - ${sessionClockAt(sessionBoundary.end).slice(0, 5)}`);
         setBoundaryPreview({
           kind: "slice",
-          id: "boundary_s128_v1",
+          id: boundaryId,
           clip: "source",
-          label: "会话边界确认",
-          windowText: `Trace ${response.meta?.trace_id ?? response.data.trace_id ?? "pending"}`,
+          label: "会话边界已加入当前决定",
+          windowText: `${audioSessionId} · 提交主决定后统一写入并回读`,
           playing: false
         });
       } catch {

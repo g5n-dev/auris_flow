@@ -8,7 +8,29 @@ import { PanelHeader } from "../../../shared/ui/PanelHeader";
 import { BarChart3 } from "lucide-react";
 
 export function InsightsScopePanel({ controller }: { controller: InsightsController }) {
-  const { applyCustomPreset, authoritativeMetricError, authoritativeMetricSnapshots, authoritativeMetricStatus, comparisonScope, customRangeDraft, customRangeError, customReportScope, dataset, evidenceComplete, evidenceForMetric, formatPercent, insightTimeRanges, labelVersionFilter, labelVersionOptions, metricByKey, northStar, rangeConfig, riskFacts, salesFilter, salesOptions, selectedMetric, setActiveModule, setAgentOutput, setComparisonScope, setLabelVersionFilter, setSalesFilter, setSelectedFactId, setSelectedMetricKey, setStoreFilter, setTimeRange, storeFilter, storeOptions, timeRange, updateCustomRangeDraft, view, visibleMetrics } = controller;
+  const { applyCustomPreset, authoritativeInsightDisplayReady, authoritativeInsightDisplayReason, authoritativeMetricError, authoritativeMetricSnapshots, authoritativeMetricStatus, comparisonScope, customRangeDraft, customRangeError, customReportScope, dataset, evidenceComplete, evidenceForMetric, formatPercent, insightTimeRanges, labelVersionFilter, labelVersionOptions, metricByKey, northStar, rangeConfig, retryAuthoritativeMetrics, riskFacts, salesFilter, salesOptions, selectedMetric, setActiveModule, setAgentOutput, setComparisonScope, setLabelVersionFilter, setSalesFilter, setSelectedFactId, setSelectedMetricKey, setStoreFilter, setTimeRange, storeFilter, storeOptions, timeRange, updateCustomRangeDraft, view, visibleMetrics } = controller;
+  if (!authoritativeInsightDisplayReady) {
+    return (
+      <section className="module-panel insight-scope-panel">
+        <PanelHeader title={view.title} subtitle={view.subtitle} icon={<BarChart3 size={16} />} sticky />
+        <div className="insight-empty-state" role="status" data-testid="authoritative-insight-empty">
+          <strong>
+            {authoritativeMetricStatus === "loading"
+              ? "正在读取权威快照"
+              : "尚未生成权威快照"}
+          </strong>
+          <span>
+            {authoritativeInsightDisplayReason ??
+              "需要完整 MetricSnapshot、comparable_series 与 evidence_refs 后才能展示数值、涨跌、证据数和 Agent 归因。"}
+          </span>
+          <div>
+            <button type="button" onClick={retryAuthoritativeMetrics}>重新读取</button>
+            <button type="button" onClick={() => setActiveModule("canvas")}>前往任务配置</button>
+          </div>
+        </div>
+      </section>
+    );
+  }
   const metricSnapshotByKey = new Map(
     authoritativeMetricSnapshots.map((snapshot) => [snapshot.metric_key, snapshot])
   );

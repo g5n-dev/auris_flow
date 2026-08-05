@@ -2245,31 +2245,66 @@ def validate_completion_result(
                     "payload": run.payload,
                 },
             )
-        if run.payload.get("completion_mode") != "completion_receipt":
+        completion_mode = run.payload.get("completion_mode")
+        if completion_mode not in {"completion_receipt", "async_materialization"}:
             fail(
                 "Completion receipt did not mark completion_mode",
                 {
                     "label": expected.label,
                     "run_id": before.run_id,
-                    "completion_mode": run.payload.get("completion_mode"),
+                    "completion_mode": completion_mode,
                     "payload": run.payload,
                 },
             )
-        expected_reason = f"{expected.adapter}_completion_received"
-        if not any(
-            item.get("from") == "submitted"
-            and item.get("to") == "success"
-            and item.get("reason") == expected_reason
+        status_history = [
+            item
             for item in run.payload.get("status_history") or []
             if isinstance(item, dict)
-        ):
+        ]
+        if completion_mode == "async_materialization":
+            required_transitions = (
+                (
+                    "submitted",
+                    "completion_pending",
+                    "dagster_success_requires_async_materialization",
+                ),
+                (
+                    "completion_pending",
+                    "success",
+                    "async_completion_materialized",
+                ),
+            )
+        else:
+            required_transitions = (
+                (
+                    "submitted",
+                    "success",
+                    f"{expected.adapter}_completion_received",
+                ),
+            )
+        missing_transitions = [
+            {
+                "from": source,
+                "to": target,
+                "reason": reason,
+            }
+            for source, target, reason in required_transitions
+            if not any(
+                item.get("from") == source
+                and item.get("to") == target
+                and item.get("reason") == reason
+                for item in status_history
+            )
+        ]
+        if missing_transitions:
             fail(
-                "Completed run status history is missing submitted -> success transition",
+                "Completed run status history is missing required completion transitions",
                 {
                     "label": expected.label,
                     "run_id": before.run_id,
-                    "expected_reason": expected_reason,
-                    "status_history": run.payload.get("status_history"),
+                    "completion_mode": completion_mode,
+                    "missing_transitions": missing_transitions,
+                    "status_history": status_history,
                 },
             )
         if before.run_type == "external_callback":
@@ -2362,9 +2397,83 @@ def validate_completion_result(
             "adapter": expected.adapter,
             "status": run.status,
             "business_status": run.payload.get("business_status"),
+            "completion_mode": completion_mode,
             "completion_receipt_id": completion.get("completion_receipt_id"),
             "external_id": completion.get("external_id"),
         }
+
+
+def validate_pending_materialization_result(
+    expected: ExpectedRun,
+    before: RunRecord,
+    response: dict[str, Any],
+) -> None:
+    data = response.get("data") if isinstance(response, dict) else None
+    if not isinstance(data, dict):
+        fail(
+            "Asynchronous completion receipt response is missing data",
+            {"label": expected.label, "run_id": before.run_id, "response": response},
+        )
+    expected_receipt_id = expected_completion_receipt_id(before)
+    mismatches: list[str] = []
+    if data.get("run_id") != before.run_id:
+        mismatches.append("run_id")
+    if data.get("status") != "completion_pending":
+        mismatches.append("status")
+    if data.get("business_status") != "materializing":
+        mismatches.append("business_status")
+    if data.get("receipt_state") != "materializing":
+        mismatches.append("receipt_state")
+    if data.get("completion_receipt_id") != expected_receipt_id:
+        mismatches.append("completion_receipt_id")
+    if mismatches:
+        fail(
+            "Completion receipt did not expose the asynchronous materialization boundary",
+            {
+                "label": expected.label,
+                "run_id": before.run_id,
+                "mismatches": mismatches,
+                "expected_completion_receipt_id": expected_receipt_id,
+                "data": data,
+            },
+        )
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, before.run_id)
+        event = (
+            session.scalar(
+                select(OutboxEvent)
+                .where(
+                    OutboxEvent.aggregate_type == before.run_type,
+                    OutboxEvent.aggregate_id == before.run_id,
+                    OutboxEvent.event_type == "execution.materialization.requested",
+                    OutboxEvent.tenant_id == before.tenant_id,
+                    OutboxEvent.project_id == before.project_id,
+                )
+                .order_by(OutboxEvent.event_id.desc())
+                .limit(1)
+            )
+            if run
+            else None
+        )
+        if (
+            run is None
+            or run.status != "completion_pending"
+            or run.payload.get("business_status") != "materializing"
+            or run.payload.get("business_completion_required") is not True
+            or run.payload.get("completion_mode") != "async_materialization"
+            or event is None
+        ):
+            fail(
+                "Asynchronous completion boundary was not durably persisted",
+                {
+                    "label": expected.label,
+                    "run_id": before.run_id,
+                    "run_status": run.status if run else None,
+                    "payload": run.payload if run else None,
+                    "materialization_event_id": event.event_id if event else None,
+                },
+            )
 
 
 def complete_submitted_run(
@@ -2412,7 +2521,27 @@ def complete_submitted_run(
         include_default_auth=False,
         extra_headers=signature_headers,
     )
-    result = validate_completion_result(expected, run, response)
+    response_data = response.get("data") if isinstance(response, dict) else None
+    is_async_materialization = bool(
+        isinstance(response_data, dict)
+        and response_data.get("status") == "completion_pending"
+        and response_data.get("receipt_state") == "materializing"
+    )
+    if is_async_materialization:
+        validate_pending_materialization_result(expected, run, response)
+        wait_for_aggregate_outbox_event(
+            aggregate_type=run.run_type,
+            aggregate_id=run.run_id,
+            event_type="execution.materialization.requested",
+        )
+        completed_readback = bff_json_request(
+            "GET",
+            f"/api/v1/runs/{run.run_id}",
+            trace_id=run.trace_id,
+        )
+        result = validate_completion_result(expected, run, completed_readback)
+    else:
+        result = validate_completion_result(expected, run, response)
     if VERIFY_COMPLETION_REPLAY:
         replay = bff_json_request(
             "POST",
@@ -2433,15 +2562,54 @@ def complete_submitted_run(
                     "replay": replay,
                 },
             )
-        if replay_data.get("status") != "success":
+        expected_replay_status = (
+            "completion_pending" if is_async_materialization else "success"
+        )
+        if replay_data.get("status") != expected_replay_status:
             fail(
-                "Completion receipt replay did not preserve success status",
+                "Completion receipt replay did not preserve its original receipt response",
                 {
                     "label": expected.label,
                     "run_id": run.run_id,
+                    "expected_status": expected_replay_status,
                     "replay_data": replay_data,
                 },
             )
+        if is_async_materialization:
+            if replay_data.get("receipt_state") != "materializing" or replay_data.get(
+                "completion_receipt_id"
+            ) != expected_completion_receipt_id(run):
+                fail(
+                    "Asynchronous completion replay did not preserve the staged receipt",
+                    {
+                        "label": expected.label,
+                        "run_id": run.run_id,
+                        "replay_data": replay_data,
+                    },
+                )
+            completed_readback = bff_json_request(
+                "GET",
+                f"/api/v1/runs/{run.run_id}",
+                trace_id=run.trace_id,
+            )
+            completed_data = (
+                completed_readback.get("data")
+                if isinstance(completed_readback, dict)
+                else None
+            )
+            if (
+                not isinstance(completed_data, dict)
+                or completed_data.get("status") != "success"
+                or completed_data.get("business_status") != "completed"
+            ):
+                fail(
+                    "Asynchronous completion replay regressed the materialized run",
+                    {
+                        "label": expected.label,
+                        "run_id": run.run_id,
+                        "completed_readback": completed_readback,
+                    },
+                )
     return result
 
 

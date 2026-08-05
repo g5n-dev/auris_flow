@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import {
   AUDIO_IMPORT_STEPS,
+  AUDIO_IMPORT_STEP_STATUS_LABELS,
   canRetryImportBatch,
   hasImportBatchFailures,
   type AudioImportBatchStatus,
@@ -30,7 +31,13 @@ const statusText: Record<AudioImportBatchStatus, string> = {
   cancelled: "已取消"
 };
 
-function AudioImportRunPanel({ flow }: { flow: AudioImportFlow }) {
+function AudioImportRunPanel({
+  flow,
+  onOpenListeningSession
+}: {
+  flow: AudioImportFlow;
+  onOpenListeningSession: (audioSessionId: string) => void;
+}) {
   const [showItems, setShowItems] = useState(false);
   const [selectedSessionId, setSelectedSessionId] = useState("");
   const batch = flow.batch;
@@ -50,11 +57,16 @@ function AudioImportRunPanel({ flow }: { flow: AudioImportFlow }) {
     );
   }
   const hasFailures = hasImportBatchFailures(batch, failedItems.length);
+  const hasRetryableFailure = failedItems.length
+    ? failedItems.some((item) => item.retryable)
+    : batch.retryable;
   const errorCode = batch.errorCode || (
     batch.status === "partial" ? "AUDIO_IMPORT_BATCH_PARTIAL" : "AUDIO_IMPORT_BATCH_FAILED"
   );
   const errorReason = batch.errorReason
     || "批次在生成逐条失败记录前终止；尚无逐条失败项，请检查配置后重试。";
+  const recoverySuggestion = batch.recoverySuggestion
+    || "当前回执没有可执行的恢复建议，请刷新批次或联系平台管理员。";
   const metrics = [
     ["总数", batch.total],
     ["成功", batch.succeeded],
@@ -91,7 +103,11 @@ function AudioImportRunPanel({ flow }: { flow: AudioImportFlow }) {
             className="audio-import-inline-warning audio-import-batch-error"
             data-testid="audio-import-batch-error"
             role="alert"
-          ><strong>{errorCode}</strong><span>{errorReason}</span></div>
+          >
+            <strong>{errorCode}</strong>
+            <span>{errorReason}</span>
+            <span>{recoverySuggestion}</span>
+          </div>
         )}
         <div className="audio-import-run-actions">
           <button type="button" disabled={Boolean(flow.action)} onClick={() => void flow.refreshBatch()}>
@@ -102,28 +118,58 @@ function AudioImportRunPanel({ flow }: { flow: AudioImportFlow }) {
           </button>
           <button
             type="button"
-            disabled={!canRetryImportBatch(batch, failedItems.length) || Boolean(flow.action)}
+            disabled={
+              !canRetryImportBatch(batch, failedItems.length)
+              || !hasRetryableFailure
+              || Boolean(flow.action)
+            }
             onClick={() => void flow.retryFailedItems()}
+            title={!hasRetryableFailure ? "失败项需要先修复源数据或配置，当前不可直接重试" : undefined}
           >{flow.action === "retry" ? "重试中" : "重试失败项"}</button>
           <button
             type="button"
             className="primary"
             disabled={!sessionIds.length}
-            onClick={() => setSelectedSessionId(sessionIds[0] ?? "")}
+            onClick={() => {
+              const audioSessionId = sessionIds[0] ?? "";
+              if (!audioSessionId) return;
+              flow.close();
+              onOpenListeningSession(audioSessionId);
+            }}
           >查看新会话{sessionIds.length > 1 ? `（${sessionIds.length}）` : ""}</button>
+          <button
+            type="button"
+            disabled={!sessionIds.length}
+            onClick={() => setSelectedSessionId(sessionIds[0] ?? "")}
+          >快速播放</button>
         </div>
         {showItems && (
           <div className="audio-import-failed-items" data-testid="audio-import-failed-items">
             {failedItems.length ? failedItems.map((item) => (
               <div key={item.id}>
                 <strong>{item.externalRecordId || item.id}</strong>
-                <span>{item.errorCode || item.status}</span>
-                <code>{item.rootTraceId || "no-trace"}</code>
+                <span>
+                  {item.errorCode || item.status}<br />
+                  {item.recoverySuggestion || "暂无恢复建议"}<br />
+                  <small>{item.retryable ? "修复后可重试" : "需先修复源数据或配置"}</small>
+                </span>
+                <details>
+                  <summary>重试链 · 第 {item.retryLineage.attempt} 次导入</summary>
+                  <code>
+                    来源批次 {item.retryLineage.sourceBatchId || "首次导入"} ·
+                    来源记录 {item.retryLineage.sourceItemId || "无"} ·
+                    根记录 {item.retryLineage.rootItemId || item.id}
+                  </code>
+                </details>
               </div>
             )) : (
               <div data-testid="audio-import-batch-failure-placeholder">
-                <strong>批次级失败</strong><span>{errorReason}</span>
-                <code>{errorCode} · {batch.rootTraceId || "no-trace"}</code>
+                <strong>批次级失败</strong>
+                <span>{errorReason}<br />{recoverySuggestion}</span>
+                <code>
+                  {errorCode} · 第 {batch.retryLineage.attempt} 次导入 ·
+                  来源批次 {batch.retryLineage.sourceBatchId || "首次导入"}
+                </code>
               </div>
             )}
           </div>
@@ -152,7 +198,13 @@ function AudioImportRunPanel({ flow }: { flow: AudioImportFlow }) {
   );
 }
 
-function ReleaseStep({ flow }: { flow: AudioImportFlow }) {
+function ReleaseStep({
+  flow,
+  onOpenListeningSession
+}: {
+  flow: AudioImportFlow;
+  onOpenListeningSession: (audioSessionId: string) => void;
+}) {
   const draftSaved = flow.taskVersionCurrent && flow.taskVersionStatus === "draft";
   const published = flow.taskVersionCurrent && flow.taskVersionStatus === "published";
   const publishing = flow.taskVersionCurrent && flow.taskVersionStatus === "publishing";
@@ -179,7 +231,16 @@ function ReleaseStep({ flow }: { flow: AudioImportFlow }) {
         <button
           type="button"
           data-testid="audio-import-save-draft"
-          disabled={Boolean(flow.action) || draftSaved || published || publishing}
+          disabled={
+            Boolean(flow.action)
+            || Boolean(flow.saveDraftBlockedReason)
+            || draftSaved
+            || published
+            || publishing
+          }
+          aria-describedby={
+            flow.saveDraftBlockedReason ? "audio-import-save-blocked-reason" : undefined
+          }
           onClick={() => void flow.saveDraft()}
         >{flow.action === "save-draft" ? "保存中" : draftSaved ? "草稿已保存" : "保存草稿"}</button>
         <button
@@ -196,29 +257,110 @@ function ReleaseStep({ flow }: { flow: AudioImportFlow }) {
           onClick={() => void flow.run()}
         >{flow.action === "run" ? "创建运行中" : "立即拉取"}</button>
       </div>
+      {flow.saveDraftBlockedReason && (
+        <p
+          id="audio-import-save-blocked-reason"
+          className="audio-import-inline-warning"
+          data-testid="audio-import-save-blocked-reason"
+          role="status"
+        >
+          保存草稿前需完成全部校验：{flow.saveDraftBlockedReason}
+        </p>
+      )}
       {!published && (
         <p className="audio-import-inline-warning" role="status">
           {draftSaved ? "草稿已回读；发布后才能拉取。" : "请先保存当前配置草稿。"}
         </p>
       )}
-      <AudioImportRunPanel flow={flow} />
+      <AudioImportRunPanel
+        flow={flow}
+        onOpenListeningSession={onOpenListeningSession}
+      />
     </section>
   );
 }
 
-export function AudioImportDrawer({ flow }: { flow: AudioImportFlow }) {
+export function AudioImportDrawer({
+  flow,
+  onOpenListeningSession
+}: {
+  flow: AudioImportFlow;
+  onOpenListeningSession: (audioSessionId: string) => void;
+}) {
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const drawerRef = useRef<HTMLElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const previousRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     if (!flow.open) return;
     previousRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overlay = overlayRef.current;
+    const siblings = overlay?.parentElement
+      ? Array.from(overlay.parentElement.children).filter(
+          (element): element is HTMLElement =>
+            element instanceof HTMLElement && element !== overlay
+        )
+      : [];
+    const previousAttributes = siblings.map((element) => ({
+      element,
+      inert: element.hasAttribute("inert"),
+      ariaHidden: element.getAttribute("aria-hidden")
+    }));
+    siblings.forEach((element) => {
+      element.setAttribute("inert", "");
+      element.setAttribute("aria-hidden", "true");
+    });
     closeRef.current?.focus();
     return () => {
+      previousAttributes.forEach(({ element, inert, ariaHidden }) => {
+        if (!inert) element.removeAttribute("inert");
+        if (ariaHidden === null) element.removeAttribute("aria-hidden");
+        else element.setAttribute("aria-hidden", ariaHidden);
+      });
       const previous = previousRef.current;
       if (previous?.isConnected) window.requestAnimationFrame(() => previous.focus());
     };
   }, [flow.open]);
+  useEffect(() => {
+    if (!flow.open || !flow.validationFocusFieldId || !flow.validationFocusRevision) return;
+    window.requestAnimationFrame(() => {
+      document.getElementById(flow.validationFocusFieldId)?.focus({ preventScroll: true });
+    });
+  }, [
+    flow.open,
+    flow.validationFocusFieldId,
+    flow.validationFocusRevision
+  ]);
   if (!flow.open) return null;
+  const handleDialogKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      flow.close();
+      return;
+    }
+    if (event.key === "Tab") {
+      const focusable = Array.from(
+        drawerRef.current?.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), details > summary, [href], [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      ).filter((element) => element.getAttribute("aria-hidden") !== "true");
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (!first || !last) {
+        event.preventDefault();
+        drawerRef.current?.focus();
+        return;
+      }
+      const active = document.activeElement;
+      if (event.shiftKey && (active === first || !drawerRef.current?.contains(active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !drawerRef.current?.contains(active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    }
+  };
   const liveDetail = flow.action
     ? flow.detail
     : flow.blockers.length
@@ -228,40 +370,69 @@ export function AudioImportDrawer({ flow }: { flow: AudioImportFlow }) {
       : flow.detail || "等待下一步操作";
   return (
     <div
+      ref={overlayRef}
       className="audio-import-overlay"
       role="presentation"
       onMouseDown={(event) => event.target === event.currentTarget && flow.close()}
     >
       <aside
+        ref={drawerRef}
         className="audio-import-drawer"
         role="dialog"
         aria-modal="true"
         aria-labelledby="audio-import-title"
-        onKeyDown={(event) => event.key === "Escape" && flow.close()}
+        aria-describedby="audio-import-description"
+        tabIndex={-1}
+        onKeyDown={handleDialogKeyDown}
       >
         <header className="audio-import-drawer-head">
           <div>
             <span>数据资产 / 新建导入配置</span>
             <h2 id="audio-import-title">平台音频 URL 导入</h2>
-            <p>关联平台、验证、发布，再创建生产同步批次。</p>
+            <p id="audio-import-description">关联平台、验证、发布，再创建生产同步批次。</p>
           </div>
           <button ref={closeRef} type="button" aria-label="关闭导入配置" onClick={flow.close}>×</button>
         </header>
         <nav className="audio-import-stepper" aria-label="导入配置步骤">
-          {AUDIO_IMPORT_STEPS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={flow.step === item.id ? "active" : flow.step > item.id ? "completed" : ""}
-              aria-current={flow.step === item.id ? "step" : undefined}
-              onClick={() => flow.setStep(item.id)}
-            ><b>{flow.step > item.id ? "✓" : item.id}</b><span>{item.label}</span></button>
-          ))}
+          {AUDIO_IMPORT_STEPS.map((item) => {
+            const stepState = flow.stepStates.find((state) => state.id === item.id)
+              ?? { id: item.id, status: "unvisited" as const, errors: [] };
+            const statusLabel = AUDIO_IMPORT_STEP_STATUS_LABELS[stepState.status];
+            return (
+              <button
+                key={item.id}
+                type="button"
+                className={[
+                  flow.step === item.id ? "active" : "",
+                  stepState.status === "verified" ? "completed" : "",
+                  `is-${stepState.status}`
+                ].filter(Boolean).join(" ")}
+                data-step-status={stepState.status}
+                aria-current={flow.step === item.id ? "step" : undefined}
+                aria-label={`第 ${item.id} 步 ${item.label}，${statusLabel}`}
+                disabled={!flow.canVisitStep(item.id) || Boolean(flow.action)}
+                onClick={() => flow.goToStep(item.id)}
+              >
+                <b aria-hidden="true">
+                  {stepState.status === "verified" ? "✓" : stepState.status === "error" ? "!" : item.id}
+                </b>
+                <span>{item.label}<small>{statusLabel}</small></span>
+              </button>
+            );
+          })}
         </nav>
         <div className="audio-import-drawer-body">
-          {flow.step === 6 ? <ReleaseStep flow={flow} /> : <AudioImportFormStep flow={flow} />}
+          {flow.step === 6
+            ? (
+              <ReleaseStep
+                flow={flow}
+                onOpenListeningSession={onOpenListeningSession}
+              />
+            )
+            : <AudioImportFormStep flow={flow} />}
         </div>
         <div
+          id="audio-import-validation-detail"
           className={`audio-import-live-detail ${flow.blockers.length ? "has-blocker" : ""}`}
           role="status"
           aria-live="polite"

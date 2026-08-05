@@ -11,6 +11,8 @@ from app.core.database import SessionLocal
 from app.models import InsightReport, MetricResult, OutboxEvent, RunRecord
 from app.workers.outbox_worker import process_once
 
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
+
 REPORT_METRICS = ["quote_consistency", "reception_conversion_quality"]
 REPORT_EVIDENCE = ["AF-128"]
 METRIC_OUTPUTS = {

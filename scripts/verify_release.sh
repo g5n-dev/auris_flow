@@ -28,6 +28,11 @@ if [ "${AURIS_SKIP_PRODUCTION_PATH_GATE:-0}" = "1" ]; then
   echo "The single production Compose path is a mandatory fail-closed release gate." >&2
   exit 2
 fi
+if [ "${AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE:-0}" = "1" ]; then
+  echo "AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE=1 is not allowed by scripts/verify_release.sh." >&2
+  echo "The real platform-audio import, Dagster, MinIO and playback proof is mandatory release evidence." >&2
+  exit 2
+fi
 if [ "${AURIS_SKIP_BACKUP_RESTORE_GATE:-0}" = "1" ]; then
   echo "AURIS_SKIP_BACKUP_RESTORE_GATE=1 is not allowed by scripts/verify_release.sh." >&2
   echo "A native-Linux, commit-bound backup/restore drill is mandatory final release evidence." >&2
@@ -126,6 +131,7 @@ bash scripts/verify_real_stack.sh
 bash scripts/verify_real_dagster.sh
 bash scripts/verify_product_dagster_path.sh
 bash scripts/verify_production_path.sh
+bash scripts/verify_audio_import_stack.sh
 
 # Generate deterministic SBOMs and the complete dependency-license inventory
 # only after runtime gates have succeeded. The final manifest below hashes every

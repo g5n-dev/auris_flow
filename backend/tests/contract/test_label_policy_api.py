@@ -15,6 +15,8 @@ from app.models import (
 from app.schemas.label_policy import LabelPolicyDSL
 from app.workers.outbox_worker import process_aggregate_events
 
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
+
 LABEL_VERSION_ID = "label_v1_9_0_rc2"
 PUBLISHED_LABEL_VERSION_ID = "label_v1_8_4"
 CANDIDATE_ID = "cand_af128_amount_conflict"

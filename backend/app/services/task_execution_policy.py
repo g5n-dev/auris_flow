@@ -8,13 +8,17 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_production_environment
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.request_identifiers import server_generated_public_id
 from app.models import ImportBatch, JsonResource
 from app.repositories.json_resources import JsonResourceRepository
 from app.schemas.scene_profiles import SceneProfileManifest
+from app.services.execution_contract_registry import (
+    ExecutionContractNotConfiguredError,
+    execution_contract_registry,
+)
 from app.services.task_version_bundle import build_task_version_bundle
 
 NON_PRODUCTION_MODES = {"diagnostic", "shadow", "experiment"}
@@ -187,6 +191,60 @@ def _hotword_run_override_fields(payload: dict[str, Any]) -> list[str]:
             f"audio_intelligence.{key}" for key in HOTWORD_RUN_OVERRIDE_KEYS if key in audio
         )
     return sorted(fields)
+
+
+def _validate_published_execution_contract(
+    ctx: RequestContext,
+    data: dict[str, Any],
+    binding: dict[str, Any],
+    *,
+    task_version_id: str | None,
+) -> None:
+    try:
+        execution_contract = execution_contract_registry.resolve(
+            event_type="task_run.requested",
+            run_type="task_run",
+            payload={
+                "execution_contract": data.get("execution_contract"),
+                "execution_mode": binding.get("execution_mode"),
+            },
+        )
+    except ExecutionContractNotConfiguredError as exc:
+        raise ApiError(
+            exc.code,
+            "生产 TaskVersion 缺少服务端白名单执行契约，不能发布",
+            409,
+            details=[
+                {
+                    "task_version_id": task_version_id,
+                    "task_type_id": data.get("task_type_id"),
+                    "event_type": exc.event_type,
+                    "run_type": exc.run_type,
+                    "requested_contract": exc.requested_contract,
+                }
+            ],
+            retryable=False,
+        ) from exc
+    if (
+        execution_contract is None
+        and str(binding.get("execution_mode") or "production").strip().lower() == "diagnostic"
+        and is_production_environment(get_settings().app_env)
+        and (ctx.actor_kind != "system" or "system" not in ctx.roles)
+    ):
+        raise ApiError(
+            "DIAGNOSTIC_EXECUTION_FORBIDDEN",
+            "诊断 TaskVersion 仅允许受信控制面服务发布",
+            403,
+            details=[
+                {
+                    "task_version_id": task_version_id,
+                    "task_type_id": data.get("task_type_id"),
+                    "event_type": "task_run.requested",
+                    "run_type": "task_run",
+                }
+            ],
+            retryable=False,
+        )
 
 
 def prepare_task_version_write(
@@ -364,6 +422,12 @@ def validate_task_version_publish_binding(
         scene_profile_version_id=scene_profile_version_id,
     )
     binding = _audio_binding(data)
+    _validate_published_execution_contract(
+        ctx,
+        data,
+        binding,
+        task_version_id=task_version_id,
+    )
     version_id = binding["hotword_pack_version_id"]
     if not version_id:
         return binding

@@ -4,7 +4,9 @@ import type { WaveformPanelController } from "./trackRegionModalActions";
 import { Eye, X } from "lucide-react";
 
 export function TrackEditor({ controller }: { controller: WaveformPanelController }) {
-  const { activeSegment, activeTrack, activeTrackMeta, allTracks, createAnnotation, createFeedback, createLayer, createLayerActionLabel, draftAnnotation, hiddenTracks, layerFormOpen, layerKindName, layerLevelConfig, layerLevelKey, layerName, layerTag, layerType, moveSegment, renderTrackRegions, selectLayerLevel, selectLayerTag, selectedRegionData, setActiveTrack, setDraftAnnotation, setHiddenTracks, setLayerFormOpen, setLayerName, setLayerType, showTracks, toggleTrack, trackLayouts, trackLevelLabel, visibleCount } = controller;
+  const { activeSegment, activeTrack, activeTrackMeta, allTracks, createAnnotation, createFeedback, createLayer, createLayerActionLabel, draftAnnotation, hiddenTracks, labelCandidateIds, layerFormOpen, layerKindName, layerLevelConfig, layerLevelKey, layerName, layerTag, layerType, moveSegment, renderTrackRegions, selectLayerLevel, selectLayerTag, selectedRegionData, setActiveTrack, setDraftAnnotation, setHiddenTracks, setLayerFormOpen, setLayerName, setLayerType, showTracks, toggleTrack, trackLayouts, trackLevelLabel, visibleCount } = controller;
+  const canReviseLabel = labelCandidateIds.length > 0;
+  const labelRevisionDisabledReason = "当前任务未绑定可修订的标签候选";
   return (
     showTracks && (
           <section className={layerFormOpen ? "tk show-layer-form" : "tk"}>
@@ -43,16 +45,18 @@ export function TrackEditor({ controller }: { controller: WaveformPanelControlle
               </div>
               <input
                 value={draftAnnotation}
+                disabled={!canReviseLabel}
+                title={!canReviseLabel ? labelRevisionDisabledReason : "输入人工修订后的标签值。"}
                 onChange={(event) => setDraftAnnotation(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") createAnnotation();
                 }}
                 placeholder={`新建${activeTrackMeta.label}`}
               />
-              <button className="create-annotation" onClick={() => createAnnotation()} disabled={!draftAnnotation.trim()}>
+              <button className="create-annotation" onClick={() => createAnnotation()} disabled={!canReviseLabel || !draftAnnotation.trim()} title={!canReviseLabel ? labelRevisionDisabledReason : "加入当前人审决定。"}>
                 创建标注
               </button>
-              <button className="add-layer-inline" onClick={() => setLayerFormOpen(true)}>
+              <button className="add-layer-inline" onClick={() => setLayerFormOpen(true)} disabled={!canReviseLabel} title={!canReviseLabel ? labelRevisionDisabledReason : "新增标签层修订。"}>
                 + 添加标签层
               </button>
               <span className={createFeedback ? "tk-stat tk-feedback" : "tk-stat"}>
@@ -61,7 +65,7 @@ export function TrackEditor({ controller }: { controller: WaveformPanelControlle
             </div>
             <div className="track-quick-tags">
               {["报价金额", "试驾邀约", "价格异议", "单据冲突", "串音复核", "Agent确认", "售后跟进"].map((tag) => (
-                <button key={tag} onClick={() => createAnnotation(tag)}>
+                <button key={tag} onClick={() => createAnnotation(tag)} disabled={!canReviseLabel} title={!canReviseLabel ? labelRevisionDisabledReason : `修订为${tag}`}>
                   {tag}
                 </button>
               ))}
@@ -80,7 +84,7 @@ export function TrackEditor({ controller }: { controller: WaveformPanelControlle
                     </div>
                   ))}
                   <div className="tl tl-add">
-                    <button onClick={() => setLayerFormOpen(true)}>+ 添加标签层</button>
+                    <button onClick={() => setLayerFormOpen(true)} disabled={!canReviseLabel} title={!canReviseLabel ? labelRevisionDisabledReason : "新增标签层修订。"}>+ 添加标签层</button>
                   </div>
                 </div>
                 <div className="tk-cv">
@@ -151,7 +155,7 @@ export function TrackEditor({ controller }: { controller: WaveformPanelControlle
                 </div>
                 <div className="lf-actions">
                   <button onClick={() => setLayerFormOpen(false)}>取消</button>
-                  <button className="pr" data-create-layer onClick={createLayer}>{createLayerActionLabel}</button>
+                  <button className="pr" data-create-layer onClick={createLayer} disabled={!canReviseLabel} title={!canReviseLabel ? labelRevisionDisabledReason : "加入当前人审决定。"}>{createLayerActionLabel}</button>
                 </div>
               </div>
             )}

@@ -527,7 +527,12 @@ def test_task_run_requires_idempotency(client, auth_headers):
     assert response.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
 
 
-def test_task_run_idempotency_replay_and_conflict(client, auth_headers):
+def test_task_run_idempotency_replay_and_conflict(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
     headers = {**auth_headers, "Idempotency-Key": "pytest-task-run"}
     payload = {
         "task_version_id": "task_version_v3_2_1",
@@ -666,7 +671,96 @@ def test_task_run_allows_draft_diagnostic_mode_with_immutable_version_snapshot(
         } == snapshot
 
 
-def test_idempotency_key_cannot_replay_across_resource_paths(client, auth_headers):
+def test_execution_contract_rejects_unconfigured_production_task_run_before_writes(
+    client, auth_headers
+):
+    with SessionLocal() as session:
+        run_count = session.query(RunRecord).count()
+        outbox_count = session.query(OutboxEvent).count()
+
+    response = client.post(
+        "/api/v1/task-runs",
+        json={
+            "task_version_id": "task_version_v3_2_1",
+            "execution_mode": "production",
+            "trigger_type": "manual",
+        },
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "unconfigured-production-task-run",
+        },
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "EXECUTION_CONTRACT_NOT_CONFIGURED"
+    with SessionLocal() as session:
+        assert session.query(RunRecord).count() == run_count
+        assert session.query(OutboxEvent).count() == outbox_count
+
+
+def test_execution_contract_rejects_publishing_unconfigured_production_task_version(
+    client, auth_headers
+):
+    task_version_id = "task_version_unconfigured_production_contract"
+    created = client.post(
+        "/api/v1/task-versions",
+        json={
+            "task_version_id": task_version_id,
+            "task_type_id": "task_sales_quality",
+            "version": "unconfigured-production-contract",
+            "canvas_variant": "stable-v3",
+            "label_version": "label_v1_8_4",
+        },
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "create-unconfigured-production-task-version",
+        },
+    )
+    assert created.status_code == 201, created.text
+    with SessionLocal() as session:
+        run_count = session.query(RunRecord).count()
+        outbox_count = session.query(OutboxEvent).count()
+
+    published = client.post(
+        f"/api/v1/task-versions/{task_version_id}/publish",
+        json={"decision": "publish", "gate": "compatibility"},
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "publish-unconfigured-production-task-version",
+        },
+    )
+
+    assert published.status_code == 409, published.text
+    assert published.json()["error"]["code"] == "EXECUTION_CONTRACT_NOT_CONFIGURED"
+    with SessionLocal() as session:
+        assert session.query(RunRecord).count() == run_count
+        assert session.query(OutboxEvent).count() == outbox_count
+
+
+def test_provider_test_requires_explicit_diagnostic_mode(client, auth_headers):
+    production = client.post(
+        "/api/v1/settings/provider-tests",
+        json={"provider": "self_hosted", "execution_mode": "production"},
+        headers={**auth_headers, "Idempotency-Key": "provider-test-production-rejected"},
+    )
+    assert production.status_code == 409, production.text
+    assert production.json()["error"]["code"] == "EXECUTION_CONTRACT_NOT_CONFIGURED"
+
+    diagnostic = client.post(
+        "/api/v1/settings/provider-tests",
+        json={"provider": "self_hosted", "execution_mode": "diagnostic"},
+        headers={**auth_headers, "Idempotency-Key": "provider-test-diagnostic-accepted"},
+    )
+    assert diagnostic.status_code == 202, diagnostic.text
+    assert diagnostic.json()["data"]["execution_mode"] == "diagnostic"
+
+
+def test_idempotency_key_cannot_replay_across_resource_paths(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
     first_version_id = "task_version_idempotency_path_a"
     second_version_id = "task_version_idempotency_path_b"
     for index, version_id in enumerate((first_version_id, second_version_id), start=1):
@@ -719,7 +813,12 @@ def test_idempotency_key_cannot_replay_across_resource_paths(client, auth_header
     assert second_asset.json()["error"]["code"] == "IDEMPOTENCY_KEY_CONFLICT"
 
 
-def test_task_run_cursor_pagination_is_stable(client, auth_headers):
+def test_task_run_cursor_pagination_is_stable(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
     for index in range(3):
         response = client.post(
             "/api/v1/task-runs",
@@ -751,7 +850,12 @@ def test_task_run_cursor_pagination_is_stable(client, auth_headers):
     assert invalid.json()["error"]["code"] == "INVALID_CURSOR"
 
 
-def test_idempotency_key_scope_does_not_change_with_user(client, auth_headers):
+def test_idempotency_key_scope_does_not_change_with_user(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
     payload = {
         "task_version_id": "task_version_v3_2_1",
         "trigger_type": "manual",
@@ -1568,7 +1672,12 @@ def test_page_read_models_cover_assets_reviews_and_labels(client, auth_headers):
         assert session.get(HumanReviewTask, "hrt_amount_001") is not None
 
 
-def test_audio_review_supporting_endpoints_are_interactive(client, auth_headers):
+def test_audio_review_supporting_endpoints_are_interactive(
+    client,
+    auth_headers,
+    configured_test_business_execution_contracts,
+):
+    del configured_test_business_execution_contracts
     sessions = client.get("/api/v1/audio-sessions", headers=auth_headers)
     assert sessions.status_code == 200
     assert sessions.json()["meta"]["status_counts"]
@@ -2365,34 +2474,17 @@ def test_modified_human_review_rejects_unbound_or_server_managed_changes(
     assert protected.json()["error"]["code"] == "VALIDATION_ERROR"
 
 
-def test_platform_connection_session_is_persisted_and_requires_idempotency(client, auth_headers):
-    missing = client.post(
+def test_platform_connection_session_endpoint_is_deprecated(client, auth_headers):
+    deprecated = client.post(
         "/api/v1/platform-connections/platformAuth/session",
         json={"scope": "current_project"},
-        headers=auth_headers,
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "platform-session-contract",
+        },
     )
-    assert missing.status_code == 400
-    assert missing.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
-
-    headers = {**auth_headers, "Idempotency-Key": "platform-session-contract"}
-    session = client.post(
-        "/api/v1/platform-connections/platformAuth/session",
-        json={"scope": "current_project"},
-        headers=headers,
-    )
-    replay = client.post(
-        "/api/v1/platform-connections/platformAuth/session",
-        json={"scope": "current_project"},
-        headers=headers,
-    )
-    assert session.status_code == 201
-    assert replay.status_code == 201
-    assert session.json()["data"]["session_ref"] == replay.json()["data"]["session_ref"]
-    trace = client.get(f"/api/v1/traces/{session.json()['meta']['trace_id']}", headers=auth_headers)
-    assert any(
-        span.get("kind") == "resource" and span.get("collection") == "platform_sessions"
-        for span in trace.json()["data"]["spans"]
-    )
+    assert deprecated.status_code == 410
+    assert deprecated.json()["error"]["code"] == "PLATFORM_SESSION_ENDPOINT_DEPRECATED"
 
 
 def test_structured_validation_blocks_invalid_eval_and_callback_payloads(client, auth_headers):
@@ -2578,7 +2670,12 @@ def test_run_style_writes_require_idempotency(client, auth_headers):
         assert response.json()["error"]["code"] == "IDEMPOTENCY_KEY_REQUIRED"
 
 
-def test_knowledge_settings_and_task_version_backend_loop(client, auth_headers):
+def test_knowledge_settings_and_task_version_backend_loop(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
     sources = client.get("/api/v1/knowledge-sources", headers=auth_headers)
     assert sources.status_code == 200
     source_items = sources.json()["data"]["items"]
@@ -3222,7 +3319,12 @@ def test_data_aggregation_view_patch_is_persisted_and_replayable(client, auth_he
     )
 
 
-def test_trace_lookup_is_scoped_by_tenant_and_project(client, auth_headers):
+def test_trace_lookup_is_scoped_by_tenant_and_project(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
     response = client.post(
         "/api/v1/task-runs",
         json={
@@ -3252,7 +3354,13 @@ def test_trace_lookup_is_scoped_by_tenant_and_project(client, auth_headers):
     assert other_scope.json()["error"]["code"] == "TENANT_NOT_FOUND"
 
 
-def test_labeling_evaluation_insight_closed_loop_contract(client, auth_headers):
+def test_labeling_evaluation_insight_closed_loop_contract(
+    client,
+    auth_headers,
+    configured_test_legacy_generic_execution,
+):
+    del configured_test_legacy_generic_execution
+
     def dispatch_run(run_id: str) -> tuple[str, str, dict]:
         external_id_keys = {
             "dagster": "external_run_id",

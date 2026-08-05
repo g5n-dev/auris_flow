@@ -13,6 +13,10 @@ import {
 import { composeIdempotencyKey, resolveWriteIdempotencyKey } from "./idempotencyKey";
 import { buildApiScopeKey, readApiRuntimeScope } from "./apiRuntimeScope";
 import { listAllTaskVersions } from "./taskVersionPagination";
+import {
+  normalizeAffectedObjectRefs,
+  type BackendAffectedObjectRef
+} from "./actionReceipt";
 export { ApiRequestError, isApiRequestError } from "./apiRequestError";
 export { subscribeApiAuthEvents } from "./requestScope";
 
@@ -225,10 +229,12 @@ export type BackendActionReceipt = {
   id: string;
   status: string;
   trace_id?: string;
-  affected_objects?: Array<{ type: string; id: string }>;
+  affected_objects?: BackendAffectedObjectRef[];
   next_actions?: Array<{ key: string; label: string; route?: string }>;
   raw: Record<string, unknown>;
 };
+
+export type { BackendAffectedObjectRef } from "./actionReceipt";
 
 export type LabelVersionEvaluationLock = {
   label_version_id: string;
@@ -1093,15 +1099,7 @@ function requiredProjectSceneLock(payload: Record<string, unknown>) {
 }
 
 export function normalizeActionReceipt(data: Record<string, unknown>, metaTraceId?: string): BackendActionReceipt {
-  const affectedObjects = Array.isArray(data.affected_objects)
-    ? data.affected_objects.filter(
-        (item): item is { type: string; id: string } =>
-          Boolean(item) &&
-          typeof item === "object" &&
-          typeof (item as Record<string, unknown>).type === "string" &&
-          typeof (item as Record<string, unknown>).id === "string"
-      )
-    : undefined;
+  const affectedObjects = normalizeAffectedObjectRefs(data.affected_objects);
   const nextActions = Array.isArray(data.next_actions)
     ? data.next_actions.filter(
         (item): item is { key: string; label: string; route?: string } =>

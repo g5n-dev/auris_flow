@@ -1,3 +1,4 @@
+import { apiRequest } from "../../../api/client";
 import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
 import { actionFeedbackAttrs } from "../../../shared/runtime/feedbackAttributes";
 import { DeepLinkSourceBar } from "../../../shared/ui/DeepLinkSourceBar";
@@ -8,26 +9,65 @@ import type { ListeningPresentation } from "../model/listeningPresentation";
 import { EvidenceMode } from "./evidence/EvidenceMode";
 import { EvidencePageConfigPanel } from "./evidence/EvidencePageConfigPanel";
 import { MatrixMode } from "./matrix/MatrixMode";
+import { ReviewDecisionTechnicalDetails } from "./ReviewDecisionTechnicalDetails";
 import { SimpleMode } from "./simple/SimpleMode";
 import { FileText, Headphones, ListFilter, RotateCcw, Search, Settings, ShieldCheck, X } from "lucide-react";
+import { useState } from "react";
 
 export function ListeningFeatureView({ controller }: { controller: ListeningPresentation }) {
-  const { activeChip, activeQueue, activeReviewSummary, activeSample, agentState, appealComposerOpen, appealPending, appealReason, changeReviewQueue, completedSampleIds, confirmAndMoveNext, createdAppeal, evidencePageConfig, focus, getModuleTitle, latestReviewDecision, listeningActionPending, listeningModes, listeningNotice, listeningQuery, listeningReadDetail, listeningReadState, listeningRunState, listeningScope, listeningTool, markState, mode, navigateModuleRoot, navigateToTarget, pageConfigOpen, panelTab, reviewQueueItems, selectedLabel, selectedWindow, setActiveChip, setAppealComposerOpen, setAppealReason, setEvidencePageConfig, setListeningQuery, setListeningReadRetry, setListeningScope, setListeningTool, setMode, setPageConfigOpen, setPanelTab, setSelectedWindow, submitLatestQualityAppeal, toggleListeningTool, updateAgentDecision, updateMarkState } = controller;
+  const { activeChip, activeQueue, activeReviewSummary, activeSample, agentState, appealComposerOpen, appealPending, appealReason, changeReviewQueue, completedSampleIds, confirmAndMoveNext, createdAppeal, evidencePageConfig, focus, getModuleTitle, latestReviewDecision, listeningActionPending, listeningModes, listeningNotice, listeningQuery, listeningReadDetail, listeningReadState, listeningRunState, listeningScope, listeningTool, lowConfidence, markState, mode, navigateModuleRoot, navigateToTarget, pageConfigOpen, panelTab, recordReviewChange, reviewQueueItems, selectedLabel, selectedWindow, setActiveChip, setAppealComposerOpen, setAppealReason, setEvidencePageConfig, setListeningNotice, setListeningQuery, setListeningReadRetry, setListeningScope, setListeningTool, setMode, setPageConfigOpen, setPanelTab, setSelectedWindow, submitLatestQualityAppeal, toggleListeningTool, updateAgentDecision, updateLowConfidence, updateMarkState } = controller;
+  const [traceReadPending, setTraceReadPending] = useState(false);
+  const viewLatestRootTrace = async () => {
+    const rootTraceId = latestReviewDecision?.rootTraceId;
+    if (!rootTraceId || traceReadPending) return;
+    setTraceReadPending(true);
+    setListeningNotice({
+      status: "pending",
+      title: "正在回读业务根 Trace",
+      detail: `${rootTraceId} 将通过当前租户/项目上下文从 BFF 查询。`
+    });
+    try {
+      const response = await apiRequest<{
+        trace_id?: string;
+        spans?: unknown[];
+        nodes?: unknown[];
+        edges?: unknown[];
+      }>(`/v1/traces/${encodeURIComponent(rootTraceId)}`);
+      if (response.data.trace_id !== rootTraceId) {
+        throw new Error(
+          `Trace 回读对象不一致：期望 ${rootTraceId}，实际 ${response.data.trace_id || "unknown"}`
+        );
+      }
+      setListeningNotice({
+        status: "success",
+        title: "业务根 Trace 已回读",
+        detail: `${rootTraceId} / ${response.data.spans?.length ?? 0} 个跨度 / ${response.data.nodes?.length ?? 0} 个对象 / ${response.data.edges?.length ?? 0} 条关系。`
+      });
+    } catch (error) {
+      setListeningNotice({
+        status: "error",
+        title: "业务根 Trace 读取失败",
+        detail: error instanceof Error ? error.message : `${rootTraceId} 无法从 BFF 回读。`
+      });
+    } finally {
+      setTraceReadPending(false);
+    }
+  };
   return (
     listeningReadState !== "ready" ? (
                   <section className="module-panel wide" data-testid={`listening-read-${listeningReadState}`} aria-live="polite">
                     <PanelHeader
-                      title={listeningReadState === "loading" || listeningReadState === "idle" ? "正在加载调听事实" : listeningReadState === "empty" ? "暂无待复核会话" : "调听事实读取失败"}
+                      title={listeningReadState === "loading" || listeningReadState === "idle" ? "正在加载调听事实" : listeningReadState === "complete" ? "当前队列复核完成" : listeningReadState === "empty" ? "暂无待复核会话" : "调听事实读取失败"}
                       subtitle="HumanReviewTask → EvidencePack → AudioSession → ASR / 说话人 / 事件 / 标注"
                       icon={<Headphones size={16} />}
                     />
-                    <div className={`operation-toast is-${listeningReadState === "error" ? "error" : listeningReadState === "empty" ? "idle" : "pending"}`}>
-                      <strong>{listeningReadState === "empty" ? "当前筛选范围没有待办" : listeningReadState === "error" ? "未使用本地 fixture 兜底" : "正在组合权威读模型"}</strong>
+                    <div className={`operation-toast is-${listeningReadState === "error" ? "error" : listeningReadState === "empty" || listeningReadState === "complete" ? "idle" : "pending"}`}>
+                      <strong>{listeningReadState === "complete" ? "服务端 pending 队列已为空" : listeningReadState === "empty" ? "当前筛选范围没有待办" : listeningReadState === "error" ? "未使用本地 fixture 兜底" : "正在组合权威读模型"}</strong>
                       <span>{listeningReadDetail}</span>
-                      {(listeningReadState === "empty" || listeningReadState === "error") && (
+                      {(listeningReadState === "empty" || listeningReadState === "complete" || listeningReadState === "error") && (
                         <button type="button" onClick={() => setListeningReadRetry((current) => current + 1)}>
                           <RotateCcw size={14} />
-                          重新读取
+                          {listeningReadState === "complete" ? "查看其他待审队列" : "重新读取"}
                         </button>
                       )}
                     </div>
@@ -71,15 +111,33 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                         <Settings size={15} />
                         <span>配置</span>
                       </button>
-                      <button className={listeningTool === "search" ? "active" : ""} aria-expanded={listeningTool === "search"} onClick={() => toggleListeningTool("search")} title="搜索证据">
+                      <button
+                        className={listeningTool === "search" ? "active" : ""}
+                        aria-expanded={listeningTool === "search"}
+                        disabled={!LABEL_DEMO_MODE}
+                        onClick={() => toggleListeningTool("search")}
+                        title={!LABEL_DEMO_MODE ? "生产搜索尚未绑定 BFF 查询参数，当前禁用。" : "DEMO：搜索证据"}
+                      >
                         <Search size={15} />
                         <span>搜证据</span>
                       </button>
-                      <button className={listeningTool === "filter" ? "active" : ""} aria-expanded={listeningTool === "filter"} onClick={() => toggleListeningTool("filter")} title="过滤复核队列">
+                      <button
+                        className={listeningTool === "filter" ? "active" : ""}
+                        aria-expanded={listeningTool === "filter"}
+                        disabled={!LABEL_DEMO_MODE}
+                        onClick={() => toggleListeningTool("filter")}
+                        title={!LABEL_DEMO_MODE ? "生产筛选尚未绑定 BFF 查询参数，当前禁用。" : "DEMO：过滤复核队列"}
+                      >
                         <ListFilter size={15} />
                         <span>过滤</span>
                       </button>
-                      <button className={listeningTool === "reception" ? "active" : ""} aria-expanded={listeningTool === "reception"} onClick={() => toggleListeningTool("reception")} title="关联销售接待单">
+                      <button
+                        className={listeningTool === "reception" ? "active" : ""}
+                        aria-expanded={listeningTool === "reception"}
+                        disabled={!LABEL_DEMO_MODE}
+                        onClick={() => toggleListeningTool("reception")}
+                        title={!LABEL_DEMO_MODE ? "生产 EventLink 候选尚未绑定对象版本，当前禁用。" : "DEMO：关联销售接待单"}
+                      >
                         <FileText size={15} />
                         <span>接待单</span>
                       </button>
@@ -87,8 +145,8 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                         className={listeningTool === "rerun" || listeningRunState === "pending" ? "active" : ""}
                         aria-expanded={listeningTool === "rerun"}
                         onClick={() => toggleListeningTool("rerun")}
-                        disabled={listeningRunState === "pending"}
-                        title={listeningRunState === "pending" ? "当前证据链正在重跑，完成后可再次发起。" : "重跑当前证据链"}
+                        disabled={!LABEL_DEMO_MODE || listeningRunState === "pending"}
+                        title={!LABEL_DEMO_MODE ? "生产模式未接入受控重跑 TaskRun，当前操作已禁用。" : listeningRunState === "pending" ? "当前证据链正在重跑，完成后可再次发起。" : "重跑当前证据链"}
                         {...actionFeedbackAttrs("p,s,e,d")}
                       >
                         <RotateCcw size={15} />
@@ -109,6 +167,12 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                           className={mode === item.id ? "active" : ""}
                           aria-selected={mode === item.id}
                           role="tab"
+                          disabled={!LABEL_DEMO_MODE && item.id === "matrix"}
+                          title={
+                            !LABEL_DEMO_MODE && item.id === "matrix"
+                              ? "生产串音矩阵尚未读取权威设备关系，fixture 编辑已禁用。"
+                              : undefined
+                          }
                           onClick={() => {
                             setMode(item.id);
                             setListeningScope(item.scope);
@@ -193,6 +257,19 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                   <div className={`operation-toast listening-operation-toast is-${listeningNotice.status} ${latestReviewDecision && !createdAppeal ? "has-action" : ""}`} role="status" aria-live="polite">
                     <strong>{listeningNotice.title}</strong>
                     <span>{listeningNotice.detail}</span>
+                    {latestReviewDecision?.rootTraceId && (
+                      <button
+                        type="button"
+                        className="listening-appeal-trigger"
+                        data-testid="listening-view-trace"
+                        onClick={() => void viewLatestRootTrace()}
+                        disabled={traceReadPending}
+                        title={traceReadPending ? "正在回读业务根 Trace。" : `查看业务根 Trace ${latestReviewDecision.rootTraceId}`}
+                      >
+                        <FileText size={14} />
+                        {traceReadPending ? "读取 Trace…" : "查看 Trace"}
+                      </button>
+                    )}
                     {latestReviewDecision && !createdAppeal && (
                       <button
                         type="button"
@@ -206,6 +283,9 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                         提出申诉
                       </button>
                     )}
+                    <ReviewDecisionTechnicalDetails
+                      affectedObjects={latestReviewDecision?.affectedObjects ?? []}
+                    />
                   </div>
 
                   {mode === "evidence" && (
@@ -219,6 +299,9 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                         setSelectedWindow={setSelectedWindow}
                         markState={markState}
                         setMarkState={updateMarkState}
+                        lowConfidence={lowConfidence}
+                        setLowConfidence={updateLowConfidence}
+                        onReviewChange={recordReviewChange}
                         selectedLabel={selectedLabel}
                         agentState={agentState}
                         setAgentState={updateAgentDecision}
@@ -287,6 +370,7 @@ export function ListeningFeatureView({ controller }: { controller: ListeningPres
                         <div className="quality-appeal-source">
                           <div><span>源决定</span><strong>{latestReviewDecision.decisionId}</strong></div>
                           <div><span>复核任务</span><strong>{latestReviewDecision.reviewTaskId}</strong></div>
+                          <div><span>根 Trace</span><strong>{latestReviewDecision.rootTraceId}</strong></div>
                           <div><span>来源样本</span><strong>{latestReviewDecision.sampleTitle}</strong></div>
                           <div><span>冻结证据</span><strong>{latestReviewDecision.evidenceRefs.join(" / ")}</strong></div>
                         </div>

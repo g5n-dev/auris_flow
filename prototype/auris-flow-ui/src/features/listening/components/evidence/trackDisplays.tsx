@@ -1,5 +1,6 @@
 import { eventLinks } from "../../../../shared/fixtures/eventLinks";
 import { actionFeedbackAttrs } from "../../../../shared/runtime/feedbackAttributes";
+import { LABEL_DEMO_MODE } from "../../../../shared/runtime/demoMode";
 import { asrRows, listeningDeviceBadges } from "../../fixtures/evidenceFixtures";
 import type { ReviewSample } from "../../fixtures/reviewSamples";
 import type { TrackAnnotation } from "../../model/trackLayout";
@@ -299,29 +300,29 @@ export function AnnotationSplitView({
 }
 
 export function AnnotationSpine({
-  agentState,
-  setAgentState,
+  lowConfidence,
+  setLowConfidence,
   sample,
   completedCount,
   onConfirmNext,
   confirmPending
 }: {
-  agentState: "pending" | "accepted" | "rejected";
-  setAgentState: (state: "pending" | "accepted" | "rejected") => void;
+  lowConfidence: boolean;
+  setLowConfidence: (value: boolean) => void;
   sample: ReviewSample;
   completedCount: number;
   onConfirmNext: () => void | Promise<void>;
   confirmPending: boolean;
 }) {
-  const [lowConfidence, setLowConfidence] = useState(false);
-  const [skipped, setSkipped] = useState(false);
+  const canSubmitReview = Boolean(sample.reviewTaskId) || LABEL_DEMO_MODE;
+  const submitDisabledReason = "当前 AudioSession 尚未绑定 HumanReviewTask，不能提交人工决定。";
   const progress = [
     "rv",
     "rv",
     "rv",
     "pn",
     lowConfidence ? "lo" : "td",
-    skipped ? "sk" : "td",
+    "td",
     "td",
     "td"
   ];
@@ -337,35 +338,33 @@ export function AnnotationSpine({
         </div>
         <span className="nu">{sample.progressIndex + completedCount} / {sample.progressTotal}</span>
       </div>
-      <div className="sn-keys">
-        {["J 上一通", "K 停", "L 下一通", "Space 播", "←→ ±5s", "↵ 确认"].map((item) => {
-          const [key, ...label] = item.split(" ");
-          return (
-            <span className="kk" key={item}>
-              <b>{key}</b>
-              {label.join(" ")}
-            </span>
-          );
-        })}
-      </div>
       <div className="sn-act">
-        <button className={skipped ? "selected" : ""} onClick={() => setSkipped(!skipped)}>
-          跳过
-        </button>
-        <button className={lowConfidence ? "selected" : ""} onClick={() => setLowConfidence(!lowConfidence)}>
-          标记低置信
+        <button
+          className={lowConfidence ? "selected" : ""}
+          disabled={!canSubmitReview}
+          title={!canSubmitReview ? submitDisabledReason : "将低置信标记加入当前人工决定。"}
+          onClick={() => setLowConfidence(!lowConfidence)}
+        >
+          {lowConfidence ? "已标记低置信" : "标记低置信"}
         </button>
         <button
           className="pr"
-          disabled={confirmPending}
-          title={confirmPending ? "复核决定正在提交，完成后自动进入下一通。" : "提交当前复核决定并进入下一通对话。"}
+          disabled={confirmPending || !canSubmitReview}
+          title={
+            !canSubmitReview
+              ? submitDisabledReason
+              : confirmPending
+                ? "复核决定正在提交，完成后自动进入下一通。"
+                : "提交当前复核决定并进入下一通对话。"
+          }
           {...actionFeedbackAttrs("p,s,e,d")}
-          onClick={() => {
-            setAgentState(agentState === "accepted" ? "pending" : "accepted");
-            void onConfirmNext();
-          }}
+          onClick={() => void onConfirmNext()}
         >
-          {confirmPending ? "提交中..." : "确认 & 下一通对话 ↵"}
+          {confirmPending
+            ? "提交并回读中..."
+            : canSubmitReview
+              ? "提交决定并进入下一通"
+              : "等待生成待审任务"}
         </button>
       </div>
     </div>
