@@ -283,6 +283,14 @@ async function listeningSurfaceSnapshot(page) {
       return {
         url: window.location.href,
         title: document.title,
+        readyState: document.readyState,
+        rootChildCount: document.querySelector("#root")?.childElementCount ?? 0,
+        bootErrorText: String(document.querySelector(".boot-error")?.textContent || "")
+          .trim()
+          .slice(0, 600),
+        authRestoringText: String(document.querySelector(".auth-restoring")?.textContent || "")
+          .trim()
+          .slice(0, 600),
         selectedNavigation,
         visibleListeningElements,
         bodyText: String(document.body?.innerText || "").trim().slice(0, 3000)
@@ -801,7 +809,14 @@ async function loginThroughUi(
   const passwordInput = page.locator('input[autocomplete="current-password"]');
   const submitButton = page.locator("button.auth-submit");
 
-  await emailInput.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
+  try {
+    await emailInput.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
+  } catch (cause) {
+    const error = new Error("login surface did not become available");
+    error.cause = cause;
+    error.detail = await listeningSurfaceSnapshot(page);
+    throw error;
+  }
   await emailInput.fill(email, { timeout: uiAuthenticationTimeoutMs });
   await passwordInput.fill("auris-demo", { timeout: uiAuthenticationTimeoutMs });
   await submitButton.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
@@ -9367,7 +9382,7 @@ try {
   );
   }
 } catch (error) {
-  writeFailedArtifact(error, {
+  const diagnostics = {
     consoleErrors,
     expectedConsoleErrors,
     pageErrors,
@@ -9375,7 +9390,24 @@ try {
     expectedRequestFailures,
     expectedFailedResponses,
     failedResponses
-  });
+  };
+  writeFailedArtifact(error, diagnostics);
+  console.error(
+    JSON.stringify(
+      {
+        status: "failed",
+        stage: artifactStage,
+        error: {
+          name: error instanceof Error ? error.name : "Error",
+          message: error instanceof Error ? error.message : String(error),
+          detail: error instanceof Error ? serializableErrorDetail(error.detail) : undefined
+        },
+        diagnostics
+      },
+      null,
+      2
+    )
+  );
   throw error;
 } finally {
   await browser.close();
