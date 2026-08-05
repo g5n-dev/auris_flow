@@ -19,6 +19,7 @@ import {
   readTrustedE2eCompletionEvidence,
   readTrustedE2eDispatchEvidence
 } from "../scripts/e2e-dispatch-evidence.mjs";
+import { assertNoBlockingAxeViolations } from "./axe-gate.mjs";
 
 const baseUrl = process.env.AURIS_E2E_URL || "http://127.0.0.1:5173/";
 const frontendRoot = new URL("../", import.meta.url).pathname;
@@ -35,6 +36,12 @@ const audioImportTimeoutMs = Math.max(
   30_000,
   Number(process.env.AURIS_E2E_AUDIO_IMPORT_TIMEOUT_MS || 180_000)
 );
+const configuredUiAuthenticationTimeoutMs = Number(
+  process.env.AURIS_E2E_UI_AUTHENTICATION_TIMEOUT_MS || 30_000
+);
+const uiAuthenticationTimeoutMs = Number.isFinite(configuredUiAuthenticationTimeoutMs)
+  ? Math.max(10_000, configuredUiAuthenticationTimeoutMs)
+  : 30_000;
 const audioImportFixture = {
   baseUrl: String(process.env.AURIS_E2E_AUDIO_IMPORT_BASE_URL || "").trim(),
   credentialRef: String(process.env.AURIS_E2E_AUDIO_IMPORT_CREDENTIAL_REF || "").trim(),
@@ -247,6 +254,53 @@ function assert(condition, message, detail = undefined) {
     const error = new Error(message);
     if (detail !== undefined) error.detail = detail;
     throw error;
+  }
+}
+
+async function listeningSurfaceSnapshot(page) {
+  try {
+    return await page.evaluate(() => {
+      const visibleListeningElements = Array.from(
+        document.querySelectorAll('[data-testid*="listening"]')
+      )
+        .filter((element) => {
+          const style = window.getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return (
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            rect.width > 0 &&
+            rect.height > 0
+          );
+        })
+        .map((element) => ({
+          testId: element.getAttribute("data-testid"),
+          text: String(element.textContent || "").trim().slice(0, 600)
+        }));
+      const selectedNavigation = Array.from(
+        document.querySelectorAll('button[aria-current="page"], a[aria-current="page"], .nav-item.active')
+      ).map((element) => String(element.textContent || "").trim()).filter(Boolean);
+      return {
+        url: window.location.href,
+        title: document.title,
+        readyState: document.readyState,
+        rootChildCount: document.querySelector("#root")?.childElementCount ?? 0,
+        bootErrorText: String(document.querySelector(".boot-error")?.textContent || "")
+          .trim()
+          .slice(0, 600),
+        authRestoringText: String(document.querySelector(".auth-restoring")?.textContent || "")
+          .trim()
+          .slice(0, 600),
+        selectedNavigation,
+        visibleListeningElements,
+        bodyText: String(document.body?.innerText || "").trim().slice(0, 3000)
+      };
+    });
+  } catch (error) {
+    return {
+      url: page.url(),
+      snapshotError: error instanceof Error ? error.message : String(error)
+    };
   }
 }
 
@@ -720,33 +774,28 @@ async function waitForHomeModuleReady(page, homeMode = "production") {
     "home projection mode must be production or demo",
     { homeMode }
   );
-  const contentSource = homeMode === "demo" ? "mock" : "none";
+  const contentSource = homeMode === "demo" ? "mock" : "bff";
   await page
     .locator(
       `[data-testid="module-projection-state"][data-state="synced"][data-source="bff"][data-content-source="${contentSource}"]`
     )
     .waitFor({ state: "visible", timeout: 10000 });
-  await page.locator('.module-metrics[data-source="bff"]').waitFor({
+  assert(
+    (await page.locator(".module-metrics").count()) === 0,
+    "home must not restore the removed high-density top metric strip"
+  );
+  await page.locator(".home-dashboard-grid").first().waitFor({
     state: "visible",
     timeout: 10000
   });
-  if (homeMode === "demo") {
-    await page.locator(".home-dashboard-grid").first().waitFor({
-      state: "visible",
-      timeout: 10000
-    });
-    assert(
-      (await page.getByTestId("module-detail-unavailable").count()) === 0,
-      "demo home projection must render the explicitly marked fixture details"
-    );
-    return;
-  }
-  await page
-    .getByTestId("module-detail-unavailable")
-    .filter({ hasText: "BFF 明细尚未接入" })
-    .waitFor({ state: "visible", timeout: 10000 });
   assert(
-    (await page.locator(".home-dashboard-grid").count()) === 0,
+    (await page.getByTestId("module-detail-unavailable").count()) === 0,
+    `${homeMode} home projection must render its declared content source`
+  );
+  if (homeMode === "demo") return;
+  await page.getByTestId("home-business-summary").waitFor({ state: "visible", timeout: 10000 });
+  assert(
+    (await page.getByText("今日处理闭环", { exact: true }).count()) === 0,
     "truth-mode home projection must not render fixture detail cards"
   );
 }
@@ -756,27 +805,50 @@ async function loginThroughUi(
   email,
   { expectedHomeProjectionStatus = 200, homeMode = "production" } = {}
 ) {
+  const emailInput = page.locator('input[autocomplete="email"]');
+  const passwordInput = page.locator('input[autocomplete="current-password"]');
+  const submitButton = page.locator("button.auth-submit");
+
+  try {
+    await emailInput.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
+  } catch (cause) {
+    const error = new Error("login surface did not become available");
+    error.cause = cause;
+    error.detail = await listeningSurfaceSnapshot(page);
+    throw error;
+  }
+  await emailInput.fill(email, { timeout: uiAuthenticationTimeoutMs });
+  await passwordInput.fill("auris-demo", { timeout: uiAuthenticationTimeoutMs });
+  await submitButton.waitFor({ state: "visible", timeout: uiAuthenticationTimeoutMs });
+  assert(await submitButton.isEnabled(), "login submit must be enabled before response observers start", {
+    email,
+    url: page.url()
+  });
+
   const responsePromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/v1/auth/dev-login" &&
       response.request().method() === "POST",
-    { timeout: 10000 }
+    { timeout: uiAuthenticationTimeoutMs }
   );
   const projectionPromise = page.waitForResponse(
     (response) =>
       new URL(response.url()).pathname === "/api/v1/insights/ops-summary" &&
       response.request().method() === "GET",
-    { timeout: 10000 }
+    { timeout: uiAuthenticationTimeoutMs }
   );
-  await page.locator('input[autocomplete="email"]').fill(email);
-  await page.locator('input[autocomplete="current-password"]').fill("auris-demo");
-  await page.locator("button.auth-submit").click();
-  const response = await responsePromise;
+  const [response, projectionResponse] = await Promise.all([
+    responsePromise,
+    projectionPromise,
+    submitButton.click({ timeout: uiAuthenticationTimeoutMs })
+  ]);
   const json = await response.json().catch(() => ({}));
   assert(response.status() === 200, `server login failed for ${email}`, json);
   assert(json?.data?.access_token?.startsWith("auris.v1."), "login must return a signed session", json);
-  await page.locator(".sidebar-user-main").waitFor({ state: "visible", timeout: 10000 });
-  const projectionResponse = await projectionPromise;
+  await page.locator(".sidebar-user-main").waitFor({
+    state: "visible",
+    timeout: uiAuthenticationTimeoutMs
+  });
   assert(
     projectionResponse.status() === expectedHomeProjectionStatus,
     "login must enforce the role-specific home projection boundary",
@@ -4702,6 +4774,146 @@ async function runDataSceneProfileFailClosedSmoke(page) {
   };
 }
 
+async function verifyColdAudioImportRecovery({
+  sourcePage,
+  importBatchId,
+  taskVersionId
+}) {
+  const activeBrowser = sourcePage.context().browser();
+  assert(activeBrowser, "cold audio import recovery requires an active browser");
+  const coldContext = await activeBrowser.newContext({
+    viewport: { width: 1440, height: 900 },
+    deviceScaleFactor: 1,
+    storageState: await sourcePage.context().storageState()
+  });
+  const coldPage = await coldContext.newPage();
+  const coldDiagnostics = [];
+  coldPage.on("console", (message) => {
+    if (message.type() === "error") {
+      coldDiagnostics.push({ type: "console", message: message.text() });
+    }
+  });
+  coldPage.on("pageerror", (error) => {
+    coldDiagnostics.push({ type: "pageerror", message: error.message });
+  });
+  coldPage.on("requestfailed", (request) => {
+    coldDiagnostics.push({
+      type: "requestfailed",
+      method: request.method(),
+      url: request.url(),
+      failure: request.failure()?.errorText
+    });
+  });
+  coldPage.on("response", (response) => {
+    if (response.status() >= 400) {
+      coldDiagnostics.push({
+        type: "response",
+        method: response.request().method(),
+        status: response.status(),
+        path: new URL(response.url()).pathname
+      });
+    }
+  });
+  await installE2eRequestIsolation(coldPage);
+  try {
+    const sessionRestorePromise = coldPage.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname === "/api/v1/auth/session" &&
+        response.request().method() === "GET",
+      { timeout: 20_000 }
+    );
+    await coldPage.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
+    const sessionRestoreResponse = await sessionRestorePromise;
+    assert(
+      sessionRestoreResponse.status() === 200,
+      "new browser context must restore only the HttpOnly authenticated session",
+      { status: sessionRestoreResponse.status() }
+    );
+    await coldPage.locator(".sidebar-user-main").waitFor({
+      state: "visible",
+      timeout: 20_000
+    });
+    await coldPage.waitForLoadState("networkidle", { timeout: 20_000 });
+    assert(
+      await coldPage.evaluate(() => window.sessionStorage.length) === 0,
+      "new browser context must start audio import recovery with empty sessionStorage"
+    );
+    await clickNav(coldPage, "数据", "数据管理");
+    await clickModuleTab(coldPage, "音频数据");
+    const batchListPromise = coldPage.waitForResponse(
+      (response) => {
+        const url = new URL(response.url());
+        return (
+          url.pathname === "/api/v1/import-batches" &&
+          url.searchParams.get("target_asset_key") === "auris/audio/raw_recordings" &&
+          response.request().method() === "GET"
+        );
+      },
+      { timeout: 20_000 }
+    );
+    const batchReadPromise = coldPage.waitForResponse(
+      (response) =>
+        new URL(response.url()).pathname ===
+          `/api/v1/import-batches/${encodeURIComponent(importBatchId)}` &&
+        response.request().method() === "GET",
+      { timeout: 20_000 }
+    );
+    await coldPage.getByTestId("data-connector-import").click();
+    const coldDrawer = coldPage.locator(".audio-import-drawer");
+    await coldDrawer.waitFor({ state: "visible", timeout: 10_000 });
+    const batchListResponse = await batchListPromise;
+    const batchListUrl = new URL(batchListResponse.url());
+    assert(
+      batchListResponse.status() === 200 &&
+        Boolean(batchListUrl.searchParams.get("connector_id")) &&
+        batchListUrl.searchParams.get("task_version_id") === taskVersionId,
+      "cold recovery must query the BFF by connector, immutable task version and target asset",
+      { url: batchListResponse.url(), status: batchListResponse.status() }
+    );
+    assert(
+      (await batchReadPromise).status() === 200,
+      "cold recovery must read the exact latest ImportBatch from BFF"
+    );
+    const recoveredReleaseStep = coldDrawer
+      .locator(".audio-import-stepper button")
+      .filter({ hasText: "发布与拉取" });
+    assert(
+      await recoveredReleaseStep.getAttribute("data-step-status") === "verified" &&
+        await recoveredReleaseStep.isEnabled(),
+      "published configuration recovery must restore verified step semantics and direct batch access"
+    );
+    await recoveredReleaseStep.click();
+    await assertLocatorText(
+      coldPage,
+      ".audio-import-release-summary",
+      taskVersionId,
+      "new browser context must recover the immutable TaskVersion from BFF"
+    );
+    await coldDrawer.locator(".audio-import-run-panel.is-succeeded").waitFor({
+      state: "visible",
+      timeout: 15_000
+    });
+    await assertLocatorText(
+      coldPage,
+      ".audio-import-run-panel",
+      "已完成",
+      "cold recovery must only show success after materialization readback"
+    );
+    assert(
+      coldDiagnostics.length === 0,
+      "cold audio import recovery emitted unexpected browser or network errors",
+      coldDiagnostics
+    );
+    return {
+      sessionStorageLength: 0,
+      batchQuery: batchListUrl.search,
+      status: "succeeded"
+    };
+  } finally {
+    await coldContext.close();
+  }
+}
+
 async function runDataAudioImportClosedLoopSmoke(page) {
   await clickNav(page, "数据", "数据管理");
   await clickModuleTab(page, "音频数据");
@@ -4750,6 +4962,10 @@ async function runDataAudioImportClosedLoopSmoke(page) {
   await page.getByTestId("data-connector-import").click();
   const drawer = page.locator(".audio-import-drawer");
   await drawer.waitFor({ state: "visible", timeout: 10_000 });
+  const drawerAccessibility = await assertNoBlockingAxeViolations(page, {
+    context: ".audio-import-drawer",
+    label: "真实音频导入配置抽屉"
+  });
   await Promise.all(recoveryResponses);
   assert(
     connectorWriteCount === 0,
@@ -4769,6 +4985,7 @@ async function runDataAudioImportClosedLoopSmoke(page) {
       ],
       connectorWriteCount,
       legacyPlatformSyncRequests,
+      accessibility: drawerAccessibility,
       targetAssetKey: "auris/audio/raw_recordings",
       sceneProfileId: activeSceneBinding.scene_profile_id,
       sceneProfileVersionId: activeSceneBinding.scene_profile_version_id,
@@ -4795,31 +5012,36 @@ async function runDataAudioImportClosedLoopSmoke(page) {
     stepPanel().locator(".audio-import-field").filter({ hasText: label }).locator("input, select").first();
   const next = () => drawer.locator(".audio-import-drawer-foot button.primary").filter({ hasText: "下一步" }).first();
 
-  const platformConnection = drawer.getByTestId("audio-import-platform-connection");
-  if ((await platformConnection.evaluate((element) => element.tagName)) === "SELECT") {
-    await platformConnection.selectOption(audioImportFixture.platformConnectionId);
-  } else {
-    await platformConnection.fill(audioImportFixture.platformConnectionId);
-  }
-  await field("平台租户标识").fill(audioImportFixture.platformTenantRef);
-  await field("门店范围").fill(audioImportFixture.storeScope);
+  const platformConnection = drawer.locator(
+    'select[data-testid="audio-import-platform-connection"]'
+  );
+  await platformConnection.waitFor({ state: "visible", timeout: 10_000 });
+  await platformConnection.selectOption(audioImportFixture.platformConnectionId);
+  assert(
+    await field("平台租户标识").inputValue() === audioImportFixture.platformTenantRef,
+    "selected platform connection must freeze the external tenant scope"
+  );
+  assert(
+    await field("门店范围").inputValue() === audioImportFixture.storeScope,
+    "selected platform connection must default to its authorized store scope"
+  );
   await next().click();
   await drawer.getByRole("heading", { name: "配置平台音频 URL API" }).waitFor({ state: "visible" });
 
   await field("配置名称").fill(`E2E 平台音频导入 ${runId}`);
-  await field("API 地址").fill(audioImportFixture.baseUrl);
+  assert(
+    await field("API 地址").inputValue() === audioImportFixture.baseUrl,
+    "selected platform connection must freeze the HTTPS origin"
+  );
   await field("录音清单路径").fill(audioImportFixture.requestPath);
-  await field("credential_ref").fill(audioImportFixture.credentialRef);
+  assert(
+    await field("credential_ref").inputValue() === audioImportFixture.credentialRef,
+    "selected platform connection must freeze the credential reference"
+  );
   await field("每页记录数").fill("3");
   await field("增量游标参数名").fill(audioImportFixture.cursorParam);
   await field("下一持久游标字段路径").fill(audioImportFixture.nextCursorPath);
-  if (audioImportFixture.initialWindowStart) {
-    await drawer.locator(".audio-import-stepper button").filter({ hasText: "游标与目标" }).click();
-    await field("首次拉取开始时间").fill(audioImportFixture.initialWindowStart);
-    await drawer.locator(".audio-import-stepper button").filter({ hasText: "测试与预览" }).click();
-  } else {
-    await next().click();
-  }
+  await next().click();
   await drawer.getByRole("heading", { name: "测试连接并预览真实记录" }).waitFor({ state: "visible" });
 
   const connectorResponsePromise = page.waitForResponse(
@@ -4988,7 +5210,8 @@ async function runDataAudioImportClosedLoopSmoke(page) {
     "final mapped cursor configuration must be validated against three real source records",
     finalPreviewJson
   );
-  await drawer.locator(".audio-import-stepper button").filter({ hasText: "发布与拉取" }).click();
+  await drawer.locator(".audio-import-stepper button").filter({ hasText: "游标与目标" }).click();
+  await next().click();
   await drawer.getByRole("heading", { name: "发布配置并立即拉取" }).waitFor({ state: "visible" });
 
   const taskVersionResponsePromise = page.waitForResponse(
@@ -5159,49 +5382,30 @@ async function runDataAudioImportClosedLoopSmoke(page) {
     state: "visible",
     timeout: 10_000
   });
-  await page.reload({ waitUntil: "domcontentloaded" });
-  await page.locator(".sidebar-user-main").waitFor({ state: "visible", timeout: 20_000 });
-  await clickNav(page, "数据", "数据管理");
-  await clickModuleTab(page, "音频数据");
-  const recoveredBatchPromise = page.waitForResponse(
-    (response) =>
-      new URL(response.url()).pathname ===
-        `/api/v1/import-batches/${encodeURIComponent(importBatchId)}` &&
-      response.request().method() === "GET",
-    { timeout: 20_000 }
-  );
-  await page.getByTestId("data-connector-import").click();
-  await drawer.waitFor({ state: "visible", timeout: 10_000 });
-  await recoveredBatchPromise;
-  await drawer.locator(".audio-import-stepper button").filter({ hasText: "发布与拉取" }).click();
-  await assertLocatorText(
-    page,
-    ".audio-import-release-summary",
-    taskVersionId,
-    "page refresh must recover the published immutable TaskVersion from BFF"
-  );
-  await drawer.locator(".audio-import-run-panel.is-succeeded").waitFor({
-    state: "visible",
-    timeout: 15_000
+  const coldRecovery = await verifyColdAudioImportRecovery({
+    sourcePage: page,
+    importBatchId,
+    taskVersionId
   });
-  await assertLocatorText(
-    page,
-    ".audio-import-run-panel",
-    "已完成",
-    "audio import UI must only show success after materialization readback"
-  );
 
-  const sessionReadPromise = page.waitForResponse(
-    (response) =>
-      /\/api\/v1\/audio-sessions\/[^/]+$/.test(new URL(response.url()).pathname) &&
-      response.request().method() === "GET",
+  const quickSessionReadPromise = page.waitForResponse(
+    (response) => {
+      const pathname = new URL(response.url()).pathname;
+      return (
+        /^\/api\/v1\/audio-sessions\/[^/]+$/.test(pathname) &&
+        response.request().method() === "GET"
+      );
+    },
     { timeout: 20_000 }
   );
-  await drawer.locator(".audio-import-run-actions button").filter({ hasText: "查看新会话" }).click();
-  const sessionReadResponse = await sessionReadPromise;
+  await drawer.locator(".audio-import-run-actions button").filter({ hasText: "快速播放" }).click();
+  const sessionReadResponse = await quickSessionReadPromise;
   const sessionJson = await sessionReadResponse.json().catch(() => ({}));
   assert(sessionReadResponse.status() === 200, "new audio session should be readable", sessionJson);
-  const audioSessionId = sessionJson?.data?.session_id || sessionJson?.data?.id;
+  const audioSessionId =
+    sessionJson?.data?.audio_session_id
+    || sessionJson?.data?.session_id
+    || sessionJson?.data?.id;
   assert(
     createdSessionIds.includes(audioSessionId) &&
       sessionJson?.data?.platform_connection_id === audioImportFixture.platformConnectionId &&
@@ -5246,49 +5450,90 @@ async function runDataAudioImportClosedLoopSmoke(page) {
       response.request().method() === "POST",
     { timeout: 20_000 }
   );
-  const playbackMediaPromise = page.waitForResponse(
-    (response) => {
-      const url = new URL(response.url());
-      return (
-        url.pathname === "/api/v1/audio-playback" &&
-        Boolean(url.searchParams.get("grant")) &&
-        response.request().method() === "GET"
-      );
-    },
-    { timeout: 20_000 }
-  );
   const importedPlaybackButton = drawer
     .locator(".audio-import-playback button")
     .filter({ hasText: "播放录音" });
   await waitForEnabled(importedPlaybackButton, "newly imported audio playback");
   await importedPlaybackButton.click();
-  const [playbackGrantResponse, playbackMediaResponse] = await Promise.all([
-    playbackGrantPromise,
-    playbackMediaPromise
-  ]);
+  const playbackGrantResponse = await playbackGrantPromise;
   const playbackGrantJson = await playbackGrantResponse.json().catch(() => ({}));
+  const playbackUrl = playbackGrantJson?.data?.playback_url;
   assert(
     playbackGrantResponse.status() === 201 &&
-      playbackGrantJson?.data?.playback_url?.startsWith("/api/v1/audio-playback?grant=") &&
+      playbackUrl?.startsWith("/api/v1/audio-playback?grant=") &&
       playbackGrantJson?.data?.expires_at,
     "new audio session playback must use a short-lived BFF grant",
     playbackGrantJson
   );
+  const importedAudio = drawer.locator(".audio-import-playback audio");
+  await page.waitForFunction(
+    ({ expectedUrl }) =>
+      document
+        .querySelector(".audio-import-playback audio")
+        ?.getAttribute("src") === expectedUrl,
+    { expectedUrl: playbackUrl },
+    { timeout: 20_000 }
+  );
+  const playbackMediaResponse = await page.request.get(
+    new URL(playbackUrl, page.url()).toString(),
+    { headers: { Range: "bytes=0-1023" } }
+  );
+  const playbackMediaBody = await playbackMediaResponse.body();
   assert(
     playbackMediaResponse.status() === 206 &&
       playbackMediaResponse.headers()["accept-ranges"] === "bytes" &&
-      playbackMediaResponse.request().headers().range?.startsWith("bytes="),
+      playbackMediaResponse.headers()["content-range"]?.startsWith("bytes ") &&
+      playbackMediaBody.length > 0 &&
+      await importedAudio.getAttribute("src") === playbackUrl,
     "newly imported audio must be range-playable from internal object storage",
     {
       status: playbackMediaResponse.status(),
       responseHeaders: playbackMediaResponse.headers(),
-      requestHeaders: playbackMediaResponse.request().headers()
+      responseBytes: playbackMediaBody.length,
+      playerSourceBound: await importedAudio.getAttribute("src") === playbackUrl
     }
   );
   assert(
     legacyPlatformSyncRequests === 0,
     "audio import closed loop must not use legacy /platform-sync-jobs",
     { legacyPlatformSyncRequests }
+  );
+
+  await drawer.getByRole("button", { name: "关闭会话详情" }).click();
+  const exactListeningSessionReadPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/audio-sessions/${encodeURIComponent(audioSessionId)}` &&
+      response.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+  await drawer.locator(".audio-import-run-actions button").filter({ hasText: "查看新会话" }).click();
+  await exactListeningSessionReadPromise;
+  await page.getByTestId("listening-authoritative-playback").waitFor({
+    state: "visible",
+    timeout: 20_000
+  });
+  assert(
+    new URL(page.url()).searchParams.get("audio_session_id") === audioSessionId,
+    "view new session must persist the exact audio_session_id in a refreshable URL",
+    { pageUrl: page.url(), audioSessionId }
+  );
+  assert(
+    await page.getByTestId("listening-recording").getAttribute("data-audio-session-id")
+      === audioSessionId,
+    "pending review queue must not replace the imported audio_session_id",
+    { audioSessionId }
+  );
+
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByTestId("listening-authoritative-playback").waitFor({
+    state: "visible",
+    timeout: 20_000
+  });
+  assert(
+    await page.getByTestId("listening-recording").getAttribute("data-audio-session-id")
+      === audioSessionId,
+    "audio_session_id URL intent must restore the exact playable session after refresh"
   );
 
   const connectorTraceId = connectorJson?.meta?.trace_id;
@@ -5303,8 +5548,6 @@ async function runDataAudioImportClosedLoopSmoke(page) {
     "audio import connector trace should reference its resource",
     connectorTrace
   );
-  await drawer.locator('button[aria-label="关闭导入配置"]').click();
-  await drawer.waitFor({ state: "hidden", timeout: 10_000 });
   page.off("request", observeImportWrites);
   return {
     id: connectorId,
@@ -5327,13 +5570,694 @@ async function runDataAudioImportClosedLoopSmoke(page) {
     failed: terminalBatch.data.failed_items,
     playbackGrantStatus: playbackGrantResponse.status(),
     playbackStatus: playbackMediaResponse.status(),
+    playbackUiBound: true,
+    playbackRangeVerified: true,
     connectorWriteCount,
     pageRefreshRecovered: true,
+    coldContextRecovered: true,
+    coldRecovery,
     rootTraceReadable: true,
     legacyPlatformSyncRequests,
+    accessibility: drawerAccessibility,
     sceneProfileId: connectorPayload.scene_profile_id,
     sceneProfileVersionId: connectorPayload.scene_profile_version_id,
     sceneProfileSnapshotSha256: connectorPayload.scene_profile_snapshot_sha256
+  };
+}
+
+async function runImportedAudioIntelligenceReviewClosedLoop(page, audioImportClosedLoop) {
+  const audioSessionId = audioImportClosedLoop.audioSessionId;
+  const rootTraceId = audioImportClosedLoop.rootTraceId;
+  const scheduledSession = await waitForApiState(
+    page,
+    `/api/v1/audio-sessions/${encodeURIComponent(audioSessionId)}`,
+    (data) =>
+      data?.audio_session_id === audioSessionId &&
+      data?.root_trace_id === rootTraceId &&
+      typeof data?.intelligence_run_id === "string" &&
+      data.intelligence_run_id.length > 0,
+    "imported AudioSession downstream intelligence scheduling",
+    audioImportTimeoutMs
+  );
+  const intelligenceRunId = scheduledSession.data.intelligence_run_id;
+  const intelligenceRun = await waitForApiState(
+    page,
+    `/api/v1/runs/${encodeURIComponent(intelligenceRunId)}`,
+    (data) => ["success", "failed", "cancelled", "canceled"].includes(data?.status),
+    "dedicated audio intelligence materialization",
+    audioImportTimeoutMs
+  );
+  assert(
+    intelligenceRun.data.status === "success" &&
+      intelligenceRun.data.run_type === "audio_intelligence" &&
+      intelligenceRun.data.audio_session_id === audioSessionId &&
+      intelligenceRun.data.root_trace_id === rootTraceId,
+    "imported session must complete the dedicated audio intelligence contract on its import root",
+    intelligenceRun
+  );
+
+  const pendingQueue = await waitForApiState(
+    page,
+    "/api/v1/human-review-tasks?status=pending&queue=audio_evidence_review&limit=100",
+    (data) =>
+      Array.isArray(data?.items) &&
+      data.items.length >= 2 &&
+      data.items.some(
+        (item) =>
+          item?.audio_session_id === audioSessionId &&
+          item?.source_run_id === intelligenceRunId &&
+          item?.root_trace_id === rootTraceId
+      ),
+    "audio evidence review task materialization",
+    audioImportTimeoutMs
+  );
+  const reviewTask = pendingQueue.data.items.find(
+    (item) =>
+      item?.audio_session_id === audioSessionId &&
+      item?.source_run_id === intelligenceRunId &&
+      item?.root_trace_id === rootTraceId
+  );
+  const reviewTaskId = reviewTask?.review_task_id || reviewTask?.id;
+  const evidencePackId = reviewTask?.evidence_pack_id;
+  assert(
+    reviewTaskId && evidencePackId && reviewTask?.queue === "audio_evidence_review",
+    "audio intelligence must create a strong pending EvidencePack review task",
+    reviewTask
+  );
+
+  const evidenceBefore = expectEnvelope(
+    await browserApi(page, `/api/v1/evidence-packs/${encodeURIComponent(evidencePackId)}`),
+    "read strong EvidencePack before human decision",
+    200
+  );
+  assert(
+    evidenceBefore.data.evidence_pack_id === evidencePackId &&
+      evidenceBefore.data.audio_session_id === audioSessionId &&
+      evidenceBefore.data.source_run_id === intelligenceRunId &&
+      evidenceBefore.data.root_trace_id === rootTraceId &&
+      evidenceBefore.data.status === "ready" &&
+      /^[0-9a-f]{64}$/.test(evidenceBefore.data.evidence_sha256 || "") &&
+      /^[0-9a-f]{64}$/.test(
+        evidenceBefore.data.storage_object?.content_sha256 ||
+          evidenceBefore.data.audio_sha256 ||
+          ""
+      ) &&
+      Boolean(
+        evidenceBefore.data.storage_object?.version_id ||
+          evidenceBefore.data.storage_object_version
+      ) &&
+      Number.isInteger(evidenceBefore.data.time_window?.start_ms) &&
+      Number.isInteger(evidenceBefore.data.time_window?.end_ms) &&
+      evidenceBefore.data.time_window.end_ms > evidenceBefore.data.time_window.start_ms,
+    "EvidencePack must bind exact audio version, hashes, ASR window and unified root",
+    evidenceBefore
+  );
+
+  const reviewUrl = new URL(page.url());
+  reviewUrl.searchParams.set("audio_session_id", audioSessionId);
+  reviewUrl.searchParams.set("review_task_id", reviewTaskId);
+  reviewUrl.searchParams.set("root_trace_id", rootTraceId);
+  await page.goto(reviewUrl.toString(), { waitUntil: "domcontentloaded" });
+  const reviewRestoreOutcome = page.locator(
+    [
+      '[data-testid="listening-evidence-mode"]',
+      '[data-testid="listening-simple-mode"]',
+      '[data-testid="listening-matrix-mode"]',
+      '[data-testid="listening-read-error"]',
+      '[data-testid="listening-read-empty"]',
+      '[data-testid="listening-read-complete"]',
+      '[data-testid="listening-module-load-error"]',
+      '[data-testid="listening-evidence-mode-error"]'
+    ].join(", ")
+  ).first();
+  try {
+    await reviewRestoreOutcome.waitFor({
+      state: "visible",
+      timeout: 20_000
+    });
+  } catch (error) {
+    assert(
+      false,
+      "refreshable review URL did not reach a terminal listening surface",
+      {
+        waitError: error instanceof Error ? error.message : String(error),
+        surface: await listeningSurfaceSnapshot(page),
+        pageErrors: pageErrors.slice(-10),
+        consoleErrors: consoleErrors.slice(-10)
+      }
+    );
+  }
+  const reviewRestoreTestId = await reviewRestoreOutcome.getAttribute("data-testid");
+  assert(
+    reviewRestoreTestId === "listening-evidence-mode",
+    "refreshable review URL must restore a ready authoritative read model",
+    {
+      reviewRestoreTestId,
+      detail: await reviewRestoreOutcome.textContent(),
+      surface: await listeningSurfaceSnapshot(page),
+      pageErrors: pageErrors.slice(-10),
+      consoleErrors: consoleErrors.slice(-10)
+    }
+  );
+  assert(
+    await page.locator(".listening-head").getAttribute("data-listening-task-id")
+      === reviewTaskId,
+    "refreshable review URL must restore the exact HumanReviewTask"
+  );
+  const authoritativeEditor = page.getByTestId("listening-authoritative-editor");
+  await authoritativeEditor.waitFor({ state: "visible", timeout: 20_000 });
+  const reviewAccessibility = await assertNoBlockingAxeViolations(page, {
+    context: "main",
+    label: "真实音频证据人审工作台"
+  });
+  assert(
+    await authoritativeEditor.getAttribute("data-review-task-id") === reviewTaskId
+      && await authoritativeEditor.getAttribute("data-root-trace-id") === rootTraceId,
+    "production evidence editor must bind the exact HumanReviewTask and business root",
+    {
+      reviewTaskId: await authoritativeEditor.getAttribute("data-review-task-id"),
+      rootTraceId: await authoritativeEditor.getAttribute("data-root-trace-id")
+    }
+  );
+  const boundaryStartInput = authoritativeEditor.getByLabel("开始（毫秒）");
+  const boundaryEndInput = authoritativeEditor.getByLabel("结束（毫秒）");
+  assert(
+    Number(await boundaryStartInput.inputValue()) ===
+      evidenceBefore.data.time_window.start_ms
+      && Number(await boundaryEndInput.inputValue()) ===
+        evidenceBefore.data.time_window.end_ms,
+    "production boundary editor must initialize from the strong EvidencePack time window",
+    {
+      expected: evidenceBefore.data.time_window,
+      actual: {
+        start_ms: await boundaryStartInput.inputValue(),
+        end_ms: await boundaryEndInput.inputValue()
+      }
+    }
+  );
+  const reviewResponseSequence = [];
+  const reviewRequestSequence = [];
+  const collectReviewRequest = (request) => {
+    const url = new URL(request.url());
+    if (
+      url.pathname.startsWith("/api/v1/human-review-tasks")
+      || url.pathname.startsWith("/api/v1/human-review-decisions")
+      || url.pathname.startsWith("/api/v1/evidence-packs")
+    ) {
+      reviewRequestSequence.push({
+        method: request.method(),
+        path: url.pathname,
+        query: url.search
+      });
+    }
+  };
+  const collectReviewResponse = (response) => {
+    const url = new URL(response.url());
+    if (
+      url.pathname.startsWith("/api/v1/human-review-tasks")
+      || url.pathname.startsWith("/api/v1/human-review-decisions")
+      || url.pathname.startsWith("/api/v1/evidence-packs")
+    ) {
+      reviewResponseSequence.push({
+        method: response.request().method(),
+        path: url.pathname,
+        status: response.status()
+      });
+    }
+  };
+  page.on("request", collectReviewRequest);
+  page.on("response", collectReviewResponse);
+
+  await page.getByRole("button", { name: "标记主录音", exact: true }).click();
+  const lowConfidenceReviewButton = authoritativeEditor.getByRole("button", {
+    name: "低置信覆盖 low_confidence",
+    exact: true,
+  });
+  await lowConfidenceReviewButton.click();
+  assert(
+    (await lowConfidenceReviewButton.getAttribute("aria-pressed")) === "true",
+    "低置信修订未进入待提交状态"
+  );
+  await authoritativeEditor
+    .getByRole("button", { name: "加入边界修订", exact: true })
+    .click();
+  await authoritativeEditor
+    .getByRole("button", { name: "边界修订待提交", exact: true })
+    .waitFor({ state: "visible", timeout: 5_000 });
+  const submitReviewButton = page.getByRole("button", {
+    name: "提交决定并进入下一通",
+    exact: true
+  });
+  await submitReviewButton.scrollIntoViewIfNeeded();
+  await submitReviewButton.waitFor({ state: "visible", timeout: 5_000 });
+  assert(
+    await submitReviewButton.isEnabled(),
+    "structured review CTA must be enabled for a strongly bound pending task",
+    {
+      reviewTaskId,
+      buttonText: await submitReviewButton.textContent(),
+      surface: await listeningSurfaceSnapshot(page)
+    }
+  );
+  const decisionResponseResultPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/human-review-tasks/${encodeURIComponent(reviewTaskId)}/decisions` &&
+      response.request().method() === "POST",
+    { timeout: 30_000 }
+  ).then(
+    (response) => ({ response, error: null }),
+    (error) => ({ response: null, error })
+  );
+  const nextQueueResponseResultPromise = page.waitForResponse(
+    (response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/v1/human-review-tasks"
+        && url.searchParams.get("status") === "pending"
+        && url.searchParams.get("queue") === "audio_evidence_review"
+        && response.request().method() === "GET"
+      );
+    },
+    { timeout: 30_000 }
+  ).then(
+    (response) => ({ response, error: null }),
+    (error) => ({ response: null, error })
+  );
+  const clickReviewResultPromise = submitReviewButton.click({
+    timeout: 10_000
+  }).then(
+    () => ({ clicked: true, error: null }),
+    (error) => ({ clicked: false, error })
+  );
+  const [
+    decisionResponseResult,
+    clickReviewResult
+  ] = await Promise.all([
+    decisionResponseResultPromise,
+    clickReviewResultPromise
+  ]);
+  let nextQueueResponseResult = { response: null, error: null };
+  const decisionResponseJson = decisionResponseResult.response
+    ? await decisionResponseResult.response.json().catch(() => ({}))
+    : {};
+  const reviewSubmitDiagnostics = async () => ({
+    clickError: clickReviewResult.error instanceof Error
+      ? clickReviewResult.error.message
+      : String(clickReviewResult.error || ""),
+    decisionWaitError: decisionResponseResult.error instanceof Error
+      ? decisionResponseResult.error.message
+      : String(decisionResponseResult.error || ""),
+    nextQueueWaitError: nextQueueResponseResult.error instanceof Error
+      ? nextQueueResponseResult.error.message
+      : String(nextQueueResponseResult.error || ""),
+    decisionStatus: decisionResponseResult.response?.status() ?? null,
+    decisionBody: decisionResponseJson,
+    buttonEnabled: await submitReviewButton.isEnabled().catch(() => false),
+    notice: await page.locator(".listening-operation-toast").textContent().catch(() => ""),
+    reviewRequestSequence,
+    reviewResponseSequence,
+    surface: await listeningSurfaceSnapshot(page),
+    pageErrors: pageErrors.slice(-10),
+    consoleErrors: consoleErrors.slice(-10)
+  });
+  assert(
+    clickReviewResult.clicked && decisionResponseResult.response,
+    "structured review CTA must issue the HumanReviewDecision POST",
+    await reviewSubmitDiagnostics()
+  );
+  assert(
+    decisionResponseResult.response.ok(),
+    "HumanReviewDecision POST must pass the strong request contract",
+    await reviewSubmitDiagnostics()
+  );
+  nextQueueResponseResult = await nextQueueResponseResultPromise;
+  assert(
+    nextQueueResponseResult.response,
+    "successful HumanReviewDecision readback must re-query the server-side pending queue",
+    await reviewSubmitDiagnostics()
+  );
+  const decisionResponse = decisionResponseResult.response;
+  const submittedDecision = decisionResponse.request().postDataJSON();
+  assert(
+    submittedDecision?.decision === "modified"
+      && submittedDecision?.changes?.some(
+        (change) =>
+          change.target_type === "evidence_pack"
+          && change.target_id === evidencePackId
+          && change.fields?.recording_disposition === "main"
+          && change.fields?.low_confidence === true
+      )
+      && submittedDecision?.changes?.some(
+        (change) =>
+          change.target_type === "conversation_boundary"
+          && change.fields?.start_ms === evidenceBefore.data.time_window.start_ms
+          && change.fields?.end_ms === evidenceBefore.data.time_window.end_ms
+      ),
+    "production editor must submit recording, confidence and boundary revisions in one HumanReviewDecision",
+    submittedDecision
+  );
+  const decision = expectEnvelope(
+    {
+      status: decisionResponse.status(),
+      json: decisionResponseJson
+    },
+    "submit structured audio evidence human decision",
+    200
+  );
+  const nextQueueResponse = nextQueueResponseResult.response;
+  page.off("request", collectReviewRequest);
+  page.off("response", collectReviewResponse);
+  const nextQueueResponseJson = await nextQueueResponse.json().catch(() => ({}));
+  const nextReviewTaskFromUi = nextQueueResponseJson?.data?.items?.[0] || null;
+  const nextReviewTaskIdFromUi =
+    nextReviewTaskFromUi?.review_task_id || nextReviewTaskFromUi?.id;
+  const nextAudioSessionIdFromUi = nextReviewTaskFromUi?.audio_session_id;
+  const nextRootTraceIdFromUi = nextReviewTaskFromUi?.root_trace_id;
+  assert(
+    nextReviewTaskIdFromUi
+      && nextAudioSessionIdFromUi
+      && nextRootTraceIdFromUi,
+    "real browser review E2E requires a strongly bound next pending call",
+    nextQueueResponseJson
+  );
+  await page.waitForFunction(
+    ({ audioSessionId: nextSession, reviewTaskId: nextTask, rootTraceId: nextRoot }) => {
+      const query = new URL(window.location.href).searchParams;
+      return (
+        query.get("audio_session_id") === nextSession
+        && query.get("review_task_id") === nextTask
+        && query.get("root_trace_id") === nextRoot
+      );
+    },
+    {
+      audioSessionId: nextAudioSessionIdFromUi,
+      reviewTaskId: nextReviewTaskIdFromUi,
+      rootTraceId: nextRootTraceIdFromUi
+    },
+    { timeout: 20_000 }
+  );
+  const reviewTechnicalDetails = page.getByTestId(
+    "listening-review-technical-details"
+  );
+  await reviewTechnicalDetails.waitFor({ state: "visible", timeout: 20_000 });
+  const reviewTechnicalDetailsText = await reviewTechnicalDetails.textContent();
+  const receiptCallbackRefs = (decision.data.affected_objects || []).filter(
+    (item) => item?.type === "platform_callback"
+  );
+  assert(
+    (decision.data.affected_objects || []).every(
+      (item) =>
+        reviewTechnicalDetailsText?.includes(item.id)
+        && reviewTechnicalDetailsText?.includes(item.readback_url)
+    )
+      && receiptCallbackRefs.every(
+        (item) => reviewTechnicalDetailsText?.includes("平台回写")
+      ),
+    "review technical details must expose every receipt object and callback readback URL",
+    {
+      reviewTechnicalDetailsText,
+      affectedObjects: decision.data.affected_objects
+    }
+  );
+  const traceReadResponsePromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname ===
+        `/api/v1/traces/${encodeURIComponent(rootTraceId)}` &&
+      response.request().method() === "GET",
+    { timeout: 20_000 }
+  );
+  const traceButton = page.getByTestId("listening-view-trace");
+  await traceButton.waitFor({ state: "visible", timeout: 20_000 });
+  await traceButton.click();
+  const traceReadResponse = await traceReadResponsePromise;
+  const traceReadResponseJson = await traceReadResponse.json().catch(() => ({}));
+  const traceReadback = expectEnvelope(
+    {
+      status: traceReadResponse.status(),
+      json: traceReadResponseJson
+    },
+    "read human review business root Trace from the listening UI",
+    200
+  );
+  assert(
+    traceReadback.data.trace_id === rootTraceId,
+    "human review success must expose the business root Trace, not the HTTP action trace"
+  );
+  await page
+    .locator(".listening-operation-toast")
+    .filter({ hasText: rootTraceId })
+    .waitFor({ state: "visible", timeout: 20_000 });
+  await page.reload({ waitUntil: "domcontentloaded" });
+  await page.getByTestId("listening-evidence-mode").waitFor({
+    state: "visible",
+    timeout: 20_000
+  });
+  assert(
+    new URL(page.url()).searchParams.get("audio_session_id")
+      === nextAudioSessionIdFromUi
+      && new URL(page.url()).searchParams.get("review_task_id")
+        === nextReviewTaskIdFromUi
+      && new URL(page.url()).searchParams.get("root_trace_id")
+        === nextRootTraceIdFromUi
+      && await page.locator(".listening-head").getAttribute("data-listening-task-id")
+        === nextReviewTaskIdFromUi,
+    "next-call URL intent must restore audio_session_id, review_task_id and root_trace_id after refresh",
+    { pageUrl: page.url(), nextReviewTaskFromUi }
+  );
+  assert(
+    decision.data.decision === "modified" &&
+      decision.data.status === "success" &&
+      decision.data.root_trace_id === rootTraceId &&
+      decision.data.resource_id === decision.data.decision_id &&
+      decision.data.readback_url ===
+        `/api/v1/human-review-tasks/${encodeURIComponent(reviewTaskId)}` &&
+      Array.isArray(decision.data.readback_urls) &&
+      decision.data.readback_urls.includes(
+        `/api/v1/evidence-packs/${encodeURIComponent(evidencePackId)}`
+      ) &&
+      decision.data.next_actions?.some(
+        (action) =>
+          action?.key === "next_review" &&
+          action?.route?.includes("status=pending") &&
+          action?.route?.includes("queue=audio_evidence_review")
+      ),
+    "human decision receipt must expose authoritative readback and server queue actions",
+    decision
+  );
+  const affectedObjects = decision.data.affected_objects || [];
+  assert(
+    affectedObjects.length >= 3
+      && affectedObjects.every(
+        (item) =>
+          typeof item?.type === "string"
+          && typeof item?.id === "string"
+          && typeof item?.readback_url === "string"
+          && item.readback_url.startsWith(
+            `/api/v1/human-review-decisions/${encodeURIComponent(decision.data.decision_id)}/affected-objects/`
+          )
+      ),
+    "every affected object must expose a decision-scoped readback URL",
+    affectedObjects
+  );
+  const nextQueueSequenceIndex = reviewResponseSequence.findIndex(
+    (item) => item.path === "/api/v1/human-review-tasks"
+  );
+  assert(
+    nextQueueSequenceIndex >= 0
+      && affectedObjects.every((affectedObject) => {
+        const readbackIndex = reviewResponseSequence.findIndex(
+          (item) =>
+            item.path === affectedObject.readback_url
+            && item.status === 200
+        );
+        return readbackIndex >= 0 && readbackIndex < nextQueueSequenceIndex;
+      }),
+    "the UI must GET every receipt affected object successfully before querying the next call",
+    { affectedObjects, reviewResponseSequence }
+  );
+  const affectedReadbacks = await Promise.all(
+    affectedObjects.map(async (affectedObject) => {
+      const readback = expectEnvelope(
+        await browserApi(page, affectedObject.readback_url),
+        `read affected object ${affectedObject.type}:${affectedObject.id}`,
+        200
+      );
+      assert(
+        readback.data.type === affectedObject.type
+          && readback.data.id === affectedObject.id
+          && readback.data.review_decision_id === decision.data.decision_id
+          && readback.data.root_trace_id === rootTraceId
+          && readback.data.resource
+          && (
+            affectedObject.resource_version === undefined
+            || (
+              affectedObject.type === "platform_callback"
+                ? readback.data.resource_version >= affectedObject.resource_version
+                : readback.data.resource_version === affectedObject.resource_version
+            )
+          ),
+        "affected object readback must match receipt identity, decision, root and version",
+        { affectedObject, readback }
+      );
+      return readback.data;
+    })
+  );
+
+  const taskAfter = expectEnvelope(
+    await browserApi(page, decision.data.readback_url),
+    "read back decided HumanReviewTask",
+    200
+  );
+  const evidenceAfter = expectEnvelope(
+    await browserApi(page, `/api/v1/evidence-packs/${encodeURIComponent(evidencePackId)}`),
+    "read back reviewed EvidencePack",
+    200
+  );
+  const affectedTypes = new Set(
+    affectedObjects.map((item) => `${item?.type}:${item?.id}`)
+  );
+  const submittedBoundaryChange = submittedDecision?.changes?.find(
+    (change) => change.target_type === "conversation_boundary"
+  );
+  const boundaryReadback = affectedReadbacks.find(
+    (item) =>
+      item.type === "conversation_boundary"
+      && item.id === submittedBoundaryChange?.target_id
+  );
+  assert(
+    taskAfter.data.review_task_id === reviewTaskId &&
+      taskAfter.data.status === "success" &&
+      taskAfter.data.decision_id === decision.data.decision_id &&
+      taskAfter.data.decision === "modified" &&
+      evidenceAfter.data.evidence_pack_id === evidencePackId &&
+      evidenceAfter.data.review_overrides?.recording_disposition === "main" &&
+      evidenceAfter.data.review_overrides?.low_confidence === true &&
+      evidenceAfter.data.review_decision_id === decision.data.decision_id &&
+      evidenceAfter.data.evidence_sha256 === evidenceBefore.data.evidence_sha256 &&
+      boundaryReadback?.resource?.start_ms ===
+        evidenceBefore.data.time_window.start_ms &&
+      boundaryReadback?.resource?.end_ms ===
+        evidenceBefore.data.time_window.end_ms &&
+      affectedTypes.has(`evidence_pack:${evidencePackId}`) &&
+      affectedTypes.has(`human_review_decision:${decision.data.decision_id}`),
+    "human decision must be written, read back, and keep the immutable evidence hash",
+    { decision, taskAfter, evidenceBefore, evidenceAfter }
+  );
+
+  const nextQueue = expectEnvelope(
+    await browserApi(
+      page,
+      "/api/v1/human-review-tasks?status=pending&queue=audio_evidence_review&limit=100"
+    ),
+    "query the next audio evidence review task from the server",
+    200
+  );
+  assert(
+    Array.isArray(nextQueue.data.items) &&
+      !nextQueue.data.items.some(
+        (item) => (item?.review_task_id || item?.id) === reviewTaskId
+      ),
+    "decided review task must not remain in the server pending queue",
+    nextQueue
+  );
+  const nextReviewTask = nextQueue.data.items[0] || null;
+  assert(
+    (nextReviewTask?.review_task_id || nextReviewTask?.id) === nextReviewTaskIdFromUi,
+    "post-decision server queue must agree with the next call restored by the browser URL",
+    { nextReviewTask, nextReviewTaskFromUi }
+  );
+  const trace = expectEnvelope(
+    await browserApi(page, `/api/v1/traces/${encodeURIComponent(rootTraceId)}`),
+    "read the full import-to-review root trace",
+    200
+  );
+  const traceNodeIds = new Set((trace.data.nodes || []).map((node) => node.node_id));
+  const traceNodeKinds = new Set((trace.data.nodes || []).map((node) => node.kind));
+  const requiredTraceNodeIds = [
+    `import_batch:${audioImportClosedLoop.importBatchId}`,
+    `audio_session:${audioSessionId}`,
+    `run:${intelligenceRunId}`,
+    `evidence_pack:${evidencePackId}`,
+    `human_review_task:${reviewTaskId}`,
+    `human_review_decision:${decision.data.decision_id}`
+  ];
+  const requiredStrongTraceKinds = [
+    "import_item",
+    "storage_object",
+    "audio_recording",
+    "asr_result"
+  ];
+  const callbackRefs = affectedObjects.filter(
+    (item) => item.type === "platform_callback"
+  );
+  const outputSinkRefs = Array.isArray(evidenceBefore.data.output_sink_refs)
+    ? evidenceBefore.data.output_sink_refs
+    : [];
+  if (outputSinkRefs.length > 0) {
+    assert(
+      callbackRefs.length === outputSinkRefs.length
+        && callbackRefs.every((item) => traceNodeIds.has(`run:${item.id}`))
+        && (trace.data.nodes || []).filter(
+          (node) => node.kind === "callback_receipt"
+        ).length >= callbackRefs.length,
+      "an output-sink-bound review must include callback runs and receipts in the unified trace",
+      { outputSinkRefs, callbackRefs, trace: trace.data.nodes }
+    );
+  }
+  assert(
+    trace.data.trace_id === rootTraceId &&
+      requiredTraceNodeIds.every((nodeId) => traceNodeIds.has(nodeId)) &&
+      requiredStrongTraceKinds.every((kind) => traceNodeKinds.has(kind)) &&
+      Array.isArray(trace.data.edges) &&
+      trace.data.edges.every(
+        (edge) =>
+          traceNodeIds.has(edge.source_node_id) &&
+          traceNodeIds.has(edge.target_node_id)
+      ),
+    "unified trace must join import, session, intelligence, evidence, decision and valid edges",
+    { requiredTraceNodeIds, requiredStrongTraceKinds, trace }
+  );
+
+  return {
+    audioSessionId,
+    rootTraceId,
+    intelligenceRunId,
+    intelligenceRunStatus: intelligenceRun.data.status,
+    evidencePackId,
+    evidenceStatus: evidenceBefore.data.status,
+    evidenceSha256: evidenceBefore.data.evidence_sha256,
+    audioSha256:
+      evidenceBefore.data.storage_object?.content_sha256 ||
+      evidenceBefore.data.audio_sha256,
+    storageObjectVersion:
+      evidenceBefore.data.storage_object?.version_id ||
+      evidenceBefore.data.storage_object_version,
+    asrResultId:
+      evidenceBefore.data.asr_result?.asr_result_id ||
+      evidenceBefore.data.asr_result_id,
+    reviewTaskId,
+    reviewQueue: reviewTask.queue,
+    reviewDecisionId: decision.data.decision_id,
+    reviewDecision: decision.data.decision,
+    reviewStatus: taskAfter.data.status,
+    decisionCurrentTraceId: decision.data.current_trace_id,
+    taskReadbackMatched: true,
+    evidenceReadbackMatched: true,
+    affectedObjectsReadBack: true,
+    affectedObjectReadbackCount: affectedReadbacks.length,
+    outputSinkBindings: outputSinkRefs.length,
+    callbackReadbacks: callbackRefs.length,
+    nextReviewTaskId:
+      nextReviewTask?.review_task_id || nextReviewTask?.id || null,
+    queueEmpty: nextReviewTask === null,
+    traceRootMatched: true,
+    traceNodeKinds: Array.from(
+      traceNodeKinds
+    ),
+    traceEdgeCount: trace.data.edges.length,
+    accessibility: reviewAccessibility,
+    noSeedSwitch: true
   };
 }
 
@@ -5567,43 +6491,26 @@ async function runListeningClosedLoopSmoke(page) {
     grantRequestCount
   };
 
-  const boundaryResponsePromise = page.waitForResponse(
-    (response) =>
-      response.url().includes("/api/v1/conversation-boundaries/boundary_s128_v1") &&
-      response.request().method() === "PATCH",
-    { timeout: 10000 }
+  const boundaryRevisionButton = page.locator("button").filter({ hasText: "修订边界" }).first();
+  assert(
+    await boundaryRevisionButton.isDisabled(),
+    "unbound conversation boundary must be disabled instead of bypassing HumanReviewDecision"
   );
-  await page.locator("button").filter({ hasText: "保存边界" }).first().click();
-  const boundaryResponse = await boundaryResponsePromise;
-  const boundaryJson = await boundaryResponse.json().catch(() => ({}));
-  assert(boundaryResponse.ok(), `boundary save expected 2xx, got ${boundaryResponse.status()}`, boundaryJson);
-  assert(boundaryJson?.meta?.trace_id, "boundary save missing trace id", boundaryJson);
+  assert(
+    (await boundaryRevisionButton.getAttribute("title"))?.includes("未绑定可修订的会话边界"),
+    "disabled boundary editor must explain the missing task binding"
+  );
 
   const receptionPanel = page.locator(".reception-link-panel").first();
   await receptionPanel.waitFor({ state: "visible", timeout: 10000 });
   await receptionPanel.locator("button").filter({ hasText: "定位证据" }).first().click();
   await page.locator(".reception-evidence-locator").waitFor({ state: "visible", timeout: 10000 });
-  const eventLinkResponsePromise = page.waitForResponse(
-    (response) =>
-      response.url().includes("/api/v1/event-links/event_quote_122718") &&
-      response.request().method() === "PATCH",
-    { timeout: 10000 }
+  await page.locator(".reception-evidence-locator button").filter({ hasText: "确认并加入决定" }).first().click();
+  await assertBodyText(
+    page,
+    "已加入当前决定",
+    "EventLink revision should be staged in the current HumanReviewDecision"
   );
-  await page.locator(".reception-evidence-locator button").filter({ hasText: "确认并写入关联" }).first().click();
-  const eventLinkResponse = await eventLinkResponsePromise;
-  const eventLinkJson = await eventLinkResponse.json().catch(() => ({}));
-  assert(eventLinkResponse.ok(), `event link expected 2xx, got ${eventLinkResponse.status()}`, eventLinkJson);
-  assert(eventLinkJson?.data?.id === "event_quote_122718", "event link should update the seeded relation", eventLinkJson);
-  assert(eventLinkJson?.meta?.trace_id, "event link missing trace id", eventLinkJson);
-  const eventLinkDetail = expectEnvelope(
-    await serverApi("/api/v1/event-links/event_quote_122718"),
-    "patched event link detail",
-    200
-  );
-  assert(eventLinkDetail.data.status === "success", "patched event link should be successful", eventLinkDetail);
-  assert(eventLinkDetail.data.relation_state === "confirmed", "patched event link should be confirmed", eventLinkDetail);
-  assert(eventLinkDetail.data.evidence_window, "patched event link should keep the evidence window", eventLinkDetail);
-  await assertBodyText(page, "已写入关联资产", "reception link UI should show backend write feedback");
 
   const annotationRegion = page.locator(".tk-cv .rg").filter({ hasText: "金额冲突" }).first();
   await annotationRegion.scrollIntoViewIfNeeded({ timeout: 10000 });
@@ -5722,11 +6629,57 @@ async function runListeningClosedLoopSmoke(page) {
       response.request().method() === "POST",
     { timeout: 10000 }
   );
-  await page.locator("button").filter({ hasText: "确认 & 下一通" }).first().click();
+  const taskReadbackPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/human-review-tasks/hrt_amount_001" &&
+      response.request().method() === "GET",
+    { timeout: 10000 }
+  );
+  const evidenceReadbackPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/evidence-packs/AF-128" &&
+      response.request().method() === "GET",
+    { timeout: 10000 }
+  );
+  const eventLinkReadbackPromise = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/v1/event-links/event_quote_122718" &&
+      response.request().method() === "GET",
+    { timeout: 10000 }
+  );
+  const nextQueuePromise = page.waitForResponse(
+    (response) => {
+      const url = new URL(response.url());
+      return (
+        url.pathname === "/api/v1/human-review-tasks" &&
+        url.searchParams.get("status") === "pending" &&
+        url.searchParams.get("queue") === "amount_conflict" &&
+        response.request().method() === "GET"
+      );
+    },
+    { timeout: 10000 }
+  );
+  await page.locator("button").filter({ hasText: "提交决定并进入下一通" }).first().click();
   const decisionResponse = await decisionResponsePromise;
   const decisionJson = await decisionResponse.json().catch(() => ({}));
   assert(decisionResponse.ok(), `human review decision expected 2xx, got ${decisionResponse.status()}`, decisionJson);
-  assert(decisionJson?.data?.id === "hrt_amount_001", "human review decision should target current task", decisionJson);
+  assert(
+    decisionJson?.data?.resource_id === decisionJson?.data?.decision_id,
+    "human review decision should expose its immutable resource id",
+    decisionJson
+  );
+  const submittedDecision = decisionResponse.request().postDataJSON();
+  assert(submittedDecision?.decision === "modified", "staged EventLink revision must submit a modified decision", submittedDecision);
+  assert(
+    submittedDecision?.changes?.some(
+      (change) =>
+        change.target_type === "event_link" &&
+        change.target_id === "event_quote_122718" &&
+        change.fields?.evidence_window
+    ),
+    "EventLink revision must be part of HumanReviewDecisionRequest.changes",
+    submittedDecision
+  );
   assert(
     (decisionJson?.data?.affected_objects || []).some(
       (item) => item.type === "label_candidate" && item.id === "cand_af128_amount_conflict"
@@ -5743,7 +6696,38 @@ async function runListeningClosedLoopSmoke(page) {
   );
   assert(decisionJson?.meta?.trace_id, "human review decision missing trace id", decisionJson);
   assert(decisionJson?.data?.decision_id, "human review decision missing immutable decision id", decisionJson);
-  await assertBodyText(page, "已确认并进入下一通", "listening UI should show backend decision feedback");
+  const [taskReadback, evidenceReadback, eventLinkReadback, nextQueueReadback] = await Promise.all([
+    taskReadbackPromise,
+    evidenceReadbackPromise,
+    eventLinkReadbackPromise,
+    nextQueuePromise
+  ]);
+  const taskReadbackJson = await taskReadback.json();
+  const evidenceReadbackJson = await evidenceReadback.json();
+  const eventLinkReadbackJson = await eventLinkReadback.json();
+  const nextQueueJson = await nextQueueReadback.json();
+  assert(
+    taskReadbackJson?.data?.decision_id === decisionJson.data.decision_id,
+    "HumanReviewTask readback must match the submitted decision",
+    taskReadbackJson
+  );
+  assert(
+    evidenceReadbackJson?.data?.review_decision_id === decisionJson.data.decision_id,
+    "EvidencePack readback must match the submitted decision",
+    evidenceReadbackJson
+  );
+  assert(
+    eventLinkReadbackJson?.data?.review_decision_id === decisionJson.data.decision_id &&
+      eventLinkReadbackJson?.data?.relation_state === "modified" &&
+      eventLinkReadbackJson?.data?.evidence_window,
+    "EventLink readback must expose the staged fields and decision",
+    eventLinkReadbackJson
+  );
+  assert(nextQueueJson?.data?.items?.length === 0, "current pending queue should be empty after the decision", nextQueueJson);
+  await page.getByTestId("listening-read-complete").waitFor({ state: "visible", timeout: 10000 });
+  await assertBodyText(page, "当前队列复核完成", "empty server queue should render an explicit completion state");
+  await page.getByRole("button", { name: "查看其他待审队列" }).click();
+  await page.locator(".listening-head").waitFor({ state: "visible", timeout: 10000 });
 
   const appealTrigger = page.locator("button").filter({ hasText: "提出申诉" }).first();
   await appealTrigger.waitFor({ state: "visible", timeout: 8000 });
@@ -5797,12 +6781,11 @@ async function runListeningClosedLoopSmoke(page) {
   return {
     recording,
     boundary: {
-      id: boundaryJson.data?.id,
-      traceId: boundaryJson.meta?.trace_id
+      status: "blocked_unbound"
     },
     eventLink: {
-      id: eventLinkJson.data?.id,
-      traceId: eventLinkJson.meta?.trace_id
+      id: eventLinkReadbackJson.data?.id ?? eventLinkReadbackJson.data?.event_link_id,
+      traceId: eventLinkReadbackJson.meta?.trace_id
     },
     annotation: {
       id: annotationId,
@@ -5811,7 +6794,7 @@ async function runListeningClosedLoopSmoke(page) {
       submissionTraceId: annotationSubmissionJson.meta?.trace_id
     },
     decision: {
-      id: decisionJson.data?.id,
+      id: decisionJson.data?.resource_id ?? decisionJson.data?.decision_id,
       decisionId: decisionJson.data?.decision_id,
       traceId: decisionJson.meta?.trace_id
     },
@@ -7478,6 +8461,12 @@ try {
       "focused audio import E2E cannot skip or fake the real ImportBatch terminal state",
       audioImportClosedLoop
     );
+    enterArtifactStage("audio-import-only:intelligence-evidence-review-trace");
+    const audioIntelligenceReviewClosedLoop =
+      await runImportedAudioIntelligenceReviewClosedLoop(
+        page,
+        audioImportClosedLoop
+      );
     const tenantAudioImportPull = await runTenantAudioImportPullSmoke(
       page,
       audioImportClosedLoop
@@ -7490,7 +8479,7 @@ try {
       { tenantAudioImportPull, audioImportClosedLoop }
     );
     const result = {
-      schema_version: "auris.audio-import-browser-e2e.v1",
+      schema_version: "auris.audio-import-browser-e2e.v2",
       status: "ok",
       stage: "completed",
       mode: "audio-import-only",
@@ -7501,11 +8490,13 @@ try {
       executionProfile: {
         realStack: true,
         platformSource: "https",
+        inferenceProvider: "https",
         dagster: "real",
         objectStorage: "real",
         uiEvidencePolicy: "browser-clicks-and-bff-readback"
       },
       audioImportClosedLoop,
+      audioIntelligenceReviewClosedLoop,
       tenantAudioImportPull,
       consoleErrors,
       pageErrors,
@@ -7536,7 +8527,11 @@ try {
           artifactPath,
           taskRunId: audioImportClosedLoop.taskRunId,
           importBatchId: audioImportClosedLoop.importBatchId,
-          audioSessionId: audioImportClosedLoop.audioSessionId
+          audioSessionId: audioImportClosedLoop.audioSessionId,
+          intelligenceRunId: audioIntelligenceReviewClosedLoop.intelligenceRunId,
+          evidencePackId: audioIntelligenceReviewClosedLoop.evidencePackId,
+          reviewTaskId: audioIntelligenceReviewClosedLoop.reviewTaskId,
+          reviewDecisionId: audioIntelligenceReviewClosedLoop.reviewDecisionId
         },
         null,
         2
@@ -7748,7 +8743,9 @@ try {
         importBatchId: audioImportClosedLoop.importBatchId,
         audioSessionId: audioImportClosedLoop.audioSessionId,
         executionMode: audioImportClosedLoop.executionMode,
-        playbackStatus: audioImportClosedLoop.playbackStatus
+        playbackStatus: audioImportClosedLoop.playbackStatus,
+        playbackUiBound: audioImportClosedLoop.playbackUiBound,
+        playbackRangeVerified: audioImportClosedLoop.playbackRangeVerified
       };
 
   coreFlows.knowledgeSync = runReceipt(
@@ -7980,7 +8977,9 @@ try {
                   importBatchId: audioImportClosedLoop.importBatchId,
                   audioSessionId: audioImportClosedLoop.audioSessionId,
                   executionMode: audioImportClosedLoop.executionMode,
-                  playbackStatus: audioImportClosedLoop.playbackStatus
+                  playbackStatus: audioImportClosedLoop.playbackStatus,
+                  playbackUiBound: audioImportClosedLoop.playbackUiBound,
+                  playbackRangeVerified: audioImportClosedLoop.playbackRangeVerified
                 }
               )
             ]),
@@ -8017,7 +9016,6 @@ try {
         uiWrite("playbackGrant", `playback-grant:${listeningActions.recording.audioSessionId}`, listeningActions.recording.grantTraceId, {
           status: listeningActions.recording.grantState
         }),
-        uiWrite("boundary", listeningActions.boundary.id, listeningActions.boundary.traceId),
         uiWrite("eventLink", listeningActions.eventLink.id, listeningActions.eventLink.traceId),
         uiWrite("annotation", listeningActions.annotation.id, listeningActions.annotation.traceId),
         uiWrite(
@@ -8384,7 +9382,7 @@ try {
   );
   }
 } catch (error) {
-  writeFailedArtifact(error, {
+  const diagnostics = {
     consoleErrors,
     expectedConsoleErrors,
     pageErrors,
@@ -8392,7 +9390,24 @@ try {
     expectedRequestFailures,
     expectedFailedResponses,
     failedResponses
-  });
+  };
+  writeFailedArtifact(error, diagnostics);
+  console.error(
+    JSON.stringify(
+      {
+        status: "failed",
+        stage: artifactStage,
+        error: {
+          name: error instanceof Error ? error.name : "Error",
+          message: error instanceof Error ? error.message : String(error),
+          detail: error instanceof Error ? serializableErrorDetail(error.detail) : undefined
+        },
+        diagnostics
+      },
+      null,
+      2
+    )
+  );
   throw error;
 } finally {
   await browser.close();

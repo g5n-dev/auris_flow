@@ -6,7 +6,7 @@ import type { TrackEditorModel } from "./trackEditorModel";
 import type { WaveformPanelProps } from "./waveformPanelTypes";
 
 export function createTrackEditorActions(context: TrackEditorModel) {
-  const { activeSegment, activeTrack, allTracks, draftAnnotation, layerKindName, layerLevelConfig, layerName, layerTag, layerType, setActiveSegmentIndex, setActiveTrack, setAnnotations, setCreateFeedback, setCustomLayers, setDraftAnnotation, setHiddenTags, setHiddenTracks, setLastCreatedAnnotationId, setLayerFormOpen, setLayerLevelKey, setLayerName, setLayerTag, setLayerType, setSelectedRegion } = context;
+  const { activeSegment, activeTrack, allTracks, draftAnnotation, labelCandidateIds, layerKindName, layerLevelConfig, layerName, layerTag, layerType, onReviewChange, setActiveSegmentIndex, setActiveTrack, setAnnotations, setCreateFeedback, setCustomLayers, setDraftAnnotation, setHiddenTags, setHiddenTracks, setLastCreatedAnnotationId, setLayerFormOpen, setLayerLevelKey, setLayerName, setLayerTag, setLayerType, setSelectedRegion } = context;
   const toggleTrack = (track: string) => {
       setHiddenTracks((current) => {
         const nextHidden = !current[track];
@@ -44,6 +44,11 @@ export function createTrackEditorActions(context: TrackEditorModel) {
 
   const createAnnotation = (labelInput = draftAnnotation) => {
       const label = labelInput.trim();
+      const labelCandidateId = labelCandidateIds[0];
+      if (!labelCandidateId) {
+        setCreateFeedback("当前任务未绑定可修订的标签候选");
+        return;
+      }
       if (!label) {
         setCreateFeedback("请输入标签名称后再创建");
         return;
@@ -65,9 +70,22 @@ export function createTrackEditorActions(context: TrackEditorModel) {
       setCreateFeedback(`已创建：${label} · ${percentToClock(activeSegment.left)}-${percentToClock(activeSegment.left + nextWidth)}`);
       setHiddenTracks((current) => ({ ...current, [activeTrack]: false }));
       setDraftAnnotation("");
+      onReviewChange({
+        target_type: "label_candidate",
+        target_id: labelCandidateId,
+        fields: {
+          value: label,
+          confidence: 1
+        }
+      });
     };
 
   const createLayer = () => {
+      const labelCandidateId = labelCandidateIds[0];
+      if (!labelCandidateId) {
+        setCreateFeedback("当前任务未绑定可修订的标签候选");
+        return;
+      }
       const label = (layerName.trim() || layerTag).slice(0, 18);
       const key = `custom-${Date.now()}`;
       const config = layerLevelConfig;
@@ -100,6 +118,14 @@ export function createTrackEditorActions(context: TrackEditorModel) {
       setSelectedRegion(id);
       setCreateFeedback(`已创建${layerKindName}：${label} / ${layerTag}`);
       setLayerFormOpen(false);
+      onReviewChange({
+        target_type: "label_candidate",
+        target_id: labelCandidateId,
+        fields: {
+          value: layerTag,
+          confidence: 1
+        }
+      });
     };
 
   const moveSegment = (direction: "prev" | "next") => {

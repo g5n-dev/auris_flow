@@ -3,7 +3,10 @@ import { listeningDeviceBadges, reviewQueueMockData } from "../../fixtures/evide
 import type { ReviewSample } from "../../fixtures/reviewSamples";
 import { getReviewQueueMock } from "../../fixtures/reviewSamples";
 import type { EvidencePageConfig, ListeningDeviceKey, ListeningScope, MarkState, Mode, PanelTab } from "../../types";
+import type { HumanReviewChange } from "../../model/reviewDecisionModel";
+import { LABEL_DEMO_MODE } from "../../../../shared/runtime/demoMode";
 import { AnnotationToolbar, BadgeBar, IslandBar } from "./annotationControls";
+import { AuthoritativeEvidenceEditor } from "./AuthoritativeEvidenceEditor";
 import { AnnotationMinimap } from "./minimap/AnnotationMinimap";
 import { EvidencePanel } from "./panel/EvidencePanel";
 import { ReceptionLinkPanel } from "./ReceptionLinkPanel";
@@ -21,6 +24,9 @@ export function EvidenceMode(props: {
   setSelectedWindow: (value: string) => void;
   markState: MarkState;
   setMarkState: (state: MarkState) => void;
+  lowConfidence: boolean;
+  setLowConfidence: (value: boolean) => void;
+  onReviewChange: (change: HumanReviewChange) => void;
   selectedLabel: string;
   agentState: "pending" | "accepted" | "rejected";
   setAgentState: (state: "pending" | "accepted" | "rejected") => void;
@@ -40,10 +46,17 @@ export function EvidenceMode(props: {
   const [receptionLocatorOpen, setReceptionLocatorOpen] = useState(false);
   const [activeTrack, setActiveTrack] = useState<string>("entity");
   const [hiddenTracks, setHiddenTracks] = useState<Record<string, boolean>>({});
+  const demoEditorsEnabled = LABEL_DEMO_MODE;
+  const authoritativeEditorsEnabled =
+    !LABEL_DEMO_MODE &&
+    Boolean(props.sample.reviewTaskId && props.sample.rootTraceId);
+  const authoritativeEditorDisabledReason =
+    "当前 AudioSession 尚未同时绑定 HumanReviewTask、EvidencePack 和统一 root_trace_id，不能编辑或提交证据。";
   const activeQueueMock = getReviewQueueMock(props.sample.queue);
   const activeDevice = listeningDeviceBadges.find((device) => device.key === activeDeviceKey) ?? listeningDeviceBadges[0];
-  const showWaveformArea = props.pageConfig.modules.waveform || props.pageConfig.modules.tracks;
-  const showReceptionLink = props.pageConfig.modules.minimap;
+  const showWaveformArea = demoEditorsEnabled
+    && (props.pageConfig.modules.waveform || props.pageConfig.modules.tracks);
+  const showReceptionLink = demoEditorsEnabled && props.pageConfig.modules.minimap;
   const receptionLinkRow = showReceptionLink
     ? receptionLocatorOpen
       ? props.pageConfig.density === "compact"
@@ -55,19 +68,20 @@ export function EvidenceMode(props: {
     : null;
   const rows = [
     "38px",
-    props.pageConfig.modules.deviceBar ? "34px" : null,
-    props.pageConfig.modules.minimap ? (props.pageConfig.density === "compact" ? "192px" : "236px") : null,
+    !demoEditorsEnabled ? "minmax(520px, 1fr)" : null,
+    demoEditorsEnabled && props.pageConfig.modules.deviceBar ? "34px" : null,
+    demoEditorsEnabled && props.pageConfig.modules.minimap ? (props.pageConfig.density === "compact" ? "192px" : "236px") : null,
     receptionLinkRow,
-    props.pageConfig.modules.islands ? (props.pageConfig.density === "compact" ? "48px" : "52px") : null,
-    props.pageConfig.modules.waveform ? (props.pageConfig.density === "compact" ? "96px" : "112px") : null,
-    props.pageConfig.modules.tracks ? (props.pageConfig.density === "compact" ? "260px" : "310px") : null,
-    props.pageConfig.modules.transcript ? "minmax(0, 1fr)" : null,
+    demoEditorsEnabled && props.pageConfig.modules.islands ? (props.pageConfig.density === "compact" ? "48px" : "52px") : null,
+    demoEditorsEnabled && props.pageConfig.modules.waveform ? (props.pageConfig.density === "compact" ? "96px" : "112px") : null,
+    demoEditorsEnabled && props.pageConfig.modules.tracks ? (props.pageConfig.density === "compact" ? "260px" : "310px") : null,
+    demoEditorsEnabled && props.pageConfig.modules.transcript ? "minmax(0, 1fr)" : null,
     props.pageConfig.modules.spine ? "42px" : null
   ].filter(Boolean).join(" ");
   const gridColumns = [
-    props.pageConfig.showQueue ? "172px" : null,
+    demoEditorsEnabled && props.pageConfig.showQueue ? "172px" : null,
     "minmax(760px, 1fr)",
-    props.pageConfig.showRightPanel ? "336px" : null
+    demoEditorsEnabled && props.pageConfig.showRightPanel ? "336px" : null
   ].filter(Boolean).join(" ");
   const selectDeviceFocus = (deviceKey: ListeningDeviceKey) => {
     const nextDevice = listeningDeviceBadges.find((device) => device.key === deviceKey) ?? listeningDeviceBadges[0];
@@ -77,8 +91,12 @@ export function EvidenceMode(props: {
   };
 
   return (
-    <div className={`evidence-grid annotation-shell density-${props.pageConfig.density}`} style={{ gridTemplateColumns: gridColumns }}>
-      {props.pageConfig.showQueue && (
+    <div
+      className={`evidence-grid annotation-shell density-${props.pageConfig.density}`}
+      data-testid="listening-evidence-mode"
+      style={{ gridTemplateColumns: gridColumns }}
+    >
+      {demoEditorsEnabled && props.pageConfig.showQueue && (
         <aside className="queue-panel annotation-queue">
           <div className="panel-title">
             <span>复核队列</span>
@@ -107,11 +125,39 @@ export function EvidenceMode(props: {
 
       <section className="main-review annotation-main" style={{ gridTemplateRows: rows }}>
         <AnnotationToolbar sample={props.sample} />
-        {props.pageConfig.modules.deviceBar && (
+        {!demoEditorsEnabled && !authoritativeEditorsEnabled && (
+          <section
+            className="module-panel wide tenant-empty-state"
+            data-testid="listening-authoritative-editor-blocked"
+            role="status"
+          >
+            <strong>证据编辑器等待完整业务绑定</strong>
+            <span>{authoritativeEditorDisabledReason}</span>
+            <span>复杂波形、设备轨和切片坐标仍只在显式 DEMO 中展示。</span>
+            <button type="button" disabled title={authoritativeEditorDisabledReason}>
+              生产证据编辑暂不可用
+            </button>
+          </section>
+        )}
+        {authoritativeEditorsEnabled && (
+          <AuthoritativeEvidenceEditor
+            key={props.sample.id}
+            sample={props.sample}
+            markState={props.markState}
+            setMarkState={props.setMarkState}
+            lowConfidence={props.lowConfidence}
+            setLowConfidence={props.setLowConfidence}
+            onReviewChange={props.onReviewChange}
+          />
+        )}
+        {demoEditorsEnabled && props.pageConfig.modules.deviceBar && (
           <BadgeBar activeDeviceKey={activeDeviceKey} onSelectDevice={selectDeviceFocus} activeDevice={activeDevice} />
         )}
-        {props.pageConfig.modules.minimap && (
+        {demoEditorsEnabled && props.pageConfig.modules.minimap && (
           <AnnotationMinimap
+            audioSessionId={props.sample.sessionId}
+            boundaryId={props.sample.boundaryIds?.[0]}
+            onReviewChange={props.onReviewChange}
             selectedWindow={props.selectedWindow}
             setSelectedWindow={props.setSelectedWindow}
             activeTrack={activeTrack}
@@ -127,12 +173,13 @@ export function EvidenceMode(props: {
         {showReceptionLink && (
           <ReceptionLinkPanel
             sample={props.sample}
+            onReviewChange={props.onReviewChange}
             setSelectedWindow={props.setSelectedWindow}
             setPanelTab={props.setPanelTab}
             onLocatorOpenChange={setReceptionLocatorOpen}
           />
         )}
-        {props.pageConfig.modules.islands && (
+        {demoEditorsEnabled && props.pageConfig.modules.islands && (
           <IslandBar
             activeIsland={activeIsland}
             setActiveIsland={setActiveIsland}
@@ -143,6 +190,8 @@ export function EvidenceMode(props: {
         {showWaveformArea && (
           <WaveformPanel
             audioSessionId={props.sample.sessionId}
+            labelCandidateIds={props.sample.labelCandidateIds ?? []}
+            onReviewChange={props.onReviewChange}
             sessionStartedAt={props.sample.sessionStartedAt}
             showWaveform={props.pageConfig.modules.waveform}
             showTracks={props.pageConfig.modules.tracks}
@@ -152,11 +201,11 @@ export function EvidenceMode(props: {
             setHiddenTracks={setHiddenTracks}
           />
         )}
-        {props.pageConfig.modules.transcript && <AnnotationSplitView sample={props.sample} activeDevice={activeDevice} />}
+        {demoEditorsEnabled && props.pageConfig.modules.transcript && <AnnotationSplitView sample={props.sample} activeDevice={activeDevice} />}
         {props.pageConfig.modules.spine && (
           <AnnotationSpine
-            agentState={props.agentState}
-            setAgentState={props.setAgentState}
+            lowConfidence={props.lowConfidence}
+            setLowConfidence={props.setLowConfidence}
             sample={props.sample}
             completedCount={props.completedCount}
             onConfirmNext={props.onConfirmNext}
@@ -165,7 +214,7 @@ export function EvidenceMode(props: {
         )}
       </section>
 
-      {props.pageConfig.showRightPanel && (
+      {demoEditorsEnabled && props.pageConfig.showRightPanel && (
         <EvidencePanel
           panelTab={props.panelTab}
           setPanelTab={props.setPanelTab}

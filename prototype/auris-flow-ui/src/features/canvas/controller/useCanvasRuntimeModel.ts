@@ -11,14 +11,16 @@ import type { CanvasIntentKey, FlowStageKey } from "../types";
 import { useMemo } from "react";
 
 export function useCanvasRuntimeModel(scope: CanvasModuleProps & CanvasState & CanvasPrimitiveActions & CanvasRecoveryModel & CanvasSectionModel & CanvasScheduleModel & CanvasExecutionPlan) {
-  const { markTaskDraftDirty, setActiveIntentKey, setActiveStageKey, setDrawerTab, setExperimentMode, setNodeLibraryOpen, setSelectedCanvasVariantKey, setSelectedNodeId, setSelectedTaskTypeKey } = scope;
+  const { demoMode, markTaskDraftDirty, setActiveIntentKey, setActiveStageKey, setDrawerTab, setExperimentMode, setNodeLibraryOpen, setSelectedCanvasVariantKey, setSelectedNodeId, setSelectedTaskTypeKey } = scope;
   const nodeTemplateCategories = useMemo(
       () =>
         (["平台数据同步抽取", "智能处理流水线", "平台处理结果推送", "人工与控制"] as const).map((category) => ({
           category,
-          templates: canvasNodeTemplates.filter((template) => template.category === category)
+          templates: canvasNodeTemplates.filter(
+            (template) => template.category === category && (demoMode || !template.productionDisabled)
+          )
         })),
-      []
+      [demoMode]
     );
 
   const primaryNodeForIntent: Record<CanvasIntentKey, string> = {

@@ -14,6 +14,7 @@ from app.models import (
     ImportBatchItem,
     JsonResource,
     OutboxEvent,
+    RunCompletionReceipt,
     RunRecord,
     StorageObject,
 )
@@ -21,6 +22,7 @@ from app.services.audio_import_completion_service import (
     finalize_audio_import_batch_from_task_terminal,
 )
 from app.services.run_service import retry_payload_from_record
+from app.workers.outbox_worker import process_aggregate_events
 
 AUDIO_IMPORT_RESULT_SCHEMA = "auris-flow-audio-import-result-v1"
 AUDIO_IMPORT_EXECUTION_CONTRACT = "auris-flow-audio-import-v1"
@@ -478,11 +480,27 @@ def test_audio_import_completion_materializes_partial_batch_and_playable_session
     }
     completed = client.post(path, json=body, headers=headers)
     replayed = client.post(path, json=body, headers=headers)
+    replayed_with_new_key = client.post(
+        path,
+        json=body,
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "complete-audio-import-materialization-replay",
+        },
+    )
 
-    assert completed.status_code == replayed.status_code == 200, completed.text
-    assert completed.json() == replayed.json()
-    assert completed.json()["data"]["status"] == "success"
-    assert completed.json()["data"]["import_batch"]["status"] == "partial"
+    assert (
+        completed.status_code == replayed.status_code == replayed_with_new_key.status_code == 202
+    ), completed.text
+    assert replayed.json()["data"]["status"] == "completion_pending"
+    assert replayed.json()["data"]["receipt_state"] == "materializing"
+    assert replayed_with_new_key.json()["data"]["receipt_state"] == "materializing"
+    assert completed.json()["data"]["status"] == "completion_pending"
+    assert completed.json()["data"]["business_status"] == "materializing"
+    assert completed.json()["data"]["receipt_state"] == "materializing"
+    assert completed.json()["data"]["import_batch_id"] == (
+        "import_batch_completion_materialization"
+    )
     assert (
         next(
             action
@@ -492,7 +510,56 @@ def test_audio_import_completion_materializes_partial_batch_and_playable_session
         == f"traces/{root_trace_id}"
     )
 
-    imported_audio_session_id = ""
+    pending_run = client.get(f"/api/v1/task-runs/{run_id}", headers=auth_headers)
+    assert pending_run.status_code == 200
+    assert pending_run.json()["data"]["status"] == "completion_pending"
+    assert pending_run.json()["data"]["business_status"] == "materializing"
+    pending_batch = client.get(
+        "/api/v1/import-batches/import_batch_completion_materialization",
+        headers=auth_headers,
+    )
+    assert pending_batch.status_code == 200
+    assert pending_batch.json()["data"]["status"] == "running"
+    assert pending_batch.json()["data"]["current_stage"] == "materializing"
+    pending_items = client.get(
+        "/api/v1/import-batches/import_batch_completion_materialization/items",
+        headers=auth_headers,
+    )
+    assert pending_items.status_code == 200
+    assert pending_items.json()["data"]["items"] == []
+
+    with SessionLocal() as session:
+        materialization_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert materialization_event is not None
+        assert materialization_event.status == "pending"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(StorageObject)
+                .where(
+                    StorageObject.source_type == "task_run",
+                    StorageObject.source_id == run_id,
+                )
+            )
+            == 0
+        )
+
+    assert process_aggregate_events([run_id]) == 1
+    finalized_run = client.get(f"/api/v1/task-runs/{run_id}", headers=auth_headers)
+    assert finalized_run.status_code == 200
+    assert finalized_run.json()["data"]["status"] == "success"
+    assert finalized_run.json()["data"]["import_batch"]["status"] == "partial"
+    imported_audio_session_id = finalized_run.json()["data"]["import_batch"]["audio_session_ids"][0]
+    # The import transaction ends at a playable session. Intelligence
+    # scheduling consumes the durable materialization event in a separate
+    # transaction, so a downstream failure can never roll back the import.
+    assert process_aggregate_events([imported_audio_session_id]) == 1
+
     with SessionLocal() as session:
         batch = session.get(ImportBatch, "import_batch_completion_materialization")
         assert batch is not None
@@ -519,7 +586,7 @@ def test_audio_import_completion_materializes_partial_batch_and_playable_session
         failed = next(item for item in items if item.status == "failed")
         assert success.object_version == "object-version-001"
         assert success.audio_session_id
-        imported_audio_session_id = str(success.audio_session_id)
+        assert imported_audio_session_id == str(success.audio_session_id)
         assert failed.error_code == "AUDIO_DOWNLOAD_FAILED"
         assert failed.audio_session_id is None
 
@@ -557,6 +624,50 @@ def test_audio_import_completion_materializes_partial_batch_and_playable_session
         assert audio_session.data["root_trace_id"] == root_trace_id
         assert audio_session.data["platform_connection_id"] == "platform_connection_completion"
 
+        materialized_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "audio_session.materialized",
+                OutboxEvent.aggregate_id == success.audio_session_id,
+                OutboxEvent.tenant_id == "aurora_auto",
+                OutboxEvent.project_id == "sales_qa",
+            )
+        )
+        assert materialized_event is not None
+        assert materialized_event.payload["trace_id"] == root_trace_id
+        intelligence_run = session.scalar(
+            select(RunRecord).where(
+                RunRecord.run_type == "audio_intelligence",
+                RunRecord.tenant_id == "aurora_auto",
+                RunRecord.project_id == "sales_qa",
+                RunRecord.payload["audio_session_id"].as_string() == success.audio_session_id,
+            )
+        )
+        assert intelligence_run is not None
+        assert intelligence_run.status == "pending"
+        assert intelligence_run.payload["root_trace_id"] == root_trace_id
+        assert intelligence_run.payload["trigger"] == "audio_session.materialized"
+        assert intelligence_run.payload["scene_profile_version_id"] == (
+            "scenev_auto_sales_quality_v1"
+        )
+        assert intelligence_run.payload["input_object"] == {
+            "storage_object_id": storage.storage_object_id,
+            "storage_provider": storage.provider,
+            "bucket": storage.bucket,
+            "object_key": storage.object_key,
+            "version_id": "object-version-001",
+            "content_sha256": storage.content_sha256,
+            "content_length": storage.size_bytes,
+            "content_type": storage.content_type,
+        }
+        intelligence_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "audio_intelligence.requested",
+                OutboxEvent.aggregate_id == intelligence_run.run_id,
+            )
+        )
+        assert intelligence_event is not None
+        assert intelligence_event.payload["trace_id"] == root_trace_id
+
         assert (
             session.scalar(
                 select(func.count())
@@ -586,6 +697,20 @@ def test_audio_import_completion_materializes_partial_batch_and_playable_session
     )
     assert batch_items.status_code == 200
     assert len(batch_items.json()["data"]["items"]) == 2
+    for item in batch_items.json()["data"]["items"]:
+        assert item["retry_lineage"] == {
+            "source_import_batch_id": None,
+            "source_import_item_id": None,
+            "root_import_batch_id": "import_batch_completion_materialization",
+            "root_import_item_id": item["import_item_id"],
+            "attempt": 1,
+        }
+    failed_item = next(
+        item for item in batch_items.json()["data"]["items"] if item["status"] == "failed"
+    )
+    assert failed_item["error_code"] == "AUDIO_DOWNLOAD_FAILED"
+    assert failed_item["retryable"] is True
+    assert failed_item["recovery_suggestion"]
 
     audio_session = client.get(
         f"/api/v1/audio-sessions/{imported_audio_session_id}",
@@ -625,6 +750,224 @@ def test_audio_import_completion_materializes_partial_batch_and_playable_session
         and span["object_id"] == imported_audio_session_id
         for span in spans
     )
+
+
+def test_audio_import_materialization_failure_remains_recoverable_and_never_reports_success(
+    client,
+    auth_headers,
+    monkeypatch,
+) -> None:
+    from app.services import run_service
+
+    run_id = "task_run_import_materialization_retry"
+    batch_id = "import_batch_materialization_retry"
+    _seed_import_run(
+        run_id=run_id,
+        batch_id=batch_id,
+        root_trace_id="root_import_materialization_retry",
+        external_run_id="dagster-import-materialization-retry",
+        cursor_before="cursor-before-retry",
+    )
+    result = _single_success_result(
+        run_id,
+        batch_id=batch_id,
+        suffix="materialization_retry",
+    )
+    accepted = client.post(
+        f"/api/v1/task-runs/{run_id}/completion-receipts",
+        json={
+            "adapter": "dagster",
+            "status": "success",
+            "completion_receipt_id": "receipt-import-materialization-retry",
+            "external_id": "dagster-import-materialization-retry",
+            "result_ref": result,
+            "metrics": {"total": 1, "succeeded": 1, "skipped": 0, "failed": 0},
+        },
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "complete-import-materialization-retry",
+        },
+    )
+    assert accepted.status_code == 202
+
+    def fail_materialization(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("simulated materializer failure")
+
+    monkeypatch.setattr(
+        run_service,
+        "materialize_staged_execution_completion",
+        fail_materialization,
+    )
+    assert process_aggregate_events([run_id]) == 1
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        batch = session.get(ImportBatch, batch_id)
+        receipt = session.scalar(
+            select(RunCompletionReceipt).where(RunCompletionReceipt.run_id == run_id)
+        )
+        event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert run is not None and run.status == "completion_pending"
+        assert run.payload["business_status"] == "materializing"
+        assert batch is not None and batch.status == "running"
+        assert batch.current_stage == "materializing"
+        assert receipt is not None and receipt.processing_state == "materializing"
+        assert event is not None and event.status == "pending"
+        assert event.attempt_count == 1
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ImportBatchItem)
+                .where(ImportBatchItem.import_batch_id == batch_id)
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(StorageObject)
+                .where(
+                    StorageObject.source_type == "task_run",
+                    StorageObject.source_id == run_id,
+                )
+            )
+            == 0
+        )
+
+
+def test_audio_import_materialization_retry_exhaustion_atomically_fails_business_state(
+    client,
+    auth_headers,
+    monkeypatch,
+) -> None:
+    from app.services import run_service
+
+    run_id = "task_run_import_materialization_dead_letter"
+    batch_id = "import_batch_materialization_dead_letter"
+    root_trace_id = "root_import_materialization_dead_letter"
+    _seed_import_run(
+        run_id=run_id,
+        batch_id=batch_id,
+        root_trace_id=root_trace_id,
+        external_run_id="dagster-import-materialization-dead-letter",
+        cursor_before="cursor-before-dead-letter",
+    )
+    result = _single_success_result(
+        run_id,
+        batch_id=batch_id,
+        suffix="materialization_dead_letter",
+    )
+    accepted = client.post(
+        f"/api/v1/task-runs/{run_id}/completion-receipts",
+        json={
+            "adapter": "dagster",
+            "status": "success",
+            "completion_receipt_id": "receipt-import-materialization-dead-letter",
+            "external_id": "dagster-import-materialization-dead-letter",
+            "result_ref": result,
+            "metrics": {"total": 1, "succeeded": 1, "skipped": 0, "failed": 0},
+        },
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "complete-import-materialization-dead-letter",
+        },
+    )
+    assert accepted.status_code == 202
+
+    with SessionLocal.begin() as session:
+        event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert event is not None
+        event.payload = {**event.payload, "max_attempts": 2}
+
+    def fail_materialization(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("permanent materializer failure")
+
+    monkeypatch.setattr(
+        run_service,
+        "materialize_staged_execution_completion",
+        fail_materialization,
+    )
+    assert process_aggregate_events([run_id]) == 1
+    with SessionLocal.begin() as session:
+        event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert event is not None and event.status == "pending"
+        event.available_at = event.created_at
+    assert process_aggregate_events([run_id]) == 1
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        batch = session.get(ImportBatch, batch_id)
+        receipt = session.scalar(
+            select(RunCompletionReceipt).where(RunCompletionReceipt.run_id == run_id)
+        )
+        materialization_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        terminal_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "task_run.failed",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        terminal_audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "task_run.failed",
+                AuditLog.object_id == run_id,
+            )
+        )
+        materialization_audit = session.scalar(
+            select(AuditLog).where(
+                AuditLog.action == "task_run.materialization_failed",
+                AuditLog.object_id == run_id,
+            )
+        )
+
+        assert run is not None and run.status == "failed"
+        assert run.terminal_reason == "EXECUTION_MATERIALIZATION_RETRIES_EXHAUSTED"
+        assert run.payload["business_status"] == "failed"
+        assert run.payload["materialization"]["status"] == "failed"
+        assert run.payload["dead_letter_event_id"] == materialization_event.event_id
+        assert receipt is not None and receipt.processing_state == "completed"
+        assert receipt.completion_status == "failed"
+        assert receipt.response_json["data"]["status"] == "failed"
+        assert batch is not None and batch.status == "failed"
+        assert batch.current_stage == "completed"
+        assert batch.cursor_before == "cursor-before-dead-letter"
+        assert batch.cursor_after is None
+        assert batch.finished_at is not None
+        assert materialization_event is not None
+        assert materialization_event.status == "dead_letter"
+        assert terminal_event is not None and terminal_event.status == "pending"
+        assert terminal_audit is not None
+        assert materialization_audit is not None
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(ImportBatchItem)
+                .where(ImportBatchItem.import_batch_id == batch_id)
+            )
+            == 0
+        )
 
 
 @pytest.mark.parametrize(
@@ -849,7 +1192,8 @@ def test_audio_import_deduplicates_same_external_id_and_checksum_across_batches(
         "dagster-import-dedupe-first",
         "dedupe_first",
     )
-    assert first.status_code == 200, first.text
+    assert first.status_code == 202, first.text
+    assert process_aggregate_events([first_run_id]) == 1
 
     _seed_import_run(
         run_id=second_run_id,
@@ -864,7 +1208,8 @@ def test_audio_import_deduplicates_same_external_id_and_checksum_across_batches(
         "dagster-import-dedupe-second",
         "dedupe_second",
     )
-    assert second.status_code == 200, second.text
+    assert second.status_code == 202, second.text
+    assert process_aggregate_events([second_run_id]) == 1
 
     with SessionLocal() as session:
         second_batch = session.get(ImportBatch, second_batch_id)
@@ -950,7 +1295,8 @@ def test_audio_import_empty_window_completes_without_creating_sessions(
         },
     )
 
-    assert completed.status_code == 200, completed.text
+    assert completed.status_code == 202, completed.text
+    assert process_aggregate_events([run_id]) == 1
     with SessionLocal() as session:
         batch = session.get(ImportBatch, batch_id)
         assert batch is not None
@@ -1031,8 +1377,11 @@ def test_audio_import_all_item_failures_fail_task_run_and_remain_retryable(
         },
     )
 
-    assert completed.status_code == 200, completed.text
-    data = completed.json()["data"]
+    assert completed.status_code == 202, completed.text
+    assert process_aggregate_events([run_id]) == 1
+    finalized = client.get(f"/api/v1/task-runs/{run_id}", headers=auth_headers)
+    assert finalized.status_code == 200
+    data = finalized.json()["data"]
     assert data["status"] == "failed"
     assert data["business_status"] == "failed"
     assert data["error_code"] == "AUDIO_IMPORT_ALL_ITEMS_FAILED"

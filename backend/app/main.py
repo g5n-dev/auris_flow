@@ -44,6 +44,7 @@ from app.api.routers import (
     label_recomputations,
     labels,
     ops,
+    platform_connections,
     prompt_candidate_reviews,
     prompt_release,
     quality_appeals,
@@ -906,6 +907,7 @@ for router in [
     traces.router,
     workspace_context.router,
     imports.router,
+    platform_connections.router,
     generic.router,
 ]:
     app.include_router(router, prefix=settings.api_prefix)

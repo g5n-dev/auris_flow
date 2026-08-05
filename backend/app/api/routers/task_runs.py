@@ -17,6 +17,7 @@ from app.schemas import (
     TaskVersionRequest,
     parse_payload,
 )
+from app.schemas.public_runs import RunCompletionReceiptPendingResponse
 from app.services.experiment_service import bind_task_run_to_experiment
 from app.services.import_batch_service import create_import_batch_for_task_run
 from app.services.import_task_publish_service import (
@@ -228,7 +229,12 @@ async def post_task_runs_by_id_status_syncs(
     )
 
 
-@router.post("/task-runs/{id}/completion-receipts")
+@router.post(
+    "/task-runs/{id}/completion-receipts",
+    responses={
+        202: {"model": RunCompletionReceiptPendingResponse},
+    },
+)
 async def post_task_runs_by_id_completion_receipts(
     id: str, request: Request, session: SessionDep, ctx: ContextDep
 ):

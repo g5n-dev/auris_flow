@@ -65,6 +65,7 @@ BUSINESS_COMPLETION_REQUIRED_ADAPTERS = {"dagster", "external_callback", "object
 PROJECTION_ONLY_TERMINAL_EVENT_TYPES = frozenset(
     {
         "human_review.decision.created",
+        "audio_intelligence.failed",
         "task_run.succeeded",
         "task_run.failed",
         "task_run.cancelled",
@@ -607,7 +608,9 @@ def _complete_attempt(
         }
     if error is not None:
         attempt.error_code = str(
-            getattr(error, "error_code", error.__class__.__name__) or error.__class__.__name__
+            getattr(error, "error_code", None)
+            or getattr(error, "code", None)
+            or error.__class__.__name__
         )[:128]
         attempt.error_message = str(error)[:1024]
         failed_dispatch = getattr(error, "dispatch_payload", None)
@@ -803,7 +806,10 @@ def _prepare_claim(claim: OutboxClaim, *, lease_seconds: int) -> PreparedDeliver
             session.rollback()
             return None
         run = _run_for_event(event, lock=True)
-        if run and run.status not in {"queued", "pending", "running", "blocked"}:
+        allowed_run_statuses = {"queued", "pending", "running", "blocked"}
+        if event.event_type == "execution.materialization.requested":
+            allowed_run_statuses.add("completion_pending")
+        if run and run.status not in allowed_run_statuses:
             raise AdapterDispatchError(
                 f"run status {run.status} cannot be externally dispatched",
                 error_code="OUTBOX_RUN_NOT_DISPATCHABLE",
@@ -1008,6 +1014,12 @@ def _dispatch_prepared(prepared: PreparedDelivery) -> DispatchResult:
         payload.get("force_worker_error") or payload.get("simulate_worker_failure")
     ):
         raise RuntimeError(str(payload.get("failure_reason", "simulated worker failure")))
+    if payload.get("event_type") == "execution.materialization.requested":
+        return DispatchResult(
+            adapter="internal",
+            operation="materialize_execution_completion",
+            details={"mode": "transactional_worker"},
+        )
     delivery = reconcile_event if payload.get("delivery_mode") == "reconcile" else dispatch_event
     with internal_span(
         "outbox.adapter.dispatch",
@@ -1219,6 +1231,58 @@ def _finalize_success(
             error_code="OUTBOX_RUN_BLOCKED_AFTER_PREPARE",
             retryable=False,
         )
+    if event.event_type == "execution.materialization.requested":
+        if run is None:
+            raise AdapterDispatchError(
+                "execution materialization run is missing",
+                error_code="EXECUTION_MATERIALIZATION_RUN_MISSING",
+                retryable=False,
+            )
+        active_session = object_session(event)
+        if active_session is None:
+            raise RuntimeError("execution materialization requires an attached session")
+        from app.services.run_service import materialize_staged_execution_completion
+        from app.services.task_run_control_service import worker_request_context
+
+        materialize_staged_execution_completion(
+            cast(Session, active_session),
+            worker_request_context(event),
+            run,
+            event_payload=dict(event.payload),
+        )
+        event.payload = {
+            **event.payload,
+            "adapter_dispatch": {
+                "adapter": dispatch.adapter,
+                "operation": dispatch.operation,
+                "status": dispatch.status,
+                "details": {
+                    **dispatch.details,
+                    "dispatch_idempotency_key": event.dispatch_idempotency_key,
+                    "dispatch_request_sha256": prepared.request_sha256,
+                    "fencing_token": f"{claim.event_id}:{claim.lease_generation}",
+                },
+            },
+            "materialization_status": run.status,
+        }
+        event.status = "processed"
+        event.delivery_state = "confirmed"
+        event.last_error = None
+        event.processed_at = database_utc_now(cast(Session, active_session))
+        _complete_attempt(event, claim, status="succeeded", dispatch=dispatch)
+        clear_claim(event)
+        metrics.record_worker_processing("success")
+        log_event(
+            logger,
+            "outbox.execution_materialization.success",
+            event_id=event.event_id,
+            event_type=event.event_type,
+            aggregate_type=event.aggregate_type,
+            aggregate_id=event.aggregate_id,
+            run_status=run.status,
+            lease_generation=claim.lease_generation,
+        )
+        return
     release_materialization: dict[str, Any] | None = None
     if run and event.event_type == "label_version.publish_requested":
         from app.services.label_policy_service import materialize_label_version_release
@@ -1273,6 +1337,25 @@ def _finalize_success(
             }
             _mark_blocked(event, claim)
             return
+
+    if event.event_type == "audio_session.materialized":
+        from app.services.audio_session_orchestration_service import (
+            schedule_intelligence_for_materialized_audio_session,
+        )
+        from app.services.task_run_control_service import worker_request_context
+
+        active_session = object_session(event)
+        if active_session is None:
+            raise RuntimeError("audio-session scheduling requires an attached session")
+        scheduling_result = schedule_intelligence_for_materialized_audio_session(
+            cast(Session, active_session),
+            worker_request_context(event),
+            event_payload=dict(event.payload),
+        )
+        event.payload = {
+            **event.payload,
+            "intelligence_scheduling": scheduling_result,
+        }
 
     details = {
         **dispatch.details,
@@ -1408,7 +1491,11 @@ def _mark_retry_or_dead_letter(
         run = _run_for_event(event)
     except AdapterDispatchError:
         run = None
-    error_code = getattr(error, "error_code", error.__class__.__name__)
+    error_code = (
+        getattr(error, "error_code", None)
+        or getattr(error, "code", None)
+        or error.__class__.__name__
+    )
     retryable = bool(getattr(error, "retryable", True))
     retry_after_seconds = getattr(error, "retry_after_seconds", None)
     requires_reconciliation = claim.exhausted or bool(
@@ -1526,7 +1613,28 @@ def _mark_retry_or_dead_letter(
         metrics.record_worker_processing("dead_letter")
         if event.event_type == "external_callback.requested":
             metrics.record_callback_outcome("dead_letter")
-        if run and run.status in {"pending", "queued", "running"}:
+        staged_materialization_failed = bool(
+            run is not None
+            and event.event_type == "execution.materialization.requested"
+            and run.status == "completion_pending"
+        )
+        if staged_materialization_failed:
+            from app.services.run_service import fail_staged_execution_materialization
+            from app.services.task_run_control_service import worker_request_context
+
+            assert run is not None
+            fail_staged_execution_materialization(
+                session,
+                worker_request_context(event),
+                run,
+                event_payload=dict(event.payload),
+                dead_letter_event_id=event.event_id,
+                error_code=str(error_code or "EXECUTION_MATERIALIZATION_FAILED"),
+                error_message=event.last_error,
+                retryable=retryable,
+                retry_count=attempts_used,
+            )
+        elif run and run.status in {"pending", "queued", "running"}:
             if run.status in {"pending", "queued"}:
                 transition_run(run, "running", reason="outbox_dispatch_started")
             before_terminal_status = run.status
@@ -1741,6 +1849,16 @@ def _finalize_dispatch(
                 outcome="success",
             )
             return False
+        if event.event_type == "execution.materialization.requested":
+            # Materializers may use nested transactions to make duplicate object
+            # registration idempotent.  SQLite otherwise treats the first
+            # SAVEPOINT as the effective outer transaction when finalization has
+            # only performed reads, allowing a released savepoint to survive a
+            # later materializer failure.  Persisting this fenced state first
+            # establishes the real outer write transaction, so every business
+            # object and its derived outbox events roll back together.
+            event.delivery_state = "finalizing"
+            session.flush([event])
         _finalize_success(event, dispatch, prepared, claim)
         session.commit()
         return True
@@ -1810,7 +1928,16 @@ def _process_claim_traced(claim: OutboxClaim) -> None:
                 dispatch_idempotency_key=prepared.payload.get("dispatch_idempotency_key"),
             )
     except Exception as exc:  # noqa: BLE001 - preserve retryability after a remote success.
-        _finalize_failure(claim, PostDispatchFinalizeError(exc))
+        # Execution materialization is an entirely local transaction. Treat its
+        # failure as a normal bounded retry instead of entering remote-outcome
+        # reconciliation, which is reserved for adapters that may have committed
+        # an external side effect before local finalization failed.
+        finalize_error: Exception = (
+            exc
+            if prepared.payload.get("event_type") == "execution.materialization.requested"
+            else PostDispatchFinalizeError(exc)
+        )
+        _finalize_failure(claim, finalize_error)
 
 
 def _claim_parent_context(claim: OutboxClaim) -> Context | None:

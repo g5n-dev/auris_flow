@@ -64,6 +64,7 @@ def _run_isolated_release_gate(repository: Path) -> subprocess.CompletedProcess[
         "AURIS_SKIP_REAL_DAGSTER",
         "AURIS_SKIP_PRODUCT_DAGSTER_GATE",
         "AURIS_SKIP_PRODUCTION_PATH_GATE",
+        "AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE",
         "AURIS_SKIP_BACKUP_RESTORE_GATE",
     ):
         env.pop(variable, None)
@@ -143,6 +144,7 @@ def test_release_gate_rejects_production_path_skip_before_work() -> None:
     "variable",
     (
         "AURIS_SKIP_REAL_DAGSTER",
+        "AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE",
         "AURIS_SKIP_BACKUP_RESTORE_GATE",
     ),
 )
@@ -250,6 +252,7 @@ def test_failed_audit_runs_full_matrix_and_never_calls_finalizer(
         "verify_real_dagster.sh",
         "verify_product_dagster_path.sh",
         "verify_production_path.sh",
+        "verify_audio_import_stack.sh",
     ):
         _write_executable(repository / "scripts" / script_name, "#!/usr/bin/env bash\nexit 0\n")
     fake_bin = repository / "test-bin"
@@ -490,6 +493,17 @@ def test_real_stack_bootstraps_the_authenticated_minio_bucket_before_strict_read
     standalone_readyz = ui_gate.index('assert_strict_readyz "${BFF_URL}"')
     assert standalone_health < standalone_bootstrap < standalone_readyz
     assert "return 200 <= response.status < 300" in ui_gate
+
+
+def test_audio_import_gate_worker_uses_the_same_frozen_storage_scope_as_bff() -> None:
+    compose = (ROOT / "production" / "tests" / "audio-import-gate.compose.yaml").read_text(
+        encoding="utf-8"
+    )
+    worker_block = compose.split("\n  worker:\n", 1)[1].split("\n  audio-import-gate-verifier:", 1)[
+        0
+    ]
+
+    assert "<<: *audio-import-gate-storage-environment" in worker_block
 
 
 def test_deadline_runner_terminates_a_command_that_exceeds_its_budget() -> None:

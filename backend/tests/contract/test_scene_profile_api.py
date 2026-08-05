@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import pytest
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
 from app.models import AgentRun, JsonResource, RunRecord, SceneProfileVersion
 from app.services.scene_profile_service import materialize_scene_profile_generation_completion
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 
 def test_project_scene_profile_optional_read_preserves_unbound_empty_state(client, auth_headers):

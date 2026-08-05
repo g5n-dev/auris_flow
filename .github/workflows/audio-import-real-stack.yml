@@ -1,0 +1,124 @@
+name: Audio import real-stack gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/audio-import-real-stack.yml"
+      - "backend/app/api/routers/audio_sessions.py"
+      - "backend/app/api/routers/generic.py"
+      - "backend/app/api/routers/imports.py"
+      - "backend/app/api/routers/human_review.py"
+      - "backend/app/api/routers/platform_connections.py"
+      - "backend/app/api/routers/task_runs.py"
+      - "backend/app/api/routers/traces.py"
+      - "backend/app/core/audio_playback.py"
+      - "backend/app/core/config.py"
+      - "backend/app/main.py"
+      - "backend/app/models.py"
+      - "backend/app/services/adapters.py"
+      - "backend/app/services/audio_import_*.py"
+      - "backend/app/services/audio_evidence_review_service.py"
+      - "backend/app/services/audio_intelligence_service.py"
+      - "backend/app/services/audio_session_orchestration_service.py"
+      - "backend/app/services/audio_object_verification.py"
+      - "backend/app/services/audio_playback_service.py"
+      - "backend/app/services/audio_task_binding_service.py"
+      - "backend/app/services/connector_import_service.py"
+      - "backend/app/services/execution_contract_registry.py"
+      - "backend/app/services/import_batch_service.py"
+      - "backend/app/services/human_review_service.py"
+      - "backend/app/services/platform_connection_service.py"
+      - "backend/app/services/resource_service.py"
+      - "backend/app/services/run_completion_storage_service.py"
+      - "backend/app/services/run_service.py"
+      - "backend/app/workers/outbox_worker.py"
+      - "backend/migrations/versions/*audio_import*.py"
+      - "backend/migrations/versions/*audio_evidence*.py"
+      - "backend/migrations/versions/*platform_connection*.py"
+      - "backend/tests/**/*audio_import*.py"
+      - "backend/tests/**/*audio_evidence*.py"
+      - "backend/tests/**/*audio_intelligence*.py"
+      - "backend/tests/**/*human_review*.py"
+      - "backend/tests/**/*audio_playback*.py"
+      - "backend/tests/**/*object_storage*.py"
+      - "backend/tests/**/*platform_connection*.py"
+      - "backend/tests/**/*trace_audio*.py"
+      - "production/compose.yaml"
+      - "production/dagster/**"
+      - "production/tests/audio-import-*"
+      - "production/tests/audio_import_*"
+      - "production/tests/production_gate_support.py"
+      - "production/tests/test_audio_import_*.py"
+      - "prototype/auris-flow-ui/e2e/platform-bff.mjs"
+      - "prototype/auris-flow-ui/package-lock.json"
+      - "prototype/auris-flow-ui/package.json"
+      - "prototype/auris-flow-ui/src/api/audioImportClient.ts"
+      - "prototype/auris-flow-ui/src/features/data/DataModule.tsx"
+      - "prototype/auris-flow-ui/src/features/data/audioImport*.ts"
+      - "prototype/auris-flow-ui/src/features/data/components/AudioImport*.tsx"
+      - "prototype/auris-flow-ui/src/features/listening/hooks/useGrantedAudioPlayback.ts"
+      - "prototype/auris-flow-ui/src/features/listening/**"
+      - "prototype/auris-flow-ui/src/styles/features/data/audio-import.css"
+      - "scripts/check_platform_readiness.py"
+      - "scripts/finalize_release_evidence.py"
+      - "scripts/tests/test_audio_import_ci_gate.py"
+      - "scripts/tests/test_finalize_release_evidence.py"
+      - "scripts/tests/test_platform_readiness_git_tree.py"
+      - "scripts/verify_audio_import_*.py"
+      - "scripts/verify_audio_import_*.sh"
+      - "scripts/verify_release.sh"
+  schedule:
+    - cron: "17 3 * * *"
+  release:
+    types:
+      - published
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: audio-import-real-stack-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audio-import-real-stack:
+    name: Audio import → intelligence → evidence → review → trace
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: prototype/auris-flow-ui/package-lock.json
+      - name: Install locked gate dependencies
+        run: |
+          python -m pip install "uv==0.10.0"
+          uv sync --locked --all-extras --project backend
+          npm ci --ignore-scripts --prefix prototype/auris-flow-ui
+      - name: Install Playwright Chromium
+        working-directory: prototype/auris-flow-ui
+        run: npx playwright install chromium --with-deps
+      - name: Run fail-closed real audio import stack
+        env:
+          AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE: "0"
+          PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
+        run: bash scripts/verify_audio_import_stack.sh
+      - name: Upload commit-bound audio import evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: audio-import-real-stack-${{ github.sha }}-${{ github.run_attempt }}
+          path: |
+            build/release-evidence/audio-import-real-stack-gate.json
+            build/release-evidence/audio-import-browser-e2e.json
+          if-no-files-found: warn
+          retention-days: 14

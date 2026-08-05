@@ -2,6 +2,7 @@ import { annotationIslands, lanes, listeningDeviceBadges, quickChips } from "../
 import type { ReviewSample } from "../../fixtures/reviewSamples";
 import { useGrantedAudioPlayback } from "../../hooks/useGrantedAudioPlayback";
 import type { ListeningDeviceKey } from "../../types";
+import { LABEL_DEMO_MODE } from "../../../../shared/runtime/demoMode";
 import { Pause, Play, Plus, RotateCcw, SkipBack, SkipForward } from "lucide-react";
 import { useRef, useState } from "react";
 
@@ -82,27 +83,29 @@ export function AnnotationToolbar({ sample }: { sample: ReviewSample }) {
           </span>
         )}
       </div>
-      <div className="toolbar-db-strip" aria-label="当前窗口 dB 波形和截断参考">
-        <div className="toolbar-db-meta">
-          <span>窗口 dB</span>
-          <strong>-12 / -36 / -60</strong>
+      {LABEL_DEMO_MODE && (
+        <div className="toolbar-db-strip" aria-label="DEMO 窗口 dB 波形和截断参考">
+          <div className="toolbar-db-meta">
+            <span>窗口 dB</span>
+            <strong>-12 / -36 / -60</strong>
+          </div>
+          <div className="toolbar-db-wave">
+            <span className="db-grid db-top" />
+            <span className="db-grid db-mid" />
+            <span className="db-grid db-low" />
+            <span className="db-boundary start"><i>截入</i></span>
+            <span className="db-boundary end"><i>截出</i></span>
+            <span className="db-playhead" />
+            {dbWaveBars.map((bar, index) => (
+              <i
+                key={`${bar}-${index}`}
+                className={index < 4 || index > dbWaveBars.length - 5 ? "quiet" : bar > 72 ? "hot" : ""}
+                style={{ height: `${bar}%` }}
+              />
+            ))}
+          </div>
         </div>
-        <div className="toolbar-db-wave">
-          <span className="db-grid db-top" />
-          <span className="db-grid db-mid" />
-          <span className="db-grid db-low" />
-          <span className="db-boundary start"><i>截入</i></span>
-          <span className="db-boundary end"><i>截出</i></span>
-          <span className="db-playhead" />
-          {dbWaveBars.map((bar, index) => (
-            <i
-              key={`${bar}-${index}`}
-              className={index < 4 || index > dbWaveBars.length - 5 ? "quiet" : bar > 72 ? "hot" : ""}
-              style={{ height: `${bar}%` }}
-            />
-          ))}
-        </div>
-      </div>
+      )}
       <div className="atg">
         <span className="atm fnt">速率</span>
         <select
@@ -121,33 +124,41 @@ export function AnnotationToolbar({ sample }: { sample: ReviewSample }) {
           ))}
         </select>
       </div>
-      <div className="atg">
-        <button className="atb-bn" onClick={() => setZoom(Math.min(180, zoom + 10))} title="放大轨道">
-          +
-        </button>
-        <button className="atb-bn" onClick={() => setZoom(Math.max(70, zoom - 10))} title="缩小轨道">
-          -
-        </button>
-        <button className="atb-bn" onClick={() => setZoom(100)} title="重置会话">
-          <RotateCcw size={13} />
-        </button>
-      </div>
-      <div className="mode-toggle-group">
-        <button className={mode === "annotate" ? "active" : ""} onClick={() => setMode("annotate")}>
-          标注
-        </button>
-        <button className={mode === "listen" ? "active" : ""} onClick={() => setMode("listen")}>
-          调听
-        </button>
-      </div>
-      <button className="atb-bn annotation-entry-button" onClick={jumpToAnnotationEditor}>
-        <Plus size={13} />
-        创建标注
-      </button>
+      {LABEL_DEMO_MODE && (
+        <>
+          <div className="atg">
+            <button className="atb-bn" onClick={() => setZoom(Math.min(180, zoom + 10))} title="放大轨道">
+              +
+            </button>
+            <button className="atb-bn" onClick={() => setZoom(Math.max(70, zoom - 10))} title="缩小轨道">
+              -
+            </button>
+            <button className="atb-bn" onClick={() => setZoom(100)} title="重置轨道">
+              <RotateCcw size={13} />
+            </button>
+          </div>
+          <div className="mode-toggle-group">
+            <button className={mode === "annotate" ? "active" : ""} onClick={() => setMode("annotate")}>
+              标注
+            </button>
+            <button className={mode === "listen" ? "active" : ""} onClick={() => setMode("listen")}>
+              调听
+            </button>
+          </div>
+          <button className="atb-bn annotation-entry-button" onClick={jumpToAnnotationEditor}>
+            <Plus size={13} />
+            创建标注
+          </button>
+        </>
+      )}
       <div className="atk">
         <span className="fl">{sample.file}</span>
-        <span className="mt">zoom {zoom}% · 标签 v1.8.4 · ASR v2.3.1</span>
-        <span className="mt last-saved">已保存 12:31:08</span>
+        <span className="mt">
+          {LABEL_DEMO_MODE
+            ? `DEMO · zoom ${zoom}% · 标签 v1.8.4 · ASR v2.3.1`
+            : `${sample.reviewTaskId} · ${sample.dataAssetId}`}
+        </span>
+        <span className="mt last-saved">写入状态以底部决定栏回读为准</span>
       </div>
     </div>
   );

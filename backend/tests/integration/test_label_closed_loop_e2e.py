@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 
 from app.core.database import SessionLocal
@@ -16,6 +17,7 @@ from app.models import (
     LabelAggregate,
     LabelAggregationPolicyVersion,
     LabelAggregationRun,
+    LabelEvalResult,
     LabelExtractionRun,
     LabelFact,
     LabelFactHead,
@@ -32,6 +34,8 @@ from app.models import (
     TraceRef,
 )
 from app.workers.outbox_worker import process_aggregate_events
+
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
 
 TENANT_ID = "aurora_auto"
 PROJECT_ID = "sales_qa"
@@ -378,7 +382,22 @@ def _ack_e2e_release_command(
             token="system-token",
         ),
     )
+    response = _materialize_and_read_back(client, auth_headers, run_id, response)
     assert response.status_code == 200, response.text
+
+
+def _materialize_and_read_back(
+    client,
+    auth_headers: dict[str, str],
+    run_id: str,
+    staged_response,
+):
+    assert staged_response.status_code == 202, staged_response.text
+    assert staged_response.json()["data"]["receipt_state"] == "materializing"
+    assert process_aggregate_events([run_id]) == 1
+    readback = client.get(f"/api/v1/runs/{run_id}", headers=auth_headers)
+    assert readback.status_code == 200, readback.text
+    return readback
 
 
 def _monitor_sample_body(
@@ -831,6 +850,12 @@ def test_label_closed_loop_from_observation_to_feedback_optimization_and_rollbac
         },
         headers=_write_headers(auth_headers, "e2e-complete-label-optimization"),
     )
+    optimization_completion = _materialize_and_read_back(
+        client,
+        auth_headers,
+        optimization_run_id,
+        optimization_completion,
+    )
     assert optimization_completion.status_code == 200, optimization_completion.text
     assert optimization_completion.json()["data"]["status"] == "success"
 
@@ -900,9 +925,19 @@ def test_label_closed_loop_from_observation_to_feedback_optimization_and_rollbac
         },
         headers=_write_headers(auth_headers, "e2e-complete-label-eval"),
     )
+    eval_completion = _materialize_and_read_back(
+        client,
+        auth_headers,
+        EVAL_RUN_ID,
+        eval_completion,
+    )
     assert eval_completion.status_code == 200, eval_completion.text
     assert eval_completion.json()["data"]["status"] == "success"
-    assert eval_completion.json()["data"]["label_eval_result"]["status"] == "passed"
+    with SessionLocal() as session:
+        eval_result = session.scalar(
+            select(LabelEvalResult).where(LabelEvalResult.eval_run_id == EVAL_RUN_ID)
+        )
+        assert eval_result is not None and eval_result.status == "passed"
 
     _seed_e2e_active_head()
     rollback_target_id = ROLLBACK_TARGET_ID

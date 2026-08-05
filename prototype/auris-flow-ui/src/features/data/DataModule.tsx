@@ -64,6 +64,23 @@ function TruthDataUnavailable({
 
 const AUDIO_IMPORT_COLD_START_ASSET = "auris/audio/raw_recordings";
 
+function openImportedAudioSession(props: DataModuleProps, audioSessionId: string) {
+  props.setSelectedAssetId(audioSessionId);
+  props.navigateToTarget({
+    module: "listening",
+    objectKind: "audioSession",
+    objectId: audioSessionId,
+    title: `新音频会话 ${audioSessionId}`,
+    detail: "音频导入 / 写后回读",
+    focusMode: "detail",
+    origin: {
+      label: "数据资产 / 音频导入批次",
+      module: "data",
+      objectLabel: audioSessionId
+    }
+  });
+}
+
 function OperationToast({ notice }: { notice: OperationNotice }) {
   return (
     <div className={`operation-toast data-operation-toast is-${notice.status}`} role="status" aria-live="polite">
@@ -120,7 +137,11 @@ function EmptyAudioImportWorkspace({ props }: { props: DataModuleProps }) {
         <strong>没有会话不是配置入口的前置条件</strong>
         <span>通过上方“新建导入配置”关联外部平台，完成测试、预览、发布和立即拉取。</span>
       </section>
-      <AudioImportDrawer flow={flow} />
+      <AudioImportDrawer
+        flow={flow}
+        onOpenListeningSession={(audioSessionId) =>
+          openImportedAudioSession(props, audioSessionId)}
+      />
     </div>
   );
 }
@@ -192,7 +213,11 @@ function DataWorkspaceContent({
               )}
           </div>
         )}
-      <AudioImportDrawer flow={audioImportFlow} />
+      <AudioImportDrawer
+        flow={audioImportFlow}
+        onOpenListeningSession={(audioSessionId) =>
+          openImportedAudioSession(props, audioSessionId)}
+      />
     </>
   );
 }

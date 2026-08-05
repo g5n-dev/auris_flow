@@ -20,6 +20,8 @@ from app.models import (
     ReleaseDeployment,
 )
 
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
+
 LABEL_VERSION_ID = "label_v1_9_0_rc2"
 
 

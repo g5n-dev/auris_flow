@@ -1194,13 +1194,21 @@ def validate_gate_compose(document: object) -> list[str]:
     audio_service = _mapping(services.get("production-gate-embedding"))
     audio_environment = _mapping(audio_service.get("environment"))
     if (
-        audio_environment.get("AUDIO_INFERENCE_API_TOKEN_FILE")
+        audio_environment.get("PYTHONPATH") != "/app"
+        or audio_environment.get("AUDIO_INFERENCE_API_TOKEN_FILE")
         != "/run/secrets/audio_inference_api_token"
         or audio_environment.get("AUDIO_INFERENCE_PROVIDER")
         != "audio_intelligence_default"
         or audio_environment.get("AUDIO_INFERENCE_MODEL") != "audio-v2.3.1"
     ):
         errors.append("production gate audio protocol fixture configuration is invalid")
+    callback_environment = _mapping(
+        _mapping(services.get("production-gate-callback")).get("environment")
+    )
+    if callback_environment.get("PYTHONPATH") != "/app":
+        errors.append(
+            "production gate callback fixture must import the packaged BFF application"
+        )
     _validate_callback_test_network(root, errors)
 
     serialized = json.dumps(root, ensure_ascii=True, sort_keys=True).lower()

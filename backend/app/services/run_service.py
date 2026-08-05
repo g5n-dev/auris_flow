@@ -18,7 +18,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.core.config import get_settings
+from app.core.config import get_settings, is_production_environment
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.logging import get_logger, log_event
@@ -45,12 +45,16 @@ from app.services.agentic_execution_service import (
     record_agent_completion,
 )
 from app.services.audio_intelligence_service import (
-    materialize_audio_intelligence_completion,
-    resolve_audio_intelligence_result,
     sanitize_audio_intelligence_result,
 )
 from app.services.audit_service import record_audit
 from app.services.data_asset_materialization_service import materialize_asset_completion
+from app.services.execution_contract_registry import (
+    DAGSTER_RUN_REQUEST_EVENT_TYPES,
+    ExecutionContract,
+    ExecutionContractNotConfiguredError,
+    execution_contract_registry,
+)
 from app.services.idempotency_service import (
     api_error_result,
     raise_replayed_api_error,
@@ -88,6 +92,8 @@ from app.services.run_completion_storage_service import (
 )
 
 logger = get_logger("run")
+
+EXECUTION_MATERIALIZATION_REQUESTED = "execution.materialization.requested"
 
 # Compatibility exports for release-policy and contract checks. The policy
 # itself lives in the dependency-light projection module above.
@@ -597,7 +603,7 @@ def _validate_completion_receipt(
     *,
     strict_external_receipt: bool = False,
     authenticated_source: str | None = None,
-) -> tuple[str, str]:
+) -> tuple[str, str, ExecutionContract | None, Any]:
     if record.status not in {"submitted", "running", "completion_pending"}:
         raise ApiError(
             "RUN_COMPLETION_NOT_ALLOWED",
@@ -653,16 +659,42 @@ def _validate_completion_receipt(
         )
     if not actual_external_id and expected_external_id and not strict_external_receipt:
         payload["external_id"] = expected_external_id
-    if (
-        record.run_type == "task_run"
-        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
-    ):
-        from app.services.audio_import_completion_service import (
-            validate_audio_import_completion_contract,
-        )
-
-        validate_audio_import_completion_contract(record, payload)
-    return adapter, str(payload.get("external_id") or "")
+    execution_contract: ExecutionContract | None = None
+    validated_completion: Any = None
+    if adapter == "dagster":
+        event_type = RUN_EVENT_TYPES.get(record.run_type, "")
+        try:
+            execution_contract = execution_contract_registry.resolve(
+                event_type=event_type,
+                run_type=record.run_type,
+                payload=record.payload,
+            )
+        except ExecutionContractNotConfiguredError as exc:
+            raise ApiError(
+                exc.code,
+                "运行没有可验证、可物化的生产执行契约",
+                409,
+                details=[
+                    {
+                        "run_id": record.run_id,
+                        "event_type": exc.event_type,
+                        "run_type": exc.run_type,
+                        "requested_contract": exc.requested_contract,
+                    }
+                ],
+                retryable=False,
+            ) from exc
+        if execution_contract is not None:
+            validated_completion = execution_contract.validate_completion(
+                record,
+                payload,
+            )
+    return (
+        adapter,
+        str(payload.get("external_id") or ""),
+        execution_contract,
+        validated_completion,
+    )
 
 
 def _stageable_early_dagster_completion(
@@ -1015,7 +1047,7 @@ def _replay_claimed_completion_receipt(
     receipt_hash: str,
     operation: str,
     body_hash: str,
-) -> dict[str, Any]:
+) -> dict[str, Any] | JSONResponse:
     if receipt.completion_receipt_id != completion_receipt_id:
         raise ApiError(
             "RUN_ALREADY_COMPLETED",
@@ -1048,6 +1080,18 @@ def _replay_claimed_completion_receipt(
             409,
             details=[{"run_id": run_id, "completion_receipt_id": completion_receipt_id}],
         )
+    if receipt.processing_state == "materializing" and receipt.response_json is not None:
+        response = public_run_response(_json_copy(receipt.response_json), ctx)
+        save_idempotency_result(
+            session,
+            ctx,
+            operation=operation,
+            body_hash=body_hash,
+            status_code=202,
+            response_json=response,
+        )
+        session.commit()
+        return JSONResponse(status_code=202, content=response)
     if receipt.processing_state != "completed" or receipt.response_json is None:
         raise ApiError(
             "RUN_COMPLETION_RECEIPT_IN_PROGRESS",
@@ -1120,6 +1164,527 @@ def _link_completion_trace_to_run_root(
         )
     )
     return root_trace_id
+
+
+def _execution_materialization_next_actions(
+    record: RunRecord,
+    *,
+    root_trace_id: str,
+    materializer_name: str,
+) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = [
+        {
+            "key": "view_trace",
+            "label": "查看 Trace",
+            "route": f"traces/{root_trace_id}",
+        }
+    ]
+    if materializer_name == "audio_import":
+        actions.insert(
+            0,
+            {
+                "key": "view_import_batch",
+                "label": "查看同步批次",
+                "route": f"import-batches/{record.payload['import_batch_id']}",
+            },
+        )
+    return actions
+
+
+def _stage_execution_materialization(
+    session: Session,
+    ctx: RequestContext,
+    record: RunRecord,
+    receipt: RunCompletionReceipt,
+    *,
+    execution_contract: ExecutionContract,
+    completion_receipt: dict[str, Any],
+    adapter: str,
+    external_id: str,
+    completion_mode: str,
+) -> dict[str, Any]:
+    """Persist an observable boundary before a contract materializes business objects."""
+
+    if record.status != "completion_pending":
+        transition_run(
+            record,
+            "completion_pending",
+            reason="dagster_success_requires_async_materialization",
+        )
+    root_trace_id = str(
+        completion_receipt.get("root_trace_id")
+        or record.payload.get("root_trace_id")
+        or record.trace_id
+    )
+    event = enqueue_event(
+        session,
+        ctx,
+        event_type=EXECUTION_MATERIALIZATION_REQUESTED,
+        aggregate_type=record.run_type,
+        aggregate_id=record.run_id,
+        payload={
+            "run_id": record.run_id,
+            "completion_receipt_id": receipt.completion_receipt_id,
+            "execution_contract": execution_contract.contract_id,
+            "execution_event_type": execution_contract.event_type,
+            "materializer": execution_contract.materializer_name,
+            "root_trace_id": root_trace_id,
+            # The receipt id is immutable and therefore the materialization
+            # event's durable resource-version identity.
+            "resource_version": receipt.completion_receipt_id,
+        },
+    )
+    completion_receipt = {
+        **completion_receipt,
+        "business_status": "materializing",
+    }
+    record.payload = {
+        **record.payload,
+        "status": "completion_pending",
+        "business_status": "materializing",
+        "dispatch_state": "completion_pending",
+        "business_completion_required": True,
+        "completion_mode": completion_mode,
+        "completion_receipt": completion_receipt,
+        "result_ref": completion_receipt.get("result_ref") or {},
+        "metrics": completion_receipt.get("metrics") or {},
+        "registered_storage_objects": completion_receipt.get("registered_storage_objects") or [],
+        "materialization": {
+            "status": "pending",
+            "event_id": event.event_id,
+            "completion_receipt_id": receipt.completion_receipt_id,
+        },
+        "next_actions": _execution_materialization_next_actions(
+            record,
+            root_trace_id=root_trace_id,
+            materializer_name=execution_contract.materializer_name,
+        ),
+    }
+    response = envelope(
+        {
+            "resource_type": record.run_type,
+            "resource_id": record.run_id,
+            "run_id": record.run_id,
+            "status": record.status,
+            "business_status": record.payload.get("business_status"),
+            "business_completion_required": record.payload.get("business_completion_required"),
+            "receipt_state": "materializing",
+            "completion_receipt_id": receipt.completion_receipt_id,
+            "import_batch_id": record.payload.get("import_batch_id"),
+            "trace_id": record.trace_id,
+            "root_trace_id": root_trace_id,
+            "current_trace_id": ctx.trace_id,
+            "readback_url": f"/api/v1/runs/{record.run_id}",
+            "affected_objects": record.payload.get("affected_objects") or [],
+            "next_actions": record.payload.get("next_actions") or [],
+        },
+        ctx,
+    )
+    receipt.adapter = adapter
+    receipt.source = receipt.source or adapter
+    receipt.external_id = external_id or None
+    receipt.processing_state = "materializing"
+    receipt.completion_status = "completion_pending"
+    receipt.status_code = 202
+    receipt.response_json = _json_copy(response)
+    receipt.completed_at = None
+    record_audit(
+        session,
+        ctx,
+        action=f"{record.run_type}.materialization_requested",
+        object_type=record.run_type,
+        object_id=record.run_id,
+        result="materializing",
+        after={
+            "completion_receipt_id": receipt.completion_receipt_id,
+            "materialization_event_id": event.event_id,
+            "import_batch_id": record.payload.get("import_batch_id"),
+            "materializer": execution_contract.materializer_name,
+        },
+        trace_id=record.trace_id,
+    )
+    return response
+
+
+def materialize_staged_execution_completion(
+    session: Session,
+    ctx: RequestContext,
+    record: RunRecord,
+    *,
+    event_payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Materialize a previously staged completion in the worker transaction."""
+
+    receipt_id = str(event_payload.get("completion_receipt_id") or "")
+    receipt = session.scalar(
+        select(RunCompletionReceipt)
+        .where(
+            RunCompletionReceipt.tenant_id == record.tenant_id,
+            RunCompletionReceipt.project_id == record.project_id,
+            RunCompletionReceipt.run_id == record.run_id,
+            RunCompletionReceipt.completion_receipt_id == receipt_id,
+        )
+        .with_for_update()
+    )
+    if receipt is None:
+        raise RuntimeError("asynchronous materialization completion receipt is missing")
+    if receipt.processing_state == "completed":
+        return run_payload(record)
+    if receipt.processing_state != "materializing":
+        raise RuntimeError(f"completion receipt is not materializing: {receipt.processing_state}")
+    if record.status != "completion_pending":
+        raise RuntimeError(f"run is not completion_pending: {record.status}")
+    completion_receipt = record.payload.get("completion_receipt")
+    if not isinstance(completion_receipt, dict):
+        raise RuntimeError("staged completion payload is missing")
+    if completion_receipt.get("completion_receipt_id") != receipt_id:
+        raise RuntimeError("materialization event and completion receipt do not match")
+
+    execution_event_type = str(
+        event_payload.get("execution_event_type") or RUN_EVENT_TYPES.get(record.run_type) or ""
+    )
+    contract = execution_contract_registry.require(
+        event_type=execution_event_type,
+        run_type=record.run_type,
+        payload=record.payload,
+    )
+    if (
+        contract.materializer_name != event_payload.get("materializer")
+        or contract.contract_id != event_payload.get("execution_contract")
+        or contract.event_type != execution_event_type
+    ):
+        raise RuntimeError("materialization event execution contract does not match")
+    raw_result_ref = completion_receipt.get("result_ref")
+    if (
+        contract.materializer_name == "audio_intelligence"
+        and isinstance(raw_result_ref, dict)
+        and raw_result_ref.get("manifest_version") is not None
+        and "storage_objects" not in raw_result_ref
+    ):
+        raw_result_ref = hydrate_staged_audio_result_ref(
+            session,
+            record,
+            raw_result_ref,
+            completion_receipt_id=receipt_id,
+        )
+    validation_payload = {
+        "status": completion_receipt.get("status"),
+        "result_ref": raw_result_ref,
+        "metrics": completion_receipt.get("metrics") or {},
+        "external_id": completion_receipt.get("external_id"),
+    }
+    validated_completion = contract.validate_completion(record, validation_payload)
+    registered_storage_objects = register_hotword_completion_storage_objects(
+        session,
+        ctx,
+        record,
+        raw_result_ref,
+        staged_completion_receipt_id=receipt_id,
+    )
+    completion_receipt = {
+        **completion_receipt,
+        "result_ref": (
+            sanitize_audio_intelligence_result(raw_result_ref)
+            if contract.materializer_name == "audio_intelligence"
+            and isinstance(raw_result_ref, dict)
+            else raw_result_ref
+        ),
+        "registered_storage_objects": registered_storage_objects,
+    }
+    materialization = contract.materialize(
+        session,
+        ctx,
+        record,
+        completion_receipt,
+        validated_completion,
+    )
+    target_status = materialization.status
+    raw_import_batch = materialization.details.get("import_batch")
+    import_batch = raw_import_batch if isinstance(raw_import_batch, dict) else None
+    raw_outputs = materialization.details.get("materialized_outputs")
+    materialized_outputs = raw_outputs if isinstance(raw_outputs, list) else []
+    completion_receipt = {
+        **completion_receipt,
+        "business_status": target_status,
+    }
+    transition_run(
+        record,
+        target_status,
+        reason="async_completion_materialized",
+    )
+    root_trace_id = str(
+        completion_receipt.get("root_trace_id")
+        or record.payload.get("root_trace_id")
+        or record.trace_id
+    )
+    next_actions = [
+        {
+            "key": "view_trace",
+            "label": "查看 Trace",
+            "route": f"traces/{root_trace_id}",
+        }
+    ]
+    if import_batch is not None:
+        next_actions.append(
+            {
+                "key": "view_import_batch",
+                "label": "查看同步批次",
+                "route": f"import-batches/{import_batch['import_batch_id']}",
+            }
+        )
+        if import_batch.get("audio_session_ids"):
+            next_actions.append(
+                {
+                    "key": "view_audio_session",
+                    "label": "查看新会话",
+                    "route": f"audio-sessions/{import_batch['audio_session_ids'][0]}",
+                }
+            )
+    if target_status == "failed":
+        next_actions.append({"key": "retry", "label": "重试失败项"})
+    record.payload = {
+        **record.payload,
+        "status": target_status,
+        "business_status": "failed" if target_status == "failed" else "completed",
+        "dispatch_state": "failed" if target_status == "failed" else "completed",
+        "business_completion_required": False,
+        "completion_mode": "async_materialization",
+        "completion_receipt": completion_receipt,
+        "registered_storage_objects": registered_storage_objects,
+        "import_batch": import_batch,
+        "materialized_outputs": materialized_outputs,
+        "materialization": {
+            **(record.payload.get("materialization") or {}),
+            "status": "completed" if target_status == "success" else "failed",
+            "completed_at": datetime.now(UTC).isoformat(),
+        },
+        "next_actions": next_actions,
+    }
+    if target_status == "failed":
+        all_items_failed = bool(
+            import_batch is not None
+            and import_batch.get("status") == "failed"
+            and completion_receipt.get("status") == "success"
+        )
+        record.terminal_reason = (
+            "AUDIO_IMPORT_ALL_ITEMS_FAILED"
+            if all_items_failed
+            else str(completion_receipt.get("error_code") or "COMPLETION_RECEIPT_FAILED")
+        )
+        record.payload = {
+            **record.payload,
+            "error": (
+                "所有音频导入项均失败"
+                if all_items_failed
+                else completion_receipt.get("note") or "completion receipt reported failure"
+            ),
+            "error_code": record.terminal_reason,
+            "retryable": bool(completion_receipt.get("retryable", True)),
+        }
+    record_agent_completion(session, record, completion_receipt)
+    record_audit(
+        session,
+        ctx,
+        action=f"{record.run_type}.completion_received",
+        object_type=record.run_type,
+        object_id=record.run_id,
+        result=target_status,
+        after=public_run_payload(record.payload),
+        trace_id=record.trace_id,
+    )
+    response = envelope(run_payload(record), ctx)
+    _finalize_completion_receipt(
+        receipt,
+        adapter=str(completion_receipt.get("adapter") or receipt.adapter),
+        external_id=str(completion_receipt.get("external_id") or ""),
+        completion_status=target_status,
+        response=response,
+    )
+    from app.services.task_run_control_service import emit_task_run_terminal_event
+
+    emit_task_run_terminal_event(
+        session,
+        ctx,
+        record,
+        reason="async_completion_materialized",
+    )
+    return response
+
+
+def fail_staged_execution_materialization(
+    session: Session,
+    ctx: RequestContext,
+    record: RunRecord,
+    *,
+    event_payload: dict[str, Any],
+    dead_letter_event_id: int,
+    error_code: str,
+    error_message: str,
+    retryable: bool,
+    retry_count: int,
+) -> dict[str, Any]:
+    """Atomically close a materialization that exhausted durable worker retries."""
+
+    receipt_id = str(event_payload.get("completion_receipt_id") or "")
+    receipt = session.scalar(
+        select(RunCompletionReceipt)
+        .where(
+            RunCompletionReceipt.tenant_id == record.tenant_id,
+            RunCompletionReceipt.project_id == record.project_id,
+            RunCompletionReceipt.run_id == record.run_id,
+            RunCompletionReceipt.completion_receipt_id == receipt_id,
+        )
+        .with_for_update()
+    )
+    if receipt is None:
+        raise RuntimeError("asynchronous materialization completion receipt is missing")
+    if receipt.processing_state == "completed" and record.status == "failed":
+        return run_payload(record)
+    if receipt.processing_state != "materializing":
+        raise RuntimeError(f"completion receipt is not materializing: {receipt.processing_state}")
+    if record.status != "completion_pending":
+        raise RuntimeError(f"run is not completion_pending: {record.status}")
+    completion_receipt = record.payload.get("completion_receipt")
+    if (
+        not isinstance(completion_receipt, dict)
+        or completion_receipt.get("completion_receipt_id") != receipt_id
+    ):
+        raise RuntimeError("materialization event and completion receipt do not match")
+
+    before_status = record.status
+    terminal_reason = "EXECUTION_MATERIALIZATION_RETRIES_EXHAUSTED"
+    transition_run(
+        record,
+        "failed",
+        reason="execution_materialization_dead_letter",
+    )
+    record.terminal_reason = terminal_reason
+    root_trace_id = str(
+        completion_receipt.get("root_trace_id")
+        or record.payload.get("root_trace_id")
+        or record.trace_id
+    )
+    completion_receipt = {
+        **completion_receipt,
+        "business_status": "failed",
+        "materialization_error_code": error_code,
+    }
+    record.payload = {
+        **record.payload,
+        "status": "failed",
+        "business_status": "failed",
+        "dispatch_state": "dead_letter",
+        "business_completion_required": False,
+        "completion_mode": "async_materialization",
+        "completion_receipt": completion_receipt,
+        "error_code": terminal_reason,
+        "error": error_message,
+        "retryable": retryable,
+        "retry_count": retry_count,
+        "next_retry_at": None,
+        "dead_letter_event_id": dead_letter_event_id,
+        "failed_event_id": dead_letter_event_id,
+        "materialization": {
+            **(record.payload.get("materialization") or {}),
+            "status": "failed",
+            "failed_at": datetime.now(UTC).isoformat(),
+            "error_code": error_code,
+            "dead_letter_event_id": dead_letter_event_id,
+        },
+        "next_actions": [
+            {"key": "retry", "label": "重试运行"},
+            {
+                "key": "view_trace",
+                "label": "查看 Trace",
+                "route": f"traces/{root_trace_id}",
+            },
+        ],
+    }
+    record_agent_completion(session, record, completion_receipt)
+    record_audit(
+        session,
+        ctx,
+        action=f"{record.run_type}.materialization_failed",
+        object_type=record.run_type,
+        object_id=record.run_id,
+        result="failed",
+        before={"status": before_status, "business_status": "materializing"},
+        after={
+            "status": "failed",
+            "terminal_reason": terminal_reason,
+            "error_code": error_code,
+            "dead_letter_event_id": dead_letter_event_id,
+            "retry_count": retry_count,
+        },
+        trace_id=record.trace_id,
+    )
+    if record.run_type == "task_run":
+        from app.services.task_run_control_service import (
+            audit_task_run_transition,
+            emit_task_run_terminal_event,
+        )
+
+        audit_task_run_transition(
+            session,
+            ctx,
+            record,
+            action="task_run.failed",
+            before_status=before_status,
+            reason=terminal_reason,
+        )
+        emit_task_run_terminal_event(
+            session,
+            ctx,
+            record,
+            reason=terminal_reason,
+        )
+    else:
+        record_audit(
+            session,
+            ctx,
+            action=f"{record.run_type}.failed",
+            object_type=record.run_type,
+            object_id=record.run_id,
+            result="failed",
+            before={"status": before_status},
+            after={
+                "status": "failed",
+                "status_version": record.status_version,
+                "reason": terminal_reason,
+            },
+            trace_id=record.trace_id,
+        )
+        terminal_ctx = replace(
+            ctx,
+            trace_id=root_trace_id,
+            parent_trace_id=(
+                ctx.trace_id if ctx.trace_id != root_trace_id else ctx.parent_trace_id
+            ),
+            correlation_id=root_trace_id,
+        )
+        enqueue_event(
+            session,
+            terminal_ctx,
+            event_type=f"{record.run_type}.failed",
+            aggregate_type=record.run_type,
+            aggregate_id=record.run_id,
+            payload={
+                "run_id": record.run_id,
+                "status": "failed",
+                "reason": terminal_reason,
+                "resource_version": record.status_version,
+                "trace_id": root_trace_id,
+            },
+        )
+    response = envelope(run_payload(record), ctx)
+    _finalize_completion_receipt(
+        receipt,
+        adapter=str(completion_receipt.get("adapter") or receipt.adapter),
+        external_id=str(completion_receipt.get("external_id") or ""),
+        completion_status="failed",
+        response=response,
+    )
+    return response
 
 
 def apply_staged_dagster_completion(
@@ -1218,7 +1783,8 @@ def apply_staged_dagster_completion(
             f"运行状态 {record.status} 不能应用早到完成回执",
         )
 
-    audio_domain_result: dict[str, Any] | None = None
+    execution_contract: ExecutionContract | None = None
+    validated_completion: Any = None
     try:
         status = str(payload.get("status") or "success")
         target_status = "failed" if status == "failed" else "success"
@@ -1229,7 +1795,12 @@ def apply_staged_dagster_completion(
                 payload.get("result_ref"),
                 completion_receipt_id=receipt.completion_receipt_id,
             )
-        adapter, external_id = _validate_completion_receipt(
+        (
+            adapter,
+            external_id,
+            execution_contract,
+            validated_completion,
+        ) = _validate_completion_receipt(
             record,
             payload,
             strict_external_receipt=True,
@@ -1237,11 +1808,6 @@ def apply_staged_dagster_completion(
         )
         if target_status == "success":
             _validate_experiment_bundle_execution(record, payload)
-        if target_status == "success" and record.run_type == "audio_intelligence":
-            audio_domain_result = resolve_audio_intelligence_result(
-                record,
-                payload.get("result_ref"),
-            )
     except ApiError as exc:
         return reject(exc.code, exc.message)
 
@@ -1251,9 +1817,8 @@ def apply_staged_dagster_completion(
         if staged_processing_state == "pending_cancel"
         else "dagster_staged_completion_bound"
     )
-    is_audio_import = (
-        record.run_type == "task_run"
-        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
+    is_audio_import = bool(
+        execution_contract is not None and execution_contract.materializer_name == "audio_import"
     )
     if target_status == "success":
         from app.services.audio_import_progress_service import (
@@ -1267,8 +1832,6 @@ def apply_staged_dagster_completion(
             completion_receipt_id=receipt.completion_receipt_id,
             result_ref=payload.get("result_ref"),
         )
-    if not is_audio_import:
-        transition_run(record, target_status, reason=completion_reason)
     registered_storage_objects = (
         register_hotword_completion_storage_objects(
             session,
@@ -1277,7 +1840,7 @@ def apply_staged_dagster_completion(
             payload.get("result_ref"),
             staged_completion_receipt_id=receipt.completion_receipt_id,
         )
-        if target_status == "success"
+        if target_status == "success" and execution_contract is None
         else []
     )
     raw_result_ref = payload.get("result_ref") or {}
@@ -1324,21 +1887,53 @@ def apply_staged_dagster_completion(
             record,
             completion_receipt,
         )
-    import_batch_completion: dict[str, Any] | None = None
-    if is_audio_import:
-        from app.services.audio_import_completion_service import (
-            materialize_audio_import_completion,
+    if target_status == "success" and execution_contract is not None:
+        _stage_execution_materialization(
+            session,
+            ctx,
+            record,
+            receipt,
+            execution_contract=execution_contract,
+            completion_receipt=completion_receipt,
+            adapter=adapter,
+            external_id=external_id,
+            completion_mode=(
+                "cancellation_race_async_materialization"
+                if staged_processing_state == "pending_cancel"
+                else "staged_async_materialization"
+            ),
         )
-
-        import_batch_completion = materialize_audio_import_completion(
+        return True
+    import_batch_completion: dict[str, Any] | None = None
+    materialized_outputs: list[dict[str, Any]] = []
+    if execution_contract is not None:
+        if target_status == "success" and record.status != "completion_pending":
+            transition_run(
+                record,
+                "completion_pending",
+                reason="dagster_success_requires_materialization",
+            )
+        materialization = execution_contract.materialize(
             session,
             ctx,
             record,
             completion_receipt,
+            validated_completion,
         )
-        if import_batch_completion is not None and import_batch_completion["status"] == "failed":
-            target_status = "failed"
+        target_status = materialization.status
+        raw_import_batch = materialization.details.get("import_batch")
+        if isinstance(raw_import_batch, dict):
+            import_batch_completion = raw_import_batch
+        raw_materialized_outputs = materialization.details.get("materialized_outputs")
+        if isinstance(raw_materialized_outputs, list):
+            materialized_outputs = raw_materialized_outputs
         completion_receipt["business_status"] = target_status
+        transition_run(
+            record,
+            target_status,
+            reason=f"{completion_reason}_materialized",
+        )
+    else:
         transition_run(record, target_status, reason=completion_reason)
     record.payload = {
         **record.payload,
@@ -1357,6 +1952,7 @@ def apply_staged_dagster_completion(
         "registered_storage_objects": registered_storage_objects,
         "experiment_completion": experiment_completion,
         "import_batch": import_batch_completion,
+        "materialized_outputs": materialized_outputs,
         "next_actions": [
             {
                 "key": "view_trace",
@@ -1429,20 +2025,6 @@ def apply_staged_dagster_completion(
             ),
             "error_code": record.terminal_reason,
             "retryable": bool(payload.get("retryable", True)),
-        }
-    if target_status == "success" and record.run_type == "audio_intelligence":
-        assert audio_domain_result is not None
-        materialized_outputs = materialize_audio_intelligence_completion(
-            session,
-            ctx,
-            record,
-            completion_receipt,
-            validated_result_ref=audio_domain_result,
-        )
-        record.payload = {
-            **record.payload,
-            "completion_receipt": completion_receipt,
-            "materialized_outputs": materialized_outputs,
         }
     record_agent_completion(session, record, completion_receipt)
     record_audit(
@@ -1664,6 +2246,7 @@ async def complete_run_from_receipt(
         if isinstance(replay_data, dict) and replay_data.get("receipt_state") in {
             "pending_binding",
             "pending_cancellation_resolution",
+            "materializing",
         }:
             return JSONResponse(status_code=202, content=public_replay)
         return public_replay
@@ -1878,7 +2461,12 @@ async def complete_run_from_receipt(
             ],
         )
 
-    adapter, external_id = _validate_completion_receipt(
+    (
+        adapter,
+        external_id,
+        execution_contract,
+        validated_completion,
+    ) = _validate_completion_receipt(
         record,
         payload,
         strict_external_receipt=strict_external_receipt,
@@ -1888,9 +2476,9 @@ async def complete_run_from_receipt(
     target_status = "failed" if status == "failed" else "success"
     if target_status == "success":
         _validate_experiment_bundle_execution(record, payload)
-    audio_domain_result: dict[str, Any] | None = None
-    if target_status == "success" and record.run_type == "audio_intelligence":
-        audio_domain_result = resolve_audio_intelligence_result(record, payload.get("result_ref"))
+    is_audio_import = bool(
+        execution_contract is not None and execution_contract.materializer_name == "audio_import"
+    )
     label_eval_result: dict[str, Any] | None = None
     if target_status == "success" and record.run_type == "eval_run":
         from app.services.label_eval_result_service import materialize_label_eval_completion
@@ -1907,7 +2495,7 @@ async def complete_run_from_receipt(
         if label_eval_result is not None and label_eval_result["status"] == "blocked":
             target_status = "blocked"
     registered_storage_objects: list[dict[str, Any]] = []
-    if target_status == "success":
+    if target_status == "success" and execution_contract is None:
         registered_storage_objects = register_hotword_completion_storage_objects(
             session,
             ctx,
@@ -1936,15 +2524,25 @@ async def complete_run_from_receipt(
         if release_command_result.get("status") == "blocked":
             target_status = "blocked"
     raw_completion_result_ref = payload.get("result_ref") or {}
+    if (
+        target_status == "success"
+        and execution_contract is not None
+        and execution_contract.materializer_name == "audio_intelligence"
+        and isinstance(raw_completion_result_ref, dict)
+        and raw_completion_result_ref.get("manifest_version") is not None
+    ):
+        stage_audio_completion_storage_object(
+            session,
+            ctx,
+            record,
+            raw_completion_result_ref,
+            completion_receipt_id=receipt_id,
+        )
     persisted_completion_result_ref = raw_completion_result_ref
     if record.run_type == "audio_intelligence" and isinstance(raw_completion_result_ref, dict):
         persisted_completion_result_ref = sanitize_audio_intelligence_result(
             raw_completion_result_ref
         )
-    is_audio_import = (
-        record.run_type == "task_run"
-        and record.payload.get("execution_contract") == "auris-flow-audio-import-v1"
-    )
     if target_status == "success":
         from app.services.audio_import_progress_service import (
             mark_audio_import_batch_materializing,
@@ -1957,7 +2555,7 @@ async def complete_run_from_receipt(
             completion_receipt_id=receipt_id,
             result_ref=raw_completion_result_ref,
         )
-    if not is_audio_import:
+    if execution_contract is None:
         transition_run(record, target_status, reason=f"{adapter}_completion_received")
     completion_receipt: dict[str, Any] = {
         "completion_receipt_id": receipt_id,
@@ -1988,22 +2586,66 @@ async def complete_run_from_receipt(
             record,
             completion_receipt,
         )
-    import_batch_completion: dict[str, Any] | None = None
-    if is_audio_import:
-        from app.services.audio_import_completion_service import (
-            materialize_audio_import_completion,
+    if target_status == "success" and execution_contract is not None:
+        response = _stage_execution_materialization(
+            session,
+            ctx,
+            record,
+            inbox_receipt,
+            execution_contract=execution_contract,
+            completion_receipt=completion_receipt,
+            adapter=adapter,
+            external_id=external_id,
+            completion_mode="async_materialization",
         )
-
-        import_batch_completion = materialize_audio_import_completion(
+        save_idempotency_result(
+            session,
+            ctx,
+            operation=operation,
+            body_hash=body_hash,
+            status_code=202,
+            response_json=response,
+        )
+        session.commit()
+        log_event(
+            logger,
+            "run.completion_materialization_requested",
+            ctx=ctx,
+            run_type=record.run_type,
+            run_id=record.run_id,
+            adapter=adapter,
+            external_id=external_id,
+        )
+        return JSONResponse(status_code=202, content=response)
+    import_batch_completion: dict[str, Any] | None = None
+    materialized_outputs: list[dict[str, Any]] = []
+    if execution_contract is not None:
+        if target_status == "success" and record.status != "completion_pending":
+            transition_run(
+                record,
+                "completion_pending",
+                reason="dagster_success_requires_materialization",
+            )
+        materialization = execution_contract.materialize(
             session,
             ctx,
             record,
             completion_receipt,
+            validated_completion,
         )
-        if import_batch_completion is not None and import_batch_completion["status"] == "failed":
-            target_status = "failed"
+        target_status = materialization.status
+        raw_import_batch = materialization.details.get("import_batch")
+        if isinstance(raw_import_batch, dict):
+            import_batch_completion = raw_import_batch
+        raw_materialized_outputs = materialization.details.get("materialized_outputs")
+        if isinstance(raw_materialized_outputs, list):
+            materialized_outputs = raw_materialized_outputs
         completion_receipt["business_status"] = target_status
-        transition_run(record, target_status, reason=f"{adapter}_completion_received")
+        transition_run(
+            record,
+            target_status,
+            reason=f"{adapter}_completion_materialized",
+        )
     record.payload = {
         **record.payload,
         "status": target_status,
@@ -2031,6 +2673,7 @@ async def complete_run_from_receipt(
         "release_command_result": release_command_result,
         "experiment_completion": experiment_completion,
         "import_batch": import_batch_completion,
+        "materialized_outputs": materialized_outputs,
         "next_actions": [
             {
                 "key": "view_trace",
@@ -2143,20 +2786,6 @@ async def complete_run_from_receipt(
                 else "COMPLETION_RECEIPT_FAILED"
             ),
             "retryable": bool(payload.get("retryable", True)),
-        }
-    if target_status == "success" and record.run_type == "audio_intelligence":
-        assert audio_domain_result is not None
-        materialized_outputs = materialize_audio_intelligence_completion(
-            session,
-            ctx,
-            record,
-            completion_receipt,
-            validated_result_ref=audio_domain_result,
-        )
-        record.payload = {
-            **record.payload,
-            "completion_receipt": completion_receipt,
-            "materialized_outputs": materialized_outputs,
         }
     if target_status == "success" and record.run_type == "label_extraction":
         from app.services.label_closed_loop_service import (
@@ -2501,6 +3130,45 @@ async def create_run(
         return public_run_response(replay, ctx)
     if prepare_payload is not None:
         payload = prepare_payload(payload)
+    if event_type in DAGSTER_RUN_REQUEST_EVENT_TYPES:
+        try:
+            execution_contract = execution_contract_registry.resolve(
+                event_type=event_type,
+                run_type=run_type,
+                payload=payload,
+            )
+        except ExecutionContractNotConfiguredError as exc:
+            raise ApiError(
+                exc.code,
+                "生产运行缺少服务端白名单执行契约，不能创建或分发",
+                409,
+                details=[
+                    {
+                        "event_type": exc.event_type,
+                        "run_type": exc.run_type,
+                        "requested_contract": exc.requested_contract,
+                    }
+                ],
+                retryable=False,
+            ) from exc
+        if (
+            execution_contract is None
+            and str(payload.get("execution_mode") or "production").strip().lower() == "diagnostic"
+            and is_production_environment(get_settings().app_env)
+            and (ctx.actor_kind != "system" or "system" not in ctx.roles)
+        ):
+            raise ApiError(
+                "DIAGNOSTIC_EXECUTION_FORBIDDEN",
+                "诊断执行仅允许受信控制面服务调用",
+                403,
+                details=[
+                    {
+                        "event_type": event_type,
+                        "run_type": run_type,
+                    }
+                ],
+                retryable=False,
+            )
 
     if run_type == "task_run":
         # Task-run lifecycle controls are server-owned even for internal retries.

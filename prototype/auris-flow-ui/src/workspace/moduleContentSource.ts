@@ -5,6 +5,7 @@ export type ModuleContentSource = "bff" | "mock" | "none";
 // rendered detail is actually bound to the current read response. Modules that
 // still mix local facts (settings/evaluation/insights) stay absent and fail closed.
 const AUTHORITATIVE_CONTENT_READERS = new Set([
+  "home",
   "tenants",
   "projects",
   "knowledge",

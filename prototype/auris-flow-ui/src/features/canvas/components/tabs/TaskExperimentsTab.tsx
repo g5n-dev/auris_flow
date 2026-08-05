@@ -6,7 +6,7 @@ import { ExperimentAnalysisSummary } from "./ExperimentAnalysisSummary";
 import { ExperimentConfigPanel } from "./ExperimentConfigPanel";
 
 export function TaskExperimentsTab({ controller }: { controller: CanvasController }) {
-  const { activePartitionKey, activeRunKey, activeTab, addMetricToObservation, availableExperimentMetrics, canvasAction, computeTaskExperimentMetrics, controlledExperiment, createTaskControlledExperiment, decideTaskControlledExperiment, displayedExperimentArms, displayedExperimentObservations, experimentActionPending, experimentLoading, experimentMode, experimentSubjectKey, generateExperimentMetricDraft, latestExperimentSnapshot, metricDraftState, publishTaskVersion, refreshMetricObservation, retryTaskExperimentRelease, runTaskOnce, saveMetricAsReleaseGate, sceneBinding, selectExperimentMetric, selectedCanvasVariant, selectedCanvasVariantKey, selectedExperimentMetric, setDrawerTab, setExperimentSubjectKey, setSelectedCanvasVariantKey, shortTrace, snapshotMetricRows, startTaskControlledExperiment, taskProductionReleaseHead, taskPublishLabel, taskReleaseGate, validateDagsterCompatibility } = controller;
+  const { activePartitionKey, activeRunKey, activeTab, addMetricToObservation, availableExperimentMetrics, canvasAction, computeTaskExperimentMetrics, controlledExperiment, createTaskControlledExperiment, decideTaskControlledExperiment, displayedExperimentArms, displayedExperimentObservations, experimentActionPending, experimentLoading, experimentMode, experimentSubjectKey, generateExperimentMetricDraft, latestExperimentSnapshot, metricDraftActionsDisabledReason, metricDraftState, publishTaskVersion, refreshMetricObservation, retryTaskExperimentRelease, runTaskOnce, saveMetricAsReleaseGate, sceneBinding, selectExperimentMetric, selectedCanvasVariant, selectedCanvasVariantKey, selectedExperimentMetric, setDrawerTab, setExperimentSubjectKey, setSelectedCanvasVariantKey, shortTrace, snapshotMetricRows, startTaskControlledExperiment, taskProductionReleaseHead, taskPublishLabel, taskReleaseGate, validateDagsterCompatibility } = controller;
   return (
     <>
       {activeTab === "experiments" && (
@@ -121,12 +121,20 @@ export function TaskExperimentsTab({ controller }: { controller: CanvasControlle
                             <span>AI 创建指标</span>
                             <button
                               type="button"
+                              disabled={Boolean(metricDraftActionsDisabledReason)}
+                              title={metricDraftActionsDisabledReason || "生成指标草稿"}
                               onClick={generateExperimentMetricDraft}
                             >
                               <Sparkles size={14} />
                               生成指标草稿
                             </button>
                           </div>
+                          {metricDraftActionsDisabledReason ? (
+                            <div className="operation-toast is-idle" role="note">
+                              <strong>生产指标助手暂不可用</strong>
+                              <span>{metricDraftActionsDisabledReason}</span>
+                            </div>
+                          ) : null}
                           <div className="metric-context-strip">
                             {experimentMetricContext.map(([label, value]) => (
                               <span key={label}>
@@ -188,13 +196,20 @@ export function TaskExperimentsTab({ controller }: { controller: CanvasControlle
                                 <em>{selectedExperimentMetric.risk}</em>
                               </div>
                               <div className="metric-definition-actions">
-                                <button type="button" onClick={addMetricToObservation}>
+                                <button
+                                  type="button"
+                                  disabled={Boolean(metricDraftActionsDisabledReason)}
+                                  title={metricDraftActionsDisabledReason || "加入观测看板"}
+                                  onClick={addMetricToObservation}
+                                >
                                   <BarChart3 size={14} />
                                   加入观测看板
                                 </button>
                                 <button
                                   type="button"
                                   data-action-key="gate-metric"
+                                  disabled={Boolean(metricDraftActionsDisabledReason)}
+                                  title={metricDraftActionsDisabledReason || "保存为发布闸门"}
                                   onClick={saveMetricAsReleaseGate}
                                 >
                                   <ShieldCheck size={14} />
@@ -213,7 +228,8 @@ export function TaskExperimentsTab({ controller }: { controller: CanvasControlle
                             <span>指标观测</span>
                             <button
                               type="button"
-                              disabled={Boolean(experimentActionPending) || controlledExperiment?.status === "draft" || controlledExperiment?.status === "decided"}
+                              disabled={Boolean(experimentActionPending) || controlledExperiment?.status === "draft" || controlledExperiment?.status === "decided" || (!controlledExperiment && Boolean(metricDraftActionsDisabledReason))}
+                              title={!controlledExperiment && metricDraftActionsDisabledReason ? metricDraftActionsDisabledReason : "生成或刷新服务端指标快照"}
                               onClick={controlledExperiment ? computeTaskExperimentMetrics : refreshMetricObservation}
                             >
                               <Eye size={14} />

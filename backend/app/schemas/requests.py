@@ -291,7 +291,6 @@ class HumanReviewTargetChange(BaseModel):
             "trace_id",
             "status",
             "resource_version",
-            "decision",
             "decided_by",
             "review_task_id",
             "review_decision_id",
@@ -300,6 +299,18 @@ class HumanReviewTargetChange(BaseModel):
         if attempted:
             raise ValueError(f"server-managed fields cannot be modified: {', '.join(attempted)}")
         return value
+
+    @model_validator(mode="after")
+    def boundary_decision_must_be_the_controlled_business_value(
+        self,
+    ) -> HumanReviewTargetChange:
+        if "decision" not in self.fields:
+            return self
+        if self.target_type != "conversation_boundary":
+            raise ValueError("server-managed fields cannot be modified: decision")
+        if self.fields["decision"] != "manual_confirmed":
+            raise ValueError("conversation boundary decision must be manual_confirmed")
+        return self
 
 
 class HumanReviewDecisionRequest(BaseModel):
@@ -587,13 +598,16 @@ class EvalFeedbackTaskRequest(FlexiblePayload):
     candidate_version: str | None = Field(default=None, max_length=128)
 
 
-class ExternalCallbackRequest(FlexiblePayload):
-    target: str
-    payload_template: dict | None = None
+class ExternalCallbackRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target: str = Field(min_length=1, max_length=256)
+    payload_template: dict[str, Any] | None = Field(default=None, max_length=100)
 
     @field_validator("target")
     @classmethod
     def target_must_be_named(cls, value: str) -> str:
-        if not value.strip():
+        normalized = value.strip()
+        if not normalized or any(ord(character) < 0x20 for character in normalized):
             raise ValueError("target is required")
-        return value
+        return normalized

@@ -1,6 +1,7 @@
 import { chromium } from "playwright";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "vite";
+import { assertNoBlockingAxeViolations } from "./axe-gate.mjs";
 
 const root = new URL("../", import.meta.url).pathname;
 const configuredPort = process.env.AURIS_UI_SMOKE_PORT;
@@ -166,52 +167,30 @@ async function assertListeningTranscriptLayout(page) {
   assert(Boolean(await backendListeningHead.getAttribute("data-listening-task-id")), "调听页未绑定 BFF HumanReviewTask 强 ID");
   await backendListeningHead.getByText("S20250526-000128", { exact: true }).waitFor({ state: "visible", timeout: 5000 });
   await clickButtonContaining(page.locator(".listening-mode-switch"), "完整调听");
-  const chat = page.locator(".simple-chat-scroll").first();
-  await chat.waitFor({ state: "visible", timeout: 8000 });
-  const layout = await chat.evaluate((element) => {
-    const chatRect = element.getBoundingClientRect();
-    const turns = [...element.querySelectorAll(".simple-turn")].map((turn) => {
-      const rect = turn.getBoundingClientRect();
-      const probeX = Math.min(window.innerWidth - 1, rect.left + Math.max(12, rect.width * 0.55));
-      const probeY = rect.top + Math.max(12, Math.min(rect.height - 1, rect.height * 0.5));
-      const visible =
-        probeX >= 0 &&
-        probeX < window.innerWidth &&
-        probeY >= Math.max(0, chatRect.top) &&
-        probeY < Math.min(window.innerHeight, chatRect.bottom);
-      const probe = document.elementFromPoint(
-        probeX,
-        Math.min(window.innerHeight - 1, Math.max(0, probeY))
-      );
-      return {
-        width: rect.width,
-        height: rect.height,
-        visible,
-        covered: visible && !probe?.closest(".simple-turn")?.isSameNode(turn)
-      };
-    });
-    return {
-      width: chatRect.width,
-      height: chatRect.height,
-      turns
-    };
-  });
-  assert(layout.width > 320 && layout.height > 240, "完整调听主区尺寸异常", layout);
-  assert(layout.turns.length >= 5, "完整调听未渲染完整对话", layout);
-  assert(layout.turns.filter((turn) => turn.visible).length >= 3, "完整调听首屏有效对话不足", layout);
+  const playback = page.getByTestId("listening-authoritative-playback");
+  await playback.waitFor({ state: "visible", timeout: 8000 });
+  const recording = playback.getByTestId("listening-recording");
   assert(
-    layout.turns.every((turn) => turn.width > 240 && turn.height > 48 && !turn.covered),
-    "完整调听对话被空白图层覆盖",
-    layout
+    (await recording.getAttribute("data-audio-session-id")) === "S20250526-000128",
+    "生产完整调听未绑定当前权威 AudioSession"
   );
-
-  await clickButtonContaining(page.locator(".listening-mode-switch"), "审音矩阵");
-  const matrix = page.locator(".matrix-page");
-  await matrix.waitFor({ state: "visible", timeout: 8000 });
-  await clickExactButton(matrix.locator(".matrix-summary"), "串音候选 2");
-  await matrix.locator(".matrix-context-bar").filter({ hasText: "串音候选" }).waitFor({ state: "visible", timeout: 6000 });
-  await matrix.locator(".matrix-context-bar").filter({ hasText: "已筛选 串音候选" }).waitFor({ state: "visible", timeout: 6000 });
-  await assertLazyBranchesHealthy(page, "调听审音矩阵状态筛选");
+  await playback.getByRole("button", { name: "播放真实音频", exact: true }).waitFor({
+    state: "visible",
+    timeout: 5000
+  });
+  const disabledAi = playback.getByRole("button", {
+    name: "AI 推荐与本地保存已禁用",
+    exact: true
+  });
+  assert(await disabledAi.isDisabled(), "生产完整调听仍允许 fixture AI 推荐或本地保存");
+  const matrixTab = page.locator(".listening-mode-switch").getByRole("tab", {
+    name: /审音矩阵/
+  });
+  assert(await matrixTab.isDisabled(), "生产审音矩阵缺少权威设备关系时仍可进入");
+  await assertNoBlockingAxeViolations(page, {
+    context: "main",
+    label: "生产调听工作台"
+  });
 }
 
 async function runManualLabelVersionWorkflowSmoke(page, failedResponses, browserErrors, requestFailures) {
@@ -221,22 +200,15 @@ async function runManualLabelVersionWorkflowSmoke(page, failedResponses, browser
   await clickButtonContaining(page.locator(".listening-mode-switch"), "证据审查");
   await page.locator(".evidence-grid.annotation-shell").waitFor({ state: "visible", timeout: 10000 });
 
-  const initialHeadResponse = page.waitForResponse(
-    (response) => response.url().endsWith("/api/v1/release-bundle-heads/production") && response.request().method() === "GET",
-    { timeout: 10000 }
-  );
-  const initialItemsResponse = page.waitForResponse(
-    (response) => response.url().includes(`/api/v1/label-versions/${manualLabelOldVersionId}/items?status=active`) && response.request().method() === "GET",
-    { timeout: 10000 }
-  );
   const sourceRegion = page.locator('button[title="质检标签 · 金额冲突"]').first();
   await sourceRegion.waitFor({ state: "visible", timeout: 10000 });
-  await sourceRegion.click();
-  assert((await initialHeadResponse).status() === 200, "人工打标弹窗未读取 production Release Head");
-  assert((await initialItemsResponse).status() === 200, "人工打标弹窗未读取 active LabelVersionItem");
-
+  await sourceRegion.evaluate((element) => element.click());
   const dialog = page.getByRole("dialog", { name: "质检标签 标签轨道编辑" });
+  if (await dialog.count() === 0) {
+    await sourceRegion.evaluate((element) => element.click());
+  }
   await dialog.waitFor({ state: "visible", timeout: 10000 });
+
   const workflow = dialog.getByTestId("manual-label-version-workflow");
   await workflow.filter({ hasText: `${manualLabelOldVersionId} · generation 1` }).waitFor({ state: "visible", timeout: 8000 });
   await workflow.filter({ hasText: `金额冲突 · ${manualLabelOldLabelId} · categorical` }).waitFor({ state: "visible", timeout: 8000 });
@@ -881,17 +853,20 @@ async function runHotwordGovernanceDemoSmoke(page) {
   await page.locator('[data-testid="module-projection-state"][data-content-source="mock"]')
     .waitFor({ state: "visible", timeout: 8000 });
   const insightScope = page.locator(".insight-scope-panel");
-  await insightScope.filter({ hasText: "lmb_to_lv_19_20250531" }).waitFor({ state: "visible", timeout: 8000 });
-  await insightScope.filter({ hasText: "Generation 42" }).waitFor({ state: "visible", timeout: 8000 });
-  await insightScope.filter({ hasText: "MAPPING_RECOMPUTE_REQUIRED" }).waitFor({ state: "visible", timeout: 8000 });
-  await insightScope.getByText("86.2%", { exact: true }).waitFor({ state: "visible", timeout: 8000 });
-  await insightScope.filter({ hasText: "样本 128" }).waitFor({ state: "visible", timeout: 8000 });
-  await insightScope.getByText("涨跌已隐藏", { exact: true }).first().waitFor({ state: "visible", timeout: 8000 });
-  const structuralBreak = page.locator('[data-insight-structural-break="business-trend"]');
-  await structuralBreak.waitFor({ state: "visible", timeout: 8000 });
+  await insightScope.getByTestId("authoritative-insight-empty").filter({
+    hasText: "尚未生成权威快照"
+  }).waitFor({ state: "visible", timeout: 8000 });
+  await insightScope.getByRole("button", { name: "重新读取", exact: true }).waitFor({
+    state: "visible",
+    timeout: 5000
+  });
+  await insightScope.getByRole("button", { name: "前往任务配置", exact: true }).waitFor({
+    state: "visible",
+    timeout: 5000
+  });
   assert(
-    await structuralBreak.locator("svg.insight-spec-line path").count() === 0,
-    "structural-break 趋势不应渲染连续 path"
+    await insightScope.getByText("86.2%", { exact: true }).count() === 0,
+    "缺少完整权威快照时仍展示洞察 KPI"
   );
   await openTab(page, "模型质量");
   const hotwordPanel = page.getByTestId("hotword-statistics-panel");
@@ -1355,13 +1330,15 @@ async function assertProjectionSourceStates(page, failedResponses, browserErrors
   assert(
     homeProjectionContract.state === "synced" &&
       homeProjectionContract.source === "bff" &&
-      homeProjectionContract.contentSource === "none",
+      homeProjectionContract.contentSource === "bff",
     "truth mode 首页投影来源契约异常",
     homeProjectionContract
   );
-  await page.getByTestId("module-detail-unavailable").waitFor({ state: "visible", timeout: 5000 });
-  await expectBodyText(page, "BFF 明细尚未接入");
-  assert(await page.getByText("今日处理闭环", { exact: true }).count() === 0, "truth mode synced 未 hydrate 时仍渲染首页 fixture 明细");
+  await page.getByTestId("home-business-summary").waitFor({ state: "visible", timeout: 5000 });
+  assert(
+    await page.getByText("今日处理闭环", { exact: true }).count() === 0,
+    "truth mode synced 首页仍渲染 fixture 明细"
+  );
 
   for (const [nav, title, nonAuthoritativeSelector] of [
     ["洞察", "业务洞察", ".insight-command-shell"],
@@ -1411,17 +1388,41 @@ async function assertProjectionSourceStates(page, failedResponses, browserErrors
       };
       await page.route("**/api/v1/connectors", boundConnectorHandler);
       try {
+        await connectorButton.focus();
         await connectorButton.click();
         const importDrawer = page.getByRole("dialog", { name: "平台音频 URL 导入" });
         await importDrawer.waitFor({ state: "visible", timeout: 5000 });
         await importDrawer.getByText("关联外部平台", { exact: true }).waitFor({ state: "visible" });
+        const closeImportDrawer = importDrawer.getByRole("button", { name: "关闭导入配置" });
+        assert(
+          await closeImportDrawer.evaluate((element) => document.activeElement === element),
+          "音频导入抽屉打开后未把焦点移入 Dialog"
+        );
+        await page.keyboard.press("Shift+Tab");
+        assert(
+          await importDrawer.evaluate((element) => element.contains(document.activeElement)),
+          "音频导入抽屉 Shift+Tab 逃逸出 Dialog"
+        );
+        await page.keyboard.press("Tab");
+        assert(
+          await importDrawer.evaluate((element) => element.contains(document.activeElement)),
+          "音频导入抽屉 Tab 逃逸出 Dialog"
+        );
+        await assertNoBlockingAxeViolations(page, {
+          context: ".audio-import-drawer",
+          label: "音频导入配置抽屉"
+        });
         await page.waitForTimeout(150);
         assert(
           prematureConnectorPosts === 0,
           "打开导入配置抽屉时不应提前创建 Connector"
         );
-        await importDrawer.getByRole("button", { name: "关闭导入配置" }).click();
+        await page.keyboard.press("Escape");
         await importDrawer.waitFor({ state: "hidden", timeout: 5000 });
+        await page.waitForFunction(
+          (element) => document.activeElement === element,
+          await connectorButton.elementHandle()
+        );
       } finally {
         await page.unroute("**/api/v1/connectors", boundConnectorHandler);
       }
@@ -1619,9 +1620,17 @@ const projectionFixtures = {
         { metric_key: "model_anomaly", value: 2 }
       ],
       audio_count: 9421,
+      running_count: 9,
       pending_count: 319,
       anomaly_count: 17,
-      recent_asset_count: 23
+      model_anomaly_count: 2,
+      recent_asset_count: 23,
+      sessions: [
+        {
+          audio_session_id: "S20250526-000128",
+          root_trace_id: "trace_home_latest_import"
+        }
+      ]
     }
   },
   "/api/v1/tenants": { data: { items: [{ id: "aurora_auto", name: "极光汽车" }] } },
@@ -1812,22 +1821,29 @@ const taskWriteRequests = [];
 const taskReleaseRequests = [];
 const assetBackfillRequests = [];
 const assetCheckRetryRequests = [];
+const importBatchListRequests = [];
 const labelReviewRequests = [];
 const labelReviewTasks = new Map();
 for (const task of projectionFixtures["/api/v1/human-review-tasks"].data.items) {
   const audioSessionId = task.evidence_pack_id === "AF-131" ? "S20250526-000131" : "S20250526-000128";
+  const rootTraceId = task.evidence_pack_id === "AF-131"
+    ? "trace_20250526_091608"
+    : "trace_20250526_122718";
   labelReviewTasks.set(task.id, {
     ...task,
+    audio_session_id: audioSessionId,
+    root_trace_id: rootTraceId,
     title: task.queue === "amount_conflict" ? "金额冲突待复核" : task.queue === "crosstalk_candidate" ? "串音候选待确认" : "低置信转写待确认",
     asset_key: task.evidence_pack_id === "AF-128" ? "auris/label/event_tags" : task.evidence_pack_id === "AF-129" ? "auris/audio/raw_recordings" : "auris/model/asr_transcripts",
     evidence_pack: {
       evidence_pack_id: task.evidence_pack_id,
       audio_session_id: audioSessionId,
+      root_trace_id: rootTraceId,
       title: `${task.evidence_pack_id} 后端证据包`,
       window_start_ms: task.evidence_pack_id === "AF-131" ? 68000 : 227000,
       window_end_ms: task.evidence_pack_id === "AF-131" ? 100000 : 270000
     },
-    trace_id: `trace_${task.id}`
+    trace_id: rootTraceId
   });
 }
 
@@ -2849,6 +2865,7 @@ const bffStub = createHttpServer((request, response) => {
       response.end(JSON.stringify({ error: { code: "AUDIO_SESSION_NOT_FOUND", message: sessionId } }));
       return;
     }
+    projectionHits.add("/api/v1/audio-sessions");
     response.writeHead(200, { "Content-Type": "application/json" });
     response.end(JSON.stringify({ data: session, meta: { trace_id: session.trace_id, request_id: "ui-smoke-audio-session-read" } }));
     return;
@@ -4500,6 +4517,65 @@ const bffStub = createHttpServer((request, response) => {
     );
     return;
   }
+  if (path === "/api/v1/human-review-tasks" && request.method === "GET") {
+    projectionHits.add(path);
+    const url = new URL(request.url ?? "", "http://127.0.0.1");
+    const status = url.searchParams.get("status");
+    const queue = url.searchParams.get("queue");
+    const items = Array.from(labelReviewTasks.values()).filter(
+      (task) => (!status || task.status === status) && (!queue || task.queue === queue)
+    );
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: { items },
+      meta: { total: items.length, trace_id: "trace_ui_smoke_human_review_queue" }
+    }));
+    return;
+  }
+  if (path === "/api/v1/import-batches" && request.method === "GET") {
+    const url = new URL(request.url ?? "", "http://127.0.0.1");
+    importBatchListRequests.push({
+      targetAssetKey: url.searchParams.get("target_asset_key"),
+      connectorId: url.searchParams.get("connector_id"),
+      taskVersionId: url.searchParams.get("task_version_id"),
+      limit: url.searchParams.get("limit")
+    });
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: { items: [] },
+      meta: {
+        total: 0,
+        limit: Number(url.searchParams.get("limit") || 50),
+        next_cursor: null,
+        trace_id: "trace_ui_smoke_import_batch_recovery"
+      }
+    }));
+    return;
+  }
+  if (path.startsWith("/api/v1/evidence-packs/") && request.method === "GET") {
+    const evidencePackId = decodeURIComponent(path.split("/").pop() || "");
+    const task = Array.from(labelReviewTasks.values()).find(
+      (candidate) => candidate.evidence_pack_id === evidencePackId
+    );
+    if (!task) {
+      response.writeHead(404, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ error: { code: "EVIDENCE_PACK_NOT_FOUND", message: evidencePackId } }));
+      return;
+    }
+    response.writeHead(200, { "Content-Type": "application/json" });
+    response.end(JSON.stringify({
+      data: {
+        ...task.evidence_pack,
+        evidence_pack_id: evidencePackId,
+        status: "ready",
+        label_candidates: evidencePackId === "AF-128"
+          ? [{ candidate_id: "cand_af128_amount_conflict", value: "31.69 万", confidence: 0.86 }]
+          : []
+      },
+      meta: { trace_id: task.trace_id, request_id: "ui-smoke-evidence-pack-read" }
+    }));
+    return;
+  }
   const fixture = projectionFixtures[path];
   if (fixture) {
     projectionHits.add(path);
@@ -4722,10 +4798,23 @@ try {
   for (const check of moduleChecks) {
     await openModule(page, check.nav, check.title);
     if (check.nav === "首页") {
-      await expectMetricText(page, "9,421");
-      await expectMetricText(page, "319");
-      await expectMetricText(page, "17");
-      await expectMetricText(page, "后端投影");
+      const summary = page.getByTestId("home-business-summary");
+      await summary.waitFor({ state: "visible", timeout: 8000 });
+      const summaryText = await summary.innerText();
+      for (const expected of [
+        "运行中",
+        "9",
+        "待处理",
+        "319",
+        "失败",
+        "2",
+        "最新导入",
+        "S20250526-000128",
+        "来自 BFF ops-summary"
+      ]) {
+        assert(summaryText.includes(expected), `首页业务摘要缺少 ${expected}`);
+      }
+      assert(!summaryText.includes("9,421"), "首页业务摘要仍混入旧音频 KPI");
     }
     if (check.nav === "调听") {
       await assertListeningTranscriptLayout(page);
@@ -4736,9 +4825,11 @@ try {
     }
   }
 
-  await runManualLabelVersionWorkflowSmoke(page, failedResponses, browserErrors, requestFailures);
   await assertProjectionSourceStates(page, failedResponses, browserErrors);
   await runLabelGovernanceTruthSmoke(page);
+  await page.goto(demoBaseUrl, { waitUntil: "networkidle", timeout: 30000 });
+  await expectBodyText(page, "运营首页");
+  await runManualLabelVersionWorkflowSmoke(page, failedResponses, browserErrors, requestFailures);
   await page.goto(demoBaseUrl, { waitUntil: "networkidle", timeout: 30000 });
   await expectBodyText(page, "运营首页");
   await runHotwordGovernanceDemoSmoke(page);
@@ -4766,6 +4857,15 @@ try {
   assert(browserCsrfRequests.length > 0, "UI smoke 未通过 CSRF 保护执行任何浏览器写请求");
   assert(invalidBrowserCsrfRequests.length === 0, "浏览器写请求必须携带当前会话 CSRF token", { invalidBrowserCsrfRequests });
   assert(systemWorkerBearerRequests.length === 2, "内部监控 Worker Bearer 请求数量异常", { systemWorkerBearerRequests });
+  assert(
+    importBatchListRequests.some(
+      (request) =>
+        request.targetAssetKey === "auris/audio/raw_recordings" &&
+        request.limit === "1"
+    ),
+    "新浏览器上下文未通过 BFF 按目标资产恢复最近导入批次",
+    { importBatchListRequests }
+  );
   assert(hotwordReadRequests >= 1, "UI smoke 未读取热词统计投影", { hotwordReadRequests });
   const manualHeadReads = manualLabelRequests.filter((request) => request.kind === "release-head-read");
   const manualItemReads = manualLabelRequests.filter((request) => request.kind === "label-items-read");

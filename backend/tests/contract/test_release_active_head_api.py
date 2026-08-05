@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from app.core.database import SessionLocal
 from app.models import PromptAsset, ReleaseBundleHead, ReleaseCommand, ReleaseDeployment, RunRecord
 from app.workers.outbox_worker import process_aggregate_events
@@ -10,6 +12,8 @@ from tests.contract.test_prompt_release_closed_loop_api import (
     _release_body,
     _seed_release_dependencies,
 )
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 
 def _command_for_deployment(deployment_id: str) -> ReleaseCommand:

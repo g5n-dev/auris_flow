@@ -25,6 +25,9 @@ from app.schemas import (
     parse_payload,
 )
 from app.schemas.label_closed_loop import LabelBadcaseCreateRequest
+from app.services.execution_contract_registry import (
+    preflight_production_execution_contract,
+)
 from app.services.hotword_rollback_service import create_hotword_rollback
 from app.services.hotword_service import (
     BADCASE_WRITE_ROLES,
@@ -361,6 +364,11 @@ async def patch_hotword_pack_version(
 ) -> dict[str, Any]:
     require_any_role(ctx, PACK_MANAGE_ROLES, action="hotword_pack_versions.update")
     body = parse_payload(HotwordPackVersionPatchRequest, await request.json())
+    if body.status == "validating":
+        preflight_production_execution_contract(
+            event_type="hotword_pack_version.build-requested",
+            run_type="hotword_build",
+        )
     body_hash = await request_hash(request)
     operation = f"hotword_pack_versions.update:{version_id}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
@@ -459,6 +467,10 @@ async def post_hotword_analysis_runs(
 ) -> dict[str, Any]:
     require_any_role(ctx, PACK_MANAGE_ROLES, action="hotword_analysis.request")
     body = parse_payload(HotwordAnalysisRunRequest, await request.json())
+    preflight_production_execution_contract(
+        event_type="hotword_analysis.requested",
+        run_type="hotword_analysis",
+    )
     body_hash = await request_hash(request)
     operation = "hotword_analysis_runs.create"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
@@ -480,6 +492,10 @@ async def post_hotword_eval_runs(
 ) -> dict[str, Any]:
     require_any_role(ctx, PACK_MANAGE_ROLES, action="hotword_pack_versions.evaluate")
     body = parse_payload(HotwordEvalRunRequest, await request.json())
+    preflight_production_execution_contract(
+        event_type="hotword_pack_version.eval-requested",
+        run_type="hotword_eval",
+    )
     body_hash = await request_hash(request)
     operation = f"hotword_pack_versions.evaluate:{version_id}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)
@@ -501,6 +517,10 @@ async def post_hotword_publish(
 ) -> dict[str, Any]:
     require_any_role(ctx, {"project_admin"}, action="hotword_pack_versions.publish")
     body = parse_payload(HotwordPublishRequest, await request.json())
+    preflight_production_execution_contract(
+        event_type="hotword_pack_version.publish-requested",
+        run_type="hotword_publish",
+    )
     body_hash = await request_hash(request)
     operation = f"hotword_pack_versions.publish:{version_id}"
     replay = replay_or_conflict(session, ctx, operation=operation, body_hash=body_hash)

@@ -26,7 +26,7 @@ from app.core.config import get_settings
 from app.core.context import RequestContext
 from app.core.errors import ApiError
 from app.core.http_transport import open_url_no_redirect
-from app.models import ImportBatch, JsonResource
+from app.models import ImportBatch, JsonResource, PlatformConnection
 from app.services.audit_service import record_audit
 from app.services.outbox_service import enqueue_event
 
@@ -630,13 +630,17 @@ def validate_platform_audio_connector(
             422,
             details=_validation_details(error),
         ) from error
-    platform_connection = _resource(session, ctx, definition.platform_connection_id)
-    platform_data = platform_connection.data if isinstance(platform_connection.data, dict) else {}
-    platform_type = platform_data.get("type") or platform_data.get("source_type")
-    if platform_type not in {"platform_auth", "platform_connection"}:
+    platform_connection = session.scalar(
+        select(PlatformConnection).where(
+            PlatformConnection.platform_connection_id == definition.platform_connection_id,
+            PlatformConnection.tenant_id == ctx.tenant_id,
+            PlatformConnection.project_id == ctx.project_id,
+        )
+    )
+    if platform_connection is None or platform_connection.status != "active":
         raise ApiError(
             "CONNECTOR_PLATFORM_CONNECTION_INVALID",
-            "平台音频连接器必须绑定当前项目的平台连接",
+            "平台音频连接器必须绑定当前项目已验证的平台连接",
             422,
         )
     if definition.platform_connection_id == definition.connector_id:
@@ -644,6 +648,27 @@ def validate_platform_audio_connector(
             "CONNECTOR_PLATFORM_CONNECTION_INVALID",
             "平台音频连接器不能绑定自身",
             422,
+        )
+    binding_matches = (
+        hmac.compare_digest(platform_connection.origin.rstrip("/"), definition.base_url.rstrip("/"))
+        and hmac.compare_digest(
+            platform_connection.credential_ref,
+            definition.credential_ref,
+        )
+        and hmac.compare_digest(
+            platform_connection.external_tenant_ref,
+            definition.platform_scope.tenant_ref,
+        )
+    )
+    allowed_store_refs = set(platform_connection.store_refs or [])
+    requested_store_refs = set(definition.platform_scope.store_refs)
+    if not binding_matches or (
+        allowed_store_refs and not requested_store_refs.issubset(allowed_store_refs)
+    ):
+        raise ApiError(
+            "CONNECTOR_PLATFORM_CONNECTION_SCOPE_MISMATCH",
+            "连接器的地址、凭证引用或平台范围与所选平台连接不一致",
+            409,
         )
     target = _resource_for_asset(session, ctx, definition.target_asset_key)
     if target.data.get("asset_key") != definition.target_asset_key:

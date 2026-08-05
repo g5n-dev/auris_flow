@@ -1,9 +1,11 @@
+import { createUserIntentIdempotencyKey } from "../../../api/client";
 import type { BackendActionReceipt } from "../../../api/client";
 import type { OperationNotice, OperationStatus } from "../../../shared/contracts/operations";
 import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
 import { defaultEvidencePageConfig } from "../fixtures/evidenceFixtures";
 import { initialListeningSample } from "../fixtures/reviewSamples";
 import type { ReviewSample } from "../fixtures/reviewSamples";
+import type { HumanReviewChange } from "../model/reviewDecisionModel";
 import type { AppealableReviewDecision, EvidencePageConfig, ListeningFeatureProps, ListeningScope, ListeningToolMode, MarkState, Mode, PanelTab } from "../types";
 import { useState } from "react";
 
@@ -18,6 +20,14 @@ export function useListeningState(props: ListeningFeatureProps) {
   const [selectedWindow, setSelectedWindow] = useState("12:23 - 12:33");
 
   const [markState, setMarkState] = useState<MarkState>("none");
+
+  const [lowConfidence, setLowConfidence] = useState(false);
+
+  const [reviewChanges, setReviewChanges] = useState<HumanReviewChange[]>([]);
+
+  const [reviewDecisionIdempotencyKey, setReviewDecisionIdempotencyKey] = useState(
+    () => createUserIntentIdempotencyKey("human_review_decision")
+  );
 
   const [agentState, setAgentState] = useState<"pending" | "accepted" | "rejected">("pending");
 
@@ -37,7 +47,7 @@ export function useListeningState(props: ListeningFeatureProps) {
 
   const [backendReviewSamples, setBackendReviewSamples] = useState<ReviewSample[]>([]);
 
-  const [listeningReadState, setListeningReadState] = useState<"idle" | "loading" | "ready" | "empty" | "error">(
+  const [listeningReadState, setListeningReadState] = useState<"idle" | "loading" | "ready" | "empty" | "complete" | "error">(
       LABEL_DEMO_MODE ? "ready" : "idle"
     );
 
@@ -52,7 +62,7 @@ export function useListeningState(props: ListeningFeatureProps) {
   const [listeningNotice, setListeningNotice] = useState<OperationNotice>({
       status: "idle",
       title: "等待复核动作",
-      detail: "队列切换、接受/拒绝、保存边界、重跑和确认下一通会写入当前会话处理记录。"
+      detail: "人工修订先汇总到当前决定；提交、写后回读全部一致后才会读取下一通。"
     });
 
   const [listeningActionPending, setListeningActionPending] = useState(false);
@@ -69,7 +79,7 @@ export function useListeningState(props: ListeningFeatureProps) {
 
   const [createdAppeal, setCreatedAppeal] = useState<BackendActionReceipt | null>(null);
 
-  return { active, activeModule, currentUser, focus, getModuleTitle, navigateModuleRoot, navigateToTarget, registerListeningNavigationResolver, setSelectedDataAssetId, setSelectedAssetKey, topbarContext, mode, setMode, listeningScope, setListeningScope, panelTab, setPanelTab, selectedWindow, setSelectedWindow, markState, setMarkState, agentState, setAgentState, activeQueue, setActiveQueue, activeChip, setActiveChip, pageConfigOpen, setPageConfigOpen, listeningTool, setListeningTool, listeningQuery, setListeningQuery, evidencePageConfig, setEvidencePageConfig, activeSampleId, setActiveSampleId, backendReviewSamples, setBackendReviewSamples, listeningReadState, setListeningReadState, listeningReadDetail, setListeningReadDetail, listeningReadRetry, setListeningReadRetry, completedSampleIds, setCompletedSampleIds, listeningNotice, setListeningNotice, listeningActionPending, setListeningActionPending, listeningRunState, setListeningRunState, latestReviewDecision, setLatestReviewDecision, appealComposerOpen, setAppealComposerOpen, appealReason, setAppealReason, appealPending, setAppealPending, createdAppeal, setCreatedAppeal };
+  return { active, activeModule, currentUser, focus, getModuleTitle, navigateModuleRoot, navigateToTarget, registerListeningNavigationResolver, setSelectedDataAssetId, setSelectedAssetKey, topbarContext, mode, setMode, listeningScope, setListeningScope, panelTab, setPanelTab, selectedWindow, setSelectedWindow, markState, setMarkState, lowConfidence, setLowConfidence, reviewChanges, setReviewChanges, reviewDecisionIdempotencyKey, setReviewDecisionIdempotencyKey, agentState, setAgentState, activeQueue, setActiveQueue, activeChip, setActiveChip, pageConfigOpen, setPageConfigOpen, listeningTool, setListeningTool, listeningQuery, setListeningQuery, evidencePageConfig, setEvidencePageConfig, activeSampleId, setActiveSampleId, backendReviewSamples, setBackendReviewSamples, listeningReadState, setListeningReadState, listeningReadDetail, setListeningReadDetail, listeningReadRetry, setListeningReadRetry, completedSampleIds, setCompletedSampleIds, listeningNotice, setListeningNotice, listeningActionPending, setListeningActionPending, listeningRunState, setListeningRunState, latestReviewDecision, setLatestReviewDecision, appealComposerOpen, setAppealComposerOpen, appealReason, setAppealReason, appealPending, setAppealPending, createdAppeal, setCreatedAppeal };
 }
 
 export type ListeningState = ReturnType<typeof useListeningState>;

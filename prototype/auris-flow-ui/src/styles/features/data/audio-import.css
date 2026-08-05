@@ -69,7 +69,7 @@
 .audio-import-drawer-head span,
 .audio-import-run-panel > header span,
 .audio-import-session-panel > header span {
-  color: #86909c;
+  color: #4e5969;
   font-size: 10px;
 }
 
@@ -462,7 +462,7 @@
 }
 
 .audio-import-drawer-foot > span {
-  color: #86909c;
+  color: #4e5969;
   font-size: 11px;
 }
 

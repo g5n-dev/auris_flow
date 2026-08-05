@@ -402,6 +402,83 @@ def test_manifest_receipt_reads_exact_version_and_materializes_supported_domain_
     assert client.calls[0][2:] == ("result-version-7", 4 * 1024 * 1024)
 
 
+def test_manifest_receipt_preserves_only_explicit_validated_review_outputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    manifest = _manifest(run)
+    review_outputs = {
+        "event_links": [
+            {
+                "source_event_id": "quote:BJ-041",
+                "document_ref": "BJ-041",
+                "relation_type": "quote",
+                "confidence": 0.92,
+                "evidence_window": "00:00.010-00:00.110",
+            }
+        ],
+        "label_candidates": [
+            {
+                "label": "报价金额",
+                "value_or_action": "金额冲突",
+                "confidence": 0.82,
+            }
+        ],
+    }
+    manifest["provider_result"]["review_outputs"] = review_outputs
+    manifest["provider_result_sha256"] = hashlib.sha256(
+        _canonical(manifest["provider_result"])
+    ).hexdigest()
+    body = _canonical(manifest)
+    receipt = _receipt(run, body)
+    receipt["provider_result_sha256"] = manifest["provider_result_sha256"]
+    client = _ExactVersionClient(body)
+    monkeypatch.setattr(
+        audio_intelligence_service,
+        "object_storage_client_for_provider",
+        lambda _provider: client,
+    )
+
+    resolved = resolve_audio_intelligence_result(run, receipt)
+
+    assert resolved["review_outputs"] == review_outputs
+
+
+def test_manifest_receipt_rejects_uncontracted_review_output_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run = _run()
+    manifest = _manifest(run)
+    manifest["provider_result"]["review_outputs"] = {
+        "event_links": [],
+        "label_candidates": [
+            {
+                "label": "报价金额",
+                "value_or_action": "金额冲突",
+                "confidence": 0.82,
+                "status": "accepted",
+            }
+        ],
+    }
+    manifest["provider_result_sha256"] = hashlib.sha256(
+        _canonical(manifest["provider_result"])
+    ).hexdigest()
+    body = _canonical(manifest)
+    receipt = _receipt(run, body)
+    receipt["provider_result_sha256"] = manifest["provider_result_sha256"]
+    client = _ExactVersionClient(body)
+    monkeypatch.setattr(
+        audio_intelligence_service,
+        "object_storage_client_for_provider",
+        lambda _provider: client,
+    )
+
+    with pytest.raises(ApiError) as raised:
+        resolve_audio_intelligence_result(run, receipt)
+
+    assert raised.value.code == "AUDIO_RESULT_MANIFEST_PROVIDER_RESULT_INVALID"
+
+
 @pytest.mark.parametrize("mutation", ["model", "version", "duplicate", "nan"])
 def test_manifest_receipt_fails_closed_on_binding_version_or_json_tampering(
     monkeypatch: pytest.MonkeyPatch,
@@ -518,7 +595,9 @@ def test_manifest_completion_is_atomic_and_never_persists_raw_result_locator(
         },
         headers={**auth_headers, "Idempotency-Key": "audio-result-manifest-complete"},
     )
-    assert completed.status_code == 200, completed.text
+    assert completed.status_code == 202, completed.text
+    assert completed.json()["data"]["status"] == "completion_pending"
+    assert completed.json()["data"]["receipt_state"] == "materializing"
     assert result_object_key not in completed.text
     assert result_version_id not in completed.text
 
@@ -536,12 +615,50 @@ def test_manifest_completion_is_atomic_and_never_persists_raw_result_locator(
         assert stored_run is not None
         assert inbox is not None
         assert stored_object is not None
+        assert stored_run.status == "completion_pending"
+        assert inbox.processing_state == "materializing"
+        assert stored_object.status == "pending_completion_binding"
         assert result_object_key not in repr(stored_run.payload["result_ref"])
         assert result_version_id not in repr(stored_run.payload["completion_receipt"])
         assert result_object_key not in repr(inbox.request_body)
         assert result_version_id not in repr(inbox.request_body)
         assert stored_object.object_key == result_object_key
         assert stored_object.payload["object_version_id"] == result_version_id
+        assert (
+            session.query(JsonResource)
+            .filter(
+                JsonResource.trace_id == stored_run.trace_id,
+                JsonResource.collection.in_(
+                    [
+                        "vad_segments",
+                        "speaker_turns",
+                        "asr_segments",
+                        "voiceprint_samples",
+                        "audio_quality_reports",
+                    ]
+                ),
+            )
+            .count()
+            == 0
+        )
+
+    assert process_aggregate_events([run_id]) == 1
+
+    with SessionLocal() as session:
+        stored_run = session.get(RunRecord, run_id)
+        inbox = session.scalar(
+            select(RunCompletionReceipt).where(
+                RunCompletionReceipt.completion_receipt_id == "audio-result-manifest-complete"
+            )
+        )
+        stored_object = session.get(
+            StorageObject,
+            result_receipt["result_manifest_storage_object_id"],
+        )
+        assert stored_run is not None and inbox is not None and stored_object is not None
+        assert stored_run.status == "success"
+        assert inbox.processing_state == "completed"
+        assert stored_object.status == "verified"
         resources = session.query(JsonResource).filter(JsonResource.trace_id == stored_run.trace_id)
         assert {resource.collection for resource in resources} >= {
             "vad_segments",
@@ -552,7 +669,7 @@ def test_manifest_completion_is_atomic_and_never_persists_raw_result_locator(
         }
 
 
-def test_manifest_registration_and_run_completion_roll_back_with_materialization_failure(
+def test_manifest_registration_failure_atomically_closes_materialization_without_outputs(
     client: Any,
     auth_headers: dict[str, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -593,7 +710,7 @@ def test_manifest_registration_and_run_completion_roll_back_with_materialization
         fail_materialization,
     )
     completion_receipt_id = "audio-result-manifest-rollback"
-    failed = client.post(
+    accepted = client.post(
         f"/api/v1/runs/{run_id}/completion-receipts",
         json={
             "adapter": "dagster",
@@ -604,22 +721,56 @@ def test_manifest_registration_and_run_completion_roll_back_with_materialization
         },
         headers={**auth_headers, "Idempotency-Key": completion_receipt_id},
     )
-    assert failed.status_code == 500, failed.text
-    assert failed.json()["error"]["code"] == "AUDIO_TEST_MATERIALIZATION_FAILED"
+    assert accepted.status_code == 202, accepted.text
+    assert accepted.json()["data"]["status"] == "completion_pending"
+    assert process_aggregate_events([run_id]) == 1
 
     with SessionLocal() as session:
-        rolled_back_run = session.get(RunRecord, run_id)
-        assert rolled_back_run is not None
-        assert rolled_back_run.status == "submitted"
-        assert "completion_receipt" not in rolled_back_run.payload
-        assert session.get(StorageObject, storage_object_id) is None
-        assert (
-            session.scalar(
-                select(RunCompletionReceipt).where(
-                    RunCompletionReceipt.completion_receipt_id == completion_receipt_id
-                )
+        staged_run = session.get(RunRecord, run_id)
+        staged_object = session.get(StorageObject, storage_object_id)
+        staged_receipt = session.scalar(
+            select(RunCompletionReceipt).where(
+                RunCompletionReceipt.completion_receipt_id == completion_receipt_id
             )
-            is None
+        )
+        materialization_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert staged_run is not None
+        assert staged_run.status == "failed"
+        assert staged_run.payload["business_status"] == "failed"
+        assert staged_run.payload["materialization"]["status"] == "failed"
+        assert staged_run.payload["materialization"]["error_code"] == (
+            "AUDIO_TEST_MATERIALIZATION_FAILED"
+        )
+        assert staged_object is not None
+        assert staged_object.status == "pending_completion_binding"
+        assert staged_receipt is not None
+        assert staged_receipt.processing_state == "completed"
+        assert staged_receipt.completion_status == "failed"
+        assert materialization_event is not None
+        assert materialization_event.status == "dead_letter"
+        assert materialization_event.last_error.startswith("AUDIO_TEST_MATERIALIZATION_FAILED:")
+        assert materialization_event.attempt_count == 1
+        assert (
+            session.query(JsonResource)
+            .filter(
+                JsonResource.trace_id == staged_run.trace_id,
+                JsonResource.collection.in_(
+                    [
+                        "vad_segments",
+                        "speaker_turns",
+                        "asr_segments",
+                        "voiceprint_samples",
+                        "audio_quality_reports",
+                    ]
+                ),
+            )
+            .count()
+            == 0
         )
 
 
@@ -752,6 +903,25 @@ def test_signed_audio_completion_can_arrive_before_launch_and_materialize_exact_
         )
 
     monkeypatch.setattr(outbox_worker, "dispatch_event", launch_after_callback)
+    assert process_aggregate_events([bound_run.run_id]) == 1
+
+    with SessionLocal() as session:
+        stored_run = session.get(RunRecord, bound_run.run_id)
+        inbox = session.scalar(
+            select(RunCompletionReceipt).where(
+                RunCompletionReceipt.completion_receipt_id == completion_receipt_id
+            )
+        )
+        pending_materialization = session.get(
+            StorageObject,
+            result_receipt["result_manifest_storage_object_id"],
+        )
+        assert stored_run is not None and inbox is not None and pending_materialization is not None
+        assert stored_run.status == "completion_pending"
+        assert stored_run.payload["business_status"] == "materializing"
+        assert inbox.processing_state == "materializing"
+        assert pending_materialization.status == "pending_completion_binding"
+
     assert process_aggregate_events([bound_run.run_id]) == 1
 
     with SessionLocal() as session:

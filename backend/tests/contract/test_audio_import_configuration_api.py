@@ -126,7 +126,7 @@ def test_connector_create_requires_complete_platform_audio_contract_and_rejects_
         headers=_write_headers(auth_headers, "connector-raw-secret"),
     )
     assert rejected_secret.status_code == 422, rejected_secret.text
-    assert rejected_secret.json()["error"]["code"] == "VALIDATION_ERROR"
+    assert rejected_secret.json()["error"]["code"] == "PLAINTEXT_CREDENTIAL_FORBIDDEN"
 
     unsafe_url = {
         **_connector_payload(connector_id="connector-private-url"),
@@ -204,7 +204,7 @@ def test_connector_create_rejects_plaintext_credential_ref_before_persistence(
     )
 
     assert rejected.status_code == 422, rejected.text
-    assert rejected.json()["error"]["code"] == "CONNECTOR_CONFIGURATION_INVALID"
+    assert rejected.json()["error"]["code"] == "CREDENTIAL_REFERENCE_INVALID"
     assert plaintext_credential not in rejected.text
     with SessionLocal() as session:
         assert (
@@ -927,6 +927,19 @@ def test_task_publish_freezes_connector_snapshot_and_production_run_creates_one_
     assert retry_data["execution_mode"] == "production"
     assert retry_data["retry_of_run_id"] == run_data["run_id"]
 
+    retry_batch_detail = client.get(
+        f"/api/v1/import-batches/{retry_data['import_batch_id']}",
+        headers=auth_headers,
+    )
+    assert retry_batch_detail.status_code == 200, retry_batch_detail.text
+    assert retry_batch_detail.json()["data"]["retry_lineage"] == {
+        "source_task_run_id": run_data["run_id"],
+        "source_import_batch_id": run_data["import_batch_id"],
+        "root_task_run_id": run_data["run_id"],
+        "root_import_batch_id": run_data["import_batch_id"],
+        "attempt": 2,
+    }
+
     with SessionLocal() as session:
         retry_batch = session.get(ImportBatch, retry_data["import_batch_id"])
         assert retry_batch is not None
@@ -1144,6 +1157,15 @@ def test_import_batch_reads_are_project_scoped_and_items_use_public_contract(
             "audio_session_id": "audio-session-001",
             "root_trace_id": "trace-import-read-contract",
             "trace_id": "trace-import-read-contract",
+            "recovery_suggestion": None,
+            "retryable": False,
+            "retry_lineage": {
+                "source_import_batch_id": None,
+                "source_import_item_id": None,
+                "root_import_batch_id": "import_batch_read_contract",
+                "root_import_item_id": "import_item_success",
+                "attempt": 1,
+            },
         },
         {
             "import_item_id": "import_item_failed",
@@ -1155,6 +1177,15 @@ def test_import_batch_reads_are_project_scoped_and_items_use_public_contract(
             "audio_session_id": None,
             "root_trace_id": "trace-import-read-contract",
             "trace_id": "trace-import-read-contract",
+            "recovery_suggestion": ("源音频地址已过期；请先在外部平台刷新地址，再重试失败项。"),
+            "retryable": True,
+            "retry_lineage": {
+                "source_import_batch_id": None,
+                "source_import_item_id": None,
+                "root_import_batch_id": "import_batch_read_contract",
+                "root_import_item_id": "import_item_failed",
+                "attempt": 1,
+            },
         },
     ]
     serialized = json.dumps(items.json(), ensure_ascii=False)

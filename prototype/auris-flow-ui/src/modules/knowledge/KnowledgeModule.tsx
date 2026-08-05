@@ -806,6 +806,17 @@ export default function KnowledgeModule({
       : sourceId;
   const backendKnowledgeIndexId = sceneManifest?.knowledge_index_refs[0] ?? "";
   const canBuildSceneIndex = Boolean(backendKnowledgeIndexId && sceneBinding);
+  const knowledgeWritesEnabled = demoMode && projectionSource === "mock";
+  const knowledgeWriteDisabledReason = knowledgeWritesEnabled ? "" : "知识同步、索引、质量、补全、人审与导出尚未绑定专用生产 executor；当前仅可查看 BFF 数据。";
+  const knowledgeWriteButtonProps = (busy = false, extraReason = "") => ({
+    disabled: busy || Boolean(knowledgeWriteDisabledReason) || Boolean(extraReason),
+    title: knowledgeWriteDisabledReason || extraReason || undefined, "aria-describedby": knowledgeWriteDisabledReason ? "knowledge-write-disabled-reason" : undefined
+  });
+  const blockKnowledgeWrite = () => {
+    if (knowledgeWritesEnabled) return false;
+    setKnowledgeNotice({ status: "error", title: "生产写操作不可用", detail: `${knowledgeWriteDisabledReason}（EXECUTION_CONTRACT_NOT_CONFIGURED）` });
+    return true;
+  };
   useEffect(() => {
     if (activeTab === "connectors") selectKnowledgeObject({ kind: "source", id: selectedSourceId });
     if (activeTab === "indexing") selectKnowledgeObject({ kind: "chunk", id: selectedChunkId });
@@ -839,24 +850,23 @@ export default function KnowledgeModule({
     onSuccess?: () => void,
     shouldFail = false
   ) => {
+    if (blockKnowledgeWrite()) return;
     setKnowledgeAction(actionKey);
     setKnowledgeNotice({ status: "pending", title: pendingTitle, detail: pendingDetail });
-    window.setTimeout(() => {
-      setKnowledgeAction(null);
-      if (shouldFail) {
-        setKnowledgeNotice({
-          status: "error",
-          title: "连接测试失败",
-          detail: `${selectedSource.name} 缺少最新授权或目录权限，请进入任务配置修复连接器。`
-        });
-        addRunRecord("连接测试失败", `${selectedSource.name} / 授权或目录权限缺失`);
-        return;
-      }
-      onSuccess?.();
-      setKnowledgeDraftActions((current) => [`${successTitle}：${successDetail}`, ...current].slice(0, 5));
-      setKnowledgeNotice({ status: "success", title: successTitle, detail: successDetail });
-      addRunRecord(successTitle, successDetail);
-    }, 720);
+    setKnowledgeAction(null);
+    if (shouldFail) {
+      setKnowledgeNotice({
+        status: "error",
+        title: "DEMO：连接测试失败",
+        detail: `${selectedSource.name} 缺少演示授权或目录权限，请进入任务配置修复连接器。`
+      });
+      addRunRecord("DEMO：连接测试失败", `${selectedSource.name} / 授权或目录权限缺失`);
+      return;
+    }
+    onSuccess?.();
+    setKnowledgeDraftActions((current) => [`DEMO：${successTitle}：${successDetail}`, ...current].slice(0, 5));
+    setKnowledgeNotice({ status: "success", title: `DEMO：${successTitle}`, detail: successDetail });
+    addRunRecord(`DEMO：${successTitle}`, successDetail);
   };
   const testConnection = (source: KnowledgeSource) => {
     setSelectedSourceId(source.id);
@@ -908,24 +918,20 @@ export default function KnowledgeModule({
     return { module: route, title };
   };
   const generateCandidateLabels = () => {
+    if (blockKnowledgeWrite()) return;
     setKnowledgeAction("complete");
     setKnowledgeNotice({
       status: "pending",
       title: "正在生成候选标签",
       detail: `${selectedEvidence.title} 正在合并知识命中、录音窗口和标签缺口。`
     });
-    window.setTimeout(() => {
-      setKnowledgeAction(null);
-      setCompletionCount((value) => value + 3);
-      addRunRecord("候选标签已生成", `${selectedGap.label} / ${selectedEvidence.title} / 待人审`);
-      setKnowledgeNotice({
-        status: "success",
-        title: "候选标签已生成",
-        detail: `${selectedGap.label} 已写入标签补全草稿，不覆盖线上标签。`
-      });
-    }, 620);
+    setKnowledgeAction(null);
+    setCompletionCount((value) => value + 3);
+    addRunRecord("DEMO：候选标签已生成", `${selectedGap.label} / ${selectedEvidence.title} / 待人审`);
+    setKnowledgeNotice({ status: "success", title: "DEMO：候选标签已生成", detail: `${selectedGap.label} 仅写入演示态标签补全草稿，不覆盖线上标签。` });
   };
   const addGapToEvaluation = () => {
+    if (blockKnowledgeWrite()) return;
     addRunRecord("缺口样本加入评测集", `${selectedGap.label} / ${selectedGap.type} / ${selectedEvidence.id}`);
     setKnowledgeNotice({
       status: "success",
@@ -934,37 +940,26 @@ export default function KnowledgeModule({
     });
   };
   const rechunkCurrentSample = () => {
+    if (blockKnowledgeWrite()) return;
     setKnowledgeAction("rechunk");
     setKnowledgeNotice({
       status: "pending",
       title: "正在重切当前样本",
       detail: `${selectedChunk.chunkId} 正在按语义窗口、标签边界和录音时间窗重建。`
     });
-    window.setTimeout(() => {
-      setKnowledgeAction(null);
-      setChunkPreviews((current) =>
-        current.map((chunk) =>
-          chunk.id === selectedChunk.id
-            ? {
-                ...chunk,
-                tokens: Math.min(chunk.tokens + 28, 260),
-                recall: Math.min(chunk.recall + 7, 96),
-                overlap: "前后各 10s",
-                quality: "正常",
-                after: `${chunk.after} 已重切：保留标签边界和上下文窗口。`
-              }
-            : chunk
-        )
-      );
-      addRunRecord("切片样本已重切", `${selectedChunk.chunkId} / 语义窗口 + 标签边界`);
-      setKnowledgeNotice({
-        status: "success",
-        title: "切片效果已更新",
-        detail: `${selectedChunk.chunkId} 已重新生成，召回分和标签覆盖已更新。`
-      });
-    }, 680);
+    setKnowledgeAction(null);
+    setChunkPreviews((current) =>
+      current.map((chunk) =>
+        chunk.id === selectedChunk.id
+          ? { ...chunk, tokens: Math.min(chunk.tokens + 28, 260), recall: Math.min(chunk.recall + 7, 96), overlap: "前后各 10s", quality: "正常", after: `${chunk.after} 已重切：保留标签边界和上下文窗口。` }
+          : chunk
+      )
+    );
+    addRunRecord("DEMO：切片样本已重切", `${selectedChunk.chunkId} / 语义窗口 + 标签边界`);
+    setKnowledgeNotice({ status: "success", title: "DEMO：切片效果已更新", detail: `${selectedChunk.chunkId} 仅更新演示态预览。` });
   };
   const markChunkIssue = () => {
+    if (blockKnowledgeWrite()) return;
     addRunRecord("切片问题已标记", `${selectedChunk.chunkId} / ${selectedChunk.quality} / ${selectedChunk.evidence}`);
     setKnowledgeNotice({
       status: "success",
@@ -973,6 +968,7 @@ export default function KnowledgeModule({
     });
   };
   const addChunkToCompletion = () => {
+    if (blockKnowledgeWrite()) return;
     setCompletionCount((value) => value + 1);
     addRunRecord("切片加入标签补全", `${selectedChunk.chunkId} / ${selectedChunk.labels.join("、")}`);
     setKnowledgeNotice({
@@ -982,6 +978,7 @@ export default function KnowledgeModule({
     });
   };
   const syncSource = async (source: KnowledgeSource) => {
+    if (blockKnowledgeWrite()) return;
     if (source.id === "knowledge-unconfigured" || !sceneBinding) {
       setKnowledgeNotice({
         status: "error",
@@ -1038,6 +1035,7 @@ export default function KnowledgeModule({
     }
   };
   const buildIndex = async () => {
+    if (blockKnowledgeWrite()) return;
     if (!backendKnowledgeIndexId || !sceneBinding) {
       setKnowledgeNotice({
         status: "error",
@@ -1114,6 +1112,7 @@ export default function KnowledgeModule({
     );
   };
   const createKnowledgeReviewTask = () => {
+    if (blockKnowledgeWrite()) return;
     const title = selectedKnowledgeObject.kind === "chunk" ? selectedChunk.chunkId : selectedGap.label;
     addRunRecord("人工处理任务已创建", `${title} / 知识库质量队列 / 待确认`);
     setKnowledgeDraftActions((current) => [`人工处理任务：${title} 已进入知识库质量队列`, ...current].slice(0, 5));
@@ -1124,6 +1123,7 @@ export default function KnowledgeModule({
     });
   };
   const exportCurrentKnowledgeData = () => {
+    if (blockKnowledgeWrite()) return;
     const scopeLabel = KNOWLEDGE_TAB_LABELS[activeTab] ?? "知识总览";
     addRunRecord("当前知识数据已导出", `${scopeLabel} / 查询 ${knowledgeFilters.query || "全部"} / JSON + Markdown`);
     setKnowledgeNotice({
@@ -1191,9 +1191,9 @@ export default function KnowledgeModule({
       </div>
       <div className="knowledge-action-row">
         <button type="button" onClick={openEvidence}><Headphones size={14} />查看录音证据</button>
-        <button type="button" disabled={knowledgeAction === "complete"} onClick={generateCandidateLabels}><Sparkles size={14} />{knowledgeAction === "complete" ? "生成中" : "生成候选标签"}</button>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === "complete")} onClick={generateCandidateLabels}><Sparkles size={14} />{knowledgeAction === "complete" ? "生成中" : "生成候选标签"}</button>
         <button type="button" onClick={() => setActiveModule("labels")}><Tags size={14} />进入标签治理</button>
-        <button type="button" className="primary" onClick={addGapToEvaluation}><BarChart3 size={14} />加入评测集</button>
+        <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={addGapToEvaluation}><BarChart3 size={14} />加入评测集</button>
       </div>
     </section>
   );
@@ -1242,13 +1242,13 @@ export default function KnowledgeModule({
         </div>
       </div>
       <div className="knowledge-action-row">
-        <button type="button" disabled={knowledgeAction === `test-${selectedSource.id}`} onClick={() => testConnection(selectedSource)}>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === `test-${selectedSource.id}`)} onClick={() => testConnection(selectedSource)}>
           <ShieldCheck size={14} />
           {knowledgeAction === `test-${selectedSource.id}` ? "测试中" : "测试连接"}
         </button>
         <button
           type="button"
-          disabled={knowledgeAction === `sync-${selectedSource.id}`}
+          {...knowledgeWriteButtonProps(knowledgeAction === `sync-${selectedSource.id}`)}
           data-action-key="knowledge-sync-source"
           onClick={() => syncSource(selectedSource)}
         >
@@ -1287,8 +1287,7 @@ export default function KnowledgeModule({
           <p>向量、关键词和实体关系共同参与召回；知识库只发布索引版本，不覆盖原始数据资产。</p>
           <button
             type="button"
-            disabled={knowledgeAction === "index" || !canBuildSceneIndex}
-            title={!canBuildSceneIndex ? "先绑定包含 knowledge_index_refs 的已发布 SceneProfile" : undefined}
+            {...knowledgeWriteButtonProps(knowledgeAction === "index", !canBuildSceneIndex ? "先绑定包含 knowledge_index_refs 的已发布 SceneProfile" : "")}
             data-action-key="knowledge-build-index"
             onClick={buildIndex}
           >
@@ -1345,9 +1344,9 @@ export default function KnowledgeModule({
         </div>
       </div>
       <div className="knowledge-action-row">
-        <button type="button" disabled={knowledgeAction === "rechunk"} onClick={rechunkCurrentSample}><RotateCcw size={14} />{knowledgeAction === "rechunk" ? "重切中" : "重切当前样本"}</button>
-        <button type="button" onClick={markChunkIssue}><AlertTriangle size={14} />标记切片问题</button>
-        <button type="button" className="primary" onClick={addChunkToCompletion}><Tags size={14} />加入标签补全样本</button>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === "rechunk")} onClick={rechunkCurrentSample}><RotateCcw size={14} />{knowledgeAction === "rechunk" ? "重切中" : "重切当前样本"}</button>
+        <button type="button" {...knowledgeWriteButtonProps()} onClick={markChunkIssue}><AlertTriangle size={14} />标记切片问题</button>
+        <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={addChunkToCompletion}><Tags size={14} />加入标签补全样本</button>
       </div>
     </section>
   );
@@ -1421,7 +1420,7 @@ export default function KnowledgeModule({
         <button type="button" onClick={() => openKnowledgeTarget(targetForKnowledgeRoute(selectedGraphPath.route, selectedGraphPath.apps[0]), "知识库 / 知识图谱")}>打开消费场景详情</button>
         <button type="button" onClick={() => openKnowledgeTarget(targetForKnowledgeRoute("assets", selectedGraphPath.chunk), "知识库 / 知识图谱")}>查看资产血缘</button>
         <button type="button" onClick={() => openKnowledgeTarget(targetForKnowledgeRoute("labels", selectedGraphPath.entities[0]), "知识库 / 知识图谱")}>查看标签样本</button>
-        <button type="button" className="primary" disabled={knowledgeAction === "complete"} onClick={generateCandidateLabels}>
+        <button type="button" className="primary" {...knowledgeWriteButtonProps(knowledgeAction === "complete")} onClick={generateCandidateLabels}>
           {knowledgeAction === "complete" ? "生成中" : "基于路径生成候选"}
         </button>
       </div>
@@ -1452,7 +1451,7 @@ export default function KnowledgeModule({
         </div>
       </div>
       <div className="knowledge-action-row">
-        <button type="button" disabled={knowledgeAction === "quality"} onClick={runQualityCheck}>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === "quality")} onClick={runQualityCheck}>
           <Gauge size={14} />
           {knowledgeAction === "quality" ? "检测中" : "运行质量检测"}
         </button>
@@ -1491,7 +1490,7 @@ export default function KnowledgeModule({
         ))}
       </div>
       <div className="knowledge-effect-actions">
-        <button type="button" disabled={knowledgeAction === "report"} onClick={exportEffectReport}>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === "report")} onClick={exportEffectReport}>
           <Download size={14} />
           {knowledgeAction === "report" ? "生成中" : "导出效果报告"}
         </button>
@@ -1743,8 +1742,8 @@ export default function KnowledgeModule({
         tags: [selectedSource.owner, selectedSource.kind, selectedSource.status],
         actions: (
           <>
-            <button type="button" onClick={() => testConnection(selectedSource)}><ShieldCheck size={14} />测试连接</button>
-            <button type="button" onClick={() => syncSource(selectedSource)}><RotateCcw size={14} />同步一次</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={() => testConnection(selectedSource)}><ShieldCheck size={14} />测试连接</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={() => syncSource(selectedSource)}><RotateCcw size={14} />同步一次</button>
             <button type="button" className="primary" onClick={() => openKnowledgeTarget(targetForKnowledgeRoute(selectedSource.route, selectedSource.name), "知识库 / 知识源下游")}><GitBranch size={14} />打开下游详情</button>
           </>
         )
@@ -1771,9 +1770,9 @@ export default function KnowledgeModule({
         tags: selectedChunk.labels,
         actions: (
           <>
-            <button type="button" onClick={rechunkCurrentSample}><RotateCcw size={14} />重切样本</button>
-            <button type="button" onClick={markChunkIssue}><AlertTriangle size={14} />标记问题</button>
-            <button type="button" className="primary" onClick={addChunkToCompletion}><Tags size={14} />加入补全</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={rechunkCurrentSample}><RotateCcw size={14} />重切样本</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={markChunkIssue}><AlertTriangle size={14} />标记问题</button>
+            <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={addChunkToCompletion}><Tags size={14} />加入补全</button>
           </>
         )
       };
@@ -1796,7 +1795,7 @@ export default function KnowledgeModule({
         actions: (
           <>
             <button type="button" onClick={openEvidence}><Headphones size={14} />查看录音</button>
-            <button type="button" onClick={generateCandidateLabels}><Sparkles size={14} />生成候选</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={generateCandidateLabels}><Sparkles size={14} />生成候选</button>
             <button type="button" className="primary" onClick={() => openKnowledgeTarget({ module: "labels", tab: "schema", objectKind: "labelIntent", objectId: selectedGap.id === "gap-testdrive" ? "testDrive" : "quote", title: selectedGap.label }, "知识库 / 证据包标签")}><Tags size={14} />标签详情</button>
           </>
         )
@@ -1823,9 +1822,9 @@ export default function KnowledgeModule({
         tags: [selectedGap.label, selectedGap.type, selectedGap.severity],
         actions: (
           <>
-            <button type="button" onClick={generateCandidateLabels}><Sparkles size={14} />生成候选</button>
-            <button type="button" onClick={addGapToEvaluation}><BarChart3 size={14} />加入评测</button>
-            <button type="button" className="primary" onClick={createKnowledgeReviewTask}><UserCheck size={14} />建人审任务</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={generateCandidateLabels}><Sparkles size={14} />生成候选</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={addGapToEvaluation}><BarChart3 size={14} />加入评测</button>
+            <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={createKnowledgeReviewTask}><UserCheck size={14} />建人审任务</button>
           </>
         )
       };
@@ -1853,7 +1852,7 @@ export default function KnowledgeModule({
           <>
             <button type="button" onClick={() => openKnowledgeTarget(targetForKnowledgeRoute(selectedGraphPath.route, selectedGraphPath.apps[0]), "知识库 / 消费路径")}><Eye size={14} />打开场景详情</button>
             <button type="button" onClick={() => openKnowledgeTarget({ module: "assets", tab: "lineage", objectKind: "asset", objectId: selectedGraphEvidence.id === "EVP-drive-129" ? "auris/audio/voice_segments" : "auris/label/event_tags", title: selectedGraphPath.evidenceId }, "知识库 / 资产血缘")}><GitBranch size={14} />资产血缘</button>
-            <button type="button" className="primary" onClick={generateCandidateLabels}><Sparkles size={14} />生成候选</button>
+            <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={generateCandidateLabels}><Sparkles size={14} />生成候选</button>
           </>
         )
       };
@@ -1879,9 +1878,9 @@ export default function KnowledgeModule({
         tags: [selectedGate.label, selectedGate.state, selectedGap.label],
         actions: (
           <>
-            <button type="button" onClick={runQualityCheck}><Gauge size={14} />运行检测</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={runQualityCheck}><Gauge size={14} />运行检测</button>
             <button type="button" onClick={() => setActiveModule("evaluation")}><BarChart3 size={14} />评测中心</button>
-            <button type="button" className="primary" onClick={createKnowledgeReviewTask}><UserCheck size={14} />建处理任务</button>
+            <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={createKnowledgeReviewTask}><UserCheck size={14} />建处理任务</button>
           </>
         )
       };
@@ -1907,7 +1906,7 @@ export default function KnowledgeModule({
         tags: [selectedEffect.label, selectedEffect.tone, selectedEffect.drop],
         actions: (
           <>
-            <button type="button" onClick={exportEffectReport}><Download size={14} />生成报告</button>
+            <button type="button" {...knowledgeWriteButtonProps()} onClick={exportEffectReport}><Download size={14} />生成报告</button>
             <button type="button" onClick={() => setActiveModule("insights")}><BarChart3 size={14} />业务洞察</button>
             <button type="button" className="primary" onClick={() => setActiveModule("assets")}><Database size={14} />报告资产</button>
           </>
@@ -1934,9 +1933,9 @@ export default function KnowledgeModule({
         tags: ["运行记录", currentIndexVersion, knowledgeNotice.status],
         actions: (
         <>
-          <button type="button" onClick={exportCurrentKnowledgeData}><Download size={14} />导出记录</button>
-          <button type="button" disabled={!canBuildSceneIndex} title={!canBuildSceneIndex ? "缺少 SceneProfile 知识索引强引用" : undefined} onClick={buildIndex}><Sparkles size={14} />重跑索引</button>
-          <button type="button" className="primary" onClick={runQualityCheck}><Gauge size={14} />跑门禁</button>
+          <button type="button" {...knowledgeWriteButtonProps()} onClick={exportCurrentKnowledgeData}><Download size={14} />导出记录</button>
+          <button type="button" {...knowledgeWriteButtonProps(false, !canBuildSceneIndex ? "缺少 SceneProfile 知识索引强引用" : "")} onClick={buildIndex}><Sparkles size={14} />重跑索引</button>
+          <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={runQualityCheck}><Gauge size={14} />跑门禁</button>
         </>
       )
     };
@@ -1993,7 +1992,7 @@ export default function KnowledgeModule({
         {knowledgeStatusOptions.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
       </select>
       <button type="button" onClick={() => setKnowledgeFilters({ query: "", status: "all", quality: "all" })}>清空</button>
-      <button type="button" className="primary" onClick={exportCurrentKnowledgeData}>
+      <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={exportCurrentKnowledgeData}>
         <Download size={14} />{activeTab === "graph" ? "导出路径证据" : "导出当前视图"}
       </button>
     </section>
@@ -2080,13 +2079,13 @@ export default function KnowledgeModule({
         ))}
       </div>
       <div className="knowledge-action-row">
-        <button type="button" disabled={knowledgeAction === `test-${selectedSource.id}`} onClick={() => testConnection(selectedSource)}>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === `test-${selectedSource.id}`)} onClick={() => testConnection(selectedSource)}>
           <ShieldCheck size={14} />
           {knowledgeAction === `test-${selectedSource.id}` ? "测试中" : "测试连接"}
         </button>
         <button
           type="button"
-          disabled={knowledgeAction === `sync-${selectedSource.id}`}
+          {...knowledgeWriteButtonProps(knowledgeAction === `sync-${selectedSource.id}`)}
           data-action-key="knowledge-sync-source"
           onClick={() => syncSource(selectedSource)}
         >
@@ -2128,15 +2127,15 @@ export default function KnowledgeModule({
       ])}
       <div className="knowledge-v2-tags">{selectedChunk.labels.map((label) => <span key={label}>{label}</span>)}</div>
       <div className="knowledge-action-row">
-        <button type="button" disabled={knowledgeAction === "index" || !canBuildSceneIndex} title={!canBuildSceneIndex ? "缺少 SceneProfile 知识索引强引用" : undefined} data-action-key="knowledge-build-index" onClick={buildIndex}>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === "index", !canBuildSceneIndex ? "缺少 SceneProfile 知识索引强引用" : "")} data-action-key="knowledge-build-index" onClick={buildIndex}>
           <Sparkles size={14} />
           {knowledgeAction === "index" ? "构建中" : "构建索引"}
         </button>
-        <button type="button" disabled={knowledgeAction === "rechunk"} onClick={rechunkCurrentSample}>
+        <button type="button" {...knowledgeWriteButtonProps(knowledgeAction === "rechunk")} onClick={rechunkCurrentSample}>
           <RotateCcw size={14} />
           {knowledgeAction === "rechunk" ? "重切中" : "重切当前样本"}
         </button>
-        <button type="button" className="primary" onClick={addChunkToCompletion}>
+        <button type="button" className="primary" {...knowledgeWriteButtonProps()} onClick={addChunkToCompletion}>
           <Tags size={14} />
           加入标签补全样本
         </button>
@@ -2344,6 +2343,7 @@ export default function KnowledgeModule({
         <strong>{knowledgeNotice.title}</strong>
         <span>{knowledgeNotice.detail}</span>
       </div>
+      {knowledgeWriteDisabledReason && <div id="knowledge-write-disabled-reason" className="disabled-reason knowledge-write-disabled-reason" role="note">{knowledgeWriteDisabledReason}</div>}
       {renderWorkbenchToolbar()}
       {renderTabContent()}
       {renderDetailPanel()}

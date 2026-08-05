@@ -6,6 +6,7 @@ from collections import UserDict, deque
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+import pytest
 import yaml  # type: ignore[import-untyped]
 from sqlalchemy import select
 from yaml.nodes import MappingNode  # type: ignore[import-untyped]
@@ -18,6 +19,8 @@ from app.services.run_service import (
     PUBLIC_RUN_FORBIDDEN_FIELD_TOKENS,
     run_payload,
 )
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 FORBIDDEN_FIELD_FINGERPRINTS = {
     json_key_fingerprint(field)

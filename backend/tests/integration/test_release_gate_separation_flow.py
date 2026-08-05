@@ -3,6 +3,8 @@ from __future__ import annotations
 from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 import app.services.release_gate_service as release_gate_service
 from app.core.auth import DevAuthProfile, issue_dev_auth_token
 from app.core.config import get_settings
@@ -12,6 +14,8 @@ from app.services.release_gate_service import revalidate_control_plane_release
 from app.workers.outbox_worker import process_aggregate_events
 
 SECOND_ADMIN_ID = "u_annotator_001"
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 
 def _headers(

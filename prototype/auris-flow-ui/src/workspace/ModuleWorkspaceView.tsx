@@ -24,7 +24,6 @@ import type { ModuleProjectionController } from "./useModuleProjection";
 import type { ModuleWorkspaceNavigation } from "./useModuleWorkspaceNavigation";
 import type { ModuleWorkspaceProps } from "./moduleWorkspaceContracts";
 import { getModuleTitle, moduleWriteArchitectures } from "./moduleWorkspaceCatalog";
-import { routeHomeMetric } from "./projectionMetrics";
 
 const PROJECT_SCENE_BLOCKED = "项目级写入与导出保持禁用。";
 
@@ -248,7 +247,7 @@ export function ModuleWorkspaceView({
         />
       )}
 
-      <MetricCards metrics={activeMetrics} source={projectionMetricSource} onMetricClick={moduleKey === "home" ? (metric) => setActiveModule(routeHomeMetric(metric)) : undefined} />
+      {moduleKey !== "home" && <MetricCards metrics={activeMetrics} source={projectionMetricSource} />}
 
       <div
         className={`operation-toast module-projection-toast is-${projectionStatus === "degraded" ? "error" : projectionStatus === "pending" ? "pending" : "success"}`}
@@ -358,7 +357,7 @@ export function ModuleWorkspaceView({
       )}
       {renderModuleDetails && (
         <>
-          {moduleKey === "home" && <HomeModuleOutlet setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} activeTab={activeTab} />}
+          {moduleKey === "home" && <HomeModuleOutlet setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} activeTab={activeTab} projectionData={projectionReceipt?.raw} projectionTraceId={projectionReceipt?.trace_id} />}
           {moduleKey === "tenants" && <TenantsModuleOutlet activeTab={activeTab} setActiveModule={setActiveModule} navigateToTarget={navigateToTarget} currentUser={currentUser} projectionItems={projectionStatus === "synced" ? projectionItems : undefined} projectionSource={projectionStatus === "synced" ? "bff" : "mock"} />}
           {moduleKey === "projects" && (
             <ProjectsModuleOutlet
@@ -386,6 +385,7 @@ export function ModuleWorkspaceView({
             <DataModuleOutlet
               activeTab={activeTab}
               setActiveModule={setActiveModule}
+              navigateToTarget={navigateToTarget}
               selectedAssetId={selectedDataAssetId}
               setSelectedAssetId={setSelectedDataAssetId}
               openListeningFromDataAsset={openListeningFromDataAsset}

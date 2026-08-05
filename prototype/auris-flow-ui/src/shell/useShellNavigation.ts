@@ -1,4 +1,4 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { DataAssetItem } from "../shared/contracts/dataAssets";
 import type { ModuleDeepLink, ModuleKey } from "../shared/contracts/navigation";
 import { deepLinkBadcaseRegistry } from "../shared/fixtures/deepLinkBadcases";
@@ -10,11 +10,20 @@ import {
 import { LABEL_DEMO_MODE } from "../shared/runtime/demoMode";
 import type { Lang, Theme } from "../shared/contracts/application";
 import { assetRows } from "../workspace/moduleWorkspaceCatalog";
+import {
+  restoredNavigationState,
+  writeNavigationState
+} from "./navigationUrlState";
 
 export function useShellNavigation() {
+  const restoredStateRef = useRef(restoredNavigationState());
   const [accountSettingsOpen, setAccountSettingsOpen] = useState(false);
-  const [activeModule, setActiveModule] = useState<ModuleKey>("home");
-  const [deepLinkTarget, setDeepLinkTarget] = useState<ModuleDeepLink | null>(null);
+  const [activeModule, setActiveModule] = useState<ModuleKey>(
+    restoredStateRef.current.module
+  );
+  const [deepLinkTarget, setDeepLinkTarget] = useState<ModuleDeepLink | null>(
+    restoredStateRef.current.target
+  );
   const [theme, setTheme] = useState<Theme>("light");
   const [lang, setLang] = useState<Lang>("zh");
   const [selectedDataAssetId, setSelectedDataAssetId] = useState("AF-128");
@@ -24,7 +33,28 @@ export function useShellNavigation() {
     listeningNavigationResolverRef.current = resolver;
   }, []);
 
+  useEffect(() => {
+    const restoreFromHistory = () => {
+      const restored = restoredNavigationState();
+      setDeepLinkTarget(restored.target);
+      setActiveModule(restored.module);
+      if (restored.target?.module === "data" && restored.target.objectId) {
+        setSelectedDataAssetId(restored.target.objectId);
+      }
+      if (
+        restored.target?.module === "assets"
+        && restored.target.objectKind === "asset"
+        && restored.target.objectId
+      ) {
+        setSelectedAssetKey(restored.target.objectId);
+      }
+    };
+    window.addEventListener("popstate", restoreFromHistory);
+    return () => window.removeEventListener("popstate", restoreFromHistory);
+  }, []);
+
   const navigateModuleRoot = (module: ModuleKey) => {
+    writeNavigationState(module, null);
     setDeepLinkTarget(null);
     setActiveModule(module);
   };
@@ -44,7 +74,7 @@ export function useShellNavigation() {
   const openAssetsFromDataAsset = (asset: DataAssetItem) => {
     setSelectedDataAssetId(asset.id);
     setSelectedAssetKey(asset.assetKey);
-    setDeepLinkTarget({
+    const target: ModuleDeepLink = {
       module: "assets",
       tab: "detail",
       objectKind: "asset",
@@ -53,7 +83,9 @@ export function useShellNavigation() {
       detail: `${asset.id} / ${asset.partitionKey}`,
       focusMode: "detail",
       origin: { label: "数据管理 / 资产链路", module: "data", objectLabel: asset.id }
-    });
+    };
+    writeNavigationState("assets", target);
+    setDeepLinkTarget(target);
     setActiveModule("assets");
   };
 
@@ -170,6 +202,7 @@ export function useShellNavigation() {
     if (resolved.module === "assets" && resolved.objectKind === "asset" && resolved.objectId) {
       setSelectedAssetKey(resolved.objectId);
     }
+    writeNavigationState(resolved.module, resolved);
     setDeepLinkTarget(resolved);
     setActiveModule(resolved.module);
   };

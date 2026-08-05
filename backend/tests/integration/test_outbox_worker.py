@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import quote
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from app.core.auth import DevAuthProfile, issue_dev_auth_token
 from app.core.completion_signature import completion_signature_message
@@ -22,11 +22,15 @@ from app.models import (
     AssetMaterialization,
     AssetPartition,
     AuditLog,
+    EvidencePack,
     ExternalCallbackReceipt,
+    HumanReviewDecision,
+    HumanReviewTask,
     JsonResource,
     OutboxEvent,
     Project,
     PromptVersionCandidate,
+    RunCompletionReceipt,
     RunRecord,
     StorageObject,
     ToolCall,
@@ -244,6 +248,7 @@ def test_outbox_worker_marks_task_run_submitted_after_dagster_dispatch(client, a
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-run"},
@@ -302,6 +307,7 @@ def test_outbox_worker_can_process_specific_aggregate_without_draining_others(cl
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/isolated-a",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-isolated-run-a"},
@@ -311,6 +317,7 @@ def test_outbox_worker_can_process_specific_aggregate_without_draining_others(cl
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/isolated-b",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-isolated-run-b"},
@@ -339,7 +346,19 @@ def test_outbox_worker_can_process_specific_aggregate_without_draining_others(cl
         assert second_event.attempt_count == 0
 
 
-def test_outbox_worker_submits_conversation_boundary_sync_run(client, auth_headers):
+def test_conversation_boundary_sync_fails_closed_without_production_executor(client, auth_headers):
+    with SessionLocal() as session:
+        boundary_before = session.scalar(
+            select(JsonResource).where(
+                JsonResource.collection == "conversation_boundaries",
+                JsonResource.resource_key == "boundary_s128_v1",
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
+            )
+        )
+        assert boundary_before is not None
+        before_data = dict(boundary_before.data)
+
     response = client.patch(
         "/api/v1/conversation-boundaries/boundary_s128_v1",
         json={
@@ -353,50 +372,67 @@ def test_outbox_worker_submits_conversation_boundary_sync_run(client, auth_heade
         },
         headers={**auth_headers, "Idempotency-Key": "worker-boundary-sync"},
     )
-    assert response.status_code == 200
-    body = response.json()
-    trace_id = body["meta"]["trace_id"]
-    run_id = body["data"]["run_id"]
-    assert body["data"]["run_type"] == "boundary_sync"
-
-    assert process_aggregate_events([run_id]) == 1
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "EXECUTION_CONTRACT_NOT_CONFIGURED"
 
     with SessionLocal() as session:
-        run = session.get(RunRecord, run_id)
-        assert run is not None
-        assert run.status == "submitted"
-        assert run.payload["boundary_id"] == "boundary_s128_v1"
-        assert run.payload["audio_session_id"] == "S20250526-000128"
-        assert run.payload["dispatch"]["adapter"] == "dagster"
-        assert (
-            run.payload["dispatch"]["details"]["job_name"] == "conversation_boundary_sync_pipeline"
-        )
-        assert run.payload["dispatch"]["details"]["external_run_id"].startswith("dg_run_")
-        event = session.scalar(
-            select(OutboxEvent)
-            .where(
-                OutboxEvent.aggregate_type == "boundary_sync",
-                OutboxEvent.aggregate_id == run_id,
-                OutboxEvent.event_type == "conversation_boundary.sync_requested",
+        boundary_after = session.scalar(
+            select(JsonResource).where(
+                JsonResource.collection == "conversation_boundaries",
+                JsonResource.resource_key == "boundary_s128_v1",
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
             )
-            .order_by(OutboxEvent.event_id.desc())
         )
-        assert event is not None
-        assert event.status == "processed"
-        assert event.payload["adapter_dispatch"] == run.payload["dispatch"]
-
-    trace = client.get(f"/api/v1/traces/{trace_id}", headers=auth_headers)
-    assert trace.status_code == 200
-    spans = trace.json()["data"]["spans"]
-    assert any(
-        span.get("kind") == "outbox"
-        and span.get("event_type") == "conversation_boundary.sync_requested"
-        and "adapter_dispatch" not in span
-        for span in spans
-    )
+        assert boundary_after is not None
+        assert boundary_after.data == before_data
+        assert (
+            session.scalar(select(RunRecord).where(RunRecord.run_type == "boundary_sync")) is None
+        )
+        assert (
+            session.scalar(
+                select(OutboxEvent).where(
+                    OutboxEvent.event_type == "conversation_boundary.sync_requested"
+                )
+            )
+            is None
+        )
 
 
 def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_headers):
+    root_trace_id = "trace_audio_intelligence_vertical_chain"
+    with SessionLocal() as session:
+        storage_object = session.scalar(
+            select(StorageObject).where(
+                StorageObject.source_id == "rec_A_1001_20250526_122300",
+                StorageObject.tenant_id == "aurora_auto",
+                StorageObject.project_id == "sales_qa",
+            )
+        )
+        assert storage_object is not None
+        storage_object_id = storage_object.storage_object_id
+        storage_object.status = "verified"
+        storage_object.size_bytes = 4096
+        storage_object.content_sha256 = "a" * 64
+        storage_object.payload = {
+            **storage_object.payload,
+            "object_version_id": "version-audio-intelligence-001",
+        }
+        audio_session = session.scalar(
+            select(JsonResource).where(
+                JsonResource.collection == "audio_sessions",
+                JsonResource.resource_key == "S20250526-000128",
+                JsonResource.tenant_id == "aurora_auto",
+                JsonResource.project_id == "sales_qa",
+            )
+        )
+        assert audio_session is not None
+        audio_session.data = {
+            **audio_session.data,
+            "root_trace_id": root_trace_id,
+        }
+        session.commit()
+
     response = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
@@ -416,9 +452,40 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
         assert run is not None
         assert run.status == "submitted"
         assert run.run_type == "audio_intelligence"
+        assert run.payload["root_trace_id"] == root_trace_id
         assert run.payload["dispatch"]["adapter"] == "dagster"
-        assert run.payload["dispatch"]["details"]["job_name"] == "audio_intelligence_pipeline"
+        assert run.payload["dispatch"]["details"]["job_name"] == "auris_flow_audio_intelligence_v1"
         external_run_id = run.payload["dispatch"]["details"]["external_run_id"]
+        run.payload = {
+            **run.payload,
+            "output_sink_refs": [
+                "platform-callback://crm-primary",
+                "platform-callback://crm-primary",
+                "platform-callback://archive",
+            ],
+        }
+        for output_sink_id, target in (
+            ("platform-callback://crm-primary", "crm_primary"),
+            ("platform-callback://archive", "review_archive"),
+        ):
+            session.add(
+                JsonResource(
+                    collection="output_sinks",
+                    resource_key=output_sink_id,
+                    tenant_id="aurora_auto",
+                    project_id="sales_qa",
+                    status="active",
+                    trace_id=root_trace_id,
+                    data={
+                        "id": output_sink_id,
+                        "output_sink_id": output_sink_id,
+                        "type": "platform_callback",
+                        "target": target,
+                        "status": "active",
+                    },
+                )
+            )
+        session.commit()
 
     completion = client.post(
         f"/api/v1/runs/{run_id}/completion-receipts",
@@ -470,12 +537,64 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
                 },
                 "snr_db": 23.8,
                 "crosstalk_risk": "medium",
+                "review_outputs": {
+                    "event_links": [
+                        {
+                            "source_event_id": "quote:BJ-041",
+                            "document_ref": "BJ-041",
+                            "relation_type": "quote",
+                            "confidence": 0.92,
+                            "evidence_window": "00:30.780-00:38.200",
+                        }
+                    ],
+                    "label_candidates": [
+                        {
+                            "label": "报价金额",
+                            "value_or_action": "金额冲突",
+                            "confidence": 0.82,
+                        }
+                    ],
+                },
             },
         },
         headers={**auth_headers, "Idempotency-Key": "worker-audio-intelligence-complete"},
     )
-    assert completion.status_code == 200
+    assert completion.status_code == 202
     completion_data = completion.json()["data"]
+    assert completion_data["status"] == "completion_pending"
+    assert completion_data["business_status"] == "materializing"
+    assert completion_data["receipt_state"] == "materializing"
+
+    with SessionLocal() as session:
+        pending_run = session.get(RunRecord, run_id)
+        assert pending_run is not None
+        assert pending_run.status == "completion_pending"
+        assert pending_run.payload["business_status"] == "materializing"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(EvidencePack)
+                .where(EvidencePack.source_run_id == run_id)
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(HumanReviewTask)
+                .where(
+                    HumanReviewTask.tenant_id == "aurora_auto",
+                    HumanReviewTask.project_id == "sales_qa",
+                    HumanReviewTask.trace_id == root_trace_id,
+                )
+            )
+            == 0
+        )
+
+    assert process_aggregate_events([run_id]) == 1
+    completed_readback = client.get(f"/api/v1/runs/{run_id}", headers=auth_headers)
+    assert completed_readback.status_code == 200
+    completion_data = completed_readback.json()["data"]
     assert completion_data["status"] == "success"
     assert completion_data["business_status"] == "completed"
     assert {item["collection"] for item in completion_data["materialized_outputs"]} == {
@@ -484,6 +603,11 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
         "asr_segments",
         "voiceprint_samples",
         "audio_quality_reports",
+        "evidence_packs",
+        "conversation_boundaries",
+        "event_links",
+        "label_candidates",
+        "human_review_tasks",
     }
 
     trace = client.get(f"/api/v1/traces/{trace_id}", headers=auth_headers)
@@ -496,9 +620,23 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
     )
 
     with SessionLocal() as session:
+        completed_run = session.get(RunRecord, run_id)
+        assert completed_run is not None
+        status_history = completed_run.payload["status_history"]
+        assert any(
+            item["from"] == "submitted" and item["to"] == "completion_pending"
+            for item in status_history
+        )
+        assert any(
+            item["from"] == "completion_pending" and item["to"] == "success"
+            for item in status_history
+        )
+        assert completed_run.payload["materialized_outputs"]
         collections = {
             row.collection
-            for row in session.query(JsonResource).filter(JsonResource.trace_id == trace_id).all()
+            for row in session.query(JsonResource)
+            .filter(JsonResource.trace_id == root_trace_id)
+            .all()
         }
         assert {
             "vad_segments",
@@ -506,7 +644,131 @@ def test_audio_intelligence_completion_materializes_audio_tracks(client, auth_he
             "asr_segments",
             "voiceprint_samples",
             "audio_quality_reports",
+            "evidence_packs",
+            "conversation_boundaries",
+            "event_links",
+            "label_candidates",
+            "human_review_tasks",
         } <= collections
+        evidence_pack = session.scalar(
+            select(EvidencePack).where(
+                EvidencePack.audio_session_id == "S20250526-000128",
+                EvidencePack.source_run_id == run_id,
+                EvidencePack.tenant_id == "aurora_auto",
+                EvidencePack.project_id == "sales_qa",
+            )
+        )
+        assert evidence_pack is not None
+        assert evidence_pack.recording_id == "rec_A_1001_20250526_122300"
+        assert evidence_pack.storage_object_id == storage_object_id
+        assert evidence_pack.storage_object_version == "version-audio-intelligence-001"
+        assert evidence_pack.audio_sha256 == "a" * 64
+        assert evidence_pack.asr_result_id == f"S20250526-000128:asr:{run_id}"
+        assert evidence_pack.window_start_ms == 30_780
+        assert evidence_pack.window_end_ms == 38_200
+        assert len(evidence_pack.evidence_sha256) == 64
+        assert evidence_pack.root_trace_id == root_trace_id
+        assert evidence_pack.payload["output_sink_refs"] == [
+            "platform-callback://crm-primary",
+            "platform-callback://archive",
+        ]
+        review_task = session.scalar(
+            select(HumanReviewTask).where(
+                HumanReviewTask.payload["evidence_pack_id"].as_string()
+                == evidence_pack.evidence_pack_id,
+                HumanReviewTask.tenant_id == "aurora_auto",
+                HumanReviewTask.project_id == "sales_qa",
+            )
+        )
+        assert review_task is not None
+        assert review_task.status == "pending"
+        assert review_task.payload["queue"] == "audio_evidence_review"
+        assert review_task.payload["audio_session_id"] == "S20250526-000128"
+        assert review_task.payload["root_trace_id"] == root_trace_id
+        assert review_task.payload["output_sink_refs"] == [
+            "platform-callback://crm-primary",
+            "platform-callback://archive",
+        ]
+        target_types = {
+            (target["type"], target["id"]) for target in review_task.payload["target_refs"]
+        }
+        assert ("evidence_pack", evidence_pack.evidence_pack_id) in target_types
+        assert any(target_type == "conversation_boundary" for target_type, _ in target_types)
+        assert any(target_type == "event_link" for target_type, _ in target_types)
+        assert any(target_type == "label_candidate" for target_type, _ in target_types)
+
+    pending_reviews = client.get(
+        "/api/v1/human-review-tasks",
+        params={"status": "pending", "queue": "audio_evidence_review"},
+        headers=auth_headers,
+    )
+    assert pending_reviews.status_code == 200
+    pending_items = pending_reviews.json()["data"]["items"]
+    assert any(
+        item["audio_session_id"] == "S20250526-000128" and item["root_trace_id"] == root_trace_id
+        for item in pending_items
+    )
+
+    decision = client.post(
+        f"/api/v1/human-review-tasks/{review_task.review_task_id}/decisions",
+        json={
+            "decision": "modified",
+            "note": "确认主录音，保留低置信提示",
+            "changes": [
+                {
+                    "target_type": "evidence_pack",
+                    "target_id": evidence_pack.evidence_pack_id,
+                    "fields": {
+                        "recording_disposition": "main",
+                        "low_confidence": True,
+                    },
+                }
+            ],
+        },
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "worker-audio-evidence-review-decision",
+        },
+    )
+    assert decision.status_code == 200, decision.text
+    receipt = decision.json()["data"]
+    assert receipt["resource_type"] == "human_review_decision"
+    assert receipt["resource_id"] == receipt["decision_id"]
+    assert receipt["root_trace_id"] == root_trace_id
+    assert receipt["current_trace_id"] == decision.json()["meta"]["trace_id"]
+    assert receipt["readback_url"] == (f"/api/v1/human-review-tasks/{review_task.review_task_id}")
+    assert receipt["next_actions"][0]["route"] == (
+        "/api/v1/human-review-tasks?status=pending&queue=audio_evidence_review"
+    )
+    callback_refs = [
+        item for item in receipt["affected_objects"] if item["type"] == "platform_callback"
+    ]
+    assert len(callback_refs) == 2
+
+    task_readback = client.get(receipt["readback_url"], headers=auth_headers)
+    evidence_readback = client.get(
+        f"/api/v1/evidence-packs/{evidence_pack.evidence_pack_id}",
+        headers=auth_headers,
+    )
+    assert task_readback.status_code == 200
+    assert evidence_readback.status_code == 200
+    assert task_readback.json()["data"]["decision_id"] == receipt["decision_id"]
+    evidence_data = evidence_readback.json()["data"]
+    assert evidence_data["status"] == "ready"
+    assert evidence_data["review_state"] == "modified"
+    assert evidence_data["review_decision_id"] == receipt["decision_id"]
+    assert evidence_data["review_overrides"] == {
+        "recording_disposition": "main",
+        "low_confidence": True,
+    }
+    with SessionLocal() as session:
+        immutable_evidence = session.get(EvidencePack, evidence_pack.evidence_pack_id)
+        assert immutable_evidence is not None
+        assert immutable_evidence.status == "ready"
+        assert immutable_evidence.evidence_sha256 == evidence_pack.evidence_sha256
+        stored_decision = session.get(HumanReviewDecision, receipt["decision_id"])
+        assert stored_decision is not None
+        assert stored_decision.trace_id == root_trace_id
 
     detail = client.get("/api/v1/audio-sessions/S20250526-000128", headers=auth_headers)
     assert detail.status_code == 200
@@ -525,6 +787,24 @@ def test_audio_intelligence_rejects_missing_outputs_and_accepts_explicit_no_cont
     client,
     auth_headers,
 ):
+    with SessionLocal() as session:
+        storage_object = session.scalar(
+            select(StorageObject).where(
+                StorageObject.source_id == "rec_A_1001_20250526_122300",
+                StorageObject.tenant_id == "aurora_auto",
+                StorageObject.project_id == "sales_qa",
+            )
+        )
+        assert storage_object is not None
+        storage_object.status = "verified"
+        storage_object.size_bytes = 4096
+        storage_object.content_sha256 = "b" * 64
+        storage_object.payload = {
+            **storage_object.payload,
+            "object_version_id": "version-audio-no-content-001",
+        }
+        session.commit()
+
     response = client.post(
         "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
         json={
@@ -592,16 +872,160 @@ def test_audio_intelligence_rejects_missing_outputs_and_accepts_explicit_no_cont
         },
         headers={**auth_headers, "Idempotency-Key": "audio-empty-output-explicit"},
     )
-    assert no_content.status_code == 200
-    assert no_content.json()["data"]["status"] == "success"
+    assert no_content.status_code == 202
+    assert no_content.json()["data"]["status"] == "completion_pending"
+    assert no_content.json()["data"]["receipt_state"] == "materializing"
+    assert process_aggregate_events([run_id]) == 1
+    no_content_readback = client.get(f"/api/v1/runs/{run_id}", headers=auth_headers)
+    assert no_content_readback.status_code == 200
+    assert no_content_readback.json()["data"]["status"] == "success"
     assert {
         item["collection"]: item["status"]
-        for item in no_content.json()["data"]["materialized_outputs"]
+        for item in no_content_readback.json()["data"]["materialized_outputs"]
     } == {
         "vad_segments": "no_content",
         "asr_segments": "no_content",
         "speaker_turns": "no_content",
     }
+
+
+def test_audio_intelligence_materialization_dead_letter_closes_receipt_and_run(
+    client,
+    auth_headers,
+    monkeypatch,
+) -> None:
+    from app.services import run_service
+
+    with SessionLocal.begin() as session:
+        storage_object = session.scalar(
+            select(StorageObject).where(
+                StorageObject.source_id == "rec_A_1001_20250526_122300",
+                StorageObject.tenant_id == "aurora_auto",
+                StorageObject.project_id == "sales_qa",
+            )
+        )
+        assert storage_object is not None
+        storage_object.status = "verified"
+        storage_object.size_bytes = 4096
+        storage_object.content_sha256 = "c" * 64
+        storage_object.payload = {
+            **storage_object.payload,
+            "object_version_id": "version-audio-dead-letter-001",
+        }
+
+    created = client.post(
+        "/api/v1/audio-sessions/S20250526-000128/intelligence-runs",
+        json={
+            "recording_id": "rec_A_1001_20250526_122300",
+            "capabilities": ["vad"],
+            "reason": "materialization_dead_letter",
+        },
+        headers={**auth_headers, "Idempotency-Key": "audio-materialization-dead-letter-run"},
+    )
+    assert created.status_code == 202
+    run_id = created.json()["data"]["run_id"]
+    assert process_aggregate_events([run_id]) == 1
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        external_run_id = run.payload["dispatch"]["details"]["external_run_id"]
+
+    accepted = client.post(
+        f"/api/v1/runs/{run_id}/completion-receipts",
+        json={
+            "adapter": "dagster",
+            "status": "success",
+            "completion_receipt_id": "audio-materialization-dead-letter-completion",
+            "external_id": external_run_id,
+            "result_ref": {
+                "audio_session_id": "S20250526-000128",
+                "recording_id": "rec_A_1001_20250526_122300",
+                "capability_statuses": {
+                    "vad": {"status": "no_content", "reason": "no_speech_detected"}
+                },
+                "vad_segments": [],
+            },
+        },
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "audio-materialization-dead-letter-completion",
+        },
+    )
+    assert accepted.status_code == 202
+
+    with SessionLocal.begin() as session:
+        event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert event is not None
+        assert event.payload["materializer"] == "audio_intelligence"
+        event.payload = {**event.payload, "max_attempts": 2}
+
+    def fail_materialization(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("permanent audio-intelligence materializer failure")
+
+    monkeypatch.setattr(
+        run_service,
+        "materialize_staged_execution_completion",
+        fail_materialization,
+    )
+    assert process_aggregate_events([run_id]) == 1
+    with SessionLocal.begin() as session:
+        event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert event is not None and event.status == "pending"
+        event.available_at = event.created_at
+    assert process_aggregate_events([run_id]) == 1
+
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        receipt = session.scalar(
+            select(RunCompletionReceipt).where(RunCompletionReceipt.run_id == run_id)
+        )
+        materialization_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        terminal_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "audio_intelligence.failed",
+                OutboxEvent.aggregate_id == run_id,
+            )
+        )
+        assert run is not None and run.status == "failed"
+        assert run.terminal_reason == "EXECUTION_MATERIALIZATION_RETRIES_EXHAUSTED"
+        assert run.payload["materialization"]["status"] == "failed"
+        assert receipt is not None and receipt.processing_state == "completed"
+        assert receipt.completion_status == "failed"
+        assert materialization_event is not None
+        assert materialization_event.status == "dead_letter"
+        assert terminal_event is not None and terminal_event.status == "pending"
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(EvidencePack)
+                .where(EvidencePack.source_run_id == run_id)
+            )
+            == 0
+        )
+        assert (
+            session.scalar(
+                select(func.count())
+                .select_from(HumanReviewTask)
+                .where(HumanReviewTask.payload["source_run_id"].as_string() == run_id)
+            )
+            == 0
+        )
 
 
 def test_outbox_worker_records_qdrant_receipt_for_knowledge_build(client, auth_headers):
@@ -1399,6 +1823,7 @@ def test_task_run_completion_receipt_moves_submitted_run_to_success(client, auth
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/completion",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-completion-task-run"},
@@ -1462,6 +1887,7 @@ def test_signed_external_completion_receipt_moves_submitted_run_to_success(clien
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/signed-completion",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-signed-completion-run"},
@@ -1524,6 +1950,7 @@ def test_signed_external_completion_receipt_rejects_missing_signature(client, au
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/missing-signature",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-missing-signature-run"},
@@ -1564,6 +1991,7 @@ def test_signed_external_completion_receipt_rejects_tampered_body_and_missing_ex
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/tampered-signature",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-tampered-signature-run"},
@@ -1624,6 +2052,7 @@ def test_signed_external_completion_receipt_rejects_expired_timestamp(client, au
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/expired-signature",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-expired-signature-run"},
@@ -1668,6 +2097,7 @@ def test_completion_receipt_rejects_wrong_external_id(client, auth_headers):
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/completion-mismatch",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-completion-mismatch-run"},
@@ -1756,6 +2186,7 @@ def test_asset_backfill_completion_materializes_asset_lineage(client, auth_heade
             "reason": "补齐金额冲突标签",
             "partition_key": partition_key,
             "recompute_downstream": True,
+            "execution_mode": "diagnostic",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-asset-backfill-completion"},
     )
@@ -1939,7 +2370,11 @@ def test_asset_backfill_completion_rejects_forged_storage_descriptor(client, aut
     partition_key = "aurora_auto/BJ-AURORA-001/2025-05-26/forged-storage"
     response = client.post(
         f"/api/v1/data-assets/{quote(asset_key, safe='')}/backfills",
-        json={"reason": "验证伪造对象描述符被拒绝", "partition_key": partition_key},
+        json={
+            "reason": "验证伪造对象描述符被拒绝",
+            "partition_key": partition_key,
+            "execution_mode": "diagnostic",
+        },
         headers={**auth_headers, "Idempotency-Key": "worker-asset-backfill-forged-storage"},
     )
     assert response.status_code == 202
@@ -2005,6 +2440,7 @@ def test_eval_feedback_agent_run_records_tools_refs_and_decision(client, auth_he
             "model_version": "prod-v5",
             "label_version": "v1.9.0-rc2",
             "source": "agentic_integration",
+            "execution_mode": "diagnostic",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-agentic-eval-source"},
     )
@@ -2018,6 +2454,7 @@ def test_eval_feedback_agent_run_records_tools_refs_and_decision(client, auth_he
             "badcase_refs": ["B-2031", "LC-quote-002"],
             "target": "标签规则 / Prompt 优化 / 打标黄金集",
             "source": "agentic_integration",
+            "execution_mode": "diagnostic",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-agentic-feedback"},
     )
@@ -2234,6 +2671,7 @@ def test_outbox_worker_schedules_retry_on_failure(client, auth_headers):
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "force_worker_error": True,
             "failure_reason": "temporary downstream timeout",
@@ -2288,6 +2726,7 @@ def test_outbox_worker_dead_letters_after_max_attempts(client, auth_headers):
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "force_worker_error": True,
             "failure_reason": "permanent callback failure",
@@ -2386,6 +2825,7 @@ def test_dead_letter_task_run_can_create_retry_run(client, auth_headers):
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "force_worker_error": True,
             "failure_reason": "permanent callback failure",
@@ -2517,6 +2957,7 @@ def test_non_failed_task_run_retry_is_rejected(client, auth_headers):
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-retry-not-failed"},
@@ -2539,6 +2980,7 @@ def test_outbox_worker_retries_structured_adapter_failure(client, auth_headers):
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "simulate_adapter_failure": True,
             "adapter_error_code": "DAGSTER_TIMEOUT",
@@ -2587,6 +3029,7 @@ def test_outbox_worker_dead_letters_terminal_adapter_failure(client, auth_header
         json={
             "task_version_id": "task_version_v3_2_1",
             "trigger_type": "manual",
+            "execution_mode": "diagnostic",
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "simulate_adapter_failure": True,
             "adapter_error_code": "CALLBACK_SIGNATURE_INVALID",
@@ -2641,6 +3084,7 @@ def test_outbox_worker_keeps_blocked_publish_behind_gate(client, auth_headers):
             "task_version_id": version_id,
             "task_type_id": "task_sales_quality",
             "version": "v3.2.2-rc1",
+            "execution_mode": "diagnostic",
         },
         headers={**auth_headers, "Idempotency-Key": "worker-blocked-version"},
     )
@@ -2673,6 +3117,7 @@ def test_task_version_publish_gate_approval_requeues_and_materializes_version(cl
             "task_version_id": version_id,
             "task_type_id": "task_sales_quality",
             "version": "v3.3.0-rc1",
+            "execution_mode": "diagnostic",
             "canvas_variant": "stable-v3",
             "label_version": "label_v1_8_4",
         },

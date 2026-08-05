@@ -10,6 +10,9 @@ from app.api.deps import ContextDep, PaginationDep, SessionDep
 from app.core.rbac import require_any_role
 from app.core.response import collection_envelope, envelope
 from app.domain.label_optimization import IterationBudget
+from app.services.execution_contract_registry import (
+    preflight_production_execution_contract,
+)
 from app.services.idempotency_service import (
     replay_or_conflict,
     request_hash,
@@ -207,6 +210,10 @@ async def post_label_optimization_trigger_scan(
     body: Annotated[LabelOptimizationTriggerScanBody, Body()],
 ):
     require_any_role(ctx, WRITE_ROLES, "label_optimization.trigger_scan")
+    preflight_production_execution_contract(
+        event_type="agent_run.requested",
+        run_type="label_optimization",
+    )
     body_hash = await request_hash(request)
     operation = "label_optimization.trigger_scan"
     replay = replay_or_conflict(

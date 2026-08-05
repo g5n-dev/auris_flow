@@ -4,27 +4,85 @@ import type { ReviewSample } from "../../fixtures/reviewSamples";
 import type { SimpleLabelReviewState, SimpleSpeakerAnnotation, SimpleSpeakerRole } from "../../fixtures/simpleReviewFixtures";
 import { getSimpleLabelDetail, inferSimpleSpeaker, simpleAiRecommendedLabels, simpleLabelDetails, simpleLabelTabs, simpleSpeakerRoles, tagSuggestions } from "../../fixtures/simpleReviewFixtures";
 import type { ListeningScope, Mode, SimpleAiRecommendState } from "../../types";
+import { useGrantedAudioPlayback } from "../../hooks/useGrantedAudioPlayback";
+import { LABEL_DEMO_MODE } from "../../../../shared/runtime/demoMode";
 import { SlidingChipRail } from "../evidence/annotationControls";
 import { SimpleAudioPlayer } from "./SimpleAudioPlayer";
 import { SimpleDetailPane, SimpleSpeakerDock, SimpleTranscriptTurn } from "./SimpleReviewDetails";
-import { Layers, Sparkles } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Layers, Pause, Play, Sparkles } from "lucide-react";
+import { useMemo, useState } from "react";
 
-export function SimpleMode({
-  setMode,
-  activeChip,
-  setActiveChip,
-  listeningScope,
-  setListeningScope,
-  sample
-}: {
+type SimpleModeProps = {
   setMode: (mode: Mode) => void;
   activeChip: string;
   setActiveChip: (value: string) => void;
   listeningScope: ListeningScope;
   setListeningScope: (scope: ListeningScope) => void;
   sample: ReviewSample;
-}) {
+};
+
+function AuthoritativeSessionPlayback({
+  sample,
+  setMode
+}: Pick<SimpleModeProps, "sample" | "setMode">) {
+  const [playing, setPlaying] = useState(false);
+  const {
+    audioRef,
+    playbackMessage,
+    playbackPending,
+    playbackStatus,
+    togglePlayback,
+    handlePlaybackError
+  } = useGrantedAudioPlayback(sample.sessionId, setPlaying);
+  const disabledReason =
+    "生产模式未接入服务端 ASR/说话人/标签推荐编辑契约；本地 SimpleMode fixture 不会写入真实 AudioSession。";
+  return (
+    <div className="simple-page" data-testid="listening-authoritative-playback">
+      <section className="module-panel wide tenant-empty-state">
+        <strong>音频会话 {sample.sessionId}</strong>
+        <span>{sample.file} · {sample.window}</span>
+        <audio
+          ref={audioRef}
+          preload="none"
+          data-testid="listening-recording"
+          data-audio-session-id={sample.sessionId}
+          aria-label={`${sample.sessionId} 录音`}
+          onPlay={() => setPlaying(true)}
+          onPause={() => setPlaying(false)}
+          onEnded={() => setPlaying(false)}
+          onError={handlePlaybackError}
+        />
+        <button
+          type="button"
+          className="primary"
+          disabled={playbackPending}
+          aria-busy={playbackPending}
+          onClick={() => void togglePlayback()}
+        >
+          {playing ? <Pause size={14} /> : <Play size={14} />}
+          {playbackPending ? "正在获取播放授权" : playing ? "暂停" : "播放真实音频"}
+        </button>
+        {playbackStatus !== "idle" && (
+          <span role="status">{playbackMessage}</span>
+        )}
+        <span>{disabledReason}</span>
+        <button type="button" disabled title={disabledReason}>
+          AI 推荐与本地保存已禁用
+        </button>
+        <button type="button" onClick={() => setMode("evidence")}>返回证据审查</button>
+      </section>
+    </div>
+  );
+}
+
+function DemoSimpleMode({
+  setMode,
+  activeChip,
+  setActiveChip,
+  listeningScope,
+  setListeningScope,
+  sample
+}: SimpleModeProps) {
   const [activeTurnIndex, setActiveTurnIndex] = useState(1);
   const [selectedLabel, setSelectedLabel] = useState(sample.selectedLabel);
   const [labelFilter, setLabelFilter] = useState<SimpleLabelFilter>("全部");
@@ -38,7 +96,6 @@ export function SimpleMode({
   const [tagEditState, setTagEditState] = useState<"未保存" | "已保存">("未保存");
   const [speakerEditState, setSpeakerEditState] = useState<"未保存" | "已保存">("已保存");
   const [labelReviewStates, setLabelReviewStates] = useState<Record<string, SimpleLabelReviewState>>({});
-  const aiRecommendTimerRef = useRef<number | null>(null);
   const activeTurn = simpleTurns[activeTurnIndex];
   const playProgress = 17 + activeTurnIndex * 16;
   const selectedDetail = getSimpleLabelDetail(selectedLabel);
@@ -52,12 +109,6 @@ export function SimpleMode({
     () => simpleLabelDomains.filter((domain) => labelFilter === "全部" || domain.filter === labelFilter),
     [labelFilter]
   );
-
-  useEffect(() => {
-    return () => {
-      if (aiRecommendTimerRef.current !== null) window.clearTimeout(aiRecommendTimerRef.current);
-    };
-  }, []);
 
   const labelReviewKey = (label: string, turnIndex: number) => `${label}::${simpleTurns[turnIndex].eventId}`;
   const setLabelHitState = (turnIndex: number, state: SimpleLabelReviewState) => {
@@ -107,14 +158,9 @@ export function SimpleMode({
   };
 
   const runAiLabelRecommend = () => {
-    if (aiRecommendTimerRef.current !== null) window.clearTimeout(aiRecommendTimerRef.current);
-    setAiRecommendState("running");
+    setAiRecommendState("ready");
     setLabelFilter("推荐");
     selectLabelFromLibrary(simpleAiRecommendedLabels[0]);
-    aiRecommendTimerRef.current = window.setTimeout(() => {
-      setAiRecommendState("ready");
-      aiRecommendTimerRef.current = null;
-    }, 520);
   };
 
   const updateActiveSpeaker = (patch: Partial<SimpleSpeakerAnnotation>) => {
@@ -217,20 +263,20 @@ export function SimpleMode({
   };
 
   return (
-    <div className="simple-page">
+    <div className="simple-page" data-testid="listening-simple-demo" data-source="demo">
       <section className="simple-listen">
         <aside className="simple-label-lib">
           <div className="simple-lib-head">
             <div>
               <span>标签库</span>
-              <strong>42 命中 / 132 标签</strong>
+              <strong>DEMO · 42 命中 / 132 标签</strong>
             </div>
             <button
               className={`simple-ai-button ${aiRecommendState === "idle" ? "" : `is-${aiRecommendState}`}`}
               onClick={runAiLabelRecommend}
               aria-pressed={aiRecommendState === "ready"}
               aria-busy={aiRecommendState === "running"}
-              title="按当前会话重新生成推荐标签"
+              title="DEMO：仅在本地样例中预览推荐标签"
             >
               <Sparkles size={14} />
               <span>AI</span>
@@ -248,7 +294,7 @@ export function SimpleMode({
               <div className={`simple-ai-insight ${aiRecommendState}`}>
                 <Sparkles size={13} />
                 <div>
-                  <strong>{aiRecommendState === "running" ? "正在重算推荐标签" : "AI 已生成推荐"}</strong>
+                  <strong>{aiRecommendState === "running" ? "正在重算推荐标签" : "DEMO：AI 推荐预览"}</strong>
                   <span>
                     {aiRecommendState === "running"
                       ? "基于当前会话、命中证据和右侧复核状态匹配标签。"
@@ -401,4 +447,10 @@ export function SimpleMode({
       </section>
     </div>
   );
+}
+
+export function SimpleMode(props: SimpleModeProps) {
+  return LABEL_DEMO_MODE
+    ? <DemoSimpleMode {...props} />
+    : <AuthoritativeSessionPlayback sample={props.sample} setMode={props.setMode} />;
 }

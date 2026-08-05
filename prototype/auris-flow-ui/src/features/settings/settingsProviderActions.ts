@@ -10,6 +10,7 @@ import {
   operationStatusFromBackendRun
 } from "../../shared/runtime/backendRunStatus";
 import { refreshBackendRunReceipt } from "../../api/backendRuns";
+import { LABEL_DEMO_MODE } from "../../shared/runtime/demoMode";
 import { asrServiceProfile } from "./catalog";
 import { settingsShortTrace } from "./settingsDraftActions";
 
@@ -66,10 +67,18 @@ export function createSettingsProviderActions(input: SettingsProviderActionsInpu
   };
 
   const saveAsrServiceDraft = () => {
+    if (!LABEL_DEMO_MODE) {
+      input.setSettingsNotice({
+        status: "error",
+        title: "服务配置写入尚未接入",
+        detail: "当前生产 BFF 未提供服务配置草稿强资源；界面保留用于 DEMO，生产不会生成本地成功状态。"
+      });
+      return;
+    }
     input.setSettingsNotice({
       status: "success",
-      title: "服务配置草稿已保存",
-      detail: `${asrServiceProfile.name} 的 provider、IO Manager 和响应契约已进入配置草稿。`
+      title: "DEMO：服务配置草稿已保存",
+      detail: `${asrServiceProfile.name} 的 provider、IO Manager 和响应契约仅保存在演示状态。`
     });
   };
 

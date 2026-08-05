@@ -37,6 +37,7 @@ from app.core.callback_signature import (
 )
 
 MAX_BODY_BYTES = 1024 * 1024
+MAX_HEALTHCHECK_RESPONSE_BYTES = 64 * 1024
 CALLBACK_TOLERANCE_SECONDS = 300
 AUDIO_REQUEST_FIELDS = frozenset(
     {
@@ -672,6 +673,18 @@ def serve(mode: str, *, listen: str, port: int) -> None:
     server.serve_forever(poll_interval=0.2)
 
 
+def _read_healthcheck_response(tls: ssl.SSLSocket) -> bytes:
+    response = bytearray()
+    while len(response) <= MAX_HEALTHCHECK_RESPONSE_BYTES:
+        chunk = tls.recv(min(4096, MAX_HEALTHCHECK_RESPONSE_BYTES + 1 - len(response)))
+        if not chunk:
+            break
+        response.extend(chunk)
+    if len(response) > MAX_HEALTHCHECK_RESPONSE_BYTES:
+        raise GateSupportError("gate support healthcheck response is too large")
+    return bytes(response)
+
+
 def healthcheck(*, url: str, ca_file: str, server_name: str) -> None:
     parsed = urlsplit(url)
     if parsed.scheme != "https" or not parsed.hostname or not parsed.port:
@@ -685,7 +698,7 @@ def healthcheck(*, url: str, ca_file: str, server_name: str) -> None:
                 f"Host: {server_name}\r\nConnection: close\r\n\r\n"
             ).encode("ascii")
             tls.sendall(request)
-            response = tls.recv(4096)
+            response = _read_healthcheck_response(tls)
     if not response.startswith(b"HTTP/1.1 200") or b'"status":"ok"' not in response:
         raise GateSupportError("gate support healthcheck failed")
 

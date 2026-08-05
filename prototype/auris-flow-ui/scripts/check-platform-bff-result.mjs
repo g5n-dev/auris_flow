@@ -123,6 +123,7 @@ if (outboxResultPath && !outboxResult) {
 }
 if (result.mode === "audio-import-only") {
   const audioImport = result.audioImportClosedLoop;
+  const vertical = result.audioIntelligenceReviewClosedLoop;
   const tenantPull = result.tenantAudioImportPull;
   const invalidRuntimeMarkers = collectForbiddenRuntimeMarkers(result, "$audioImportBrowser");
   const diagnostics = [
@@ -133,10 +134,11 @@ if (result.mode === "audio-import-only") {
   ];
   if (
     !requireRealStack ||
-    result.schema_version !== "auris.audio-import-browser-e2e.v1" ||
+    result.schema_version !== "auris.audio-import-browser-e2e.v2" ||
     result.stage !== "completed" ||
     result.executionProfile?.realStack !== true ||
     result.executionProfile?.platformSource !== "https" ||
+    result.executionProfile?.inferenceProvider !== "https" ||
     result.executionProfile?.dagster !== "real" ||
     result.executionProfile?.objectStorage !== "real" ||
     result.executionProfile?.uiEvidencePolicy !== "browser-clicks-and-bff-readback" ||
@@ -150,6 +152,59 @@ if (result.mode === "audio-import-only") {
       executionProfile: result.executionProfile,
       invalidRuntimeMarkers,
       diagnostics
+    });
+  }
+  const requiredTraceKinds = [
+    "import_item",
+    "storage_object",
+    "audio_recording",
+    "import_batch",
+    "audio_session",
+    "run",
+    "asr_result",
+    "evidence_pack",
+    "human_review_task",
+    "human_review_decision"
+  ];
+  if (
+    !vertical?.intelligenceRunId ||
+    !vertical?.evidencePackId ||
+    !vertical?.reviewTaskId ||
+    !vertical?.reviewDecisionId ||
+    vertical?.audioSessionId !== audioImport.audioSessionId ||
+    vertical?.rootTraceId !== audioImport.rootTraceId ||
+    vertical?.intelligenceRunStatus !== "success" ||
+    vertical?.evidenceStatus !== "ready" ||
+    !/^[0-9a-f]{64}$/.test(vertical?.evidenceSha256 ?? "") ||
+    !/^[0-9a-f]{64}$/.test(vertical?.audioSha256 ?? "") ||
+    !vertical?.storageObjectVersion ||
+    !vertical?.asrResultId ||
+    vertical?.reviewQueue !== "audio_evidence_review" ||
+    vertical?.reviewDecision !== "modified" ||
+    vertical?.reviewStatus !== "success" ||
+    !vertical?.decisionCurrentTraceId ||
+    vertical?.taskReadbackMatched !== true ||
+    vertical?.evidenceReadbackMatched !== true ||
+    vertical?.affectedObjectsReadBack !== true ||
+    !(vertical?.affectedObjectReadbackCount >= 3) ||
+    !Number.isInteger(vertical?.callbackReadbacks) ||
+    !Number.isInteger(vertical?.outputSinkBindings) ||
+    (
+      vertical.outputSinkBindings > 0 &&
+      (
+        vertical.callbackReadbacks < vertical.outputSinkBindings ||
+        !vertical.traceNodeKinds?.includes("callback_receipt")
+      )
+    ) ||
+    vertical?.traceRootMatched !== true ||
+    vertical?.noSeedSwitch !== true ||
+    !Array.isArray(vertical?.traceNodeKinds) ||
+    requiredTraceKinds.some((kind) => !vertical.traceNodeKinds.includes(kind)) ||
+    !(vertical?.traceEdgeCount >= 6)
+  ) {
+    fail("focused browser run did not close intelligence, evidence, review and trace", {
+      vertical,
+      audioImport
     });
   }
   if (
@@ -169,10 +224,17 @@ if (result.mode === "audio-import-only") {
     audioImport?.failed !== 0 ||
     audioImport?.playbackGrantStatus !== 201 ||
     audioImport?.playbackStatus !== 206 ||
+    audioImport?.playbackUiBound !== true ||
+    audioImport?.playbackRangeVerified !== true ||
     !Number.isInteger(audioImport?.connectorWriteCount) ||
     audioImport.connectorWriteCount < 1 ||
     audioImport.connectorWriteCount > 2 ||
     audioImport?.pageRefreshRecovered !== true ||
+    audioImport?.coldContextRecovered !== true ||
+    audioImport?.coldRecovery?.sessionStorageLength !== 0 ||
+    audioImport?.coldRecovery?.status !== "succeeded" ||
+    !String(audioImport?.coldRecovery?.batchQuery || "").includes("connector_id=") ||
+    !String(audioImport?.coldRecovery?.batchQuery || "").includes("task_version_id=") ||
     audioImport?.rootTraceReadable !== true ||
     audioImport?.legacyPlatformSyncRequests !== 0 ||
     !audioImport?.targetAssetKey ||
@@ -210,6 +272,9 @@ if (result.mode === "audio-import-only") {
         taskRunId: audioImport.taskRunId,
         importBatchId: audioImport.importBatchId,
         audioSessionId: audioImport.audioSessionId,
+        intelligenceRunId: vertical.intelligenceRunId,
+        evidencePackId: vertical.evidencePackId,
+        reviewDecisionId: vertical.reviewDecisionId,
         playbackStatus: audioImport.playbackStatus,
         tenantTaskRunId: tenantPull.taskRunId
       },
@@ -858,10 +923,17 @@ if (audioImportFixtureSkipped) {
   audioImportClosedLoop?.failed !== 0 ||
   audioImportClosedLoop?.playbackGrantStatus !== 201 ||
   audioImportClosedLoop?.playbackStatus !== 206 ||
+  audioImportClosedLoop?.playbackUiBound !== true ||
+  audioImportClosedLoop?.playbackRangeVerified !== true ||
   !Number.isInteger(audioImportClosedLoop?.connectorWriteCount) ||
   audioImportClosedLoop.connectorWriteCount < 1 ||
   audioImportClosedLoop.connectorWriteCount > 2 ||
   audioImportClosedLoop?.pageRefreshRecovered !== true ||
+  audioImportClosedLoop?.coldContextRecovered !== true ||
+  audioImportClosedLoop?.coldRecovery?.sessionStorageLength !== 0 ||
+  audioImportClosedLoop?.coldRecovery?.status !== "succeeded" ||
+  !String(audioImportClosedLoop?.coldRecovery?.batchQuery || "").includes("connector_id=") ||
+  !String(audioImportClosedLoop?.coldRecovery?.batchQuery || "").includes("task_version_id=") ||
   audioImportClosedLoop?.rootTraceReadable !== true ||
   audioImportClosedLoop?.legacyPlatformSyncRequests !== 0 ||
   !audioImportClosedLoop?.targetAssetKey ||
@@ -911,7 +983,12 @@ if (!result.insightReport?.runId) {
   });
 }
 
-for (const key of ["boundary", "eventLink", "annotation", "decision", "appeal"]) {
+if (result.listeningActions?.boundary?.status !== "blocked_unbound") {
+  fail("platform BFF E2E listening boundary must fail closed when the task has no bound target", {
+    value: result.listeningActions?.boundary
+  });
+}
+for (const key of ["eventLink", "annotation", "decision", "appeal"]) {
   if (!result.listeningActions?.[key]?.id || !result.listeningActions?.[key]?.traceId) {
     fail(`platform BFF E2E listening ${key} is missing id or traceId`, {
       value: result.listeningActions?.[key]
@@ -1061,7 +1138,9 @@ if (!audioImportFixtureSkipped) {
     dataAudioImportWrite?.importBatchId !== audioImportClosedLoop.importBatchId ||
     dataAudioImportWrite?.audioSessionId !== audioImportClosedLoop.audioSessionId ||
     dataAudioImportWrite?.executionMode !== "production" ||
-    dataAudioImportWrite?.playbackStatus !== 206
+    dataAudioImportWrite?.playbackStatus !== 206 ||
+    dataAudioImportWrite?.playbackUiBound !== true ||
+    dataAudioImportWrite?.playbackRangeVerified !== true
   ) {
     fail("data module must cover the entire audio import closed loop through UI clicks", {
       value: dataAudioImportWrite,
@@ -1211,7 +1290,9 @@ if (audioImportFixtureSkipped) {
   audioImportCoreFlow?.importBatchId !== audioImportClosedLoop.importBatchId ||
   audioImportCoreFlow?.audioSessionId !== audioImportClosedLoop.audioSessionId ||
   audioImportCoreFlow?.executionMode !== "production" ||
-  audioImportCoreFlow?.playbackStatus !== 206
+  audioImportCoreFlow?.playbackStatus !== 206 ||
+  audioImportCoreFlow?.playbackUiBound !== true ||
+  audioImportCoreFlow?.playbackRangeVerified !== true
 ) {
   fail("core audio import evidence does not match the browser-closed P0 chain", {
     value: audioImportCoreFlow,
@@ -1283,7 +1364,7 @@ console.log(
       checkedDataExportAction: "dataExportAction",
       checkedDataSceneProfileGate: "dataSceneProfileGate",
       checkedVoiceprintEnrollmentGate: "voiceprintEnrollmentGate",
-      checkedListeningActions: ["boundary", "eventLink", "annotation", "decision", "appeal", "asrHotwordCorrection"],
+      checkedListeningActions: ["boundaryGuard", "eventLink", "annotation", "decision", "appeal", "asrHotwordCorrection"],
       checkedListeningRecording: "playback-grant -> headerless media Range",
       checkedEvaluationPromptUi: "evaluationPromptUi",
       checkedEvaluationBadcaseUi: "evaluationBadcaseUi",

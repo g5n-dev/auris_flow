@@ -6,6 +6,7 @@ import json
 import math
 import re
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from typing import Any
 from urllib.error import HTTPError, URLError
 
@@ -125,11 +126,28 @@ _AUDIO_INPUT_INTEGRITY_FIELDS = frozenset(
         "content_length",
     }
 )
-_AUDIO_PROVIDER_RESULT_FIELDS = frozenset({"transcript", "analyses"})
+_AUDIO_PROVIDER_RESULT_FIELDS = frozenset({"transcript", "analyses", "review_outputs"})
 _AUDIO_TRANSCRIPT_FIELDS = frozenset({"language", "text", "segments"})
 _AUDIO_SEGMENT_FIELDS = frozenset({"start_ms", "end_ms", "speaker", "text", "confidence"})
 _AUDIO_ANALYSIS_FIELDS = frozenset({"capability", "summary", "score", "labels"})
 _AUDIO_LABEL_FIELDS = frozenset({"label", "score"})
+_AUDIO_REVIEW_OUTPUT_FIELDS = frozenset({"event_links", "label_candidates"})
+_AUDIO_REVIEW_EVENT_LINK_FIELDS = frozenset(
+    {
+        "source_event_id",
+        "document_ref",
+        "relation_type",
+        "confidence",
+        "evidence_window",
+    }
+)
+_AUDIO_REVIEW_LABEL_CANDIDATE_FIELDS = frozenset(
+    {
+        "label",
+        "value_or_action",
+        "confidence",
+    }
+)
 _AUDIO_RAW_LOCATOR_FIELDS = frozenset(
     {
         "storage_objects",
@@ -714,11 +732,15 @@ def _validate_audio_provider_result(
     *,
     capabilities: list[str],
 ) -> dict[str, Any]:
-    result = _manifest_mapping(
-        raw,
-        fields=_AUDIO_PROVIDER_RESULT_FIELDS,
-        name="provider_result",
-    )
+    if not isinstance(raw, Mapping) or any(not isinstance(key, str) for key in raw):
+        raise _audio_manifest_error("CONTRACT_INVALID", "provider_result 必须是对象")
+    observed_fields = set(raw)
+    if (
+        not {"transcript", "analyses"} <= observed_fields
+        or observed_fields - _AUDIO_PROVIDER_RESULT_FIELDS
+    ):
+        raise _audio_manifest_error("CONTRACT_INVALID", "provider_result 字段集合无效")
+    result = dict(raw)
     raw_transcript = result.get("transcript")
     transcript: dict[str, Any] | None = None
     if raw_transcript is None:
@@ -835,7 +857,130 @@ def _validate_audio_provider_result(
         )
     if observed_capabilities != expected_analyses:
         raise _audio_manifest_error("PROVIDER_RESULT_INVALID", "provider 能力结果不完整")
-    return {"transcript": transcript, "analyses": analyses}
+    normalized = {"transcript": transcript, "analyses": analyses}
+    if "review_outputs" in result:
+        normalized["review_outputs"] = _validate_audio_review_outputs(
+            result.get("review_outputs"),
+            error_factory=lambda message: _audio_manifest_error(
+                "PROVIDER_RESULT_INVALID",
+                message,
+            ),
+        )
+    return normalized
+
+
+def _review_output_text(value: object, *, field: str, maximum: int) -> str:
+    normalized = value.strip() if isinstance(value, str) else ""
+    if (
+        not normalized
+        or len(normalized) > maximum
+        or any(ord(character) < 0x20 for character in normalized)
+    ):
+        raise ValueError(f"{field} 无效")
+    return normalized
+
+
+def _review_output_confidence(value: object, *, field: str) -> float:
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(float(value))
+        or not 0 <= float(value) <= 1
+    ):
+        raise ValueError(f"{field} 无效")
+    return float(value)
+
+
+def _validate_audio_review_outputs(
+    raw: object,
+    *,
+    error_factory: Any,
+) -> dict[str, list[dict[str, Any]]]:
+    try:
+        if not isinstance(raw, dict) or set(raw) - _AUDIO_REVIEW_OUTPUT_FIELDS:
+            raise ValueError("review_outputs 结构无效")
+        raw_event_links = raw.get("event_links", [])
+        raw_label_candidates = raw.get("label_candidates", [])
+        if not isinstance(raw_event_links, list) or len(raw_event_links) > 100:
+            raise ValueError("review_outputs.event_links 无效")
+        if not isinstance(raw_label_candidates, list) or len(raw_label_candidates) > 100:
+            raise ValueError("review_outputs.label_candidates 无效")
+        event_links: list[dict[str, Any]] = []
+        observed_event_links: set[tuple[str, str, str]] = set()
+        for index, item in enumerate(raw_event_links):
+            if not isinstance(item, dict) or set(item) != _AUDIO_REVIEW_EVENT_LINK_FIELDS:
+                raise ValueError(f"review_outputs.event_links[{index}] 结构无效")
+            source_event_id = _review_output_text(
+                item.get("source_event_id"),
+                field="source_event_id",
+                maximum=128,
+            )
+            document_ref = _review_output_text(
+                item.get("document_ref"),
+                field="document_ref",
+                maximum=128,
+            )
+            relation_type = _review_output_text(
+                item.get("relation_type"),
+                field="relation_type",
+                maximum=128,
+            )
+            normalized = {
+                "source_event_id": source_event_id,
+                "document_ref": document_ref,
+                "relation_type": relation_type,
+                "confidence": _review_output_confidence(
+                    item.get("confidence"),
+                    field="confidence",
+                ),
+                "evidence_window": _review_output_text(
+                    item.get("evidence_window"),
+                    field="evidence_window",
+                    maximum=128,
+                ),
+            }
+            identity = (
+                source_event_id,
+                document_ref,
+                relation_type,
+            )
+            if identity in observed_event_links:
+                raise ValueError("review_outputs.event_links 存在重复业务关联")
+            observed_event_links.add(identity)
+            event_links.append(normalized)
+        label_candidates: list[dict[str, Any]] = []
+        observed_labels: set[str] = set()
+        for index, item in enumerate(raw_label_candidates):
+            if not isinstance(item, dict) or set(item) != _AUDIO_REVIEW_LABEL_CANDIDATE_FIELDS:
+                raise ValueError(f"review_outputs.label_candidates[{index}] 结构无效")
+            label = _review_output_text(
+                item.get("label"),
+                field="label",
+                maximum=128,
+            )
+            if label in observed_labels:
+                raise ValueError("review_outputs.label_candidates 存在重复标签")
+            observed_labels.add(label)
+            label_candidates.append(
+                {
+                    "label": label,
+                    "value_or_action": _review_output_text(
+                        item.get("value_or_action"),
+                        field="value_or_action",
+                        maximum=2_000,
+                    ),
+                    "confidence": _review_output_confidence(
+                        item.get("confidence"),
+                        field="confidence",
+                    ),
+                }
+            )
+    except ValueError as exc:
+        raise error_factory(str(exc)) from exc
+    return {
+        "event_links": event_links,
+        "label_candidates": label_candidates,
+    }
 
 
 def _validate_audio_result_manifest(
@@ -967,6 +1112,8 @@ def _audio_domain_result_from_provider(
         "recording_id": record.payload.get("recording_id"),
         "capability_statuses": {},
     }
+    if "review_outputs" in provider_result:
+        result["review_outputs"] = provider_result["review_outputs"]
     for capability in capabilities:
         if capability in outputs:
             output_key, items, empty_reason = outputs[capability]
@@ -1182,6 +1329,15 @@ def validate_audio_intelligence_result(
             project_id=record.project_id,
             storage_object_id=storage_object_id,
             purpose="词级时间戳",
+        )
+    if "review_outputs" in result_ref:
+        result_ref["review_outputs"] = _validate_audio_review_outputs(
+            result_ref.get("review_outputs"),
+            error_factory=lambda message: ApiError(
+                "AUDIO_REVIEW_OUTPUT_INVALID",
+                message,
+                422,
+            ),
         )
     return result_ref
 
@@ -1477,6 +1633,18 @@ def materialize_audio_intelligence_completion(
                 status=capability_status,
             )
         )
+    from app.services.audio_evidence_review_service import (
+        materialize_audio_evidence_review,
+    )
+
+    materialized.extend(
+        materialize_audio_evidence_review(
+            session,
+            ctx,
+            record,
+            result_ref,
+        )
+    )
     return materialized
 
 
@@ -1495,21 +1663,35 @@ def _upsert_audio_resource(
     # orchestration and imports this module.
     from app.services.resource_service import upsert_resource
 
+    payload = record.payload if isinstance(record.payload, dict) else {}
+    root_trace_id = str(payload.get("root_trace_id") or record.trace_id)
+    rooted_ctx = (
+        ctx
+        if ctx.trace_id == root_trace_id
+        else replace(
+            ctx,
+            trace_id=root_trace_id,
+            parent_trace_id=record.trace_id,
+            correlation_id=root_trace_id,
+        )
+    )
     resource_data = {
         "id": resource_key,
         **data,
         "status": status,
         "source_run_id": record.run_id,
-        "trace_id": record.trace_id,
+        "root_trace_id": root_trace_id,
+        "current_trace_id": record.trace_id,
+        "trace_id": root_trace_id,
     }
     upsert_resource(
         session,
-        ctx,
+        rooted_ctx,
         collection,
         resource_key,
         resource_data,
         status=status,
-        trace_id=record.trace_id,
+        trace_id=root_trace_id,
         audit_action=f"{collection}.materialize",
     )
     return {

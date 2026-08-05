@@ -139,7 +139,9 @@ export function deriveProjectionMetrics(
   }
 
   if (moduleKey === "insights") {
-    return patchByLabel("北极星", projectedMetricValue(raw, ["north_star", "north_star_score"]));
+    // Top-level projection cards cannot prove comparable_series + evidence_refs.
+    // The insights controller performs that full validation before rendering values.
+    return fallbackMetrics.map(unavailableMetric);
   }
   if (moduleKey === "canvas" && itemCount) return patchByLabel("编排版本", itemCount);
   if (moduleKey === "data") return patchByLabel("音频片段", projectedAggregateCount(raw));

@@ -460,12 +460,12 @@
 }
 
 .context-select.locked span {
-  color: var(--teal);
+  color: #0b6f70;
 }
 
 .context-select.locked svg {
   flex: 0 0 auto;
-  color: var(--teal);
+  color: #0b6f70;
 }
 
 .topbar .context-select {

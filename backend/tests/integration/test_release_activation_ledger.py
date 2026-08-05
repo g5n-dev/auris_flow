@@ -30,6 +30,8 @@ from tests.contract.test_prompt_release_closed_loop_api import (
     _seed_release_dependencies,
 )
 
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
+
 
 def test_bootstrap_appends_generation_one_activation_ledger_event(client, auth_headers):
     _seed_release_dependencies()

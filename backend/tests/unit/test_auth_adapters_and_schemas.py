@@ -523,7 +523,12 @@ def test_dispatch_event_routes_to_expected_local_adapters():
     dagster = dispatch_event(
         "task_run.requested",
         "task_run",
-        {"run_id": "run_001", "task_version_id": "task_v1", "partition_key": "p1"},
+        {
+            "run_id": "run_001",
+            "task_version_id": "task_v1",
+            "partition_key": "p1",
+            "execution_mode": "diagnostic",
+        },
     )
     assert dagster.adapter == "dagster"
     assert dagster.details["job_name"] == "task_v1"
@@ -562,7 +567,11 @@ def test_dispatch_event_routes_to_expected_local_adapters():
     provider = dispatch_event(
         "provider_test.requested",
         "provider_test",
-        {"run_id": "provider_run_001", "provider": "asr"},
+        {
+            "run_id": "provider_run_001",
+            "provider": "asr",
+            "execution_mode": "diagnostic",
+        },
     )
     assert provider.adapter == "dagster"
     assert provider.details["external_run_id"].startswith("dg_run_")
@@ -575,6 +584,7 @@ def test_dispatch_event_routes_to_expected_local_adapters():
             "audio_session_id": "S20250526-000128",
             "recording_id": "A-1001_20250526_122300",
             "job_name": "audio_intelligence_pipeline",
+            "execution_mode": "diagnostic",
         },
     )
     assert audio_intelligence.adapter == "dagster"
@@ -879,6 +889,7 @@ def test_real_dagster_adapter_posts_graphql_run_request_without_network():
             },
             "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
             "event_type": "task_run.requested",
+            "execution_mode": "diagnostic",
             "dispatch_idempotency_key": "outbox:task-run:task_run_001",
             "outbox_fencing_token": "123:1",
         },
@@ -933,6 +944,7 @@ def test_real_dagster_run_config_discards_caller_control_plane_config():
         "trace_id": "trace_server_authoritative",
         "run_id": "task_run_002",
         "event_type": "task_run.requested",
+        "execution_mode": "diagnostic",
         "dispatch_idempotency_key": "outbox:task-run:task_run_002",
         "outbox_fencing_token": "456:2",
         "run_config": {

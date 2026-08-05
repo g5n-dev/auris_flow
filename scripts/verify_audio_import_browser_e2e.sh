@@ -97,9 +97,15 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
+# The production catalogs and sanitized fixture projections are derived assets
+# excluded from git. Build them explicitly because this gate launches the Vite
+# binary directly and therefore does not execute package.json's predev hook.
+npm --prefix "${UI_ROOT}" run assets:build
+
 (
   cd "${UI_ROOT}"
   exec env \
+    NODE_ENV=development \
     VITE_DEMO_MODE=false \
     VITE_API_PROXY_TARGET="${BFF_URL}" \
     ./node_modules/.bin/vite \
@@ -181,18 +187,21 @@ from pathlib import Path
 
 artifact = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 flow = artifact.get("audioImportClosedLoop")
+vertical = artifact.get("audioIntelligenceReviewClosedLoop")
 tenant_pull = artifact.get("tenantAudioImportPull")
 profile = artifact.get("executionProfile")
 if (
-    artifact.get("schema_version") != "auris.audio-import-browser-e2e.v1"
+    artifact.get("schema_version") != "auris.audio-import-browser-e2e.v2"
     or artifact.get("status") != "ok"
     or artifact.get("mode") != "audio-import-only"
     or not isinstance(flow, dict)
+    or not isinstance(vertical, dict)
     or not isinstance(tenant_pull, dict)
     or profile
     != {
         "realStack": True,
         "platformSource": "https",
+        "inferenceProvider": "https",
         "dagster": "real",
         "objectStorage": "real",
         "uiEvidencePolicy": "browser-clicks-and-bff-readback",
@@ -205,9 +214,23 @@ if (
     or flow.get("failed") != 0
     or flow.get("playbackGrantStatus") != 201
     or flow.get("playbackStatus") != 206
+    or flow.get("playbackUiBound") is not True
+    or flow.get("playbackRangeVerified") is not True
     or flow.get("pageRefreshRecovered") is not True
     or flow.get("rootTraceReadable") is not True
     or flow.get("legacyPlatformSyncRequests") != 0
+    or vertical.get("audioSessionId") != flow.get("audioSessionId")
+    or vertical.get("rootTraceId") != flow.get("rootTraceId")
+    or vertical.get("intelligenceRunStatus") != "success"
+    or vertical.get("evidenceStatus") != "ready"
+    or vertical.get("reviewQueue") != "audio_evidence_review"
+    or vertical.get("reviewDecision") != "modified"
+    or vertical.get("reviewStatus") != "success"
+    or vertical.get("taskReadbackMatched") is not True
+    or vertical.get("evidenceReadbackMatched") is not True
+    or vertical.get("affectedObjectsReadBack") is not True
+    or vertical.get("traceRootMatched") is not True
+    or vertical.get("noSeedSwitch") is not True
     or tenant_pull.get("executionMode") != "production"
     or tenant_pull.get("taskVersionId") != flow.get("taskVersionId")
     or tenant_pull.get("legacyPlatformSyncRequests") != 0

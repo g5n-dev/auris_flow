@@ -20,6 +20,15 @@ import type { ComponentType } from "react";
 
 export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState & CanvasPrimitiveActions & CanvasRecoveryModel & CanvasSectionModel & CanvasScheduleModel & CanvasExecutionPlan & CanvasRuntimeModel & CanvasNodeCollections & CanvasNodeContextModel & CanvasNodeInteractions & CanvasTaskDagModel & CanvasDraftModelActions & CanvasExecutionActions & CanvasExperimentActions & CanvasRunModel) {
   const { activeSchedule, activeSchedulePartitionKey, activeTab, canvasAction, computeTaskExperimentMetrics, controlledExperiment, createTaskControlledExperiment, decideTaskControlledExperiment, demoMode, draftState, experimentActionPending, experimentLoading, generateExperimentMetricDraft, generateMappingSuggestions, isFlowTab, nodeLibraryOpen, openFieldMappingEditor, openInputSourceEditor, openOutputWritebackEditor, publishTaskVersion, retryTaskExperimentRelease, runTaskOnce, saveTaskDraft, setCanvasLevel, setCanvasNotice, setDrawerTab, setNodeLibraryOpen, setSelectedNodeId, startTaskControlledExperiment, syncSchedulePlan, taskPublishLabel, taskReleaseGate, updateExecutionState, validateDagsterCompatibility } = scope;
+  const canvasAssistantDisabledReason = demoMode
+    ? ""
+    : "映射建议执行器尚未配置；生产模式禁止使用本地 fixture 生成成功结果。";
+  const canvasOutputMarkerDisabledReason = demoMode
+    ? ""
+    : "输出状态必须由业务 materializer 回读，不能由前端手工标记成功。";
+  const canvasMetricDraftDisabledReason = demoMode
+    ? ""
+    : "指标草稿尚未接入专用 BFF 执行契约；生产模式禁止本地生成成功状态。";
   const taskToolbarActions: Array<{
       key: string;
       label: string;
@@ -27,6 +36,7 @@ export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState &
       action: () => void;
       active?: boolean;
       disabled?: boolean;
+      disabledReason?: string;
     }> = (() => {
       if (activeTab === "schedule") {
         return [
@@ -55,7 +65,14 @@ export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState &
         if (!controlledExperiment) {
           return [
             { key: "experiment-create", label: experimentActionPending === "create" ? "创建中" : "创建实验", icon: Plus, action: createTaskControlledExperiment, disabled: Boolean(experimentActionPending) },
-            { key: "generate-metric", label: "生成指标", icon: Sparkles, action: generateExperimentMetricDraft }
+            {
+              key: "generate-metric",
+              label: "生成指标",
+              icon: Sparkles,
+              action: generateExperimentMetricDraft,
+              disabled: Boolean(canvasMetricDraftDisabledReason),
+              disabledReason: canvasMetricDraftDisabledReason
+            }
           ];
         }
         if (controlledExperiment.status === "draft") {
@@ -103,7 +120,24 @@ export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState &
         return [
           { key: "validate-run", label: "重新校验", icon: ShieldCheck, action: validateDagsterCompatibility, disabled: Boolean(canvasAction) },
           { key: "run-once", label: canvasAction === "run" ? "运行中" : "运行一次", icon: RotateCcw, action: runTaskOnce, disabled: Boolean(canvasAction) },
-          { key: "sync-output", label: "标记输出", icon: Check, action: () => updateExecutionState("success") }
+          {
+            key: "sync-output",
+            label: "标记输出",
+            icon: Check,
+            disabled: !demoMode,
+            disabledReason: canvasOutputMarkerDisabledReason,
+            action: () => {
+              if (!demoMode) {
+                setCanvasNotice({
+                  status: "error",
+                  title: "禁止前端标记业务成功",
+                  detail: canvasOutputMarkerDisabledReason
+                });
+                return;
+              }
+              updateExecutionState("success");
+            }
+          }
         ];
       }
       if (isFlowTab) {
@@ -119,7 +153,14 @@ export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState &
               setNodeLibraryOpen((open) => !open);
             }
           },
-          { key: "generate-mapping", label: canvasAction === "mapping" ? "生成中" : "生成映射", icon: Sparkles, action: generateMappingSuggestions, disabled: Boolean(canvasAction) },
+          {
+            key: "generate-mapping",
+            label: canvasAction === "mapping" ? "生成中" : "生成映射",
+            icon: Sparkles,
+            action: generateMappingSuggestions,
+            disabled: Boolean(canvasAction) || Boolean(canvasAssistantDisabledReason),
+            disabledReason: canvasAssistantDisabledReason
+          },
           { key: "validate-flow", label: canvasAction === "validate" ? "校验中" : "校验", icon: ShieldCheck, action: validateDagsterCompatibility, disabled: Boolean(canvasAction) },
           { key: "run-flow", label: canvasAction === "run" ? "运行中" : "运行", icon: RotateCcw, action: runTaskOnce, disabled: Boolean(canvasAction) }
         ];
@@ -135,6 +176,9 @@ export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState &
       /(save|schedule|run|validate|publish|mapping|experiment)/.test(actionKey) ? "p,s,e,d" : "s,e";
 
   const taskActionTitle = (action: (typeof taskToolbarActions)[number]) =>
+      action.disabledReason
+        ? action.disabledReason
+        :
       action.disabled
         ? `${action.label}正在处理，完成后可继续操作。`
         : `${action.label}会在上方显示执行状态和回执。`;
@@ -238,6 +282,8 @@ export function buildCanvasToolbarModel(scope: CanvasModuleProps & CanvasState &
         : [];
 
   return {
+    canvasAssistantDisabledReason,
+    canvasOutputMarkerDisabledReason,
     taskToolbarActions,
     taskActionFeedbackFor,
     taskActionTitle,

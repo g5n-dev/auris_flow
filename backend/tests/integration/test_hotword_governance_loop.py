@@ -12,7 +12,6 @@ from app.core.context import RequestContext
 from app.core.database import SessionLocal
 from app.core.errors import ApiError
 from app.models import (
-    AssetMaterialization,
     AuditLog,
     Badcase,
     HotwordMetricSnapshot,
@@ -33,6 +32,25 @@ from app.services.hotword_service import (
     materialize_hotword_analysis_completion,
 )
 from app.workers.outbox_worker import process_aggregate_events
+
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
+
+
+@pytest.fixture(autouse=True)
+def _bind_seeded_recording_to_immutable_test_object() -> None:
+    """Keep legacy completion tests focused on their result-object assertions."""
+
+    with SessionLocal.begin() as session:
+        storage_object = session.get(StorageObject, "sto_rec_A_1001_20250526_122300")
+        assert storage_object is not None
+        storage_object.status = "verified"
+        storage_object.size_bytes = 1024
+        storage_object.content_sha256 = "f" * 64
+        storage_object.etag = "etag-seeded-recording-v1"
+        storage_object.payload = {
+            **(storage_object.payload or {}),
+            "object_version_id": "immutable-seeded-recording-v1",
+        }
 
 
 def _headers(auth_headers, *, key: str, token: str = "dev-token"):
@@ -182,7 +200,7 @@ def _complete_dagster_run(client, auth_headers, run_id: str, result_ref: dict, *
         run = session.get(RunRecord, run_id)
         assert run is not None and run.status == "submitted"
         external_run_id = run.payload["dispatch"]["details"]["external_run_id"]
-    return client.post(
+    response = client.post(
         f"/api/v1/runs/{run_id}/completion-receipts",
         json={
             "adapter": "dagster",
@@ -193,24 +211,30 @@ def _complete_dagster_run(client, auth_headers, run_id: str, result_ref: dict, *
         },
         headers=_headers(auth_headers, key=key),
     )
+    if (
+        response.status_code == 202
+        and response.json()["data"].get("receipt_state") == "materializing"
+    ):
+        assert process_aggregate_events([run_id]) == 1
+        return client.get(f"/api/v1/runs/{run_id}", headers=auth_headers)
+    return response
 
 
 @pytest.mark.parametrize(
-    "failure,expected_status,expected_code",
+    "failure,expected_code",
     [
-        ("missing", 404, "STORAGE_OBJECT_NOT_FOUND"),
-        ("cross_tenant", 403, "STORAGE_OBJECT_SCOPE_FORBIDDEN"),
-        ("cross_project", 403, "STORAGE_OBJECT_SCOPE_FORBIDDEN"),
-        ("uploading", 409, "STORAGE_OBJECT_NOT_READY"),
-        ("incomplete", 409, "STORAGE_OBJECT_METADATA_INCOMPLETE"),
-        ("hash_mismatch", 409, "STORAGE_OBJECT_CONTENT_HASH_MISMATCH"),
+        ("missing", "STORAGE_OBJECT_NOT_FOUND"),
+        ("cross_tenant", "STORAGE_OBJECT_SCOPE_FORBIDDEN"),
+        ("cross_project", "STORAGE_OBJECT_SCOPE_FORBIDDEN"),
+        ("uploading", "STORAGE_OBJECT_NOT_READY"),
+        ("incomplete", "STORAGE_OBJECT_METADATA_INCOMPLETE"),
+        ("hash_mismatch", "STORAGE_OBJECT_CONTENT_HASH_MISMATCH"),
     ],
 )
 def test_hotword_build_rejects_untrusted_manifest_storage_reference(
     client,
     auth_headers,
     failure,
-    expected_status,
     expected_code,
 ):
     _, version, validating = _create_validating_hotword_version(
@@ -246,13 +270,13 @@ def test_hotword_build_rejects_untrusted_manifest_storage_reference(
         },
         key=f"manifest-{failure}-completion",
     )
-    assert completed.status_code == expected_status, completed.text
-    assert completed.json()["error"]["code"] == expected_code
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["data"]["status"] == "failed"
+    assert completed.json()["data"]["materialization"]["error_code"] == expected_code
     with SessionLocal() as session:
         run = session.get(RunRecord, validating_data["build_run_id"])
         stored_version = session.get(HotwordPackVersion, version["version_id"])
-        assert run is not None and run.status == "submitted"
-        assert "completion_receipt" not in run.payload
+        assert run is not None and run.status == "failed"
         assert stored_version is not None and stored_version.status == "validating"
         assert stored_version.manifest_storage_object_id is None
 
@@ -312,12 +336,16 @@ def test_hotword_completion_real_head_failure_rolls_back_storage_registration(
         key="real-head-rollback-completion",
     )
 
-    assert completed.status_code == 404, completed.text
-    assert completed.json()["error"]["code"] == "STORAGE_OBJECT_REMOTE_NOT_FOUND"
+    assert completed.status_code == 200, completed.text
+    assert completed.json()["data"]["status"] == "failed"
+    assert (
+        completed.json()["data"]["materialization"]["error_code"]
+        == "STORAGE_OBJECT_REMOTE_NOT_FOUND"
+    )
     with SessionLocal() as session:
         run = session.get(RunRecord, build_run_id)
         stored_version = session.get(HotwordPackVersion, version["version_id"])
-        assert run is not None and run.status == "submitted"
+        assert run is not None and run.status == "failed"
         assert stored_version is not None and stored_version.status == "validating"
         assert session.get(StorageObject, manifest_id) is None
         assert session.get(StorageObject, artifact_id) is None
@@ -554,8 +582,11 @@ def test_hotword_completion_registers_only_run_scoped_storage_descriptors(
             key="completion-storage-registration-receipt",
         ),
     )
-    assert replayed.status_code == 200, replayed.text
-    assert replayed.json()["data"]["registered_storage_objects"] == registered
+    assert replayed.status_code == 202, replayed.text
+    assert replayed.json()["data"]["receipt_state"] == "materializing"
+    readback = client.get(f"/api/v1/runs/{build_run_id}", headers=auth_headers)
+    assert readback.status_code == 200, readback.text
+    assert readback.json()["data"]["registered_storage_objects"] == registered
 
 
 def test_hotword_completion_rejects_storage_id_collision(client, auth_headers):
@@ -600,13 +631,17 @@ def test_hotword_completion_rejects_storage_id_collision(client, auth_headers):
         },
         key="completion-storage-collision-receipt",
     )
-    assert rejected.status_code == 409, rejected.text
-    assert rejected.json()["error"]["code"] == "RUN_COMPLETION_STORAGE_COLLISION"
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "failed"
+    assert (
+        rejected.json()["data"]["materialization"]["error_code"]
+        == "RUN_COMPLETION_STORAGE_COLLISION"
+    )
     with SessionLocal() as session:
         run = session.get(RunRecord, build_run_id)
         stored_version = session.get(HotwordPackVersion, version["version_id"])
         collision = session.get(StorageObject, manifest_id)
-        assert run is not None and run.status == "submitted"
+        assert run is not None and run.status == "failed"
         assert stored_version is not None and stored_version.status == "validating"
         assert collision is not None and collision.source_type == "test_artifact"
         assert session.get(StorageObject, artifact_id) is None
@@ -819,12 +854,13 @@ def test_hotword_completion_rejects_unbound_storage_descriptors(
         result_ref,
         key=f"completion-storage-{mutation}-receipt",
     )
-    assert rejected.status_code in {409, 422}, rejected.text
-    assert rejected.json()["error"]["code"] == expected_code
+    assert rejected.status_code == 200, rejected.text
+    assert rejected.json()["data"]["status"] == "failed"
+    assert rejected.json()["data"]["materialization"]["error_code"] == expected_code
     with SessionLocal() as session:
         run = session.get(RunRecord, build_run_id)
         stored_version = session.get(HotwordPackVersion, version["version_id"])
-        assert run is not None and run.status == "submitted"
+        assert run is not None and run.status == "failed"
         assert stored_version is not None and stored_version.status == "validating"
         assert session.get(StorageObject, manifest_id) is None
         assert session.get(StorageObject, artifact_id) is None
@@ -1096,8 +1132,12 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
         publish_result,
         key="loop-publish-preclaimed-task",
     )
-    assert preclaimed_publish.status_code == 409, preclaimed_publish.text
-    assert preclaimed_publish.json()["error"]["code"] == "HOTWORD_TASK_VERSION_ID_CONFLICT"
+    assert preclaimed_publish.status_code == 200, preclaimed_publish.text
+    assert preclaimed_publish.json()["data"]["status"] == "failed"
+    assert (
+        preclaimed_publish.json()["data"]["materialization"]["error_code"]
+        == "HOTWORD_TASK_VERSION_ID_CONFLICT"
+    )
     with SessionLocal() as session:
         preclaimed_task = session.scalar(
             select(JsonResource).where(
@@ -1108,14 +1148,31 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
             )
         )
         assert preclaimed_task is not None and preclaimed_task.data["source"] == "client_preclaim"
+        materialization_event = session.scalar(
+            select(OutboxEvent).where(
+                OutboxEvent.event_type == "execution.materialization.requested",
+                OutboxEvent.aggregate_id == published_data["run_id"],
+            )
+        )
+        assert materialization_event is not None
+        assert materialization_event.status == "dead_letter"
+        assert "HOTWORD_TASK_VERSION_ID_CONFLICT" in str(materialization_event.last_error)
+        assert "TaskVersion ID 已被" in str(materialization_event.last_error)
         session.delete(preclaimed_task)
         session.commit()
+    retried_publish = client.post(
+        f"/api/v1/runs/{published_data['run_id']}/retries",
+        json={"reason": "预占 TaskVersion 冲突已解除"},
+        headers=_headers(auth_headers, key="loop-publish-retry"),
+    )
+    assert retried_publish.status_code == 202, retried_publish.text
+    published_data = retried_publish.json()["data"]
     publish_completed = _complete_dagster_run(
         client,
         auth_headers,
         published_data["run_id"],
         publish_result,
-        key="loop-publish-completion",
+        key="loop-publish-retry-completion",
     )
     assert publish_completed.status_code == 200, publish_completed.text
     assert publish_completed.json()["data"]["hotword_publish"]["version_status"] == "published"
@@ -1307,125 +1364,19 @@ def test_eval_approval_publish_creates_task_draft_and_preserves_root_trace(clien
         json=backfill_payload,
         headers=_headers(auth_headers, key="loop-controlled-backfill"),
     )
-    assert backfill.status_code == 202, backfill.text
-    backfill_data = backfill.json()["data"]
-    assert backfill_data["root_trace_id"] == pack["root_trace_id"]
-    assert backfill_data["impact_scope"]["overwrite_history"] is False
-    assert {item["type"] for item in backfill_data["affected_objects"]} == {
-        "data_asset",
-        "asset_materialization",
-        "hotword_pack_version",
-        "eval_run",
-        "task_version",
-    }
-    backfill_run_id = backfill_data["run_id"]
-    assert process_aggregate_events([backfill_run_id]) == 1
+    assert backfill.status_code == 409, backfill.text
+    assert backfill.json()["error"]["code"] == "EXECUTION_CONTRACT_NOT_CONFIGURED"
     with SessionLocal() as session:
-        backfill_run = session.get(RunRecord, backfill_run_id)
-        assert backfill_run is not None and backfill_run.status == "submitted"
-        assert backfill_run.trace_id == pack["root_trace_id"]
-        external_run_id = backfill_run.payload["dispatch"]["details"]["external_run_id"]
-    backfill_storage_object_id = f"sto-{backfill_run_id}-materialization"
-    backfill_content_sha256 = hashlib.sha256(b"hotword-v1.9-backfill").hexdigest()
-    backfill_completed = client.post(
-        f"/api/v1/runs/{backfill_run_id}/completion-receipts",
-        json={
-            "adapter": "dagster",
-            "status": "success",
-            "completion_receipt_id": "receipt-hotword-controlled-backfill",
-            "external_id": external_run_id,
-            "result_ref": {
-                "asset_key": "auris/model/asr_transcripts",
-                "partition_key": backfill_payload["partition_key"],
-                "storage_object_id": backfill_storage_object_id,
-                "storage_objects": [
-                    _run_storage_descriptor(
-                        backfill_run_id,
-                        backfill_storage_object_id,
-                        role="asset_materialization",
-                        content_sha256=backfill_content_sha256,
-                        content_type="application/x-ndjson",
-                    )
-                ],
-                "upstream_asset_keys": ["auris/audio/raw_recordings"],
-                "downstream_asset_keys": ["auris/label/event_tags"],
-                "record_count": 128,
-                "error_count": 0,
-                "checks": [{"name": "schema", "status": "passed"}],
-            },
-            "metrics": {"record_count": 128, "error_count": 0},
-        },
-        headers=_headers(auth_headers, key="loop-controlled-backfill-completion"),
-    )
-    assert backfill_completed.status_code == 200, backfill_completed.text
-    registered_backfill_objects = backfill_completed.json()["data"]["registered_storage_objects"]
-    assert len(registered_backfill_objects) == 1
-    assert "storage_object_id" not in registered_backfill_objects[0]
-    assert registered_backfill_objects[0]["source_id"] == backfill_run_id
-    assert registered_backfill_objects[0]["status"] == "verified"
-    backfill_materialization_id = backfill_completed.json()["data"]["materialized_assets"][0][
-        "materialization_id"
-    ]
-    with SessionLocal() as session:
-        original = session.get(AssetMaterialization, "mat_asr_20250526_122300")
-        replacement = session.get(AssetMaterialization, backfill_materialization_id)
-        assert original is not None and original.status == "success"
-        assert replacement is not None and replacement.status == "success"
-        assert replacement.trace_id == pack["root_trace_id"]
-        assert replacement.payload["source_materialization_id"] == original.materialization_id
-        assert replacement.payload["hotword_pack_version_id"] == version["version_id"]
-        assert replacement.payload["eval_run_id"] == eval_data["run_id"]
-        assert replacement.payload["task_version_id"] == published_task_version_id
-        assert replacement.payload["root_trace_id"] == pack["root_trace_id"]
-        assert replacement.payload["overwrite_history"] is False
-        assert replacement.payload["storage_refs"][0]["storage_object_id"] == (
-            backfill_storage_object_id
+        assert (
+            session.scalar(
+                select(RunRecord).where(
+                    RunRecord.run_type == "asset_backfill",
+                    RunRecord.payload["impact_scope"]["hotword_pack_version_id"].as_string()
+                    == version["version_id"],
+                )
+            )
+            is None
         )
-
-    lineage = client.get(
-        "/api/v1/data-assets/auris/model/asr_transcripts/lineage",
-        headers=auth_headers,
-    )
-    assert lineage.status_code == 200, lineage.text
-    lineage_data = lineage.json()["data"]
-    governed_nodes = {node["asset_key"]: node for node in lineage_data["nodes"]}
-    assert {
-        "mat_asr_20250526_122300",
-        "storage_badcase_a_4107_evidence",
-        "A-4107",
-        version["version_id"],
-        eval_data["run_id"],
-        published_task_version_id,
-        backfill_run_id,
-    } <= set(governed_nodes)
-    assert (
-        governed_nodes["storage_badcase_a_4107_evidence"]["trace_id"]
-        == pack["source_badcase_root_trace_id"]
-    )
-    assert governed_nodes["A-4107"]["trace_id"] == pack["source_badcase_root_trace_id"]
-    assert {
-        governed_nodes[node_id]["trace_id"]
-        for node_id in (
-            version["version_id"],
-            eval_data["run_id"],
-            published_task_version_id,
-            backfill_run_id,
-        )
-    } == {pack["root_trace_id"]}
-    governed_relations = {
-        edge.get("relation")
-        for edge in lineage_data["edges"]
-        if edge.get("lineage_source") == "hotword_governance"
-    }
-    assert {
-        "supports",
-        "fixed-by",
-        "evaluated-by",
-        "bound-to",
-        "executed-by",
-        "materialized-as",
-        "reprocessed-by",
-    } <= governed_relations
 
     with SessionLocal() as session:
         active_version = session.get(HotwordPackVersion, version["version_id"])
@@ -1620,21 +1571,32 @@ def test_first_hotword_version_uses_no_hotword_baseline_and_cannot_bypass_gate(
         eval_result(first_eval, passing=True, storage_ids=[]),
         key="bootstrap-eval-empty-result",
     )
-    assert empty_result.status_code == 422, empty_result.text
-    assert empty_result.json()["error"]["code"] == "HOTWORD_EVAL_RESULT_STORAGE_REQUIRED"
+    assert empty_result.status_code == 200, empty_result.text
+    assert empty_result.json()["data"]["status"] == "failed"
+    assert (
+        empty_result.json()["data"]["materialization"]["error_code"]
+        == "HOTWORD_EVAL_RESULT_STORAGE_REQUIRED"
+    )
     with SessionLocal() as session:
         run = session.get(RunRecord, first_eval["run_id"])
         stored_version = session.get(HotwordPackVersion, version["version_id"])
-        assert run is not None and run.status == "submitted"
+        assert run is not None and run.status == "failed"
         assert stored_version is not None and stored_version.status == "evaluating"
 
+    retried_eval = client.post(
+        f"/api/v1/runs/{first_eval['run_id']}/retries",
+        json={"reason": "补齐不可变评测结果对象后重试"},
+        headers=_headers(auth_headers, key="bootstrap-eval-blocked-retry", token="model-token"),
+    )
+    assert retried_eval.status_code == 202, retried_eval.text
+    blocked_eval = retried_eval.json()["data"]
     _register_storage_object("sto-bootstrap-eval-blocked", content_sha256="d" * 64)
     blocked_completion = _complete_dagster_run(
         client,
         auth_headers,
-        first_eval["run_id"],
+        blocked_eval["run_id"],
         eval_result(
-            first_eval,
+            blocked_eval,
             passing=False,
             storage_ids=["sto-bootstrap-eval-blocked"],
         ),
@@ -1647,7 +1609,7 @@ def test_first_hotword_version_uses_no_hotword_baseline_and_cannot_bypass_gate(
         json={
             "expected_resource_version": 8,
             "status": "approved",
-            "eval_run_id": first_eval["run_id"],
+            "eval_run_id": blocked_eval["run_id"],
         },
         headers=_headers(auth_headers, key="bootstrap-blocked-approval", token="model-token"),
     )

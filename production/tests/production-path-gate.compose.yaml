@@ -137,6 +137,7 @@ services:
       - --port
       - "8443"
     environment:
+      PYTHONPATH: /app
       AURIS_GATE_CERT_FILE: /run/auris-gate-tls/fullchain.pem
       AURIS_GATE_KEY_FILE: /run/auris-gate-tls/privkey.pem
       AURIS_GATE_CONTROL_SECRET_FILE: /run/auris-gate/control-secret
@@ -196,6 +197,7 @@ services:
       - --port
       - "8443"
     environment:
+      PYTHONPATH: /app
       AURIS_GATE_CERT_FILE: /run/auris-gate-tls/fullchain.pem
       AURIS_GATE_KEY_FILE: /run/auris-gate-tls/privkey.pem
       AURIS_GATE_CONTROL_SECRET_FILE: /run/auris-gate/control-secret

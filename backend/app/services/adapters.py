@@ -47,6 +47,21 @@ from app.core.observability import (
 )
 from app.core.redaction import redact_structured_value
 from app.core.runtime_guards import failure_injection_enabled
+from app.services.execution_contract_registry import (
+    AUDIO_IMPORT_EXECUTION_CONTRACT,
+    AUDIO_IMPORT_INPUT_SCHEMA,
+    AUDIO_INTELLIGENCE_EXECUTION_CONTRACT,
+    AUDIO_INTELLIGENCE_INPUT_SCHEMA,
+    DAGSTER_RUN_REQUEST_EVENT_TYPES,
+    ExecutionContractNotConfiguredError,
+    execution_contract_registry,
+)
+from app.services.execution_contract_registry import (
+    AUDIO_IMPORT_JOB_NAME as AUDIO_IMPORT_JOB_NAME,
+)
+from app.services.execution_contract_registry import (
+    AUDIO_INTELLIGENCE_JOB_NAME as AUDIO_INTELLIGENCE_JOB_NAME,
+)
 
 
 @dataclass(frozen=True)
@@ -454,23 +469,41 @@ class LocalDagsterClient:
         failure = _maybe_failure("dagster", "run_request", payload)
         if failure:
             return failure
-        is_audio_import = (
-            payload.get("event_type") == "task_run.requested"
-            and payload.get("execution_contract") == AUDIO_IMPORT_EXECUTION_CONTRACT
-        )
-        if is_audio_import:
-            try:
-                _audio_import_execution_envelope(payload)
-            except DagsterExecutionContractError as exc:
-                return DispatchResult(
-                    adapter="dagster",
-                    operation="run_request",
-                    status="failed",
-                    details={"mode": "local", "invalid_field": exc.field},
-                    error_code="DAGSTER_EXECUTION_CONTRACT_INVALID",
-                    error_message="Dagster execution contract is invalid",
-                    retryable=False,
-                )
+        event_type = str(payload.get("event_type") or "")
+        run_type = _dagster_run_type(payload)
+        contract = None
+        try:
+            contract = execution_contract_registry.resolve(
+                event_type=event_type,
+                run_type=run_type,
+                payload=payload,
+            )
+            if contract is not None:
+                contract.validate_input(payload)
+        except ExecutionContractNotConfiguredError as exc:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_request",
+                status="failed",
+                details={
+                    "mode": "local",
+                    "event_type": exc.event_type,
+                    "run_type": exc.run_type,
+                },
+                error_code=exc.code,
+                error_message="Production execution contract is not configured",
+                retryable=False,
+            )
+        except DagsterExecutionContractError as exc:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_request",
+                status="failed",
+                details={"mode": "local", "invalid_field": exc.field},
+                error_code="DAGSTER_EXECUTION_CONTRACT_INVALID",
+                error_message="Dagster execution contract is invalid",
+                retryable=False,
+            )
         run_key = str(
             payload.get("dispatch_idempotency_key")
             or payload.get("run_key")
@@ -491,8 +524,8 @@ class LocalDagsterClient:
                     "dg_req", {**payload, "effective_run_key": run_key}, "effective_run_key"
                 ),
                 "job_name": (
-                    AUDIO_IMPORT_JOB_NAME
-                    if is_audio_import
+                    contract.dagster_job_name
+                    if contract is not None
                     else payload.get("job_name") or payload.get("task_version_id")
                 ),
                 "partition_key": payload.get("partition_key"),
@@ -543,38 +576,39 @@ class LocalDagsterClient:
 
 MAX_DAGSTER_GRAPHQL_RESPONSE_BYTES = 1_048_576
 DAGSTER_RECONCILIATION_ABSENCE_PROOF = "dagster-exact-dispatch-tag-absent-v1"
-AUDIO_INTELLIGENCE_EXECUTION_CONTRACT = "auris-flow-audio-intelligence-v1"
-AUDIO_INTELLIGENCE_EXECUTION_ENVELOPE_SCHEMA = "auris-flow-execution-envelope-v1"
-AUDIO_INTELLIGENCE_JOB_NAME = "auris_flow_audio_intelligence_v1"
-AUDIO_IMPORT_EXECUTION_CONTRACT = "auris-flow-audio-import-v1"
-AUDIO_IMPORT_EXECUTION_ENVELOPE_SCHEMA = "auris-flow-execution-envelope-v1"
-AUDIO_IMPORT_JOB_NAME = "auris_flow_audio_import_v1"
-DAGSTER_RUN_REQUEST_EVENT_TYPES = frozenset(
-    {
-        "task_run.requested",
-        "audio_intelligence.requested",
-        "backfill.requested",
-        "asset_check.retry_requested",
-        "conversation_boundary.sync_requested",
-        "platform_sync.requested",
-        "eval_run.requested",
-        "agent_run.requested",
-        "insight_metric_aggregation.requested",
-        "hotword_analysis.requested",
-        "hotword_pack_version.build-requested",
-        "hotword_pack_version.eval-requested",
-        "hotword_pack_version.publish-requested",
-        "release_deployment.command-requested",
-        "provider_test.requested",
-    }
-)
-_DAGSTER_CONTROL_PLANE_EVENT_TYPES = DAGSTER_RUN_REQUEST_EVENT_TYPES - {
-    "audio_intelligence.requested"
-}
+AUDIO_INTELLIGENCE_EXECUTION_ENVELOPE_SCHEMA = AUDIO_INTELLIGENCE_INPUT_SCHEMA
+AUDIO_IMPORT_EXECUTION_ENVELOPE_SCHEMA = AUDIO_IMPORT_INPUT_SCHEMA
 _DAGSTER_IDENTIFIER_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _DAGSTER_BUCKET_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{2,254}$")
 _DAGSTER_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _AUDIO_CAPABILITIES = frozenset({"vad", "asr", "diarization", "voiceprint", "quality"})
+
+_DAGSTER_RUN_TYPE_BY_EVENT = {
+    "task_run.requested": "task_run",
+    "audio_intelligence.requested": "audio_intelligence",
+    "backfill.requested": "asset_backfill",
+    "asset_check.retry_requested": "asset_check_retry",
+    "conversation_boundary.sync_requested": "boundary_sync",
+    "platform_sync.requested": "platform_sync",
+    "eval_run.requested": "eval_run",
+    "insight_metric_aggregation.requested": "insight_metric_aggregation",
+    "hotword_analysis.requested": "hotword_analysis",
+    "hotword_pack_version.build-requested": "hotword_build",
+    "hotword_pack_version.eval-requested": "hotword_eval",
+    "hotword_pack_version.publish-requested": "hotword_publish",
+    "release_deployment.command-requested": "release_command",
+    "provider_test.requested": "provider_test",
+}
+
+
+def _dagster_run_type(payload: dict[str, Any]) -> str:
+    event_type = str(payload.get("event_type") or "")
+    return str(
+        payload.get("aggregate_type")
+        or payload.get("run_type")
+        or _DAGSTER_RUN_TYPE_BY_EVENT.get(event_type)
+        or event_type.removesuffix(".requested")
+    )
 
 
 class DagsterExecutionContractError(ValueError):
@@ -1115,6 +1149,20 @@ class RealDagsterClient:
         try:
             job_name = self._job_name(payload)
             run_config = self._run_config(payload)
+        except ExecutionContractNotConfiguredError as exc:
+            return DispatchResult(
+                adapter="dagster",
+                operation="run_request",
+                status="failed",
+                details={
+                    "mode": "real",
+                    "event_type": exc.event_type,
+                    "run_type": exc.run_type,
+                },
+                error_code=exc.code,
+                error_message="Production execution contract is not configured",
+                retryable=False,
+            )
         except DagsterExecutionContractError as exc:
             return DispatchResult(
                 adapter="dagster",
@@ -1668,21 +1716,17 @@ class RealDagsterClient:
 
     def _job_name(self, payload: dict[str, Any]) -> str:
         event_type = _required_dagster_text(payload, "event_type", maximum=128)
-        if event_type == "audio_intelligence.requested":
-            if payload.get("execution_contract") != AUDIO_INTELLIGENCE_EXECUTION_CONTRACT:
-                raise DagsterExecutionContractError("execution_contract")
-            if self.execution_mode != "control-plane-acknowledgement":
-                raise DagsterExecutionContractError("execution_mode")
-            return AUDIO_INTELLIGENCE_JOB_NAME
-        if (
-            event_type == "task_run.requested"
-            and payload.get("execution_contract") == AUDIO_IMPORT_EXECUTION_CONTRACT
-        ):
-            if self.execution_mode != "control-plane-acknowledgement":
-                raise DagsterExecutionContractError("execution_mode")
-            return AUDIO_IMPORT_JOB_NAME
-        if event_type not in _DAGSTER_CONTROL_PLANE_EVENT_TYPES:
+        if event_type not in DAGSTER_RUN_REQUEST_EVENT_TYPES:
             raise DagsterExecutionContractError("event_type")
+        contract = execution_contract_registry.resolve(
+            event_type=event_type,
+            run_type=_dagster_run_type(payload),
+            payload=payload,
+        )
+        if contract is not None:
+            if self.execution_mode != "control-plane-acknowledgement":
+                raise DagsterExecutionContractError("execution_mode")
+            return contract.dagster_job_name
         return self.default_job_name
 
     def _run_config(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -1711,18 +1755,16 @@ class RealDagsterClient:
                 "otel_trace_flags": otel_context.get("otel_trace_flags"),
             },
         }
-        if payload.get("event_type") == "audio_intelligence.requested":
+        event_type = str(payload.get("event_type") or "")
+        contract = execution_contract_registry.resolve(
+            event_type=event_type,
+            run_type=_dagster_run_type(payload),
+            payload=payload,
+        )
+        if contract is not None:
             return {
                 "auris_context": authoritative_context,
-                "execution_envelope": _audio_execution_envelope(payload),
-            }
-        if (
-            payload.get("event_type") == "task_run.requested"
-            and payload.get("execution_contract") == AUDIO_IMPORT_EXECUTION_CONTRACT
-        ):
-            return {
-                "auris_context": authoritative_context,
-                "execution_envelope": _audio_import_execution_envelope(payload),
+                "execution_envelope": contract.validate_input(payload),
             }
         return {
             "auris_context": authoritative_context,

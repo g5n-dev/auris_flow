@@ -62,7 +62,7 @@
   --bg-4: #d0e1e5;
   --tx-1: #0b1b21;
   --tx-2: #334f57;
-  --tx-3: #627980;
+  --tx-3: #566b72;
   --tx-4: #8ba0a5;
 }
 
@@ -148,7 +148,7 @@
 }
 
 .atm {
-  color: var(--am);
+  color: #a64b00;
   font-family: var(--ff-m);
   font-size: 12px;
   font-variant-numeric: tabular-nums;

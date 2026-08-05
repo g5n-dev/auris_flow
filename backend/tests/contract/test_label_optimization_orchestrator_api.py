@@ -16,6 +16,8 @@ from app.models import (
     RunRecord,
 )
 
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
+
 
 @pytest.fixture(autouse=True)
 def _seed_locked_bundle(client):

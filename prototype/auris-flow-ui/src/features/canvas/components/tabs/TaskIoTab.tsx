@@ -3,7 +3,7 @@ import { loginRiskApiContracts } from "../../catalog";
 import { Database, Download, Link2, Plus, ShieldCheck } from "lucide-react";
 
 export function TaskIoTab({ controller }: { controller: CanvasController }) {
-  const { activeTab, appliedMappingCount, contractNodeMap, generateMappingSuggestions, mappingTotal, openFieldMappingEditor, openInputSourceEditor, openOutputSinkTemplate, openOutputWritebackEditor, openScheduleSettings, renderTaskAssetCanvas, setDrawerTab, setNodeLibraryOpen, setSelectedNodeId, validateDagsterCompatibility } = controller;
+  const { activeTab, appliedMappingCount, canvasAssistantDisabledReason, contractNodeMap, generateMappingSuggestions, mappingTotal, openFieldMappingEditor, openInputSourceEditor, openOutputSinkTemplate, openOutputWritebackEditor, openScheduleSettings, renderTaskAssetCanvas, setDrawerTab, setNodeLibraryOpen, setSelectedNodeId, validateDagsterCompatibility } = controller;
   return (
     <>
       {activeTab === "io" && (
@@ -103,7 +103,14 @@ export function TaskIoTab({ controller }: { controller: CanvasController }) {
                           <span>Agent 字段映射</span>
                           <strong>{appliedMappingCount}/{mappingTotal} 已应用</strong>
                           <p>Agent 根据平台字段、单据字段、音频元数据和标签体系生成映射建议，再由人工确认高风险字段。</p>
-                          <button onClick={generateMappingSuggestions}>生成并查看建议</button>
+                          <button
+                            type="button"
+                            disabled={Boolean(canvasAssistantDisabledReason)}
+                            title={canvasAssistantDisabledReason || "生成并查看建议"}
+                            onClick={generateMappingSuggestions}
+                          >
+                            生成并查看建议
+                          </button>
                         </section>
                         <section className="task-tab-card wide task-output-target-card">
                           <div className="task-tab-card-head">

@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Deterministic HTTPS platform fixture for the real audio-import stack gate.
+"""Run-stable HTTPS platform fixture for the real audio-import stack gate.
 
 This is a network fixture, not an in-process adapter fake: both the BFF probe
 and the Dagster import job must resolve the fixture hostname, validate TLS,
 authenticate, paginate, and download the returned WAV objects over HTTPS.
+
+Record identities and audio bytes are deterministic. Source timestamps are
+frozen once when the fixture process starts so the default recent-data preview
+does not become stale as the calendar advances.
 """
 
 from __future__ import annotations
@@ -23,11 +27,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 PLATFORM_HOSTNAME = "recordings.audio-import-gate.test"
+INFERENCE_HOSTNAME = "audio-inference.audio-import-gate.test"
 PLATFORM_PORT = 8443
 PLATFORM_ORIGIN = f"https://{PLATFORM_HOSTNAME}:{PLATFORM_PORT}"
 PLATFORM_BEARER_TOKEN = "audio-import-gate-fixture-auth"
 PLATFORM_AUDIO_TOKEN = "audio-import-gate-fixture-download"
 PLATFORM_RECORD_COUNT = 3
+FIXTURE_REFERENCE_TIME = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=5)
 
 
 def _fixture_wav_bytes(index: int, *, browser_dataset: bool) -> bytes:
@@ -66,6 +72,7 @@ def _fixture_records(
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for index in range(1, PLATFORM_RECORD_COUNT + 1):
+        recorded_at = (FIXTURE_REFERENCE_TIME + timedelta(seconds=index)).isoformat()
         records.append(
             {
                 "recording_id": f"{identity_prefix}-{index:03d}",
@@ -73,8 +80,8 @@ def _fixture_records(
                     f"{origin}/audio/{identity_prefix}-{index:03d}.wav"
                     f"?token={PLATFORM_AUDIO_TOKEN}"
                 ),
-                "started_at": f"2026-07-27T00:00:{index:02d}+00:00",
-                "updated_at": f"2026-07-27T00:00:{index:02d}+00:00",
+                "started_at": recorded_at,
+                "updated_at": recorded_at,
                 "duration_ms": 100 + index * 10,
                 "store_id": "BJ-AURORA-001",
                 "employee": {"badge": f"GATE-{index:03d}"},
@@ -153,7 +160,12 @@ def initialize_pki(ca_dir: Path, tls_dir: Path) -> None:
         .not_valid_before(now - timedelta(minutes=5))
         .not_valid_after(now + timedelta(days=2))
         .add_extension(
-            x509.SubjectAlternativeName([x509.DNSName(PLATFORM_HOSTNAME)]),
+            x509.SubjectAlternativeName(
+                [
+                    x509.DNSName(PLATFORM_HOSTNAME),
+                    x509.DNSName(INFERENCE_HOSTNAME),
+                ]
+            ),
             critical=False,
         )
         .add_extension(x509.BasicConstraints(ca=False, path_length=None), critical=True)

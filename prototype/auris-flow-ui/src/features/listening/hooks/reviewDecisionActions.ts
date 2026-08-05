@@ -1,148 +1,289 @@
-import { createQualityAppeal, createUserIntentIdempotencyKey, getHumanReviewTask, submitHumanReviewDecision } from "../../../api/client";
-import { backendId } from "../../../shared/runtime/records";
-import { emptyReviewSample, getReviewTaskIdForSample } from "../fixtures/reviewSamples";
-import type { MarkState } from "../types";
+import { createUserIntentIdempotencyKey, getHumanReviewTask, submitHumanReviewDecision } from "../../../api/client";
+import { getEvidencePack, readHumanReviewAffectedObjects } from "../../../api/humanReviewClient";
+import { emptyReviewSample, getReviewTaskIdForSample, reviewQueueKeyForLabel } from "../fixtures/reviewSamples";
+import { buildHumanReviewDecisionRequest, validateHumanReviewDecisionClosure } from "../model/reviewDecisionModel";
+import { createReviewDecisionSecondaryActions } from "./reviewDecisionSecondaryActions";
 import type { SelectedListeningLabel } from "./useSelectedListeningLabel";
+import { LABEL_DEMO_MODE } from "../../../shared/runtime/demoMode";
 
 export function createReviewDecisionActions(context: SelectedListeningLabel) {
-  const { activeSample, agentState, appealPending, appealReason, completedSampleIds, latestReviewDecision, listeningActionPending, reviewSamplePool, selectReviewSample, selectedLabel, setAgentState, setAppealComposerOpen, setAppealPending, setAppealReason, setCompletedSampleIds, setCreatedAppeal, setLatestReviewDecision, setListeningActionPending, setListeningNotice, setMarkState } = context;
-  const changeReviewQueue = (queueLabel: string) => {
-      const nextSample =
-        reviewSamplePool.find((sample) => sample.queue === queueLabel && !completedSampleIds.includes(sample.id)) ??
-        reviewSamplePool.find((sample) => sample.queue === queueLabel) ??
-        activeSample;
-      selectReviewSample(nextSample);
-      setListeningNotice({
-        status: "success",
-        title: `已切换到${queueLabel}`,
-        detail: `${nextSample.sessionId} / ${nextSample.file} 已载入，右侧证据和底部进度同步到当前队列。`
-      });
-    };
+  const {
+    activeSample,
+    agentState,
+    appealPending,
+    appealReason,
+    completedSampleIds,
+    latestReviewDecision,
+    listeningActionPending,
+    lowConfidence,
+    markState,
+    navigateModuleRoot,
+    navigateToTarget,
+    refreshPendingReviewQueue,
+    reviewChanges,
+    reviewDecisionIdempotencyKey,
+    reviewSamplePool,
+    selectedLabel,
+    setAppealReason,
+    setAgentState,
+    setAppealComposerOpen,
+    setAppealPending,
+    setCompletedSampleIds,
+    setCreatedAppeal,
+    setLatestReviewDecision,
+    setListeningActionPending,
+    setListeningNotice,
+    setLowConfidence,
+    setMarkState,
+    setReviewChanges
+  } = context;
 
   const confirmAndMoveNext = async () => {
-      if (listeningActionPending) return;
-      if (activeSample.id === emptyReviewSample.id || !reviewSamplePool.length) {
-        setListeningNotice({
-          status: "error",
-          title: "没有可提交的复核对象",
-          detail: "请先从 BFF 读取已关联 HumanReviewTask、AudioSession 和 EvidencePack 的对象。"
-        });
-        return;
-      }
-      setListeningActionPending(true);
+    if (listeningActionPending) return;
+    if (activeSample.id === emptyReviewSample.id || !reviewSamplePool.length) {
       setListeningNotice({
-        status: "pending",
-        title: "正在提交复核决策",
-        detail: `${activeSample.sessionId} / ${activeSample.queueTitle} 正在写入 HumanReviewTask，成功后进入下一通。`
+        status: "error",
+        title: "没有可提交的复核对象",
+        detail: "请先从 BFF 读取已关联 HumanReviewTask、AudioSession 和 EvidencePack 的对象。"
       });
-      try {
-        const reviewTaskId = getReviewTaskIdForSample(activeSample);
-        const decision = await submitHumanReviewDecision(reviewTaskId, {
-          decision: agentState === "rejected" ? "rejected" : "accepted",
-          note: `${activeSample.conclusion} · ${selectedLabel}`
-        });
-        const decisionId = typeof decision.data.raw.decision_id === "string" ? decision.data.raw.decision_id : "";
-        if (!decisionId) {
-          throw new Error("后端复核回执缺少 decision_id，已停止推进当前样本。");
-        }
-        const reviewTaskReadback = await getHumanReviewTask(reviewTaskId);
-        const readbackStatus = backendId(reviewTaskReadback.data, "status");
-        if (!readbackStatus || ["pending", "queued", "running"].includes(readbackStatus)) {
-          throw new Error(`${reviewTaskId} 写后回读仍为 ${readbackStatus || "unknown"}，当前样本未推进。`);
-        }
-        setLatestReviewDecision({
-          decisionId,
-          reviewTaskId,
-          evidenceRefs: [activeSample.dataAssetId],
-          sampleTitle: `${activeSample.sessionId} / ${activeSample.queueTitle}`,
-          traceId: decision.meta?.trace_id ?? decision.data.trace_id,
-          idempotencyKey: createUserIntentIdempotencyKey(`quality_appeal_${decisionId}`)
-        });
-        setCreatedAppeal(null);
-        setAppealReason("");
-      const nextCompleted = Array.from(new Set([...completedSampleIds, activeSample.id]));
-      const nextSample =
-        reviewSamplePool.find((sample) => sample.queue === activeSample.queue && !nextCompleted.includes(sample.id)) ??
-        reviewSamplePool.find((sample) => !nextCompleted.includes(sample.id)) ??
-        reviewSamplePool[0] ?? emptyReviewSample;
-      setCompletedSampleIds(nextCompleted);
+      return;
+    }
+    if (!LABEL_DEMO_MODE && !activeSample.reviewTaskId) {
       setListeningNotice({
-        status: "success",
-        title: "已确认并进入下一通",
-          detail: `${reviewTaskId} 已写入后端，Trace ${decision.meta?.trace_id ?? decision.data.trace_id ?? "pending"}；当前载入 ${nextSample.sessionId} / ${nextSample.queueTitle}。`
+        status: "error",
+        title: "当前会话尚无待审任务",
+        detail: `${activeSample.sessionId} 只完成了音频导入；生成 EvidencePack 与 HumanReviewTask 后才能提交决定。`
       });
-      selectReviewSample(nextSample);
-      } catch (error) {
-        setListeningNotice({
-          status: "error",
-          title: "复核提交失败",
-          detail: error instanceof Error ? error.message : "后端未返回可用复核结果，当前样本未推进。"
-        });
-      } finally {
-        setListeningActionPending(false);
+      return;
+    }
+    if (!LABEL_DEMO_MODE && !activeSample.rootTraceId) {
+      setListeningNotice({
+        status: "error",
+        title: "当前会话缺少业务根 Trace",
+        detail: `${activeSample.sessionId} 的 HumanReviewTask、EvidencePack 与 AudioSession 尚未返回一致 root_trace_id，已阻断提交。`
+      });
+      return;
+    }
+    setListeningActionPending(true);
+    setListeningNotice({
+      status: "pending",
+      title: "正在提交并核验复核决定",
+      detail: `${activeSample.sessionId} 将依次写入决定、回读任务、EvidencePack 和全部受影响对象。`
+    });
+    try {
+      const reviewTaskId = getReviewTaskIdForSample(activeSample);
+      const expectedRootTraceId = activeSample.rootTraceId ?? "";
+      const request = buildHumanReviewDecisionRequest({
+        agentState,
+        evidencePackId: activeSample.dataAssetId,
+        lowConfidence,
+        markState,
+        note: `${activeSample.conclusion} · ${selectedLabel}`,
+        stagedChanges: reviewChanges
+      });
+      const decision = await submitHumanReviewDecision(reviewTaskId, request, {
+        idempotencyKey: reviewDecisionIdempotencyKey
+      });
+      const rawDecisionId = decision.data.raw.decision_id;
+      const decisionId = typeof rawDecisionId === "string" && rawDecisionId ? rawDecisionId : decision.data.id;
+      const rawRootTraceId = decision.data.raw.root_trace_id;
+      const decisionRootTraceId =
+        typeof rawRootTraceId === "string" && rawRootTraceId
+          ? rawRootTraceId
+          : "";
+      if (!decisionId) {
+        throw new Error("后端复核回执缺少 decision_id，已停止推进当前样本。");
       }
-    };
+      if (!decisionRootTraceId) {
+        throw new Error("后端复核回执缺少业务 root_trace_id，已停止推进当前样本。");
+      }
 
-  const submitLatestQualityAppeal = async () => {
-      if (!latestReviewDecision || appealPending) return;
-      const reason = appealReason.trim();
-      if (reason.length < 8) {
-        setListeningNotice({
-          status: "error",
-          title: "申诉理由不完整",
-          detail: "请说明原结论遗漏或误判的事实，至少输入 8 个字符。"
-        });
-        return;
-      }
-      setAppealPending(true);
-      setListeningNotice({
-        status: "pending",
-        title: "正在提交质检申诉",
-        detail: `${latestReviewDecision.decisionId} 将冻结原决定和证据引用，原决定不会被覆盖。`
+      const reviewTaskReadback = await getHumanReviewTask(reviewTaskId);
+      const evidencePackReadback = await getEvidencePack(activeSample.dataAssetId);
+      const affectedObjects = decision.data.affected_objects ?? [];
+      const affectedReadbacks = await readHumanReviewAffectedObjects(
+        decision.data.affected_objects ?? []
+      );
+      const closureErrors = validateHumanReviewDecisionClosure({
+        decisionId,
+        expectedRootTraceId,
+        receiptRootTraceId: decisionRootTraceId,
+        reviewTaskId,
+        evidencePackId: activeSample.dataAssetId,
+        request,
+        taskReadback: reviewTaskReadback.data,
+        evidencePackReadback: evidencePackReadback.data,
+        affectedObjects,
+        affectedReadbacks
       });
-      try {
-        const response = await createQualityAppeal(
-          latestReviewDecision.decisionId,
-          { reason, evidence_refs: latestReviewDecision.evidenceRefs },
-          { idempotencyKey: latestReviewDecision.idempotencyKey }
-        );
-        setCreatedAppeal(response.data);
-        setAppealComposerOpen(false);
+      if (closureErrors.length > 0) {
+        throw new Error(`写后回读不一致：${closureErrors.join("；")}`);
+      }
+
+      setLatestReviewDecision({
+        decisionId,
+        reviewTaskId,
+        evidenceRefs: [activeSample.dataAssetId],
+        sampleTitle: `${activeSample.sessionId} / ${activeSample.queueTitle}`,
+        rootTraceId: decisionRootTraceId,
+        affectedObjects,
+        idempotencyKey: createUserIntentIdempotencyKey(`quality_appeal_${decisionId}`)
+      });
+      setCreatedAppeal(null);
+      setAppealReason("");
+      setCompletedSampleIds(Array.from(new Set([
+        ...completedSampleIds,
+        activeSample.id
+      ])));
+
+      const nextSamples = await refreshPendingReviewQueue(
+        activeSample.queueKey ?? reviewQueueKeyForLabel(activeSample.queue),
+        "complete"
+      );
+      if (nextSamples.length > 0) {
+        const nextSample = nextSamples[0];
+        if (
+          !LABEL_DEMO_MODE
+          && (!nextSample.reviewTaskId || !nextSample.rootTraceId)
+        ) {
+          throw new Error(
+            `下一通 ${nextSample.sessionId} 缺少 review_task_id 或 root_trace_id，已停止导航。`
+          );
+        }
+        navigateToTarget({
+          module: "listening",
+          objectKind: "audioSession",
+          objectId: nextSample.sessionId,
+          audioSessionId: nextSample.sessionId,
+          reviewTaskId: nextSample.reviewTaskId,
+          rootTraceId: nextSample.rootTraceId,
+          title: nextSample.queueTitle,
+          detail: `${nextSample.dataAssetId} / ${nextSample.assetKey}`,
+          window: nextSample.window,
+          focusMode: "evidence"
+        });
         setListeningNotice({
           status: "success",
-          title: "质检申诉已立案",
-          detail: `${response.data.id} / Trace ${response.meta?.trace_id ?? response.data.trace_id ?? "pending"}；等待独立复议人领取。`
+          title: "决定已核验，已读取下一通",
+          detail: `${reviewTaskId} 及全部受影响对象回读一致；Trace ${decisionRootTraceId}；当前载入 ${nextSample.sessionId} / ${nextSample.queueTitle}。`
         });
-      } catch (error) {
+      } else {
+        navigateModuleRoot("listening");
+        setReviewChanges([]);
+        setMarkState("none");
+        setLowConfidence(false);
         setListeningNotice({
-          status: "error",
-          title: "质检申诉提交失败",
-          detail: error instanceof Error ? error.message : "申诉未落账，可保留当前理由后重试。"
+          status: "success",
+          title: "当前队列复核完成",
+          detail: `${reviewTaskId} 及全部受影响对象回读一致；Trace ${decisionRootTraceId}；服务端 pending 队列已为空。`
         });
-      } finally {
-        setAppealPending(false);
       }
-    };
-
-  const updateAgentDecision = (state: "pending" | "accepted" | "rejected") => {
-      setAgentState(state);
+    } catch (error) {
       setListeningNotice({
-        status: state === "rejected" ? "error" : state === "accepted" ? "success" : "idle",
-        title: state === "accepted" ? "已接受 Agent 建议" : state === "rejected" ? "已拒绝 Agent 建议" : "已恢复待复核",
-        detail: `${activeSample.sessionId} / ${activeSample.queueTitle} 的处理状态已更新，可继续标记主录音、串音或进入下一通。`
+        status: "error",
+        title: "复核闭环未完成",
+        detail:
+          error instanceof Error
+            ? error.message
+            : "后端写入或回读校验失败，当前样本未推进。"
       });
-    };
+    } finally {
+      setListeningActionPending(false);
+    }
+  };
 
-  const updateMarkState = (state: MarkState) => {
-      setMarkState(state);
+  const changeReviewQueue = async (queueLabel: string) => {
+    if (listeningActionPending) return;
+    if (reviewChanges.length > 0 || markState !== "none" || lowConfidence || agentState !== "pending") {
       setListeningNotice({
-        status: state === "none" ? "idle" : "success",
-        title: state === "main" ? "已标记主录音" : state === "crosstalk" ? "已标记串音" : state === "duplicate" ? "已标记重复收录" : "已清除标记",
-        detail: `${activeSample.sessionId} 的录音判定已写入当前证据链，提交后会同步标签和资产状态。`
+        status: "error",
+        title: "当前决定尚未提交",
+        detail: "请先提交并完成写后回读，再切换服务端待审队列，避免丢失人工修订。"
       });
-    };
+      return;
+    }
+    setListeningActionPending(true);
+    setListeningNotice({
+      status: "pending",
+      title: `正在读取${queueLabel}`,
+      detail: "队列切换会重新查询服务端 pending HumanReviewTask。"
+    });
+    try {
+      const samples = await refreshPendingReviewQueue(
+        reviewQueueKeyForLabel(queueLabel),
+        "complete"
+      );
+      if (samples[0]) {
+        navigateToTarget({
+          module: "listening",
+          objectKind: LABEL_DEMO_MODE ? "reviewSample" : "audioSession",
+          objectId: LABEL_DEMO_MODE ? samples[0].id : samples[0].sessionId,
+          audioSessionId: samples[0].sessionId,
+          reviewTaskId: samples[0].reviewTaskId,
+          rootTraceId: samples[0].rootTraceId,
+          title: samples[0].queueTitle,
+          detail: `${samples[0].dataAssetId} / ${samples[0].assetKey}`,
+          window: samples[0].window,
+          focusMode: "evidence"
+        });
+      } else {
+        navigateModuleRoot("listening");
+      }
+      setListeningNotice(
+        samples[0]
+          ? {
+              status: "success",
+              title: `已切换到${queueLabel}`,
+              detail: `${samples[0].sessionId} / ${samples[0].file} 来自最新 pending 队列。`
+            }
+          : {
+              status: "success",
+              title: `${queueLabel}已复核完成`,
+              detail: "服务端没有剩余 pending HumanReviewTask。"
+            }
+      );
+    } catch (error) {
+      setListeningNotice({
+        status: "error",
+        title: `${queueLabel}读取失败`,
+        detail: error instanceof Error ? error.message : "无法读取服务端待审队列。"
+      });
+    } finally {
+      setListeningActionPending(false);
+    }
+  };
 
-  return { ...context, changeReviewQueue, confirmAndMoveNext, submitLatestQualityAppeal, updateAgentDecision, updateMarkState };
+  const {
+    recordReviewChange,
+    submitLatestQualityAppeal,
+    updateAgentDecision,
+    updateLowConfidence,
+    updateMarkState
+  } = createReviewDecisionSecondaryActions({
+      activeSample,
+      appealPending,
+      appealReason,
+      latestReviewDecision,
+      setAgentState,
+      setAppealComposerOpen,
+      setAppealPending,
+      setCreatedAppeal,
+      setListeningNotice,
+      setLowConfidence,
+      setMarkState,
+      setReviewChanges
+    });
+
+  return {
+    ...context,
+    changeReviewQueue,
+    confirmAndMoveNext,
+    recordReviewChange,
+    submitLatestQualityAppeal,
+    updateAgentDecision,
+    updateLowConfidence,
+    updateMarkState
+  };
 }
 
 export type ReviewDecisionActions = ReturnType<typeof createReviewDecisionActions>;

@@ -69,6 +69,9 @@ def main() -> None:
     payload = {
         "task_version_id": "task_version_v3_2_1",
         "trigger_type": "manual",
+        # This smoke probes the control plane only. Business runs must name a
+        # dedicated production execution contract and are covered separately.
+        "execution_mode": "diagnostic",
         "partition_key": "aurora_auto/BJ-AURORA-001/2025-05-26/12",
     }
     first = client.post("/api/v1/task-runs", headers=idempotency_headers, json=payload)
@@ -94,6 +97,7 @@ def main() -> None:
     assert run_detail.status_code == 200, run_detail.text
     assert run_detail.json()["data"]["status"] == "submitted"
     assert run_detail.json()["data"]["business_status"] == "awaiting_completion"
+    assert run_detail.json()["data"]["execution_mode"] == "diagnostic"
 
     trace = client.get(f"/api/v1/traces/{trace_id}", headers=headers)
     assert trace.status_code == 200, trace.text

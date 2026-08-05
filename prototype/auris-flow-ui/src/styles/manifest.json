@@ -2,11 +2,11 @@
   "schemaVersion": 2,
   "source": "src/styles.css",
   "cascade": "strict-eager-source-order",
-  "sourceSha256": "bef06d486697e6e85ea50bc16ea61f85a2a82cfe2d3ffa5b8bf816baf77af6d0",
-  "sourceBytes": 1044919,
+  "sourceSha256": "96e9e2ec6a1ff87315906554fbfa62225274362bee5d964250628dbe6fa158a2",
+  "sourceBytes": 1044906,
   "sourceLines": 51712,
   "topLevelNodes": 6818,
-  "orderedNodeTextSha256": "96e8ca4948a77d16686c15e3f9750b97fe9f99ea77e23cd72bf81febd0d84dd7",
+  "orderedNodeTextSha256": "f15d0066d8b0b608577dce303217c20c8ee8c58dc10475d2937ffb8f196cba16",
   "orderedAstDescriptorSha256": "6f40e61891baf21e98a9bfc93fda00b15995b487327551da84628a9ead07f5a9",
   "duplicateSelectorGroups": 427,
   "duplicateSelectorSignature": "cd12cfe7909120d023f2896e4b20daa32d5b43d790e5362acc0e386f6daa22e1",
@@ -47,8 +47,8 @@
       "startLine": 80,
       "endLine": 498,
       "lines": 419,
-      "bytes": 7402,
-      "sha256": "2fa7fab9513955206090bd756a7128dcf7ae0b01f97be41c2607d74f851e6ed7"
+      "bytes": 7399,
+      "sha256": "8e540ab07620e511e03f98259f2ed1c3c19714d4db82d9be5f61233c0467339f"
     },
     {
       "file": "compat/workspace-evidence.css",
@@ -86,8 +86,8 @@
       "startLine": 5107,
       "endLine": 8107,
       "lines": 3001,
-      "bytes": 63368,
-      "sha256": "2db86af9981505aa93d5e7f61738d3f49a3921eef8a8e519666a31981c554e71"
+      "bytes": 63366,
+      "sha256": "facc81940faf77e1b4ea09d65ed6599e4c85c6bb395228db40878e16f39cc3bd"
     },
     {
       "file": "features/listening/annotation-review.css",
@@ -269,7 +269,7 @@
       "endLine": 34103,
       "lines": 2503,
       "bytes": 47653,
-      "sha256": "c32783a36ded7970674990d4bef1ea93222e925c7495b459dd23cef76cdb4aa2"
+      "sha256": "b66309bb450c73b9779d8bc3f6baf45b45e46130784c19349d991b983c79d4a5"
     },
     {
       "file": "compat/theme-evidence.css",
@@ -281,8 +281,8 @@
       "startLine": 34104,
       "endLine": 36031,
       "lines": 1928,
-      "bytes": 67367,
-      "sha256": "865c968c9c82cee30b2665a0477fce4b038b8c0a29431fb711085e55eb4e613e"
+      "bytes": 67359,
+      "sha256": "60a8c53fbf26856757123be2d91df6cfae1906a583f9643a7a7388efc6833174"
     },
     {
       "file": "features/listening/command-center.css",
@@ -321,7 +321,7 @@
       "endLine": 37133,
       "lines": 122,
       "bytes": 2572,
-      "sha256": "ee930db15366feeb2962fdad62373cdd381b1242c49c2fe692e6cf7e77d3e9fa"
+      "sha256": "c97e92ec92474451531a4fa3e6317b6cf023f4992b1dcf833bdee555d7932aaf"
     },
     {
       "file": "features/tenants/asr-access.css",
@@ -342,7 +342,7 @@
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
       "sourceStartLine": 351,
-      "sourceEndLine": 656,
+      "sourceEndLine": 835,
       "startLine": 37360,
       "endLine": 37664,
       "lines": 305,
@@ -354,8 +354,8 @@
       "owner": "shell",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 657,
-      "sourceEndLine": 999,
+      "sourceStartLine": 836,
+      "sourceEndLine": 1178,
       "startLine": 37665,
       "endLine": 38006,
       "lines": 342,
@@ -367,8 +367,8 @@
       "owner": "shell",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 1000,
-      "sourceEndLine": 1739,
+      "sourceStartLine": 1179,
+      "sourceEndLine": 1918,
       "startLine": 38007,
       "endLine": 38745,
       "lines": 739,
@@ -380,8 +380,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 1740,
-      "sourceEndLine": 1914,
+      "sourceStartLine": 1919,
+      "sourceEndLine": 2093,
       "startLine": 38746,
       "endLine": 38919,
       "lines": 174,
@@ -393,8 +393,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 1915,
-      "sourceEndLine": 4089,
+      "sourceStartLine": 2094,
+      "sourceEndLine": 4268,
       "startLine": 38920,
       "endLine": 41093,
       "lines": 2174,
@@ -406,8 +406,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 4090,
-      "sourceEndLine": 4832,
+      "sourceStartLine": 4269,
+      "sourceEndLine": 5011,
       "startLine": 41094,
       "endLine": 41835,
       "lines": 742,
@@ -419,8 +419,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 4833,
-      "sourceEndLine": 4899,
+      "sourceStartLine": 5012,
+      "sourceEndLine": 5078,
       "startLine": 41836,
       "endLine": 41901,
       "lines": 66,
@@ -432,8 +432,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 4900,
-      "sourceEndLine": 5346,
+      "sourceStartLine": 5079,
+      "sourceEndLine": 5525,
       "startLine": 41902,
       "endLine": 42347,
       "lines": 446,
@@ -445,8 +445,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 5347,
-      "sourceEndLine": 7882,
+      "sourceStartLine": 5526,
+      "sourceEndLine": 8061,
       "startLine": 42348,
       "endLine": 44882,
       "lines": 2535,
@@ -458,8 +458,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 7883,
-      "sourceEndLine": 9879,
+      "sourceStartLine": 8062,
+      "sourceEndLine": 10058,
       "startLine": 44883,
       "endLine": 46878,
       "lines": 1996,
@@ -471,8 +471,8 @@
       "owner": "features",
       "eager": true,
       "sourceFile": "09-feature-extensions.css",
-      "sourceStartLine": 9880,
-      "sourceEndLine": 10791,
+      "sourceStartLine": 10059,
+      "sourceEndLine": 10970,
       "startLine": 46879,
       "endLine": 47789,
       "lines": 911,
@@ -594,7 +594,7 @@
       "endLine": 51712,
       "lines": 487,
       "bytes": 8854,
-      "sha256": "5668e534ca935b287f4e70180c9dcc3b7582c2002ab978f075ecfdd0f1854130"
+      "sha256": "f95cb495fabc34bf9ece7fa0b3a969686849ac993e0572812ff14fb318ea65de"
     }
   ]
 }

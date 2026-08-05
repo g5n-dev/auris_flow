@@ -25,6 +25,11 @@ export type PlatformConnectionOption = Record<string, unknown> & {
   id: string;
   name: string;
   status: string;
+  externalTenantRef: string;
+  storeRefs: string[];
+  origin: string;
+  credentialRef: string;
+  testPath: string;
 };
 
 export type AudioImportPreview = {
@@ -97,9 +102,34 @@ export async function listPlatformConnections(): Promise<ApiEnvelope<{ items: Pl
     ...item,
     id: String(item.id ?? item.platform_connection_id ?? ""),
     name: String(item.name ?? item.display_name ?? item.id ?? "未命名平台连接"),
-    status: String(item.status ?? "unknown")
+    status: String(item.status ?? "unknown").trim().toLowerCase(),
+    externalTenantRef: String(item.external_tenant_ref ?? "").trim(),
+    storeRefs: stringItems(item.store_refs).map((value) => value.trim()).filter(Boolean),
+    origin: String(item.origin ?? "").trim().replace(/\/+$/, ""),
+    credentialRef: String(item.credential_ref ?? "").trim(),
+    testPath: String(item.test_path ?? "/").trim() || "/"
   })).filter((item) => item.id);
   return { ...response, data: { items } };
+}
+
+export async function listAudioImportBatches(input: {
+  connectorId?: string;
+  taskVersionId?: string;
+  targetAssetKey: string;
+}): Promise<ApiEnvelope<{ items: Array<Record<string, unknown>> }>> {
+  const query = new URLSearchParams({
+    target_asset_key: input.targetAssetKey,
+    limit: "1"
+  });
+  if (input.connectorId) query.set("connector_id", input.connectorId);
+  if (input.taskVersionId) query.set("task_version_id", input.taskVersionId);
+  const response = await apiRequest<unknown>(
+    `/v1/import-batches?${query.toString()}`
+  );
+  return {
+    ...response,
+    data: { items: collectionItems(response.data) }
+  };
 }
 
 export function createAudioImportConnector(
@@ -225,8 +255,49 @@ export function getImportBatch(importBatchId: string) {
   return apiRequest<Record<string, unknown>>(importBatchPath(importBatchId));
 }
 
-export function getImportBatchItems(importBatchId: string) {
-  return apiRequest<unknown>(`${importBatchPath(importBatchId)}/items`);
+export function getImportBatchItems(
+  importBatchId: string,
+  input: {
+    status?: "queued" | "running" | "succeeded" | "skipped" | "failed";
+    cursor?: string;
+    limit?: number;
+  } = {}
+) {
+  const query = new URLSearchParams({
+    limit: String(input.limit ?? 200)
+  });
+  if (input.status) query.set("status", input.status);
+  if (input.cursor) query.set("cursor", input.cursor);
+  return apiRequest<unknown>(
+    `${importBatchPath(importBatchId)}/items?${query.toString()}`
+  );
+}
+
+export async function listAudioImportBatchItems(
+  importBatchId: string,
+  input: {
+    status?: "queued" | "running" | "succeeded" | "skipped" | "failed";
+  } = {}
+): Promise<ApiEnvelope<{ items: Array<Record<string, unknown>> }>> {
+  const items: Array<Record<string, unknown>> = [];
+  const observedCursors = new Set<string>();
+  let cursor = "";
+  for (let page = 0; page < 50; page += 1) {
+    const response = await getImportBatchItems(importBatchId, {
+      status: input.status,
+      cursor,
+      limit: 200
+    });
+    items.push(...collectionItems(response.data));
+    const nextCursor = String(response.meta?.next_cursor ?? "");
+    if (!nextCursor) return { ...response, data: { items } };
+    if (observedCursors.has(nextCursor)) {
+      throw new Error("导入失败记录分页游标重复，无法完成批次回读");
+    }
+    observedCursors.add(nextCursor);
+    cursor = nextCursor;
+  }
+  throw new Error("导入失败记录超过前端安全分页上限，请缩小状态筛选范围");
 }
 
 const importBatchPath = (id: string) =>

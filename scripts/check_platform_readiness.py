@@ -54,6 +54,7 @@ RELEASE_SKIP_VARIABLES = (
     "AURIS_SKIP_REAL_DAGSTER",
     "AURIS_SKIP_PRODUCT_DAGSTER_GATE",
     "AURIS_SKIP_PRODUCTION_PATH_GATE",
+    "AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE",
     "AURIS_SKIP_BACKUP_RESTORE_GATE",
 )
 RELEASE_SKIP_GUARD_PREAMBLE = (
@@ -262,6 +263,9 @@ CHECKS: tuple[Check, ...] = (
             "scripts/verify_product_dagster_path.py",
             "scripts/verify_production_path.sh",
             "scripts/verify_production_path_gate.py",
+            "scripts/verify_audio_import_stack.sh",
+            "scripts/verify_audio_import_stack.py",
+            "scripts/verify_audio_import_browser_e2e.sh",
             "scripts/verify_production_mysql_migrations.sh",
             "backend/scripts/verify_mysql_migration_security.py",
             "production/tests/test_mysql_migration_security.py",
@@ -330,10 +334,12 @@ CHECKS: tuple[Check, ...] = (
                 "bash scripts/verify_real_dagster.sh",
                 "bash scripts/verify_product_dagster_path.sh",
                 "bash scripts/verify_production_path.sh",
+                "bash scripts/verify_audio_import_stack.sh",
                 "bash scripts/verify_production_mysql_migrations.sh",
                 "AURIS_SKIP_REAL_DAGSTER=1 is not allowed",
                 "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
                 "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
+                "AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE=1 is not allowed",
                 "AURIS_RELEASE_CHECK=1 bash scripts/verify_clean_clone.sh",
                 "scripts/verify_license_materials.py",
                 "scripts/finalize_release_evidence.py",
@@ -1948,12 +1954,14 @@ def run_release_checks() -> list[ReadinessResult]:
         "bash scripts/verify_real_dagster.sh",
         "bash scripts/verify_product_dagster_path.sh",
         "bash scripts/verify_production_path.sh",
+        "bash scripts/verify_audio_import_stack.sh",
         "scripts/generate_supply_chain_evidence.py",
         "scripts/finalize_release_evidence.py",
         "AURIS_SKIP_REAL_STACK_E2E=1 is not allowed",
         "AURIS_SKIP_REAL_DAGSTER=1 is not allowed",
         "AURIS_SKIP_PRODUCT_DAGSTER_GATE=1 is not allowed",
         "AURIS_SKIP_PRODUCTION_PATH_GATE=1 is not allowed",
+        "AURIS_SKIP_AUDIO_IMPORT_REAL_STACK_GATE=1 is not allowed",
         "AURIS_SKIP_BACKUP_RESTORE_GATE=1 is not allowed",
     ):
         if pattern not in release_verify_text:
@@ -2067,7 +2075,7 @@ def read_text(path: str) -> str:
 
 
 def validate_release_gate_wiring(root: Path = ROOT) -> list[str]:
-    """Require a real top-level production-path command, not a comment or echo."""
+    """Require each governed runtime gate as one real top-level command."""
 
     path = root / "scripts" / "verify_release.sh"
     if not path.is_file():
@@ -2077,16 +2085,20 @@ def validate_release_gate_wiring(root: Path = ROOT) -> list[str]:
     except OSError as error:
         return [f"scripts/verify_release.sh is unreadable: {error}"]
 
-    expected = "bash scripts/verify_production_path.sh"
-    executable_lines = [
-        index for index, line in enumerate(lines) if line.strip() == expected
-    ]
-    if len(executable_lines) != 1:
-        return [
-            "scripts/verify_release.sh must execute exactly one top-level "
-            f"{expected} command"
+    failures: list[str] = []
+    for expected in (
+        "bash scripts/verify_production_path.sh",
+        "bash scripts/verify_audio_import_stack.sh",
+    ):
+        executable_lines = [
+            index for index, line in enumerate(lines) if line.strip() == expected
         ]
-    return []
+        if len(executable_lines) != 1:
+            failures.append(
+                "scripts/verify_release.sh must execute exactly one top-level "
+                f"{expected} command"
+            )
+    return failures
 
 
 def validate_production_path_readiness_contract(root: Path = ROOT) -> list[str]:

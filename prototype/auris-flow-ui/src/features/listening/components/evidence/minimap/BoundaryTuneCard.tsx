@@ -2,7 +2,7 @@ import { stitchedWavSlices } from "../../../fixtures/boundaryFixtures";
 import type { AnnotationMinimapController } from "./conversationBoundaryActions";
 
 export function BoundaryTuneCard({ controller }: { controller: AnnotationMinimapController }) {
-  const { boundaryAxisDuration, boundaryAxisEnd, boundaryAxisStart, boundaryDrag, boundaryEndPct, boundaryImpactRows, boundaryPct, boundaryStartPct, boundaryWindowWidth, confirmSessionBoundary, conversationBoundaryTicks, conversationOverlapZones, extensionDrafts, finishBoundaryDrag, modalBoundaryStripRef, moveNearestModalBoundary, nudgeSessionBoundary, resetConversationBoundary, selectExtensionCandidate, selectedExtensionId, selectedSlice, sessionBoundary, sessionClockAt, sessionRangeText, setSelectedSliceId, sliceDecisions, startModalBoundaryDrag, syncState, syncStateMeta, updateModalBoundaryFromPointer, visibleExtensionRanges } = controller;
+  const { boundaryAxisDuration, boundaryAxisEnd, boundaryAxisStart, boundaryDrag, boundaryEndPct, boundaryId, boundaryImpactRows, boundaryPct, boundaryStartPct, boundaryWindowWidth, confirmSessionBoundary, conversationBoundaryTicks, conversationOverlapZones, extensionDrafts, finishBoundaryDrag, modalBoundaryStripRef, moveNearestModalBoundary, nudgeSessionBoundary, resetConversationBoundary, selectExtensionCandidate, selectedExtensionId, selectedSlice, sessionBoundary, sessionClockAt, sessionRangeText, setSelectedSliceId, sliceDecisions, startModalBoundaryDrag, syncState, syncStateMeta, updateModalBoundaryFromPointer, visibleExtensionRanges } = controller;
   return (
     <section className="session-boundary-card boundary-tune-card">
                       <div className="boundary-tune-head">
@@ -158,8 +158,14 @@ export function BoundaryTuneCard({ controller }: { controller: AnnotationMinimap
                               <span>保存记录</span>
                               <p>拖动左侧蓝色开始手柄和橙色结束手柄后，直接保存当前完整对话的开始/结束；下游时间索引和资产状态由系统自动重建。</p>
                             </div>
-                          <button type="button" className="sync-primary" onClick={() => void confirmSessionBoundary()} disabled={syncState === "saving"}>
-                            {syncState === "saving" ? "写入中" : "保存开始/结束"}
+                          <button
+                            type="button"
+                            className="sync-primary"
+                            onClick={() => void confirmSessionBoundary()}
+                            disabled={!boundaryId || syncState === "saving"}
+                            title={!boundaryId ? "当前 HumanReviewTask 未绑定可修订的会话边界。" : "加入当前人审决定，提交后统一写入并回读。"}
+                          >
+                            {syncState === "saving" ? "暂存中" : "加入边界修订"}
                           </button>
                           <button type="button" onClick={resetConversationBoundary}>
                             恢复系统建议边界

@@ -5,9 +5,11 @@ import type { InsightDatasetState } from "./useInsightDataset";
 import type { InsightTimeRangeState } from "./useInsightTimeRange";
 import type { InsightComparisonState } from "./useInsightComparisonState";
 import {
+  authoritativeInsightDisplayState,
   parseAuthoritativeMetricSnapshots
 } from "../model/authoritativeSnapshots";
 import type { InsightMetricSnapshot } from "../types";
+import { metricDescriptors } from "../fixtures/viewDescriptors";
 
 type AuthoritativeMetricState = {
   status: "loading" | "ready" | "error";
@@ -43,6 +45,7 @@ export function useAuthoritativeInsightMetrics(
     }
   };
   const [state, setState] = useState<AuthoritativeMetricState>(initialState);
+  const [retryGeneration, setRetryGeneration] = useState(0);
   const effectiveTimeRange = timeRange === "custom"
     ? `${customRangeDraft.startDate}/${customRangeDraft.endDate}`
     : timeRange;
@@ -70,17 +73,24 @@ export function useAuthoritativeInsightMetrics(
       });
     });
     return () => { cancelled = true; };
-  }, [dataset.context.model, effectiveTimeRange, labelVersionFilter, storeFilter]);
+  }, [dataset.context.model, effectiveTimeRange, labelVersionFilter, retryGeneration, storeFilter]);
 
   const snapshotByMetricKey = useMemo(
     () => new Map(state.snapshots.map((snapshot) => [snapshot.metric_key, snapshot])),
     [state.snapshots]
   );
+  const displayState = authoritativeInsightDisplayState(
+    state.snapshots,
+    metricDescriptors.map((descriptor) => descriptor.key)
+  );
   return {
     authoritativeMetricStatus: state.status,
     authoritativeMetricError: state.error,
     authoritativeMetricSnapshots: state.snapshots,
-    snapshotByMetricKey
+    snapshotByMetricKey,
+    authoritativeInsightDisplayReady: state.status === "ready" && displayState.ready,
+    authoritativeInsightDisplayReason: state.error ?? displayState.reason,
+    retryAuthoritativeMetrics: () => setRetryGeneration((generation) => generation + 1)
   };
 }
 

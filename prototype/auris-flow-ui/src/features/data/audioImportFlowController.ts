@@ -3,7 +3,8 @@ import { useCallback, useReducer } from "react";
 import {
   createAudioImportConnector,
   getImportBatch,
-  getImportBatchItems,
+  listAudioImportBatches,
+  listAudioImportBatchItems,
   listAudioImportConnectors,
   listPlatformConnections,
   patchAudioImportConnector,
@@ -17,17 +18,25 @@ import {
   testAudioImportConnection,
   type PlatformConnectionOption
 } from "../../api/audioImportClient";
-import { listTaskVersions } from "../../api/client";
+import { getTaskVersion, listTaskVersions } from "../../api/client";
 import type { OperationNotice } from "../../shared/contracts/operations";
+import { LABEL_DEMO_MODE } from "../../shared/runtime/demoMode";
 import {
+  bindAudioImportDraftToPlatformConnection,
   buildAudioImportTaskVersionPayload,
+  buildAudioImportStepStates,
   buildConnectorPayload,
+  canNavigateToAudioImportStep,
   configurationFingerprint,
   defaultAudioImportDraft,
+  firstAudioImportErrorFieldId,
   importBatchIdFromTaskRun,
+  latestAudioImportBatchIdFromBatches,
   normalizeImportBatch,
   normalizeImportBatchItems,
+  audioImportErrorFieldIds,
   validateAudioImportStep,
+  validateAudioImportPlatformBinding,
   validateCompleteAudioImport,
   type AudioImportBatch,
   type AudioImportBatchItem,
@@ -121,7 +130,12 @@ const initialState = (targetAssetKey: string) => ({
   batch: null as AudioImportBatch | null,
   batchItems: [] as AudioImportBatchItem[],
   action: "",
-  detail: "请选择平台连接并配置音频 URL 导入。"
+  attemptedSteps: [] as number[],
+  detail: "请选择平台连接并配置音频 URL 导入。",
+  rememberedBatchHint: "",
+  validationFocusFieldId: "",
+  validationFocusRevision: 0,
+  visitedSteps: [1] as number[]
 });
 type FlowState = ReturnType<typeof initialState>;
 type StateChange = Partial<FlowState> | ((state: FlowState) => Partial<FlowState>);
@@ -130,6 +144,170 @@ const reduceState = (state: FlowState, change: StateChange) => ({
   ...(typeof change === "function" ? change(state) : change)
 });
 
+function deriveAudioImportFlowState(
+  state: FlowState,
+  sceneProfileLock: DataSceneProfileLock | null
+) {
+  const {
+    attemptedSteps, draft, platformConnections, step, taskVersionFingerprint,
+    taskVersionStatus, verification, visitedSteps
+  } = state;
+  const fingerprint = configurationFingerprint(draft);
+  const selectedPlatformConnection = platformConnections.find(
+    (item) => item.id === draft.platformConnectionId
+  );
+  const platformBindingErrors = selectedPlatformConnection
+    ? validateAudioImportPlatformBinding(draft, selectedPlatformConnection)
+    : draft.platformConnectionId && !LABEL_DEMO_MODE
+      ? ["所选平台连接不在当前项目连接目录中"]
+      : [];
+  const blockers = Array.from(new Set([
+    ...validateAudioImportStep(step, draft, verification),
+    ...([1, 2].includes(step) ? platformBindingErrors : [])
+  ]));
+  const completeBlockers = Array.from(new Set([
+    ...validateCompleteAudioImport(draft, verification),
+    ...platformBindingErrors
+  ]));
+  const taskVersionCurrent = taskVersionFingerprint === fingerprint;
+  const stepStates = buildAudioImportStepStates({
+    draft,
+    verification,
+    visitedSteps,
+    attemptedSteps,
+    releaseVerified: taskVersionCurrent && taskVersionStatus === "published"
+  });
+  const activeValidationErrors = attemptedSteps.includes(step)
+    ? (step === 6 ? completeBlockers : blockers) : [];
+  return {
+    blockers,
+    completeBlockers,
+    fingerprint,
+    invalidFieldIds: audioImportErrorFieldIds(activeValidationErrors),
+    platformBindingErrors,
+    saveDraftBlockedReason: !sceneProfileLock
+      ? "缺少已发布 SceneProfile，无法保存草稿。"
+      : completeBlockers[0] ?? "",
+    selectedPlatformConnection,
+    stepStates,
+    taskVersionCurrent
+  };
+}
+
+async function readAudioImportRecovery(
+  targetAssetKey: string
+): Promise<Partial<FlowState>> {
+  const fallback = defaultAudioImportDraft(targetAssetKey);
+  const [connectorResponse, versionResponse, connectionResult] = await Promise.all([
+    listAudioImportConnectors(),
+    listTaskVersions(),
+    listPlatformConnections().then(
+      ({ data }) => ({ items: data.items, error: "" }),
+      (error) => ({ items: [], error: errorText(error, "平台连接读取失败") })
+    )
+  ]);
+  const versions = versionResponse.data.items.filter(
+    (item) => item.task_type_id === "audio-platform-import"
+  );
+  const matchingVersions = versions.filter((item) => {
+    const direct = record(item.input_binding);
+    const nested = record(record(item.payload).input_binding);
+    return text(direct.target_asset_key || nested.target_asset_key) === targetAssetKey;
+  });
+  const version = matchingVersions[matchingVersions.length - 1];
+  const binding = record(version?.input_binding ?? record(version?.payload).input_binding);
+  const recoveredConnectorId = text(binding.connector_id);
+  const connectors = connectorResponse.data.items;
+  const connector = connectors.find(
+    (item) => text(item.id ?? item.connector_id) === recoveredConnectorId
+  ) ?? connectors.find((item) => item.target_asset_key === targetAssetKey);
+  let recovered: Partial<FlowState> = {
+    platformConnections: connectionResult.items,
+    platformConnectionsDetail: connectionResult.error,
+    draft: fallback,
+    detail: connector
+      ? "配置已恢复；修改发布前须重新测试和预览。"
+      : "暂无配置，请先关联平台。"
+  };
+  if (connector) {
+    const id = text(connector.id ?? connector.connector_id);
+    const connectorDraft = draftFromConnector(connector, fallback);
+    const selectedConnection = connectionResult.items.find(
+      (item) => item.id === connectorDraft.platformConnectionId
+    );
+    const restoredDraft = selectedConnection
+      ? bindAudioImportDraftToPlatformConnection(connectorDraft, selectedConnection)
+      : connectorDraft;
+    const restoredVersion = positiveNumber(
+      connector.connector_version ?? connector.version ?? connector.resource_version
+    );
+    const restoredFingerprint = configurationFingerprint(restoredDraft);
+    const persistedConnectorFingerprint = configurationFingerprint(connectorDraft);
+    const frozenVersion = Number(binding.connector_version);
+    const frozenConnectorMatches = Boolean(
+      version
+      && text(binding.connector_id) === id
+      && Number.isFinite(frozenVersion)
+      && frozenVersion === restoredVersion
+      && restoredFingerprint === persistedConnectorFingerprint
+    );
+    const recoveredPublishedVersion =
+      frozenConnectorMatches && text(version?.status).toLowerCase() === "published";
+    recovered = {
+      ...recovered,
+      connectorId: id,
+      connectorVersion: restoredVersion,
+      draft: restoredDraft,
+      persistedFingerprint: persistedConnectorFingerprint,
+      taskVersionFingerprint: frozenConnectorMatches ? restoredFingerprint : "",
+      ...(recoveredPublishedVersion ? {
+        verification: {
+          testedFingerprint: restoredFingerprint,
+          previewedFingerprint: restoredFingerprint,
+          mappingValid: true,
+          mappingErrors: []
+        },
+        visitedSteps: [1, 2, 3, 4, 5, 6]
+      } : {}),
+      ...(version ? {
+        taskVersionId: text(version.id ?? version.task_version_id),
+        taskVersionStatus: text(version.status)
+      } : {})
+    };
+  }
+  const batchResult = await listAudioImportBatches({
+    connectorId: text(recovered.connectorId) || recoveredConnectorId || undefined,
+    taskVersionId: text(recovered.taskVersionId)
+      || text(version?.id ?? version?.task_version_id)
+      || undefined,
+    targetAssetKey
+  }).then(
+    ({ data }) => ({ items: data.items, error: "" }),
+    (error) => ({ items: [], error: errorText(error, "同步批次列表读取失败") })
+  );
+  const latestBatchId = latestAudioImportBatchIdFromBatches(batchResult.items);
+  const rememberedBatchHint = recalledLatestAudioImportBatch(targetAssetKey);
+  const batchRecoveryDetail = latestBatchId
+    ? `最近同步批次 ${latestBatchId} 已从 BFF 列表恢复。`
+    : batchResult.error
+      ? `${batchResult.error}；未恢复批次。${
+          rememberedBatchHint ? ` 浏览器曾记录 ${rememberedBatchHint}，仅作为提示。` : ""
+        }`
+      : `BFF 列表中没有匹配当前任务版本和目标资产的同步批次。${
+          rememberedBatchHint ? ` 浏览器曾记录 ${rememberedBatchHint}，仅作为提示。` : ""
+        }`;
+  return {
+    ...recovered,
+    batchId: latestBatchId,
+    ...(text(recovered.taskVersionStatus).toLowerCase() === "published"
+      && text(recovered.taskVersionFingerprint)
+      ? { step: 6 }
+      : {}),
+    rememberedBatchHint,
+    detail: `${text(recovered.detail)} ${batchRecoveryDetail}`.trim()
+  };
+}
+
 export function useAudioImportFlow({
   targetAssetKey,
   sceneProfileLock,
@@ -137,13 +315,16 @@ export function useAudioImportFlow({
 }: AudioImportFlowInput) {
   const [state, change] = useReducer(reduceState, initialState(targetAssetKey));
   const {
-    action, batch, batchId, batchItems, connectorId, connectorVersion, detail,
+    action, attemptedSteps, batch, batchId, batchItems, connectorId, connectorVersion, detail,
     draft, open, persistedFingerprint, platformConnections,
-    platformConnectionsDetail, previewFields, previewRecords, step, taskVersionFingerprint,
-    taskVersionId, taskVersionStatus, verification
+    platformConnectionsDetail, previewFields, previewRecords, rememberedBatchHint,
+    step, taskVersionFingerprint, taskVersionId, taskVersionStatus, validationFocusFieldId,
+    validationFocusRevision, verification, visitedSteps
   } = state;
-  const fingerprint = configurationFingerprint(draft);
-  const blockers = validateAudioImportStep(step, draft, verification);
+  const {
+    blockers, completeBlockers, fingerprint, invalidFieldIds, platformBindingErrors,
+    saveDraftBlockedReason, selectedPlatformConnection, stepStates, taskVersionCurrent
+  } = deriveAudioImportFlowState(state, sceneProfileLock);
   const setDetail = useCallback((detail: string) => change({ detail }), []);
   const setTaskVersionStatus = useCallback(
     (taskVersionStatus: string) => change({ taskVersionStatus }),
@@ -157,15 +338,37 @@ export function useAudioImportFlow({
   ) => change((current) => ({
     draft: typeof value === "function" ? value(current.draft) : value
   }));
-  const setStep = (value: number | ((current: number) => number)) =>
+  const selectPlatformConnection = (platformConnectionId: string) => {
+    const connection = platformConnections.find(
+      (item) => item.id === platformConnectionId
+    );
     change((current) => ({
-      step: typeof value === "function" ? value(current.step) : value
+      draft: connection
+        ? bindAudioImportDraftToPlatformConnection(current.draft, connection)
+        : {
+            ...current.draft,
+            platformConnectionId,
+            platformTenantKey: "",
+            storeScope: "",
+            baseUrl: "",
+            credentialRef: ""
+          },
+      detail: connection
+        ? `已绑定平台连接 ${connection.name} 的租户、门店范围、地址和凭证引用。`
+        : "请选择当前项目中已验证的平台连接。"
+    }));
+  };
+  const requestValidationFocus = (errors: string[], attemptedStep = step) =>
+    change((current) => ({
+      attemptedSteps: Array.from(new Set([...current.attemptedSteps, attemptedStep])),
+      validationFocusFieldId: firstAudioImportErrorFieldId(errors),
+      validationFocusRevision: current.validationFocusRevision + 1
     }));
 
   const refreshBatch = useCallback(async (id: string) => {
     const [batchResponse, itemsResponse] = await Promise.all([
       getImportBatch(id),
-      getImportBatchItems(id)
+      listAudioImportBatchItems(id, { status: "failed" })
     ]);
     const next = normalizeImportBatch(batchResponse.data);
     change({
@@ -200,9 +403,10 @@ export function useAudioImportFlow({
       change({ action: "" });
     }
   };
-  const reject = (errors: string[]) => {
+  const reject = (errors: string[], attemptedStep = step) => {
     if (!errors.length) return false;
     setDetail(errors[0]);
+    requestValidationFocus(errors, attemptedStep);
     return true;
   };
 
@@ -211,80 +415,33 @@ export function useAudioImportFlow({
     setTaskVersionId("");
     setBatchId("");
     change({
+      attemptedSteps: [],
       connectorVersion: 1,
       persistedFingerprint: "",
       taskVersionStatus: "",
       taskVersionFingerprint: "",
       batch: null,
       batchItems: [],
+      rememberedBatchHint: "",
       previewRecords: [],
-      previewFields: []
+      previewFields: [],
+      validationFocusFieldId: "",
+      visitedSteps: [1]
     });
-    const fallback = defaultAudioImportDraft(targetAssetKey);
     return perform("recover", "正在恢复配置与最近批次。", "配置回读失败", async () => {
-      const [connectorResponse, versionResponse, connectionResult] = await Promise.all([
-        listAudioImportConnectors(),
-        listTaskVersions(),
-        listPlatformConnections().then(
-          ({ data }) => ({ items: data.items, error: "" }),
-          (error) => ({ items: [], error: errorText(error, "平台连接读取失败") })
-        )
-      ]);
-      const versions = versionResponse.data.items.filter(
-        (item) => item.task_type_id === "audio-platform-import"
-      );
-      const matchingVersions = versions.filter((item) => {
-        const direct = record(item.input_binding);
-        const nested = record(record(item.payload).input_binding);
-        return text(direct.target_asset_key || nested.target_asset_key) === targetAssetKey;
-      });
-      const version = matchingVersions[matchingVersions.length - 1];
-      const binding = record(version?.input_binding ?? record(version?.payload).input_binding);
-      const recoveredConnectorId = text(binding.connector_id);
-      const connectors = connectorResponse.data.items;
-      const connector = connectors.find(
-        (item) => text(item.id ?? item.connector_id) === recoveredConnectorId
-      ) ?? connectors.find((item) => item.target_asset_key === targetAssetKey);
-      let recovered: Partial<FlowState> = {
-        platformConnections: connectionResult.items,
-        platformConnectionsDetail: connectionResult.error,
-        draft: fallback,
-        detail: connector
-          ? "配置已恢复；修改发布前须重新测试和预览。"
-          : "暂无配置，请先关联平台。"
-      };
-      if (connector) {
-        const id = text(connector.id ?? connector.connector_id);
-        const restoredDraft = draftFromConnector(connector, fallback);
-        const restoredVersion = positiveNumber(
-          connector.connector_version ?? connector.version ?? connector.resource_version
-        );
-        const restoredFingerprint = configurationFingerprint(restoredDraft);
-        const frozenVersion = Number(binding.connector_version);
-        recovered = {
-          ...recovered,
-          connectorId: id,
-          connectorVersion: restoredVersion,
-          draft: restoredDraft,
-          persistedFingerprint: restoredFingerprint,
-          taskVersionFingerprint: version
-            && text(binding.connector_id) === id
-            && Number.isFinite(frozenVersion)
-            && frozenVersion === restoredVersion
-              ? restoredFingerprint : "",
-          ...(version ? {
-            taskVersionId: text(version.id ?? version.task_version_id),
-            taskVersionStatus: text(version.status)
-          } : {})
-        };
-      }
-      const remembered = recalledLatestAudioImportBatch(targetAssetKey);
-      change({ ...recovered, ...(remembered ? { batchId: remembered } : {}) });
+      change(await readAudioImportRecovery(targetAssetKey));
     });
   };
 
   const openDrawer = () => {
-    change({ open: true, verification: emptyVerification });
+    change({
+      open: true,
+      step: 1,
+      verification: emptyVerification,
+      attemptedSteps: [],
+      validationFocusFieldId: "",
+      visitedSteps: [1]
+    });
     void recover();
   };
 
@@ -328,7 +485,10 @@ export function useAudioImportFlow({
   };
 
   const testConnection = async () => {
-    if (reject([1, 2].flatMap((item) => validateAudioImportStep(item, draft, verification)))) return;
+    if (reject(Array.from(new Set([
+      ...[1, 2].flatMap((item) => validateAudioImportStep(item, draft, verification)),
+      ...platformBindingErrors
+    ])))) return;
     return perform("test", "正在通过 BFF 测试连接。", "连接测试失败", async () => {
       const connector = await persistConnector();
       const response = await testAudioImportConnection(connector.id);
@@ -370,7 +530,7 @@ export function useAudioImportFlow({
       setDetail("缺少已发布 SceneProfile，无法保存草稿。");
       return;
     }
-    if (reject(validateCompleteAudioImport(draft, verification))) return;
+    if (reject(completeBlockers, 6)) return;
     if (
       taskVersionFingerprint === fingerprint
       && ["draft", "published", "publishing"].includes(taskVersionStatus)
@@ -386,17 +546,32 @@ export function useAudioImportFlow({
         connectorVersion: connector.version,
         sceneProfileLock: activeSceneProfileLock
       }));
+      const readback = await getTaskVersion(saved.data.id);
+      const readbackId = text(readback.data.id ?? readback.data.task_version_id);
+      const readbackStatus = text(readback.data.status).toLowerCase();
+      const readbackPayload = record(readback.data.payload);
+      const readbackBinding = record(
+        readback.data.input_binding ?? readbackPayload.input_binding
+      );
+      if (
+        readbackId !== saved.data.id
+        || readbackStatus !== "draft"
+        || text(readbackBinding.connector_id) !== connector.id
+        || Number(readbackBinding.connector_version) !== connector.version
+      ) {
+        throw new Error("草稿写入后回读不一致，已停止发布流程，请刷新后重试");
+      }
       change({
-        taskVersionId: saved.data.id,
-        taskVersionStatus: "draft",
+        taskVersionId: readbackId,
+        taskVersionStatus: readbackStatus,
         taskVersionFingerprint: fingerprint,
-        detail: `草稿 ${saved.data.id} 已写入并回读，可发布。`
+        detail: `草稿 ${readbackId} 已写入并回读，可发布。`
       });
     });
   };
 
   const publish = async () => {
-    if (reject(validateCompleteAudioImport(draft, verification))) return;
+    if (reject(completeBlockers, 6)) return;
     if (!taskVersionId || taskVersionStatus !== "draft" || taskVersionFingerprint !== fingerprint) {
       setDetail("请先保存当前草稿再发布。");
       return;
@@ -453,39 +628,80 @@ export function useAudioImportFlow({
     });
   };
 
+  const canVisitStep = (targetStep: number) =>
+    canNavigateToAudioImportStep(targetStep, visitedSteps, stepStates);
+
+  const goToStep = (targetStep: number) => {
+    if (!canVisitStep(targetStep)) {
+      const earliestIncomplete = stepStates.find(
+        (item) => item.status !== "verified"
+      )?.id ?? step;
+      setDetail(
+        visitedSteps.includes(targetStep)
+          ? `请先完成第 ${earliestIncomplete} 步，不能越过最早未完成步骤。`
+          : "该步骤尚未访问，请通过“下一步”按顺序完成配置。"
+      );
+      return;
+    }
+    change({ step: targetStep });
+  };
+
+  const next = () => {
+    if (reject(blockers, step)) return;
+    const targetStep = Math.min(6, step + 1);
+    change((current) => ({
+      attemptedSteps: Array.from(new Set([...current.attemptedSteps, step])),
+      step: targetStep,
+      visitedSteps: Array.from(new Set([...current.visitedSteps, targetStep]))
+    }));
+  };
+
+  const previous = () => {
+    const targetStep = Math.max(1, step - 1);
+    if (visitedSteps.includes(targetStep)) change({ step: targetStep });
+  };
+
   return {
     action,
     batch,
     batchItems,
     blockers,
+    canVisitStep,
     close: () => change({ open: false }),
+    completeBlockers,
     detail,
     draft,
     connectionVerified: verification.testedFingerprint === fingerprint,
-    next: () => blockers.length
-      ? setDetail(blockers[0])
-      : setStep((value) => Math.min(6, value + 1)),
+    goToStep,
+    invalidFieldIds,
+    next,
     open,
     openDrawer,
     platformConnections,
     platformConnectionsDetail,
+    selectedPlatformConnection,
+    selectPlatformConnection,
     previewFields,
     previewVerified: verification.previewedFingerprint === fingerprint,
     previewRecords,
-    previous: () => setStep((value) => Math.max(1, value - 1)),
+    previous,
     publish,
+    rememberedBatchHint,
     refreshBatch: () => batchId ? refreshBatch(batchId) : Promise.resolve(null),
     retryFailedItems,
     run,
+    saveDraftBlockedReason,
     saveDraft,
     setDraft,
-    setStep,
     step,
+    stepStates,
     taskVersionId,
-    taskVersionCurrent: taskVersionFingerprint === fingerprint,
+    taskVersionCurrent,
     taskVersionStatus,
     testConnection,
     previewRecordsFromSource,
+    validationFocusFieldId,
+    validationFocusRevision,
     verification
   };
 }

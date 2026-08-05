@@ -1,9 +1,10 @@
-import { createEventLink, patchEventLink } from "../../../../api/client";
 import type { ReceptionLinkStatus, ReceptionOrderCandidate } from "../../../../shared/contracts/reception";
 import { eventLinks } from "../../../../shared/fixtures/eventLinks";
 import { actionFeedbackAttrs } from "../../../../shared/runtime/feedbackAttributes";
+import { LABEL_DEMO_MODE } from "../../../../shared/runtime/demoMode";
 import { clamp } from "../../../../shared/runtime/math";
 import type { ReviewSample } from "../../fixtures/reviewSamples";
+import type { HumanReviewChange } from "../../model/reviewDecisionModel";
 import { getReceptionCandidatesForSample } from "../../fixtures/reviewSamples";
 import { clockToSeconds, describeTimeDrift, extractClockFromText, formatSignedSeconds, parseClockWindow, secondsToClock } from "../../model/listeningTime";
 import { getReceptionLocatorEvents } from "../../model/receptionEvidence";
@@ -15,6 +16,7 @@ export type ReceptionLinkPanelProps = {
   sample: ReviewSample;
   setSelectedWindow: (value: string) => void;
   setPanelTab: (tab: PanelTab) => void;
+  onReviewChange: (change: HumanReviewChange) => void;
   onLocatorOpenChange?: (open: boolean) => void;
 };
 
@@ -22,6 +24,7 @@ export function ReceptionLinkPanel({
   sample,
   setSelectedWindow,
   setPanelTab,
+  onReviewChange,
   onLocatorOpenChange
 }: ReceptionLinkPanelProps) {
   const candidates = useMemo(() => getReceptionCandidatesForSample(sample), [sample]);
@@ -136,32 +139,37 @@ export function ReceptionLinkPanel({
     }
   };
 
-  const confirmLocatedEvidence = async () => {
+  const confirmLocatedEvidence = () => {
     if (!selectedLocatorEvent || linkSubmitting) return;
+    const eventLinkId =
+      (activeCandidate.eventLinkId &&
+      sample.eventLinkIds?.includes(activeCandidate.eventLinkId)
+        ? activeCandidate.eventLinkId
+        : sample.eventLinkIds?.find((id) => id === selectedLocatorEvent.id)) ??
+      sample.eventLinkIds?.[0];
+    if (!eventLinkId) {
+      setLocatorStatus("当前任务未绑定可修订的 EventLink");
+      return;
+    }
     setLinkSubmitting(true);
-    setLocatorStatus("写入关联中");
+    setLocatorStatus("加入当前人审决定");
     try {
       const targetDocId = activeCandidate.orderNo.replace(/^接待单\s*/, "");
-      const linkPayload = {
-        audio_session_id: sample.sessionId,
-        source_event_id: selectedLocatorEvent.id,
-        event_ref: selectedLocatorEvent.id,
-        target_doc_id: targetDocId,
-        document_ref: targetDocId,
-        relation_type: activeCandidate.asset,
-        join_keys: activeCandidate.joinKeys,
-        confidence: Math.min(0.99, Math.max(0.2, activeCandidate.match / 100)),
-        status: "success",
-        relation_state: "confirmed",
-        evidence_window: adjustedWindow
-      };
-      const receipt = activeCandidate.eventLinkId
-        ? await patchEventLink(activeCandidate.eventLinkId, linkPayload)
-        : await createEventLink(linkPayload);
-      setLocatorStatus(`已写入关联资产 · Trace ${receipt.meta?.trace_id ?? receipt.data.trace_id ?? "pending"}`);
+      onReviewChange({
+        target_type: "event_link",
+        target_id: eventLinkId,
+        fields: {
+          source_event_id: selectedLocatorEvent.id,
+          document_ref: targetDocId,
+          relation_type: activeCandidate.asset,
+          confidence: Math.min(0.99, Math.max(0.2, activeCandidate.match / 100)),
+          evidence_window: adjustedWindow
+        }
+      });
+      setLocatorStatus("已加入当前决定 · 提交后统一写入并回读");
       updateState("人工确认");
     } catch (error) {
-      setLocatorStatus(error instanceof Error ? `写入失败：${error.message}` : "写入失败：请重试");
+      setLocatorStatus(error instanceof Error ? `暂存失败：${error.message}` : "暂存失败：请重试");
     } finally {
       setLinkSubmitting(false);
     }
@@ -268,11 +276,11 @@ export function ReceptionLinkPanel({
             <button
               type="button"
               onClick={confirmLocatedEvidence}
-              disabled={linkSubmitting}
-              title={linkSubmitting ? "关联资产正在写入，完成后可继续操作。" : "确认证据窗口并写入关联资产。"}
+              title={!sample.eventLinkIds?.length ? "当前 HumanReviewTask 未绑定可修订的 EventLink。" : linkSubmitting ? "正在加入当前决定。" : "确认证据窗口并加入当前人审决定。"}
+              disabled={!sample.eventLinkIds?.length || linkSubmitting}
               {...actionFeedbackAttrs("p,s,e,d")}
             >
-              {linkSubmitting ? "写入中..." : "确认并写入关联"}
+              {linkSubmitting ? "暂存中..." : "确认并加入决定"}
             </button>
           </div>
         </div>
@@ -286,16 +294,16 @@ export function ReceptionLinkPanel({
           type="button"
           className="primary"
           onClick={confirmLocatedEvidence}
-          disabled={linkSubmitting}
-          title={linkSubmitting ? "关联资产正在写入，完成后可继续操作。" : "确认当前接待单与音频证据关联。"}
+          disabled={!sample.eventLinkIds?.length || linkSubmitting}
+          title={!sample.eventLinkIds?.length ? "当前 HumanReviewTask 未绑定可修订的 EventLink。" : linkSubmitting ? "正在加入当前决定。" : "确认当前接待单关联并加入当前人审决定。"}
           {...actionFeedbackAttrs("p,s,e,d")}
         >
-          {linkSubmitting ? "写入中..." : "确认关联"}
+          {linkSubmitting ? "暂存中..." : "确认关联"}
         </button>
-        <button type="button" onClick={() => updateState("改绑候选")} title="把当前候选标记为需要改绑。" {...actionFeedbackAttrs("s,e")}>
+        <button type="button" onClick={() => updateState("改绑候选")} disabled={!LABEL_DEMO_MODE} title={!LABEL_DEMO_MODE ? "生产模式未接入受控改绑请求，当前操作已禁用。" : "把当前候选标记为需要改绑。"} {...actionFeedbackAttrs("s,e")}>
           改绑候选
         </button>
-        <button type="button" onClick={() => updateState("补单草稿")} title="生成补单草稿状态并保留当前证据。" {...actionFeedbackAttrs("s,e")}>
+        <button type="button" onClick={() => updateState("补单草稿")} disabled={!LABEL_DEMO_MODE} title={!LABEL_DEMO_MODE ? "生产模式未接入补单草稿 API，当前操作已禁用。" : "生成补单草稿状态并保留当前证据。"} {...actionFeedbackAttrs("s,e")}>
           生成补单
         </button>
       </div>

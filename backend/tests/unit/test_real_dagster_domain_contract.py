@@ -181,20 +181,49 @@ def test_audio_domain_event_selects_allowlisted_job_and_complete_immutable_envel
 
 
 @pytest.mark.parametrize(
-    ("mutation", "expected_field"),
+    ("mutation", "expected_field", "expected_code"),
     [
-        (lambda payload: payload.pop("event_type"), "event_type"),
-        (lambda payload: payload.__setitem__("event_type", "unknown.requested"), "event_type"),
-        (lambda payload: payload.pop("execution_contract"), "execution_contract"),
-        (lambda payload: payload["input_object"].pop("version_id"), "version_id"),
-        (lambda payload: payload["input_object"].pop("content_sha256"), "content_sha256"),
-        (lambda payload: payload.pop("execution_deadline_at"), "deadline"),
-        (lambda payload: payload.pop("outbox_fencing_token"), "outbox_fencing_token"),
+        (
+            lambda payload: payload.pop("event_type"),
+            "event_type",
+            "DAGSTER_EXECUTION_CONTRACT_INVALID",
+        ),
+        (
+            lambda payload: payload.__setitem__("event_type", "unknown.requested"),
+            "event_type",
+            "DAGSTER_EXECUTION_CONTRACT_INVALID",
+        ),
+        (
+            lambda payload: payload.pop("execution_contract"),
+            "execution_contract",
+            "EXECUTION_CONTRACT_NOT_CONFIGURED",
+        ),
+        (
+            lambda payload: payload["input_object"].pop("version_id"),
+            "version_id",
+            "DAGSTER_EXECUTION_CONTRACT_INVALID",
+        ),
+        (
+            lambda payload: payload["input_object"].pop("content_sha256"),
+            "content_sha256",
+            "DAGSTER_EXECUTION_CONTRACT_INVALID",
+        ),
+        (
+            lambda payload: payload.pop("execution_deadline_at"),
+            "deadline",
+            "DAGSTER_EXECUTION_CONTRACT_INVALID",
+        ),
+        (
+            lambda payload: payload.pop("outbox_fencing_token"),
+            "outbox_fencing_token",
+            "DAGSTER_EXECUTION_CONTRACT_INVALID",
+        ),
     ],
 )
 def test_audio_domain_mapping_and_envelope_fail_closed_before_graphql(
     mutation: Any,
     expected_field: str,
+    expected_code: str,
 ) -> None:
     client = RecordingDagsterClient()
     payload = deepcopy(_audio_payload())
@@ -203,9 +232,13 @@ def test_audio_domain_mapping_and_envelope_fail_closed_before_graphql(
     dispatch = client.submit_run_request(payload)
 
     assert dispatch.status == "failed"
-    assert dispatch.error_code == "DAGSTER_EXECUTION_CONTRACT_INVALID"
+    assert dispatch.error_code == expected_code
     assert dispatch.retryable is False
-    assert expected_field in str(dispatch.details.get("invalid_field") or "")
+    if expected_code == "EXECUTION_CONTRACT_NOT_CONFIGURED":
+        assert dispatch.details["event_type"] == "audio_intelligence.requested"
+        assert dispatch.details["run_type"] == "audio_intelligence"
+    else:
+        assert expected_field in str(dispatch.details.get("invalid_field") or "")
     assert client.requests == []
     assert "must-not-forward" not in repr(dispatch)
 
@@ -218,6 +251,7 @@ def test_known_control_plane_event_retains_generic_job_for_ci_and_control_tests(
         "trace_id": "trace_control_001",
         "run_id": "task_run_001",
         "event_type": "task_run.requested",
+        "execution_mode": "diagnostic",
         "dispatch_idempotency_key": "outbox:task:001",
         "outbox_fencing_token": "900:1",
         "job_name": "caller_must_not_select_this",
@@ -230,6 +264,81 @@ def test_known_control_plane_event_retains_generic_job_for_ci_and_control_tests(
     params = request["variables"]["executionParams"]
     assert params["selector"]["pipelineName"] == "auris_flow_generic_job"
     assert params["runConfigData"]["execution"] == {"mode": "control-plane-acknowledgement"}
+
+
+def test_production_business_event_without_contract_fails_before_graphql() -> None:
+    client = RecordingDagsterClient()
+    payload = {
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": "trace_unconfigured_production_001",
+        "run_id": "task_run_unconfigured_production_001",
+        "event_type": "task_run.requested",
+        "execution_mode": "production",
+        "dispatch_idempotency_key": "outbox:task:unconfigured-production",
+        "outbox_fencing_token": "901:1",
+    }
+
+    dispatch = client.submit_run_request(payload)
+
+    assert dispatch.status == "failed"
+    assert dispatch.error_code == "EXECUTION_CONTRACT_NOT_CONFIGURED"
+    assert dispatch.retryable is False
+    assert client.requests == []
+
+
+@pytest.mark.parametrize(
+    ("event_type", "run_type"),
+    [
+        ("task_run.requested", "task_run"),
+        ("provider_test.requested", "provider_test"),
+        ("insight_metric_aggregation.requested", "insight_metric_aggregation"),
+    ],
+)
+def test_local_adapter_rejects_unconfigured_production_business_execution(
+    event_type: str,
+    run_type: str,
+) -> None:
+    dispatch = LocalDagsterClient().submit_run_request(
+        {
+            "tenant_id": "aurora_auto",
+            "project_id": "sales_qa",
+            "trace_id": f"trace_local_{run_type}",
+            "run_id": f"run_local_{run_type}",
+            "event_type": event_type,
+            "execution_mode": "production",
+        }
+    )
+
+    assert dispatch.status == "failed"
+    assert dispatch.error_code == "EXECUTION_CONTRACT_NOT_CONFIGURED"
+    assert dispatch.retryable is False
+    assert dispatch.details["event_type"] == event_type
+    assert dispatch.details["run_type"] == run_type
+
+
+def test_provider_test_generic_ack_is_diagnostic_only_for_local_and_real_adapters() -> None:
+    payload = {
+        "tenant_id": "aurora_auto",
+        "project_id": "sales_qa",
+        "trace_id": "trace_provider_diagnostic",
+        "run_id": "run_provider_diagnostic",
+        "event_type": "provider_test.requested",
+        "execution_mode": "diagnostic",
+        "dispatch_idempotency_key": "outbox:provider-test:diagnostic",
+        "outbox_fencing_token": "902:1",
+    }
+
+    local_dispatch = LocalDagsterClient().submit_run_request(payload)
+    real_client = RecordingDagsterClient()
+    real_dispatch = real_client.submit_run_request(payload)
+
+    assert local_dispatch.status == "success"
+    assert real_dispatch.status == "success"
+    assert (
+        real_client.requests[0]["variables"]["executionParams"]["selector"]["pipelineName"]
+        == "auris_flow_generic_job"
+    )
 
 
 def test_audio_import_task_run_selects_allowlisted_job_and_server_envelope() -> None:

@@ -449,7 +449,9 @@ paths:
       summary: 按 trace_id 查询跨模块调用链和审计摘要
       description: >
         返回当前 tenant/project 范围内的公开领域追踪投影，仅包含业务对象引用、领域状态、
-        重试摘要和可执行下一步；不返回适配器、调度、远端运行 ID、请求哈希、storage/tool
+        重试摘要和可执行下一步。音频纵向链同时返回稳定排序的 `nodes[]` 与 `edges[]`，
+        覆盖导入批次、导入项、对象、录音、会话、智能结果、证据、人审和平台回执；
+        原 `spans[]` 保持兼容。不返回适配器、调度、远端运行 ID、请求哈希、storage/tool
         payload 或其他执行内部证据。原始证据仅保存在 scoped DB、Outbox 与 Audit 记录中，
         并由离线 verifier 校验；本 API 不提供原始证据或内部排障入口。
       operationId: getTracesByTraceId
@@ -638,7 +640,11 @@ paths:
         - $ref: "#/components/parameters/Limit"
       responses:
         "200":
-          $ref: "#/components/responses/GenericList"
+          description: 当前租户项目内真实平台回写运行、回执和失败状态
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunListResponse"
         default:
           $ref: "#/components/responses/Error"
     post:
@@ -967,6 +973,34 @@ paths:
           $ref: "#/components/responses/Error"
 
   /platform-connections:
+    post:
+      tags: [connectors]
+      summary: 创建平台连接强资源
+      description: >
+        只保存服务端 credential_ref；请求任意层级出现 password、token、secret、
+        api_key 或 authorization 等明文字段时返回 422。platform_connection_id
+        由服务端生成，客户端不能指定全局标识。
+      operationId: postPlatformConnections
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - $ref: "#/components/parameters/IdempotencyKey"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PlatformConnectionCreateRequest"
+      responses:
+        "201":
+          description: 平台连接已按租户和项目创建
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConnectionResponse"
+        default:
+          $ref: "#/components/responses/Error"
     get:
       tags: [connectors]
       summary: 平台连接列表
@@ -979,30 +1013,87 @@ paths:
         - $ref: "#/components/parameters/Limit"
       responses:
         "200":
-          $ref: "#/components/responses/GenericList"
+          description: 当前租户和项目的平台连接分页列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConnectionListResponse"
         default:
           $ref: "#/components/responses/Error"
 
-  /platform-connections/{connection_id}/session:
+  /platform-connections/{platform_connection_id}:
+    get:
+      tags: [connectors]
+      summary: 平台连接详情
+      operationId: getPlatformConnectionsByPlatformConnectionId
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: platform_connection_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 当前租户和项目的平台连接强资源
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConnectionResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /platform-connections/{platform_connection_id}/connection-tests:
     post:
       tags: [connectors]
-      summary: 生成外部平台会话引用
-      operationId: postPlatformConnectionsByConnectionIdSession
+      summary: 使用服务端凭证引用测试平台连接
+      operationId: postPlatformConnectionsByPlatformConnectionIdConnectionTests
       parameters:
         - $ref: "#/components/parameters/XTenantId"
         - $ref: "#/components/parameters/XProjectId"
         - $ref: "#/components/parameters/XRequestId"
         - $ref: "#/components/parameters/IdempotencyKey"
-        - name: connection_id
+        - name: platform_connection_id
           in: path
           required: true
           schema:
             type: string
       requestBody:
-        $ref: "#/components/requestBodies/GenericRequest"
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
       responses:
-        "201":
-          $ref: "#/components/responses/GenericObject"
+        "200":
+          description: 连通性测试成功并提供写后回读入口
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PlatformConnectionTestResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /platform-connections/{platform_connection_id}/session:
+    post:
+      tags: [connectors]
+      summary: 已废弃的平台浏览器会话入口
+      description: 固定返回 410；浏览器不得获取或保存外部平台凭证。
+      deprecated: true
+      operationId: postPlatformConnectionsByPlatformConnectionIdSession
+      parameters:
+        - $ref: "#/components/parameters/IdempotencyKey"
+        - name: platform_connection_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "410":
+          $ref: "#/components/responses/Error"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1083,6 +1174,43 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /import-batches:
+    get:
+      tags: [connectors, task-runs]
+      summary: 导入批次列表
+      description: >
+        从 BFF 强表按创建时间倒序恢复导入历史；支持连接器、任务版本、目标资产和状态筛选，
+        浏览器缓存不能替代此接口。
+      operationId: getImportBatches
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: connector_id
+          in: query
+          schema: {type: string}
+        - name: task_version_id
+          in: query
+          schema: {type: string}
+        - name: target_asset_key
+          in: query
+          schema: {type: string}
+        - name: status
+          in: query
+          schema:
+            $ref: "#/components/schemas/ImportBatchStatus"
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: 当前租户和项目的导入批次分页列表
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ImportBatchListResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /import-batches/{import_batch_id}:
     get:
       tags: [connectors, task-runs]
@@ -1127,6 +1255,13 @@ paths:
           required: true
           schema:
             type: string
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, running, succeeded, skipped, failed]
+        - $ref: "#/components/parameters/Cursor"
+        - $ref: "#/components/parameters/Limit"
       responses:
         "200":
           description: 批次导入项
@@ -1429,6 +1564,13 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObject"
+        "202":
+          description: >
+            已接收执行完成 ACK，业务产物正在异步物化；必须继续通过任务运行详情回读终态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunCompletionReceiptPendingResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1821,6 +1963,14 @@ paths:
                     meta:
                       trace_id: trace_metric_completion_0cd341
                       request_id: req_metric_completion_001
+        "202":
+          description: >
+            已接收执行完成 ACK，业务产物正在异步物化；此状态不代表业务成功，
+            调用方必须通过 GET /runs/{id} 回读终态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunCompletionReceiptPendingResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -1861,8 +2011,8 @@ paths:
                 $ref: "#/components/schemas/RunDetailResponse"
         "202":
           description: >
-            已验签 Dagster 回执早于 launch binding 到达，已持久化为 pending_binding；
-            仅在可信 launch external ID 完全匹配后应用业务终态。
+            已验签回执处于 pending_binding、pending_cancellation_resolution 或
+            materializing；只有可信 launch binding 与业务 materializer 均完成后才进入业务终态。
           content:
             application/json:
               schema:
@@ -2601,6 +2751,63 @@ paths:
         default:
           $ref: "#/components/responses/Error"
 
+  /human-review-decisions/{decision_id}:
+    get:
+      tags: [human-review]
+      summary: 回读不可变人审决定
+      operationId: getHumanReviewDecisionsById
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: decision_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/GenericObject"
+        default:
+          $ref: "#/components/responses/Error"
+
+  /human-review-decisions/{decision_id}/affected-objects/{object_type}/{object_id}:
+    get:
+      tags: [human-review]
+      summary: 按决定清单回读单个受影响对象
+      description: >
+        仅允许读取已列入该 HumanReviewDecision affected_objects 的同租户、同项目对象；
+        返回稳定 type/id/decision/root 绑定和当前权威资源详情。
+      operationId: getHumanReviewDecisionAffectedObject
+      parameters:
+        - $ref: "#/components/parameters/XTenantId"
+        - $ref: "#/components/parameters/XProjectId"
+        - $ref: "#/components/parameters/XRequestId"
+        - name: decision_id
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: object_type
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: object_id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: 决定作用域内的受影响对象权威回读
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HumanReviewAffectedObjectReadbackResponse"
+        default:
+          $ref: "#/components/responses/Error"
+
   /human-review-tasks/{id}/decisions:
     post:
       tags: [human-review]
@@ -2628,7 +2835,7 @@ paths:
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ActionResponse"
+                $ref: "#/components/schemas/HumanReviewDecisionReceiptResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -6999,6 +7206,13 @@ paths:
       responses:
         "200":
           $ref: "#/components/responses/GenericObject"
+        "202":
+          description: >
+            已接收执行完成 ACK，回写业务产物正在异步物化；必须继续回读运行终态。
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunCompletionReceiptPendingResponse"
         default:
           $ref: "#/components/responses/Error"
 
@@ -7577,6 +7791,144 @@ components:
           schema:
             $ref: "#/components/schemas/ErrorResponse"
   schemas:
+    PlatformConnectionCreateRequest:
+      type: object
+      additionalProperties: false
+      required:
+        - name
+        - provider_type
+        - auth_mode
+        - origin
+        - credential_ref
+        - external_tenant_ref
+      properties:
+        name: {type: string, minLength: 1, maxLength: 255}
+        provider_type: {type: string, minLength: 2, maxLength: 64}
+        auth_mode: {type: string, minLength: 2, maxLength: 64}
+        origin:
+          type: string
+          format: uri
+          pattern: '^https://'
+        credential_ref:
+          type: string
+          pattern: '^secret://'
+          description: 服务端密钥管理引用，不是明文凭证。
+        external_tenant_ref: {type: string, minLength: 1, maxLength: 256}
+        store_refs:
+          type: array
+          maxItems: 100
+          uniqueItems: true
+          items: {type: string}
+        test_path: {type: string, default: /}
+    PlatformConnectionData:
+      type: object
+      additionalProperties: false
+      required:
+        - platform_connection_id
+        - name
+        - provider_type
+        - auth_mode
+        - origin
+        - credential_ref
+        - external_tenant_ref
+        - store_refs
+        - test_path
+        - status
+        - resource_version
+        - root_trace_id
+        - current_trace_id
+      properties:
+        platform_connection_id: {type: string}
+        name: {type: string}
+        provider_type: {type: string}
+        auth_mode: {type: string}
+        origin: {type: string, format: uri}
+        credential_ref:
+          type: string
+          description: 服务端密钥引用；响应不会包含引用指向的密钥值。
+        external_tenant_ref: {type: string}
+        store_refs:
+          type: array
+          items: {type: string}
+        test_path: {type: string}
+        status:
+          type: string
+          enum: [draft, active, disabled, error, needs_reconfiguration]
+        resource_version: {type: integer, minimum: 1}
+        last_test_status:
+          type: string
+          enum: [success, failed]
+          nullable: true
+        last_tested_at: {type: string, format: date-time, nullable: true}
+        root_trace_id: {type: string}
+        current_trace_id: {type: string}
+    PlatformConnectionResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/PlatformConnectionData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    PlatformConnectionListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/PlatformConnectionData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    PlatformConnectionTestData:
+      type: object
+      additionalProperties: false
+      required:
+        - resource_type
+        - resource_id
+        - status
+        - response_status
+        - root_trace_id
+        - current_trace_id
+        - readback_url
+        - affected_objects
+        - next_actions
+        - tested_at
+      properties:
+        resource_type: {type: string, enum: [platform_connection]}
+        resource_id: {type: string}
+        status: {type: string, enum: [success]}
+        response_status: {type: integer, minimum: 100, maximum: 599}
+        root_trace_id: {type: string}
+        current_trace_id: {type: string}
+        readback_url: {type: string}
+        affected_objects:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        next_actions:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        tested_at: {type: string, format: date-time}
+    PlatformConnectionTestResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/PlatformConnectionTestData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
     ConnectorProbeRequest:
       type: object
       additionalProperties: false
@@ -7661,6 +8013,36 @@ components:
     ImportBatchStatus:
       type: string
       enum: [queued, running, partial, succeeded, failed, cancelled]
+    ImportBatchRetryLineage:
+      type: object
+      additionalProperties: false
+      required:
+        - source_task_run_id
+        - source_import_batch_id
+        - root_task_run_id
+        - root_import_batch_id
+        - attempt
+      properties:
+        source_task_run_id: {type: string, nullable: true}
+        source_import_batch_id: {type: string, nullable: true}
+        root_task_run_id: {type: string}
+        root_import_batch_id: {type: string}
+        attempt: {type: integer, minimum: 1}
+    ImportBatchItemRetryLineage:
+      type: object
+      additionalProperties: false
+      required:
+        - source_import_batch_id
+        - source_import_item_id
+        - root_import_batch_id
+        - root_import_item_id
+        - attempt
+      properties:
+        source_import_batch_id: {type: string, nullable: true}
+        source_import_item_id: {type: string, nullable: true}
+        root_import_batch_id: {type: string}
+        root_import_item_id: {type: string}
+        attempt: {type: integer, minimum: 1}
     ImportBatchData:
       type: object
       additionalProperties: false
@@ -7677,6 +8059,9 @@ components:
         - failed_items
         - root_trace_id
         - trace_id
+        - retryable
+        - retry_lineage
+        - audio_session_ids
       properties:
         import_batch_id: {type: string}
         task_run_id: {type: string}
@@ -7704,6 +8089,13 @@ components:
           nullable: true
           pattern: '^[A-Z][A-Z0-9_]{2,127}$'
         reason: {type: string, nullable: true}
+        recovery_suggestion: {type: string, nullable: true}
+        retryable: {type: boolean}
+        retry_lineage:
+          $ref: "#/components/schemas/ImportBatchRetryLineage"
+        audio_session_ids:
+          type: array
+          items: {type: string}
     ImportBatchResponse:
       type: object
       additionalProperties: false
@@ -7713,18 +8105,34 @@ components:
           $ref: "#/components/schemas/ImportBatchData"
         meta:
           $ref: "#/components/schemas/ApiMeta"
+    ImportBatchListResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ImportBatchData"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
     ImportBatchItem:
       type: object
       additionalProperties: false
       required:
-        [import_item_id, import_batch_id, external_record_id, status, root_trace_id, trace_id]
+        [import_item_id, import_batch_id, external_record_id, status, root_trace_id, trace_id, retryable, retry_lineage]
       properties:
         import_item_id: {type: string}
         import_batch_id: {type: string}
         external_record_id: {type: string}
         status:
           type: string
-          enum: [succeeded, skipped, failed]
+          enum: [queued, running, succeeded, skipped, failed]
         error_code:
           type: string
           nullable: true
@@ -7733,15 +8141,24 @@ components:
         audio_session_id: {type: string, nullable: true}
         root_trace_id: {type: string}
         trace_id: {type: string}
+        recovery_suggestion: {type: string, nullable: true}
+        retryable: {type: boolean}
+        retry_lineage:
+          $ref: "#/components/schemas/ImportBatchItemRetryLineage"
     ImportBatchItemListResponse:
       type: object
       additionalProperties: false
       required: [data, meta]
       properties:
         data:
-          type: array
-          items:
-            $ref: "#/components/schemas/ImportBatchItem"
+          type: object
+          additionalProperties: false
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ImportBatchItem"
         meta:
           $ref: "#/components/schemas/ApiMeta"
     ExternalRunProgressReceiptRequest:
@@ -9828,10 +10245,47 @@ components:
           type: string
         receipt_state:
           type: string
-          enum: [pending_binding, pending_cancellation_resolution]
-          description: 已验签回执等待可信 launch binding 或取消竞争裁决的公开状态。
+          enum: [pending_binding, pending_cancellation_resolution, materializing]
+          description: 已验签回执等待可信 launch binding、取消竞争裁决或业务物化的公开状态。
         trace_id:
           type: string
+        business_status:
+          type: string
+          enum: [materializing]
+          nullable: true
+        business_completion_required:
+          type: boolean
+          nullable: true
+        import_batch_id:
+          type: string
+          nullable: true
+        resource_type:
+          type: string
+          nullable: true
+        resource_id:
+          type: string
+          nullable: true
+        root_trace_id:
+          type: string
+          nullable: true
+        current_trace_id:
+          type: string
+          nullable: true
+        readback_url:
+          type: string
+          nullable: true
+          pattern: '^/api/v1/runs/[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$'
+        affected_objects:
+          type: array
+          nullable: true
+          items:
+            type: object
+            additionalProperties: true
+        next_actions:
+          type: array
+          nullable: true
+          items:
+            $ref: "#/components/schemas/PublicRunNextAction"
     RunCompletionReceiptPendingResponse:
       type: object
       additionalProperties: false
@@ -10090,6 +10544,8 @@ components:
         attempt_count: {type: integer, minimum: 0, nullable: true}
         attempt_id: {type: string, nullable: true}
         attempt_number: {type: integer, minimum: 1, nullable: true}
+        asr_result_id: {type: string, nullable: true}
+        audio_intelligence_result_id: {type: string, nullable: true}
         audio_session_id: {type: string, nullable: true}
         available_at: {type: string, format: date-time, nullable: true}
         base_prompt_version: {type: string, nullable: true}
@@ -10098,6 +10554,7 @@ components:
         collection: {type: string, nullable: true}
         completed_at: {type: string, format: date-time, nullable: true}
         correlation_id: {type: string, nullable: true}
+        current_trace_id: {type: string, nullable: true}
         decision_id: {type: string, nullable: true}
         decision_type: {type: string, nullable: true}
         edge_id: {type: string, nullable: true}
@@ -10110,9 +10567,12 @@ components:
         event_id: {type: string, nullable: true}
         event_type: {type: string, nullable: true}
         evidence_pack_id: {type: string, nullable: true}
+        external_record_id: {type: string, nullable: true}
         gate_id: {type: string, nullable: true}
         hit_rate: {type: number, nullable: true}
         index_id: {type: string, nullable: true}
+        import_batch_id: {type: string, nullable: true}
+        import_item_id: {type: string, nullable: true}
         knowledge_effect_id: {type: string, nullable: true}
         knowledge_gate_id: {type: string, nullable: true}
         knowledge_index_id: {type: string, nullable: true}
@@ -10120,10 +10580,13 @@ components:
         label_version_id: {type: string, nullable: true}
         lineage_source: {type: string, nullable: true}
         materialization_id: {type: string, nullable: true}
+        node_id: {type: string, nullable: true}
         object_id: {type: string, nullable: true}
         parent_trace_id: {type: string, nullable: true}
         partition_key: {type: string, nullable: true}
         processed_at: {type: string, format: date-time, nullable: true}
+        queue: {type: string, nullable: true}
+        recording_id: {type: string, nullable: true}
         ref_id: {type: string, nullable: true}
         ref_role: {type: string, nullable: true}
         ref_type: {type: string, nullable: true}
@@ -10146,6 +10609,7 @@ components:
           type: string
           nullable: true
           description: 对应领域对象的状态；不同 kind 可使用各自稳定状态集。
+        storage_object_version: {type: string, nullable: true}
         target_asset_key: {type: string, nullable: true}
         tool_call_id: {type: string, nullable: true}
         trace_ref_id: {type: string, nullable: true}
@@ -10161,9 +10625,21 @@ components:
               label: {type: string}
               route: {type: string, nullable: true}
               available_at: {type: string, format: date-time, nullable: true}
+    TraceEdge:
+      type: object
+      additionalProperties: false
+      description: >
+        同一 root trace 内的有向业务因果边。端点必须存在于同一响应的 nodes 中；
+        边按来源节点、目标节点、关系和 edge_id 稳定排序。
+      required: [edge_id, source_node_id, target_node_id, relation]
+      properties:
+        edge_id: {type: string}
+        source_node_id: {type: string}
+        target_node_id: {type: string}
+        relation: {type: string}
     TraceProjection:
       type: object
-      required: [trace_id, tenant_id, project_id, spans]
+      required: [trace_id, tenant_id, project_id, nodes, edges, spans]
       properties:
         trace_id:
           type: string
@@ -10173,6 +10649,16 @@ components:
           type: string
         root_object:
           $ref: "#/components/schemas/ObjectRef"
+        nodes:
+          type: array
+          description: 按业务生命周期与节点 ID 稳定排序的公开领域节点。
+          items:
+            $ref: "#/components/schemas/TraceSpan"
+        edges:
+          type: array
+          description: 仅连接本响应 nodes 的稳定有向业务因果边。
+          items:
+            $ref: "#/components/schemas/TraceEdge"
         spans:
           type: array
           items:
@@ -10663,11 +11149,156 @@ components:
           type: string
     HumanReviewTaskListResponse:
       type: object
+      additionalProperties: false
+      required: [data, meta]
       properties:
         data:
+          type: object
+          additionalProperties: false
+          required: [items]
+          properties:
+            items:
+              type: array
+              items:
+                type: object
+                additionalProperties: true
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    HumanReviewAffectedObject:
+      type: object
+      additionalProperties: false
+      required: [type, id, readback_url]
+      properties:
+        type:
+          type: string
+          minLength: 1
+          maxLength: 128
+        id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        readback_url:
+          type: string
+          minLength: 1
+          maxLength: 2048
+        resource_version:
+          type: integer
+          minimum: 1
+    HumanReviewAffectedObjectReadback:
+      type: object
+      additionalProperties: false
+      required: [type, id, review_decision_id, root_trace_id, resource]
+      properties:
+        type:
+          type: string
+          minLength: 1
+          maxLength: 128
+        id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        review_decision_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        root_trace_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        resource_version:
+          type: integer
+          minimum: 1
+        resource:
+          type: object
+          additionalProperties: true
+    HumanReviewAffectedObjectReadbackResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/HumanReviewAffectedObjectReadback"
+        meta:
+          $ref: "#/components/schemas/ApiMeta"
+    HumanReviewNextAction:
+      type: object
+      additionalProperties: false
+      required: [key, label, route]
+      properties:
+        key:
+          type: string
+          enum: [next_review, view_trace]
+        label:
+          type: string
+          minLength: 1
+          maxLength: 128
+        route:
+          type: string
+          minLength: 1
+          maxLength: 2048
+    HumanReviewDecisionReceipt:
+      type: object
+      additionalProperties: false
+      required:
+        - resource_type
+        - resource_id
+        - decision_id
+        - decision
+        - status
+        - root_trace_id
+        - current_trace_id
+        - trace_id
+        - action_trace_id
+        - readback_url
+        - readback_urls
+        - affected_objects
+        - next_actions
+      properties:
+        resource_type:
+          type: string
+          enum: [human_review_decision]
+        resource_id:
+          type: string
+        decision_id:
+          type: string
+        decision:
+          type: string
+          enum: [accepted, modified, rejected, escalated]
+        status:
+          type: string
+          enum: [success, blocked, escalated]
+        root_trace_id:
+          type: string
+        current_trace_id:
+          type: string
+        trace_id:
+          type: string
+        action_trace_id:
+          type: string
+        readback_url:
+          type: string
+        readback_urls:
           type: array
+          minItems: 1
           items:
-            type: object
+            type: string
+        affected_objects:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/HumanReviewAffectedObject"
+        next_actions:
+          type: array
+          minItems: 2
+          items:
+            $ref: "#/components/schemas/HumanReviewNextAction"
+    HumanReviewDecisionReceiptResponse:
+      type: object
+      additionalProperties: false
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/HumanReviewDecisionReceipt"
         meta:
           $ref: "#/components/schemas/ApiMeta"
     ReviewDecisionRequest:
@@ -17034,13 +17665,15 @@ components:
           type: boolean
     CreateExternalCallbackRequest:
       type: object
-      required: [target_object_type, target_object_id, payload_ref]
+      additionalProperties: false
+      required: [target]
       properties:
-        target_object_type:
+        target:
           type: string
-        target_object_id:
-          type: string
-        payload_ref:
-          type: string
-        endpoint_ref:
-          type: string
+          minLength: 1
+          maxLength: 256
+        payload_template:
+          type: object
+          maxProperties: 100
+          additionalProperties: true
+          nullable: true

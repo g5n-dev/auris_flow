@@ -156,7 +156,7 @@ cleanup() {
   if [ "${status}" -ne 0 ]; then
     compose_with_deadline "${CLEANUP_TIMEOUT}" "collect audio import gate logs" \
       logs --tail 160 \
-      audio-import-platform minio minio-bootstrap \
+      audio-import-platform audio-import-inference minio minio-bootstrap \
       bff worker dagster-code dagster-webserver dagster-daemon >&2 || true
   fi
   if [[ "${PROJECT_NAME}" =~ ^auris-audio-import-gate-[0-9]+-[0-9]+$ ]]; then
@@ -219,7 +219,9 @@ START_ORDER=(
   dagster-product-gate-db-bootstrap
   migrate
   dagster-product-gate-seed
+  audio-import-gate-platform-connection-seed
   audio-import-platform
+  audio-import-inference
   dagster-code
   dagster-webserver
   dagster-daemon
@@ -237,6 +239,7 @@ ONE_SHOT_SERVICES=(
   dagster-product-gate-db-bootstrap
   migrate
   dagster-product-gate-seed
+  audio-import-gate-platform-connection-seed
 )
 
 is_one_shot_service() {
@@ -262,7 +265,7 @@ for service in "${START_ORDER[@]}"; do
   fi
 done
 
-echo "Exercising browser UI -> BFF -> HTTPS platform -> Dagster -> MinIO -> playback..."
+echo "Exercising browser UI -> BFF -> HTTPS platform -> Dagster -> MinIO -> playback -> intelligence -> evidence -> review -> trace..."
 BFF_HOST_BINDING="$(
   compose_with_deadline "${CLEANUP_TIMEOUT}" \
     "resolve audio import gate BFF port" port bff 8000
@@ -294,6 +297,34 @@ if [ ! -f "${TEMP_BROWSER_ARTIFACT}" ]; then
   exit 1
 fi
 
+"${PYTHON_BIN}" - \
+  "${TEMP_BROWSER_ARTIFACT}" \
+  "${SOURCE_COMMIT}" \
+  "${SOURCE_TREE_DIRTY}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+artifact = json.loads(path.read_text(encoding="utf-8"))
+expected_commit = sys.argv[2]
+expected_dirty = sys.argv[3] == "true"
+existing_commit = artifact.get("source_commit")
+existing_dirty = artifact.get("source_tree_dirty")
+if existing_commit not in (None, expected_commit):
+    raise SystemExit("Audio import browser evidence source_commit is inconsistent.")
+if existing_dirty not in (None, expected_dirty):
+    raise SystemExit("Audio import browser evidence source_tree_dirty is inconsistent.")
+artifact["source_commit"] = expected_commit
+artifact["source_tree_dirty"] = expected_dirty
+temporary = path.with_suffix(f"{path.suffix}.tmp")
+temporary.write_text(
+    json.dumps(artifact, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
+    encoding="utf-8",
+)
+temporary.replace(path)
+PY
+
 echo "Exercising HTTPS platform -> Dagster -> MinIO -> signed BFF -> playback..."
 compose_with_deadline "${RUN_COMMAND_DEADLINE}" \
   "run audio import real-stack verifier" \
@@ -305,6 +336,7 @@ fi
 
 "${PYTHON_BIN}" - \
   "${TEMP_ARTIFACT}" \
+  "${TEMP_BROWSER_ARTIFACT}" \
   "${SOURCE_COMMIT}" \
   "${SOURCE_TREE_DIRTY}" <<'PY'
 import json
@@ -312,11 +344,13 @@ import sys
 from pathlib import Path
 
 artifact = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
-expected_dirty = sys.argv[3] == "true"
+browser_artifact = json.loads(Path(sys.argv[2]).read_text(encoding="utf-8"))
+expected_commit = sys.argv[3]
+expected_dirty = sys.argv[4] == "true"
 if (
     artifact.get("schema_version") != "auris.audio-import-real-stack-gate.v1"
     or artifact.get("status") != "ok"
-    or artifact.get("source_commit") != sys.argv[2]
+    or artifact.get("source_commit") != expected_commit
     or artifact.get("source_tree_dirty") is not expected_dirty
     or artifact.get("execution_environment") != "compose"
     or artifact.get("adapters") != {
@@ -326,6 +360,24 @@ if (
     }
 ):
     raise SystemExit("Audio import real-stack evidence envelope is invalid.")
+if (
+    browser_artifact.get("schema_version") != "auris.audio-import-browser-e2e.v2"
+    or browser_artifact.get("status") != "ok"
+    or browser_artifact.get("source_commit") != expected_commit
+    or browser_artifact.get("source_tree_dirty") is not expected_dirty
+    or browser_artifact.get("stage") != "completed"
+    or browser_artifact.get("mode") != "audio-import-only"
+    or browser_artifact.get("executionProfile")
+    != {
+        "realStack": True,
+        "platformSource": "https",
+        "inferenceProvider": "https",
+        "dagster": "real",
+        "objectStorage": "real",
+        "uiEvidencePolicy": "browser-clicks-and-bff-readback",
+    }
+):
+    raise SystemExit("Audio import browser evidence envelope is invalid.")
 PY
 install -m 0644 "${TEMP_ARTIFACT}" "${RESULT_ARTIFACT}"
 install -m 0644 "${TEMP_BROWSER_ARTIFACT}" "${BROWSER_RESULT_ARTIFACT}"

@@ -47,6 +47,97 @@ const completeDraft = {
   dedupePolicy: "external_id_checksum"
 };
 
+test("选择强平台连接会覆盖冲突来源字段并保留独立录音清单路径", async () => {
+  const {
+    bindAudioImportDraftToPlatformConnection,
+    validateAudioImportPlatformBinding
+  } = await loadModel();
+  const connection = {
+    id: "platform_conn_strong",
+    status: "active",
+    externalTenantRef: "tenant-frozen",
+    storeRefs: ["STORE-001", "STORE-002"],
+    origin: "https://source.example.test",
+    credentialRef: "secret://tenant/platform-audio",
+    testPath: "/healthz"
+  };
+
+  const bound = bindAudioImportDraftToPlatformConnection({
+    ...completeDraft,
+    platformConnectionId: "platform_conn_old",
+    platformTenantKey: "tenant-conflict",
+    storeScope: "STORE-999",
+    baseUrl: "https://conflict.example.test",
+    credentialRef: "secret://tenant/conflict",
+    requestPath: "/v1/recordings"
+  }, connection);
+
+  assert.equal(bound.platformConnectionId, "platform_conn_strong");
+  assert.equal(bound.platformTenantKey, "tenant-frozen");
+  assert.equal(bound.storeScope, "STORE-001,STORE-002");
+  assert.equal(bound.baseUrl, "https://source.example.test");
+  assert.equal(bound.credentialRef, "secret://tenant/platform-audio");
+  assert.equal(bound.requestPath, "/v1/recordings");
+  assert.deepEqual(validateAudioImportPlatformBinding(bound, connection), []);
+});
+
+test("平台连接测试路径只在录音清单路径为空时作为安全初值", async () => {
+  const { bindAudioImportDraftToPlatformConnection } = await loadModel();
+  const bound = bindAudioImportDraftToPlatformConnection({
+    ...completeDraft,
+    requestPath: ""
+  }, {
+    id: "platform_conn_strong",
+    status: "active",
+    externalTenantRef: "tenant-frozen",
+    storeRefs: [],
+    origin: "https://source.example.test",
+    credentialRef: "secret://tenant/platform-audio",
+    testPath: "/healthz"
+  });
+
+  assert.equal(bound.requestPath, "/healthz");
+});
+
+test("首次导入默认窗口覆盖最近七天以支持配置阶段真实预览", async () => {
+  const { defaultAudioImportDraft } = await loadModel();
+  const now = Date.now();
+  const draft = defaultAudioImportDraft("auris/audio/raw_recordings");
+  const initialWindow = new Date(draft.initialWindowStart).getTime();
+  const ageDays = (now - initialWindow) / 86_400_000;
+
+  assert.ok(ageDays >= 6.99 && ageDays <= 7.01, { ageDays });
+});
+
+test("平台连接冻结契约拒绝来源、凭证、租户、门店和状态冲突", async () => {
+  const { validateAudioImportPlatformBinding } = await loadModel();
+  const connection = {
+    id: "platform_conn_strong",
+    status: "disabled",
+    externalTenantRef: "tenant-frozen",
+    storeRefs: ["STORE-001"],
+    origin: "https://source.example.test",
+    credentialRef: "secret://tenant/platform-audio",
+    testPath: "/healthz"
+  };
+
+  assert.deepEqual(validateAudioImportPlatformBinding({
+    ...completeDraft,
+    platformConnectionId: "platform_conn_other",
+    platformTenantKey: "tenant-other",
+    storeScope: "STORE-999",
+    baseUrl: "https://other.example.test",
+    credentialRef: "secret://tenant/other"
+  }, connection), [
+    "所选平台连接尚未验证为可用状态",
+    "平台连接 ID 与冻结连接不一致",
+    "平台租户标识与所选连接不一致",
+    "门店范围超出所选连接授权范围",
+    "平台 API 地址与所选连接不一致",
+    "credential_ref 与所选连接不一致"
+  ]);
+});
+
 test("导入配置必须按平台、接口、验证预览、字段映射、游标目标逐步闭环", async () => {
   const { validateAudioImportStep } = await loadModel();
 
@@ -127,6 +218,126 @@ test("连接参数变化后，旧测试与预览回执失效", async () => {
   ), false);
 });
 
+test("导入步骤明确区分未访问、未完成、已验证和有错误", async () => {
+  const {
+    buildAudioImportStepStates,
+    configurationFingerprint
+  } = await loadModel();
+  const emptyVerification = {
+    testedFingerprint: "",
+    previewedFingerprint: "",
+    mappingValid: false,
+    mappingErrors: []
+  };
+
+  const initialStates = buildAudioImportStepStates({
+    draft: { ...completeDraft, platformConnectionId: "" },
+    verification: emptyVerification,
+    visitedSteps: [1],
+    attemptedSteps: [],
+    releaseVerified: false
+  });
+  assert.equal(initialStates[0].status, "incomplete");
+  assert.equal(initialStates[1].status, "unvisited");
+
+  const errorStates = buildAudioImportStepStates({
+    draft: { ...completeDraft, platformConnectionId: "" },
+    verification: emptyVerification,
+    visitedSteps: [1],
+    attemptedSteps: [1],
+    releaseVerified: false
+  });
+  assert.equal(errorStates[0].status, "error");
+
+  const fingerprint = configurationFingerprint(completeDraft);
+  const verifiedStates = buildAudioImportStepStates({
+    draft: completeDraft,
+    verification: {
+      testedFingerprint: fingerprint,
+      previewedFingerprint: fingerprint,
+      mappingValid: true,
+      mappingErrors: []
+    },
+    visitedSteps: [1, 2, 3, 4, 5, 6],
+    attemptedSteps: [1, 2, 3, 4, 5],
+    releaseVerified: true
+  });
+  assert.deepEqual(
+    verifiedStates.map((item) => item.status),
+    ["verified", "verified", "verified", "verified", "verified", "verified"]
+  );
+});
+
+test("步骤导航只能返回已访问步骤且不能越过最早未完成步骤", async () => {
+  const {
+    buildAudioImportStepStates,
+    canNavigateToAudioImportStep,
+    configurationFingerprint
+  } = await loadModel();
+  const fingerprint = configurationFingerprint(completeDraft);
+  const verification = {
+    testedFingerprint: fingerprint,
+    previewedFingerprint: fingerprint,
+    mappingValid: true,
+    mappingErrors: []
+  };
+  const stepStates = buildAudioImportStepStates({
+    draft: { ...completeDraft, baseUrl: "" },
+    verification,
+    visitedSteps: [1, 2, 3, 4],
+    attemptedSteps: [1, 2],
+    releaseVerified: false
+  });
+
+  assert.equal(canNavigateToAudioImportStep(1, [1, 2, 3, 4], stepStates), true);
+  assert.equal(canNavigateToAudioImportStep(2, [1, 2, 3, 4], stepStates), true);
+  assert.equal(canNavigateToAudioImportStep(3, [1, 2, 3, 4], stepStates), false);
+  assert.equal(canNavigateToAudioImportStep(5, [1, 2, 3, 4], stepStates), false);
+});
+
+test("校验错误可定位到首个必填控件", async () => {
+  const { firstAudioImportErrorFieldId } = await loadModel();
+
+  assert.equal(
+    firstAudioImportErrorFieldId(["请选择已存在的平台连接"]),
+    "audio-import-platform-connection"
+  );
+  assert.equal(
+    firstAudioImportErrorFieldId(["请填写平台 API 地址", "请填写 credential_ref"]),
+    "audio-import-base-url"
+  );
+  assert.equal(
+    firstAudioImportErrorFieldId(["请预览真实源记录"]),
+    "audio-import-preview-records"
+  );
+  assert.equal(
+    firstAudioImportErrorFieldId([
+      "真实预览字段映射未通过：cursor_policy.field、audio_url"
+    ]),
+    "audio-import-map-audio-url"
+  );
+});
+
+test("最近同步批次只接受 BFF 批次列表的最新权威记录", async () => {
+  const { latestAudioImportBatchIdFromBatches } = await loadModel();
+  const batches = [
+    {
+      import_batch_id: "batch-from-bff-new",
+      created_at: "2026-07-28T09:00:00Z"
+    },
+    {
+      import_batch_id: "batch-from-bff-old",
+      created_at: "2026-07-28T07:00:00Z"
+    }
+  ];
+
+  assert.equal(
+    latestAudioImportBatchIdFromBatches({ items: batches }),
+    "batch-from-bff-new"
+  );
+  assert.equal(latestAudioImportBatchIdFromBatches({ items: [] }), "");
+});
+
 test("真实预览允许先查看原始字段，但无效映射不能保存或发布", async () => {
   const {
     configurationFingerprint,
@@ -143,9 +354,19 @@ test("真实预览允许先查看原始字段，但无效映射不能保存或�
 
   assert.deepEqual(validateAudioImportStep(3, completeDraft, verification), []);
   assert.match(
-    validateCompleteAudioImport(completeDraft, verification).at(-1),
-    /cursor_policy\.field.*audio_url/
+    validateAudioImportStep(4, completeDraft, verification).at(-1),
+    /audio_url/
   );
+  assert.match(
+    validateAudioImportStep(5, completeDraft, verification).at(-1),
+    /cursor_policy\.field/
+  );
+  const completeErrors = validateCompleteAudioImport(
+    completeDraft,
+    verification
+  ).join(" ");
+  assert.match(completeErrors, /cursor_policy\.field/);
+  assert.match(completeErrors, /audio_url/);
 });
 
 test("真实预览按音频 URL 映射路径强制脱敏，并支持 dotted path", async () => {
@@ -275,17 +496,45 @@ test("批次权威计数字段与导入项主键直接映射到前端业务统�
     rootTraceId: "trace-public",
     createdAudioSessionIds: [],
     errorCode: "",
-    errorReason: ""
+    errorReason: "",
+    recoverySuggestion: "",
+    retryable: false,
+    retryLineage: {
+      sourceTaskRunId: "",
+      sourceBatchId: "",
+      rootTaskRunId: "",
+      rootBatchId: "",
+      attempt: 1
+    }
   });
 
-  assert.equal(normalizeImportBatchItems({
+  const [failedItem] = normalizeImportBatchItems({
     items: [{
       import_item_id: "import_item_public_001",
       external_record_id: "recording_public_001",
       status: "failed",
-      error_code: "AUDIO_URL_EXPIRED"
+      error_code: "AUDIO_URL_EXPIRED",
+      recovery_suggestion: "源音频地址已过期；请刷新地址后重试。",
+      retryable: true,
+      retry_lineage: {
+        source_import_batch_id: "batch_public_000",
+        source_import_item_id: "import_item_public_000",
+        root_import_batch_id: "batch_public_000",
+        root_import_item_id: "import_item_public_000",
+        attempt: 2
+      }
     }]
-  })[0]?.id, "import_item_public_001");
+  });
+  assert.equal(failedItem?.id, "import_item_public_001");
+  assert.equal(failedItem?.retryable, true);
+  assert.equal(failedItem?.recoverySuggestion, "源音频地址已过期；请刷新地址后重试。");
+  assert.deepEqual(failedItem?.retryLineage, {
+    sourceBatchId: "batch_public_000",
+    sourceItemId: "import_item_public_000",
+    rootBatchId: "batch_public_000",
+    rootItemId: "import_item_public_000",
+    attempt: 2
+  });
 });
 
 test("批次响应兼容 payload 关联并将物化阶段与终态清晰投影", async () => {
@@ -323,7 +572,16 @@ test("批次响应兼容 payload 关联并将物化阶段与终态清晰投影",
     rootTraceId: "trace-root",
     createdAudioSessionIds: [],
     errorCode: "",
-    errorReason: ""
+    errorReason: "",
+    recoverySuggestion: "",
+    retryable: false,
+    retryLineage: {
+      sourceTaskRunId: "",
+      sourceBatchId: "",
+      rootTaskRunId: "",
+      rootBatchId: "",
+      attempt: 1
+    }
   });
 
   assert.deepEqual(normalizeImportBatchItems({
@@ -342,7 +600,16 @@ test("批次响应兼容 payload 关联并将物化阶段与终态清晰投影",
     errorCode: "",
     objectVersion: "v3",
     audioSessionId: "session_001",
-    rootTraceId: "trace-root"
+    rootTraceId: "trace-root",
+    recoverySuggestion: "",
+    retryable: false,
+    retryLineage: {
+      sourceBatchId: "",
+      sourceItemId: "",
+      rootBatchId: "",
+      rootItemId: "",
+      attempt: 1
+    }
   }]);
 });
 
@@ -362,6 +629,15 @@ test("批次级失败即使尚无逐条记录与失败计数也保持可见且�
     failed_items: 0,
     error_code: "PLATFORM_CREDENTIAL_INVALID",
     reason: "平台凭证无效或已过期",
+    recovery_suggestion: "更新凭证引用并通过连通性测试后再重试。",
+    retryable: true,
+    retry_lineage: {
+      source_task_run_id: "task_run_original",
+      source_import_batch_id: "batch_original",
+      root_task_run_id: "task_run_original",
+      root_import_batch_id: "batch_original",
+      attempt: 2
+    },
     root_trace_id: "trace-batch-failure"
   });
   assert.deepEqual(failedBatch, {
@@ -376,7 +652,16 @@ test("批次级失败即使尚无逐条记录与失败计数也保持可见且�
     rootTraceId: "trace-batch-failure",
     createdAudioSessionIds: [],
     errorCode: "PLATFORM_CREDENTIAL_INVALID",
-    errorReason: "平台凭证无效或已过期"
+    errorReason: "平台凭证无效或已过期",
+    recoverySuggestion: "更新凭证引用并通过连通性测试后再重试。",
+    retryable: true,
+    retryLineage: {
+      sourceTaskRunId: "task_run_original",
+      sourceBatchId: "batch_original",
+      rootTaskRunId: "task_run_original",
+      rootBatchId: "batch_original",
+      attempt: 2
+    }
   });
   assert.equal(hasImportBatchFailures(failedBatch, 0), true);
   assert.equal(canRetryImportBatch(failedBatch, 0), true);
@@ -386,7 +671,8 @@ test("批次级失败即使尚无逐条记录与失败计数也保持可见且�
     task_run_id: "task_run_partial_without_items",
     status: "partial",
     total_items: 0,
-    failed_items: 0
+    failed_items: 0,
+    retryable: true
   });
   assert.equal(hasImportBatchFailures(emptyPartialBatch, 0), true);
   assert.equal(canRetryImportBatch(emptyPartialBatch, 0), true);

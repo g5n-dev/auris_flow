@@ -28,6 +28,8 @@ from app.models import (
 from app.services.label_optimization_runtime_service import create_or_update_schedule
 from app.workers.label_optimization_worker import run_once
 
+pytestmark = pytest.mark.usefixtures("configured_test_business_execution_contracts")
+
 TENANT = "aurora_auto"
 PROJECT = "sales_qa"
 LABEL_VERSION = "label-runtime-v1"

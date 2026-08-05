@@ -50,7 +50,12 @@ def _configure_key_bindings(
     )
 
 
-def _add_submitted_run(run_id: str, *, trace_id: str) -> str:
+def _add_submitted_run(
+    run_id: str,
+    *,
+    trace_id: str,
+    execution_mode: str = "diagnostic",
+) -> str:
     external_run_id = f"external-{run_id}"
     with SessionLocal() as session:
         session.add(
@@ -67,6 +72,7 @@ def _add_submitted_run(run_id: str, *, trace_id: str) -> str:
                     "run_id": run_id,
                     "status": "submitted",
                     "trace_id": trace_id,
+                    "execution_mode": execution_mode,
                     "business_completion_required": True,
                     "dispatch_state": "submitted",
                     "dispatch": {
@@ -196,6 +202,38 @@ def test_completion_receipt_replays_once_with_a_different_idempotency_key(
                 "reason": "dagster_completion_received",
             }
         ]
+
+
+def test_local_generic_ack_cannot_complete_a_production_business_run(
+    client,
+    auth_headers,
+) -> None:
+    run_id = "receipt-inbox-production-generic-run"
+    external_run_id = _add_submitted_run(
+        run_id,
+        trace_id="trace-production-generic-run",
+        execution_mode="production",
+    )
+
+    completion = client.post(
+        f"/api/v1/runs/{run_id}/completion-receipts",
+        json=_receipt_payload(
+            completion_receipt_id="receipt-production-generic-rejected",
+            external_run_id=external_run_id,
+        ),
+        headers={
+            **auth_headers,
+            "Idempotency-Key": "receipt-production-generic-rejected",
+        },
+    )
+
+    assert completion.status_code == 409, completion.text
+    assert completion.json()["error"]["code"] == "EXECUTION_CONTRACT_NOT_CONFIGURED"
+    with SessionLocal() as session:
+        run = session.get(RunRecord, run_id)
+        assert run is not None
+        assert run.status == "submitted"
+        assert "completion_receipt" not in run.payload
 
 
 def test_concurrent_completion_receipt_is_materialized_once(auth_headers) -> None:

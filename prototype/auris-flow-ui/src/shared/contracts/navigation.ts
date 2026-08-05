@@ -14,6 +14,7 @@ export type ModuleKey =
 
 export type DeepLinkObjectKind =
   | "module"
+  | "audioSession"
   | "reviewSample"
   | "dataAsset"
   | "asset"
@@ -57,6 +58,9 @@ export type ModuleDeepLink = {
   tab?: string;
   objectKind?: DeepLinkObjectKind;
   objectId?: string;
+  audioSessionId?: string;
+  reviewTaskId?: string;
+  rootTraceId?: string;
   title?: string;
   detail?: string;
   window?: string;

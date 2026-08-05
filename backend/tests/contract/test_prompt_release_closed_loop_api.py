@@ -4,6 +4,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 
+import pytest
 from sqlalchemy import select
 
 from app.core.context import RequestContext
@@ -29,6 +30,8 @@ from app.models import (
 from app.services.eval_binding_service import validate_labeling_eval_binding
 from app.services.label_eval_result_service import materialize_label_eval_completion
 from app.workers.outbox_worker import process_aggregate_events
+
+pytestmark = pytest.mark.usefixtures("configured_test_legacy_generic_execution")
 
 TENANT_ID = "aurora_auto"
 PROJECT_ID = "sales_qa"

@@ -30,6 +30,7 @@
 
 <p>
   <a href="#quickstart"><strong>5 分钟启动</strong></a>
+  · <a href="#screenshots">操作截图</a>
   · <a href="#tour">能力导览</a>
   · <a href="#architecture">系统架构</a>
   · <a href="#quality">验证门禁</a>
@@ -41,35 +42,59 @@
 
 </div>
 
+<a id="screenshots"></a>
+
+## 操作导览：从导入到人工决定
+
+### 1. 新建音频导入配置
+
+![数据资产中的音频资产、连接器导入、聚合层级与播放入口](doc/assets/screenshots/audio-data-assets.png)
+
+1. 打开 **数据资产 → 音频资产**。
+2. 点击 **连接器导入**，选择已有平台连接。
+3. 填写音频 URL API、凭证引用、分页方式和字段映射。
+4. 完成连通测试与三条记录预览，再保存并发布配置。
+
+**完成标志：** 页面回读已发布任务版本，并允许执行“立即拉取”。
+
+### 2. 发布任务版本并立即拉取
+
+![任务配置中的平台接入、智能处理、人审策略与版本发布](doc/assets/screenshots/workflow-configuration.png)
+
+1. 在任务配置中确认平台范围、目标音频资产和后续处理策略。
+2. 校验配置并发布不可变任务版本。
+3. 点击 **立即拉取**，查看读取清单、下载音频、校验入库和生成会话阶段。
+4. 完成后查看成功数、重复跳过数、失败项和新音频会话。
+
+**完成标志：** 导入批次达到业务终态，新会话可查询、可播放。
+
+### 3. 播放音频、核验证据并提交决定
+
+![调听工作台中的音频时间轴、证据审查、字段差异与人工决定](doc/assets/screenshots/listening-evidence-review.png)
+
+1. 从导入结果点击 **查看新会话**，进入调听工作台。
+2. 播放音频并核对时间窗、证据片段、字段差异和关联单据。
+3. 修订主录音、串音、低置信、边界或标签结论。
+4. 点击 **提交决定并进入下一通**，等待写后回读一致后推进队列。
+
+**完成标志：** 决定、受影响对象、下一通任务和根 Trace 均由 BFF 回读一致。
+
+> 截图来自可重复的视觉回归运行场景，使用脱敏演示数据；权威业务状态仍以 BFF 回读为准。
+
 ---
 
 <a id="tour"></a>
 
 ## 从音频到行动，不丢失上下文
 
-传统音频质检系统把音频、转写、标签、评测和报表拆成互不相干的页面。Auris Flow 把它们建模为
-同一条证据链：每次运行、人工判断、版本变更和业务结论都绑定 `tenant_id`、`project_id` 与
-`trace_id`。
+传统音频质检系统把音频、转写、标签、评测和报表拆成互不相干的页面。Auris Flow 把它们建模为同一条证据链：每次运行、人工判断、版本变更和业务结论都绑定 `tenant_id`、`project_id` 与 `trace_id`。
 
-| 进入系统 | 形成证据 | 做出判断 | 推动行动 |
-| --- | --- | --- | --- |
-| 连接器、批次、音频资产 | 转写、说话人、片段、人工标注 | 标签版本、评测集、校准、复核 | 洞察报告、实验、发布、回滚 |
-| 对象身份与内容哈希 | 原始对象与派生结果可追溯 | 规则、模型与人保持版本绑定 | 结果可回到证据和执行记录 |
+- **进入系统**：连接器、批次、音频资产。保留对象身份与内容哈希。
+- **形成证据**：转写、说话人、片段、人工标注。派生结果全程可追溯。
+- **做出判断**：标签版本、评测集、校准、复核。规则、模型与人保持版本绑定。
+- **推动行动**：洞察报告、实验、发布、回滚。结果可回到证据和执行记录。
 
-```mermaid
-flowchart LR
-    A["音频与业务对象"] --> B["转写 / 说话人 / 片段"]
-    B --> C["调听与证据标注"]
-    C --> D["标签版本与事实集"]
-    D --> E["评测 / 校准 / 人工复核"]
-    E --> F["洞察报告与行动"]
-    F --> G["实验 / 发布 / 回滚"]
-
-    T["tenant · project · trace_id"] -. 贯穿 .-> A
-    T -. 贯穿 .-> C
-    T -. 贯穿 .-> E
-    T -. 贯穿 .-> G
-```
+> `tenant · project · trace_id` 贯穿整条链路，业务结果始终可以回到源音频和执行记录。
 
 <details open>
 <summary><strong>🎧 我想先体验产品工作台</strong></summary>
@@ -241,19 +266,14 @@ npm run dev
 浏览器原生媒体元素可以直接使用短期 playback grant 请求
 `GET /api/v1/audio-playback?grant=…`，无需把长期 Authorization header 暴露给媒体组件。
 
-```mermaid
-sequenceDiagram
-    participant UI as Browser
-    participant BFF as FastAPI BFF
-    participant OBJ as Object Storage
-
-    UI->>BFF: 申请短期 playback grant
-    BFF-->>UI: /api/v1/audio-playback?grant=…
-    UI->>BFF: GET + Range: bytes=…
-    BFF->>OBJ: Provider-signed ranged GET
-    OBJ-->>BFF: 206 + Content-Range
-    BFF-->>UI: 206 + Accept-Ranges + ETag
-```
+| 顺序 | 发起方 → 接收方 | 请求 / 响应 |
+| --- | --- | --- |
+| 1 | Browser → BFF | 申请短期 playback grant |
+| 2 | BFF → Browser | 返回 `/api/v1/audio-playback?grant=…` |
+| 3 | Browser → BFF | `GET` + `Range: bytes=…` |
+| 4 | BFF → Object Storage | Provider-signed ranged GET |
+| 5 | Object Storage → BFF | `206` + `Content-Range` |
+| 6 | BFF → Browser | `206` + `Accept-Ranges` + `ETag` |
 
 - 支持 `GET` / `HEAD`、闭区间、开放区间、suffix range 和 `If-Range`。
 - 合法部分请求返回 `206`；不可满足或多区间请求稳定返回 `416`。
@@ -396,8 +416,8 @@ or [the production candidate guide](production/README.md).
 
 ## License
 
-Auris Flow 源码使用 [Apache License 2.0](LICENSE)；第三方软件与按需下载的数据集遵循各自许可，
-详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 项目许可：[Apache License 2.0](LICENSE)
+- 第三方许可：[许可清单](THIRD_PARTY_NOTICES.md)
 
 ---
 
