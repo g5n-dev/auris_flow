@@ -25,6 +25,7 @@ from scripts.verify_audio_import_stack import (
 
 ROOT = Path(__file__).resolve().parents[2]
 GATE_DRIVER = ROOT / "scripts" / "verify_audio_import_stack.sh"
+BROWSER_GATE_DRIVER = ROOT / "scripts" / "verify_audio_import_browser_e2e.sh"
 
 
 def test_audio_fixture_is_deterministic_valid_and_identity_stable() -> None:
@@ -144,3 +145,13 @@ def test_real_stack_gate_cannot_be_skipped() -> None:
     assert result.returncode == 2
     assert result.stdout == ""
     assert "is not allowed by this gate" in result.stderr
+
+
+def test_browser_gate_pins_vite_development_runtime() -> None:
+    source = BROWSER_GATE_DRIVER.read_text(encoding="utf-8")
+    vite_launch = source[
+        source.index("exec env \\\n") : source.index(') >"${VITE_LOG}"')
+    ]
+
+    assert "NODE_ENV=development" in vite_launch
+    assert "VITE_DEMO_MODE=false" in vite_launch

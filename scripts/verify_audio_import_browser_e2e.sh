@@ -100,6 +100,7 @@ trap 'exit 143' TERM
 (
   cd "${UI_ROOT}"
   exec env \
+    NODE_ENV=development \
     VITE_DEMO_MODE=false \
     VITE_API_PROXY_TARGET="${BFF_URL}" \
     ./node_modules/.bin/vite \
