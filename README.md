@@ -98,20 +98,11 @@
 | 连接器、批次、音频资产 | 转写、说话人、片段、人工标注 | 标签版本、评测集、校准、复核 | 洞察报告、实验、发布、回滚 |
 | 对象身份与内容哈希 | 原始对象与派生结果可追溯 | 规则、模型与人保持版本绑定 | 结果可回到证据和执行记录 |
 
-```mermaid
-flowchart LR
-    A["音频与业务对象"] --> B["转写 / 说话人 / 片段"]
-    B --> C["调听与证据标注"]
-    C --> D["标签版本与事实集"]
-    D --> E["评测 / 校准 / 人工复核"]
-    E --> F["洞察报告与行动"]
-    F --> G["实验 / 发布 / 回滚"]
+**音频与业务对象** → **转写 / 说话人 / 片段** → **调听与证据标注** →
+**标签版本与事实集** → **评测 / 校准 / 人工复核** → **洞察报告与行动** →
+**实验 / 发布 / 回滚**
 
-    T["tenant · project · trace_id"] -. 贯穿 .-> A
-    T -. 贯穿 .-> C
-    T -. 贯穿 .-> E
-    T -. 贯穿 .-> G
-```
+> `tenant · project · trace_id` 贯穿整条链路，业务结果始终可以回到源音频和执行记录。
 
 <details open>
 <summary><strong>🎧 我想先体验产品工作台</strong></summary>
@@ -283,19 +274,14 @@ npm run dev
 浏览器原生媒体元素可以直接使用短期 playback grant 请求
 `GET /api/v1/audio-playback?grant=…`，无需把长期 Authorization header 暴露给媒体组件。
 
-```mermaid
-sequenceDiagram
-    participant UI as Browser
-    participant BFF as FastAPI BFF
-    participant OBJ as Object Storage
-
-    UI->>BFF: 申请短期 playback grant
-    BFF-->>UI: /api/v1/audio-playback?grant=…
-    UI->>BFF: GET + Range: bytes=…
-    BFF->>OBJ: Provider-signed ranged GET
-    OBJ-->>BFF: 206 + Content-Range
-    BFF-->>UI: 206 + Accept-Ranges + ETag
-```
+| 顺序 | 发起方 → 接收方 | 请求 / 响应 |
+| --- | --- | --- |
+| 1 | Browser → BFF | 申请短期 playback grant |
+| 2 | BFF → Browser | 返回 `/api/v1/audio-playback?grant=…` |
+| 3 | Browser → BFF | `GET` + `Range: bytes=…` |
+| 4 | BFF → Object Storage | Provider-signed ranged GET |
+| 5 | Object Storage → BFF | `206` + `Content-Range` |
+| 6 | BFF → Browser | `206` + `Accept-Ranges` + `ETag` |
 
 - 支持 `GET` / `HEAD`、闭区间、开放区间、suffix range 和 `If-Range`。
 - 合法部分请求返回 `206`；不可满足或多区间请求稳定返回 `416`。
