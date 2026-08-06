@@ -4,7 +4,7 @@ version = "1.0.0"
 description = "Pinned Dagster execution runtime for Auris Flow"
 requires-python = ">=3.12,<3.13"
 dependencies = [
-  "cryptography==49.0.0",
+  "cryptography==50.0.0",
   "dagster==1.13.1",
   "dagster-mysql==0.29.1",
   "dagster-webserver==1.13.1",
