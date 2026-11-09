@@ -151,7 +151,7 @@ jobs:
           PYTHON: ${{ github.workspace }}/backend/.venv/bin/python
         run: bash scripts/verify_release.sh --pre-image
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: success()
         with:
           name: dependency-evidence-${{ needs.release-context.outputs.source_commit }}
@@ -159,7 +159,7 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: failure()
         with:
           name: dependency-evidence-failed-${{ needs.release-context.outputs.source_commit }}
@@ -448,7 +448,7 @@ jobs:
             --release-tag "${RELEASE_TAG}" \
             --source-commit "${SOURCE_COMMIT}"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: image-evidence-${{ matrix.image_id }}-${{ needs.release-context.outputs.source_commit }}
@@ -727,7 +727,7 @@ jobs:
           done < <(jq -r '.images[] | [.digest, .image] | @tsv' build/release/compose-image-scans/index.json)
           exit "${scan_status}"
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: compose-image-scans-${{ needs.release-context.outputs.source_commit }}
@@ -1223,7 +1223,7 @@ jobs:
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \
             build/release/SHA256SUMS
 
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: auris-flow-${{ needs.release-context.outputs.release_tag }}-${{ needs.release-context.outputs.source_commit }}
           path: build/release/
